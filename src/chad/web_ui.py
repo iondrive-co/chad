@@ -8,7 +8,11 @@ import queue
 from typing import Iterator
 
 from .security import SecurityManager
-from .session_manager import SessionManager
+from .session_manager import (
+    SessionManager, get_coding_timeout, get_management_timeout,
+    TaskPhase, INVESTIGATION_PROMPT, IMPLEMENTATION_PROMPT, VERIFICATION_PROMPT, SAFETY_CONSTRAINTS,
+    CODING_INVESTIGATION_CONTEXT, CODING_IMPLEMENTATION_CONTEXT
+)
 from .providers import ModelConfig, parse_codex_output, extract_final_codex_response
 
 
@@ -43,24 +47,40 @@ PROVIDER_PANEL_CSS = """
   border-color: #243552;
 }
 
-.provider-card .provider-card__header-row {
+.provider-card .provider-card__header-row,
+.provider-card__header-row {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   background: #000 !important;
   border-radius: 12px;
   padding: 8px 10px;
   gap: 8px;
 }
 
+.provider-card .provider-card__header-row .provider-card__header,
 .provider-card .provider-card__header {
   background: #000 !important;
   color: #fff !important;
   display: inline-flex;
   align-items: center;
-  padding: 0;
+  padding: 6px 10px;
   flex: 1;
+  border-radius: 10px;
 }
 
+.provider-card .provider-card__header-row .provider-card__header-text,
+.provider-card__header-row .provider-card__header-text {
+  background: #000;
+  color: #fff;
+  padding: 6px 10px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  letter-spacing: 0.02em;
+}
+
+.provider-card .provider-card__header-row .provider-card__header .prose,
+.provider-card .provider-card__header-row .provider-card__header .prose *,
 .provider-card .provider-card__header .prose,
 .provider-card .provider-card__header .prose * {
   color: #fff !important;
@@ -69,20 +89,18 @@ PROVIDER_PANEL_CSS = """
   padding: 0;
 }
 
+.provider-card .provider-card__header-row .provider-card__header > *,
 .provider-card .provider-card__header > * {
   background: #000 !important;
   color: #fff !important;
 }
 
+.provider-card .provider-card__header-row .provider-card__header :is(h1, h2, h3, h4, h5, h6, p, span),
 .provider-card .provider-card__header :is(h1, h2, h3, h4, h5, h6, p, span) {
   margin: 0;
-  padding: 4px 8px;
-  border-radius: 10px;
-  background: #000 !important;
-  display: inline-flex;
-  align-items: center;
-  color: #fff !important;
-  letter-spacing: 0.02em;
+  padding: 0;
+  background: transparent !important;
+  color: inherit !important;
 }
 
 .provider-card .provider-controls {
@@ -110,7 +128,74 @@ PROVIDER_PANEL_CSS = """
 }
 
 .provider-delete {
-  margin-left: 6px;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  max-width: 32px;
+  flex-shrink: 0;
+  padding: 4px;
+  border-radius: 8px;
+  background: #0f172a !important;
+  border: 1px solid #f97373 !important;
+  color: #fecdd3 !important;
+  font-size: 14px;
+  line-height: 1;
+  box-shadow: none;
+}
+
+#status-box {
+  padding: 8px 12px;
+  font-size: 14px;
+}
+
+#live-output-box {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+#live-stream-box {
+  margin-top: 8px;
+}
+
+#live-stream-box .live-output-header {
+  background: #2a2a3e;
+  color: #a8d4ff;
+  padding: 6px 12px;
+  border-radius: 8px 8px 0 0;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  margin: 0;
+}
+
+#live-stream-box .live-output-content {
+  background: #3a3a4e !important;
+  color: #e2e8f0 !important;
+  border: 1px solid #555 !important;
+  border-top: none !important;
+  border-radius: 0 0 8px 8px !important;
+  padding: 12px !important;
+  margin: 0 !important;
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: monospace;
+  font-size: 13px;
+}
+
+#live-stream-box .live-output-content * {
+  background: transparent !important;
+  color: #e2e8f0 !important;
+}
+
+/* Agent communication chatbot - preserve scroll position */
+.chatbot-container, [data-testid="chatbot"] {
+  scroll-behavior: auto !important;
 }
 """
 
@@ -142,7 +227,7 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
     # For long content, make it collapsible with a summary
     if collapsible and len(content) > 300:
         summary = summarize_content(content)
-        formatted = f"**{speaker}**\n\n{summary}\n\n<details><summary>Show full output</summary>\n\n{content}\n\n</details>"
+        formatted = f"**{speaker}**\n\n{summary}\n\n<details><summary>Show full output</summary>\n\n{content}\n\n</details>"  # noqa: E501
     else:
         formatted = f"**{speaker}**\n\n{content}"
 
@@ -190,10 +275,12 @@ class ChadWebUI:
     def _get_account_role(self, account_name: str) -> str | None:
         """Return the role assigned to the account, if any."""
         role_assignments = self.security_mgr.list_role_assignments()
-        for role, acct in role_assignments.items():
-            if acct == account_name:
-                return role
-        return None
+        roles = [role for role, acct in role_assignments.items() if acct == account_name]
+        if len(roles) == 0:
+            return None
+        if 'CODING' in roles and 'MANAGEMENT' in roles:
+            return "BOTH"
+        return roles[0]
 
     def get_provider_usage(self, account_name: str) -> str:
         """Get usage text for a single provider."""
@@ -228,7 +315,7 @@ class ChadWebUI:
         for idx in range(card_slots):
             if idx < len(account_items):
                 account_name, provider = account_items[idx]
-                header = f"### {account_name} ({provider})"
+                header = f'<span class="provider-card__header-text">{account_name} ({provider})</span>'
                 current_role = self._get_account_role(account_name)
                 role_value = current_role if current_role else "(none)"
                 model_choices = self.get_models_for_account(account_name)
@@ -269,8 +356,6 @@ class ChadWebUI:
         """Get usage info from Codex by parsing JWT token and session files."""
         import json
         import base64
-        import os
-        from pathlib import Path
         from datetime import datetime
 
         codex_home = self._get_codex_home(account_name)
@@ -330,7 +415,7 @@ class ChadWebUI:
         except Exception as e:
             return f"⚠️ **Error reading auth data:** {str(e)}"
 
-    def _get_codex_session_usage(self, account_name: str) -> str | None:
+    def _get_codex_session_usage(self, account_name: str) -> str | None:  # noqa: C901
         """Extract usage data from the most recent Codex session file."""
         import json
         import os
@@ -395,7 +480,7 @@ class ChadWebUI:
             else:
                 reset_str = 'N/A'
 
-            result += f"**5-hour session**\n"
+            result += "**5-hour session**\n"
             result += f"[{bar}] {util:.0f}% used\n"
             result += f"Resets at {reset_str}\n\n"
 
@@ -414,7 +499,7 @@ class ChadWebUI:
             else:
                 reset_str = 'N/A'
 
-            result += f"**Weekly limit**\n"
+            result += "**Weekly limit**\n"
             result += f"[{bar}] {util:.0f}% used\n"
             result += f"Resets {reset_str}\n\n"
 
@@ -426,7 +511,7 @@ class ChadWebUI:
             balance = credits.get('balance')
 
             if unlimited:
-                result += f"**Credits:** Unlimited\n\n"
+                result += "**Credits:** Unlimited\n\n"
             elif has_credits and balance is not None:
                 result += f"**Credits balance:** ${balance}\n\n"
 
@@ -440,7 +525,7 @@ class ChadWebUI:
 
         return result if result else None
 
-    def _get_claude_usage(self) -> str:
+    def _get_claude_usage(self) -> str:  # noqa: C901
         """Get usage info from Claude via API."""
         import json
         import requests
@@ -498,12 +583,12 @@ class ChadWebUI:
                     try:
                         reset_dt = datetime.fromisoformat(reset_at.replace('Z', '+00:00'))
                         reset_str = reset_dt.strftime('%I:%M%p')
-                    except:
+                    except ValueError:
                         reset_str = reset_at
                 else:
                     reset_str = 'N/A'
 
-                result += f"**5-hour session**\n"
+                result += "**5-hour session**\n"
                 result += f"[{bar}] {util:.0f}% used\n"
                 result += f"Resets at {reset_str}\n\n"
 
@@ -520,12 +605,12 @@ class ChadWebUI:
                     try:
                         reset_dt = datetime.fromisoformat(reset_at.replace('Z', '+00:00'))
                         reset_str = reset_dt.strftime('%b %d')
-                    except:
+                    except ValueError:
                         reset_str = reset_at
                 else:
                     reset_str = 'N/A'
 
-                result += f"**Weekly limit**\n"
+                result += "**Weekly limit**\n"
                 result += f"[{bar}] {util:.0f}% used\n"
                 result += f"Resets {reset_str}\n\n"
 
@@ -539,7 +624,7 @@ class ChadWebUI:
                 filled = int(util / 5)
                 bar = '█' * filled + '░' * (20 - filled)
 
-                result += f"**Extra credits**\n"
+                result += "**Extra credits**\n"
                 result += f"[{bar}] ${used:.0f} / ${limit:.0f} ({util:.1f}%)\n\n"
 
             return result
@@ -549,10 +634,9 @@ class ChadWebUI:
         except Exception as e:
             return f"⚠️ **Error:** {str(e)}"
 
-    def _get_gemini_usage(self) -> str:
+    def _get_gemini_usage(self) -> str:  # noqa: C901
         """Get usage info from Gemini by parsing session files."""
         import json
-        import os
         from pathlib import Path
         from collections import defaultdict
 
@@ -684,9 +768,8 @@ class ChadWebUI:
         """Get list of account names for dropdowns."""
         return list(self.security_mgr.list_accounts().keys())
 
-    def _check_provider_login(self, provider_type: str, account_name: str) -> tuple[bool, str]:
+    def _check_provider_login(self, provider_type: str, account_name: str) -> tuple[bool, str]:  # noqa: C901
         """Check if a provider is logged in."""
-        import subprocess
         from pathlib import Path
 
         try:
@@ -724,9 +807,6 @@ class ChadWebUI:
 
     def _setup_codex_account(self, account_name: str) -> str:
         """Setup isolated home directory for a Codex account."""
-        from pathlib import Path
-        import os
-
         codex_home = self._get_codex_home(account_name)
         codex_dir = codex_home / ".codex"
         codex_dir.mkdir(parents=True, exist_ok=True)
@@ -767,12 +847,12 @@ class ChadWebUI:
         )
 
         if result.returncode == 0:
-            return f"✅ **Login successful for '{account_name}'!**\n\nRefresh the Usage Statistics to see account details."
+            return f"✅ **Login successful for '{account_name}'!**\n\nRefresh the Usage Statistics to see account details."  # noqa: E501
         else:
             error = result.stderr.strip() if result.stderr else "Unknown error"
             return f"⚠️ **Login may have failed**\n\n{error}\n\nTry refreshing Usage Statistics to check status."
 
-    def add_provider(self, provider_name: str, provider_type: str):
+    def add_provider(self, provider_name: str, provider_type: str):  # noqa: C901
         """Add a new provider and return refreshed provider panel state."""
         import subprocess
         import os
@@ -872,21 +952,60 @@ class ChadWebUI:
             base_response = self._provider_action_response(f"❌ Error adding provider: {str(e)}")
             return (*base_response, name_field_value, add_btn_state, accordion_state)
 
+    def _unassign_account_roles(self, account_name: str) -> None:
+        """Remove all role assignments for an account."""
+        role_assignments = self.security_mgr.list_role_assignments()
+        for role, acct in list(role_assignments.items()):
+            if acct == account_name:
+                self.security_mgr.clear_role(role)
+
+    def get_role_config_status(self) -> tuple[bool, str]:
+        """Check if roles are properly configured for running tasks.
+
+        Returns:
+            Tuple of (is_ready, status_message)
+        """
+        role_assignments = self.security_mgr.list_role_assignments()
+        coding_account = role_assignments.get('CODING')
+        management_account = role_assignments.get('MANAGEMENT')
+
+        missing = []
+        if not coding_account:
+            missing.append("CODING")
+        if not management_account:
+            missing.append("MANAGEMENT")
+
+        if missing:
+            return False, f"⚠️ Missing role assignments: {', '.join(missing)}. Configure in Providers tab."
+        return True, "✓ Ready to run"
+
     def assign_role(self, account_name: str, role: str):
         """Assign a role to a provider and refresh the provider panel."""
         try:
             if not account_name:
                 return self._provider_action_response("❌ Please select an account to assign a role")
-
-            if not role or role == '(none)':
+            if not role or not str(role).strip():
                 return self._provider_action_response("❌ Please select a role")
 
             accounts = self.security_mgr.list_accounts()
             if account_name not in accounts:
                 return self._provider_action_response(f"❌ Provider '{account_name}' not found")
 
-            self.security_mgr.assign_role(account_name, role.upper())
-            return self._provider_action_response(f"✓ Assigned {role.upper()} role to {account_name}")
+            if role == '(none)':
+                # Clear all roles for this account
+                self._unassign_account_roles(account_name)
+                return self._provider_action_response(f"✓ Removed role assignments from {account_name}")
+
+            # First, remove any existing roles for this account
+            self._unassign_account_roles(account_name)
+
+            if role.upper() == "BOTH":
+                self.security_mgr.assign_role(account_name, "CODING")
+                self.security_mgr.assign_role(account_name, "MANAGEMENT")
+                return self._provider_action_response(f"✓ Assigned CODING and MANAGEMENT roles to {account_name}")
+            else:
+                self.security_mgr.assign_role(account_name, role.upper())
+                return self._provider_action_response(f"✓ Assigned {role.upper()} role to {account_name}")
         except Exception as e:
             return self._provider_action_response(f"❌ Error assigning role: {str(e)}")
 
@@ -948,12 +1067,12 @@ class ChadWebUI:
             self.session_manager = None
         return "🛑 Task cancelled"
 
-    def start_chad_task(
+    def start_chad_task(  # noqa: C901
         self,
         project_path: str,
         task_description: str,
         insane_mode: bool = False
-    ) -> Iterator[tuple[list, str, gr.Textbox, gr.TextArea, gr.Checkbox, gr.Button, gr.Button]]:
+    ) -> Iterator[tuple[list, str, str, gr.Textbox, gr.TextArea, gr.Checkbox, gr.Button, gr.Button]]:
         """Start Chad task and stream updates.
 
         Flow: Management AI plans first, then coding AI executes.
@@ -963,10 +1082,11 @@ class ChadWebUI:
         self.cancel_requested = False
 
         # Helper to yield with UI state
-        def make_yield(history, status, interactive=False):
+        def make_yield(history, status, live_stream="", interactive=False):
             return (
                 history,
                 status,
+                live_stream,
                 gr.Textbox(interactive=interactive),
                 gr.TextArea(interactive=interactive),
                 gr.Checkbox(interactive=interactive),
@@ -991,7 +1111,7 @@ class ChadWebUI:
             management_account = role_assignments.get('MANAGEMENT')
 
             if not coding_account or not management_account:
-                yield make_yield([], "❌ Please assign CODING and MANAGEMENT roles in the Provider Management tab first", interactive=True)
+                yield make_yield([], "❌ Please assign CODING and MANAGEMENT roles in the Provider Management tab first", interactive=True)  # noqa: E501
                 return
 
             # Get provider info
@@ -1015,8 +1135,11 @@ class ChadWebUI:
                 account_name=management_account
             )
 
+            coding_timeout = get_coding_timeout(coding_provider)
+            management_timeout = get_management_timeout(management_provider)
+
             # Initialize status - start streaming immediately
-            status_text = f"**Starting Chad...**\n\n"
+            status_text = "**Starting Chad...**\n\n"
             status_text += f"• Project: {path}\n"
             status_text += f"• CODING: {coding_account} ({coding_provider})\n"
             status_text += f"• MANAGEMENT: {management_account} ({management_provider})\n"
@@ -1033,16 +1156,19 @@ class ChadWebUI:
                 yield make_yield([], status_text + "❌ Failed to start sessions", interactive=True)
                 return
 
-            yield make_yield([], status_text + "✓ Sessions started\n\n⏳ Management AI is planning...", interactive=False)
+            yield make_yield([], status_text + "✓ Sessions started\n\n⏳ Management AI is planning...", interactive=False)  # noqa: E501
 
             # Activity callback to capture live updates
             def on_activity(activity_type: str, detail: str):
-                import sys
-                print(f"[Activity] {activity_type}: {detail}", file=sys.stderr, flush=True)
-                if activity_type == 'tool':
+                if activity_type == 'stream':
+                    # Raw streaming chunk - send for live display
+                    message_queue.put(('stream', detail))
+                elif activity_type == 'tool':
                     message_queue.put(('activity', f"🔧 {detail}"))
+                elif activity_type == 'thinking':
+                    message_queue.put(('activity', f"🧠 {detail}"))
                 elif activity_type == 'text' and detail:
-                    message_queue.put(('activity', f"💭 {detail[:80]}..."))
+                    message_queue.put(('activity', f"💭 {detail[:80]}"))
 
             session_manager.set_activity_callback(on_activity)
 
@@ -1051,150 +1177,329 @@ class ChadWebUI:
             task_success = [False]
             completion_reason = [""]
 
-            def relay_loop():
-                """Run the relay loop: Management plans -> Coding executes -> repeat."""
+            def relay_loop():  # noqa: C901
+                """Run the state machine: Investigation -> Implementation -> Verification."""
                 try:
-                    max_iterations = 50
-                    iteration = 0
+                    # State machine variables
+                    phase = TaskPhase.INVESTIGATION
+                    plan = None
+                    impl_notes = []
+                    investigation_revisits = 0
+                    max_investigation_revisits = 2
 
-                    # STEP 1: Management AI creates initial plan
-                    initial_plan_prompt = f"""USER'S TASK:
-{task_description}
+                    # Iteration limits per phase
+                    max_investigation_iters = 10
+                    max_implementation_iters = 30
+                    max_verification_iters = 5
 
-PROJECT: {path}
+                    investigation_iter = 0
+                    implementation_iter = 0
+                    verification_iter = 0
 
-This is the START of the task. The CODING AI has not done anything yet.
-Create the first instruction for the coding AI.
-
-Output: "NEXT: <your instruction for the coding AI>"
-(Do not say DONE - the task hasn't started yet!)"""
-
-                    message_queue.put(('status', "⏳ Management AI is analyzing the task..."))
-                    session_manager.send_to_management(initial_plan_prompt)
-
-                    initial_response = session_manager.get_management_response(timeout=120.0)
-
-                    if self.cancel_requested:
-                        message_queue.put(('status', "🛑 Task cancelled by user"))
-                        return
-
-                    if not initial_response:
-                        message_queue.put(('status', "❌ No response from MANAGEMENT AI"))
-                        return
-
-                    # Extract the instruction
-                    initial_response = extract_final_codex_response(initial_response)
-                    message_queue.put(('message', "MANAGEMENT AI", initial_response))
-
-                    # Parse NEXT: instruction
-                    next_match = re.search(r'NEXT:\s*(.+)', initial_response, re.IGNORECASE | re.DOTALL)
-                    if next_match:
-                        initial_instruction = next_match.group(1).strip().split('\n')[0].strip()
-                    else:
-                        # Fallback: use the whole response or default to the task
-                        if "DONE" in initial_response.upper():
-                            initial_instruction = f"Implement the following task: {task_description}"
-                        else:
-                            initial_instruction = initial_response
-
-                    # STEP 2: Send to coding AI
-                    message_queue.put(('status', "⏳ Coding AI is working..."))
-                    session_manager.send_to_coding(initial_instruction)
-
-                    while session_manager.are_sessions_alive() and iteration < max_iterations and not self.cancel_requested:
-                        iteration += 1
-
-                        # Get response from coding AI
-                        coding_response = session_manager.get_coding_response(timeout=1800.0)
-
+                    def check_cancelled():
                         if self.cancel_requested:
                             message_queue.put(('status', "🛑 Task cancelled by user"))
-                            break
+                            return True
+                        return False
 
-                        if not coding_response:
-                            message_queue.put(('status', "❌ No response from CODING AI"))
-                            break
+                    def get_phase_status(p: TaskPhase) -> str:
+                        phase_names = {
+                            TaskPhase.INVESTIGATION: ("📋", "Investigate"),
+                            TaskPhase.IMPLEMENTATION: ("🔨", "Implement"),
+                            TaskPhase.VERIFICATION: ("✅", "Verify")
+                        }
+                        icon, name = phase_names[p]
+                        return f"{icon} Phase {p.value}: {name}"
 
-                        # Parse and display coding response
-                        parsed_coding = parse_codex_output(coding_response)
-                        message_queue.put(('message', "CODING AI", parsed_coding))
+                    def add_phase_divider(phase: TaskPhase):
+                        """Add a visual divider when entering a new phase."""
+                        phase_names = {
+                            TaskPhase.INVESTIGATION: ("📋", "INVESTIGATE"),
+                            TaskPhase.IMPLEMENTATION: ("🔨", "IMPLEMENT"),
+                            TaskPhase.VERIFICATION: ("✅", "VERIFY")
+                        }
+                        icon, name = phase_names[phase]
+                        message_queue.put(('phase_divider', f"{icon} PHASE {phase.value}: {name}"))
 
-                        if self.cancel_requested:
-                            message_queue.put(('status', "🛑 Task cancelled by user"))
-                            break
+                    # Build investigation prompt with safety constraints
+                    investigation_system = INVESTIGATION_PROMPT.format(
+                        task_description=task_description,
+                        project_path=str(path)
+                    )
+                    if not insane_mode:
+                        investigation_system += "\n\n" + SAFETY_CONSTRAINTS
 
-                        # STEP 3: Management AI ALWAYS reviews - even if coding AI claims complete
-                        # This ensures verification of work before marking task done
-                        coding_claims_complete = any(marker in coding_response.upper() for marker in ["TASK COMPLETE", "TASK_COMPLETE", "[COMPLETE]"])
+                    # Add phase divider for investigation start
+                    add_phase_divider(phase)
 
-                        message_queue.put(('status', "⏳ Management AI is verifying..."))
+                    # Initialize management with investigation prompt
+                    message_queue.put(('status', f"{get_phase_status(phase)} - Starting..."))
+                    message_queue.put(('ai_switch', 'MANAGEMENT AI'))
+                    message_queue.put(('message_start', 'MANAGEMENT AI'))  # Placeholder while working
+                    session_manager.send_to_management(investigation_system)
+                    mgmt_response = session_manager.get_management_response(timeout=management_timeout)
 
-                        review_prompt = f"""ORIGINAL USER TASK: {task_description}
-
-CODING AI OUTPUT:
-{parsed_coding}
-
-CRITICAL: Before saying DONE, verify the changes ACTUALLY match the original task:
-- For CSS: Check that the CSS values match what was requested (correct colors, correct element, etc.)
-- For code: Check that the logic matches what was requested
-- For multi-step: Check ALL steps are done
-
-Ask yourself: Does "{task_description}" actually get achieved by these changes?
-
-First, assess whether the changes fulfill the SPECIFIC requirements of the original task.
-Then on a NEW LINE output EXACTLY one of:
-- "NEXT: <specific fix needed>" - if the changes don't match the requirements
-- "DONE" - ONLY if the original task requirement is fully satisfied"""
-
-                        session_manager.send_to_management(review_prompt)
-                        management_response = session_manager.get_management_response(timeout=120.0)
-
-                        if self.cancel_requested:
-                            message_queue.put(('status', "🛑 Task cancelled by user"))
-                            break
-
-                        if not management_response:
+                    if check_cancelled() or not mgmt_response:
+                        if not mgmt_response:
                             message_queue.put(('status', "❌ No response from MANAGEMENT AI"))
-                            break
+                        return
 
-                        management_instruction = extract_final_codex_response(management_response)
+                    mgmt_text = extract_final_codex_response(mgmt_response)
+                    message_queue.put(('message_complete', "MANAGEMENT AI", parse_codex_output(mgmt_response) or mgmt_text))
 
-                        # Parse the new format: assessment followed by NEXT: or DONE
-                        # Show the full response (with assessment) in the chat
-                        message_queue.put(('message', "MANAGEMENT AI", management_instruction))
 
-                        # Check if task is complete
-                        instruction_upper = management_instruction.upper()
-                        if "\nDONE" in instruction_upper or instruction_upper.strip().endswith("DONE"):
-                            completion_reason[0] = "Management AI confirmed the task is complete."
-                            message_queue.put(('status', "✓ Task completed!"))
-                            task_success[0] = True
-                            break
+                    # Main state machine loop
+                    while session_manager.are_sessions_alive() and not self.cancel_requested:
 
-                        # Extract the next instruction after "NEXT:"
-                        next_match = re.search(r'NEXT:\s*(.+)', management_instruction, re.IGNORECASE | re.DOTALL)
-                        if next_match:
-                            next_instruction = next_match.group(1).strip()
-                            # Clean up - take just the first line/sentence if multi-line
-                            next_instruction = next_instruction.split('\n')[0].strip()
-                        else:
-                            # Fallback: use the whole response as instruction if no NEXT: found
-                            # but only if it doesn't look like a completion
-                            if "DONE" not in instruction_upper:
-                                next_instruction = management_instruction
+                        # ==================== INVESTIGATION PHASE ====================
+                        if phase == TaskPhase.INVESTIGATION:
+                            investigation_iter += 1
+
+                            if investigation_iter > max_investigation_iters:
+                                message_queue.put(('status', "⚠️ Investigation taking too long, forcing plan"))
+                                plan = f"1. Implement the task: {task_description}"
+                                phase = TaskPhase.IMPLEMENTATION
+                                continue
+
+                            # Check if management has produced a PLAN:
+                            plan_match = re.search(r'PLAN:\s*(.+)', mgmt_text, re.IGNORECASE | re.DOTALL)
+
+                            if plan_match:
+                                plan = plan_match.group(1).strip()
+                                phase = TaskPhase.IMPLEMENTATION
+                                implementation_iter = 0
+
+                                # Add phase divider
+                                add_phase_divider(phase)
+                                message_queue.put(('phase', f"📝 **Plan:**\n{plan}"))
+
+                                # Build implementation prompt
+                                impl_system = IMPLEMENTATION_PROMPT.format(
+                                    task_description=task_description,
+                                    project_path=str(path),
+                                    plan=plan
+                                )
+                                if not insane_mode:
+                                    impl_system += "\n\n" + SAFETY_CONSTRAINTS
+
+                                # Send plan to coding AI to start implementation
+                                message_queue.put(('status', f"{get_phase_status(phase)} - Coding AI executing..."))
+                                coding_instruction = f"{CODING_IMPLEMENTATION_CONTEXT}\n\nORIGINAL TASK: {task_description}\n\nPLAN TO EXECUTE:\n{plan}\n\nExecute this plan to accomplish the task. Report back when complete."
+                                session_manager.send_to_coding(coding_instruction)
+                                continue
+
+                            # Management wants more investigation - send to coding AI
+                            message_queue.put(('status', f"{get_phase_status(phase)} - Coding AI investigating..."))
+                            message_queue.put(('ai_switch', 'CODING AI'))
+                            message_queue.put(('message_start', 'CODING AI'))
+                            session_manager.send_to_coding(f"{CODING_INVESTIGATION_CONTEXT}\n\n{mgmt_text}")
+
+                            coding_response = session_manager.get_coding_response(timeout=coding_timeout)
+                            if check_cancelled() or not coding_response:
+                                if not coding_response:
+                                    message_queue.put(('status', "❌ No response from CODING AI"))
+                                break
+
+                            parsed_coding = parse_codex_output(coding_response)
+                            message_queue.put(('message_complete', "CODING AI", parsed_coding))
+
+                            # Send findings back to management
+                            message_queue.put(('status', f"{get_phase_status(phase)} - Management reviewing findings..."))
+                            message_queue.put(('ai_switch', 'MANAGEMENT AI'))
+                            message_queue.put(('message_start', 'MANAGEMENT AI'))
+                            session_manager.send_to_management(f"CODING AI FINDINGS:\n{parsed_coding}\n\nIf you have enough info, output PLAN: with implementation steps. If not, ask for MORE info in ONE batched request (multiple files/searches at once).")
+                            mgmt_response = session_manager.get_management_response(timeout=management_timeout)
+
+                            if check_cancelled() or not mgmt_response:
+                                if not mgmt_response:
+                                    message_queue.put(('status', "❌ No response from MANAGEMENT AI"))
+                                break
+
+                            mgmt_text = extract_final_codex_response(mgmt_response)
+                            message_queue.put(('message_complete', "MANAGEMENT AI", parse_codex_output(mgmt_response) or mgmt_text))
+
+                        # ==================== IMPLEMENTATION PHASE ====================
+                        elif phase == TaskPhase.IMPLEMENTATION:
+                            implementation_iter += 1
+
+                            if implementation_iter > max_implementation_iters:
+                                completion_reason[0] = "Reached maximum implementation iterations."
+                                message_queue.put(('status', "⚠️ Implementation taking too long"))
+                                break
+
+                            # Get coding AI response
+                            message_queue.put(('status', f"{get_phase_status(phase)} - Coding AI working..."))
+                            message_queue.put(('ai_switch', 'CODING AI'))
+                            message_queue.put(('message_start', 'CODING AI'))
+                            coding_response = session_manager.get_coding_response(timeout=coding_timeout)
+
+                            if check_cancelled() or not coding_response:
+                                if not coding_response:
+                                    message_queue.put(('status', "❌ No response from CODING AI"))
+                                break
+
+                            parsed_coding = parse_codex_output(coding_response)
+                            message_queue.put(('message_complete', "CODING AI", parsed_coding))
+                            impl_notes.append(parsed_coding[:10000])  # Keep more context for verification
+
+                            # Send to management for supervision
+                            message_queue.put(('status', f"{get_phase_status(phase)} - Management supervising..."))
+                            message_queue.put(('ai_switch', 'MANAGEMENT AI'))
+                            message_queue.put(('message_start', 'MANAGEMENT AI'))
+                            session_manager.send_to_management(f"CODING AI OUTPUT:\n{parsed_coding}\n\nRespond with CONTINUE: <guidance for remaining steps> or VERIFY if complete. Be direct - give ALL remaining instructions at once, not one step at a time.")
+                            mgmt_response = session_manager.get_management_response(timeout=management_timeout)
+
+                            if check_cancelled() or not mgmt_response:
+                                if not mgmt_response:
+                                    message_queue.put(('status', "❌ No response from MANAGEMENT AI"))
+                                break
+
+                            mgmt_text = extract_final_codex_response(mgmt_response)
+                            message_queue.put(('message_complete', "MANAGEMENT AI", parse_codex_output(mgmt_response) or mgmt_text))
+
+                            # Check for phase transitions
+                            mgmt_upper = mgmt_text.upper()
+                            if "VERIFY" in mgmt_upper:
+                                phase = TaskPhase.VERIFICATION
+                                verification_iter = 0
+
+                                # Add phase divider
+                                add_phase_divider(phase)
+
+                                # Build verification prompt
+                                impl_summary = "\n".join(impl_notes[-5:])  # Last 5 notes
+                                verify_system = VERIFICATION_PROMPT.format(
+                                    task_description=task_description,
+                                    project_path=str(path),
+                                    plan=plan,
+                                    impl_notes=impl_summary
+                                )
+                                if not insane_mode:
+                                    verify_system += "\n\n" + SAFETY_CONSTRAINTS
+
+                                message_queue.put(('status', f"{get_phase_status(phase)} - Management verifying..."))
+                                message_queue.put(('message_start', 'MANAGEMENT AI'))
+                                session_manager.send_to_management(verify_system)
+                                mgmt_response = session_manager.get_management_response(timeout=management_timeout)
+
+                                if check_cancelled() or not mgmt_response:
+                                    if not mgmt_response:
+                                        message_queue.put(('status', "❌ No response from MANAGEMENT AI"))
+                                    break
+
+                                mgmt_text = extract_final_codex_response(mgmt_response)
+                                message_queue.put(('message_complete', "MANAGEMENT AI", parse_codex_output(mgmt_response) or mgmt_text))
+                                continue
+
+                            # Management providing guidance - relay to coding AI
+                            message_queue.put(('ai_switch', 'CODING AI'))
+                            continue_match = re.search(r'CONTINUE:\s*(.+)', mgmt_text, re.IGNORECASE | re.DOTALL)
+                            if continue_match:
+                                guidance = continue_match.group(1).strip()
+                                session_manager.send_to_coding(f"{CODING_IMPLEMENTATION_CONTEXT}\n\n{guidance}")
                             else:
-                                completion_reason[0] = "Management AI confirmed the task is complete."
-                                message_queue.put(('status', "✓ Task completed!"))
+                                # Fallback: send the whole response as guidance
+                                session_manager.send_to_coding(f"{CODING_IMPLEMENTATION_CONTEXT}\n\n{mgmt_text}")
+
+                        # ==================== VERIFICATION PHASE ====================
+                        elif phase == TaskPhase.VERIFICATION:
+                            verification_iter += 1
+
+                            if verification_iter > max_verification_iters:
+                                completion_reason[0] = "Verification inconclusive after maximum attempts."
+                                message_queue.put(('status', "⚠️ Verification inconclusive"))
+                                break
+
+                            mgmt_upper = mgmt_text.upper()
+
+                            # Check for COMPLETE
+                            if "COMPLETE" in mgmt_upper and "PLAN_ISSUE" not in mgmt_upper and "IMPL_ISSUE" not in mgmt_upper:
+                                completion_reason[0] = "Management AI verified task completion."
+                                message_queue.put(('status', "✓ Task verified complete!"))
                                 task_success[0] = True
                                 break
 
-                        # Send next instruction to coding AI
-                        message_queue.put(('status', "⏳ Coding AI is working..."))
-                        session_manager.send_to_coding(next_instruction)
+                            # Check for PLAN_ISSUE - return to investigation
+                            plan_issue_match = re.search(r'PLAN_ISSUE:\s*(.+)', mgmt_text, re.IGNORECASE | re.DOTALL)
+                            if plan_issue_match:
+                                investigation_revisits += 1
+                                if investigation_revisits > max_investigation_revisits:
+                                    completion_reason[0] = "Too many plan revisions needed."
+                                    message_queue.put(('status', "⚠️ Too many plan issues"))
+                                    break
 
-                    if iteration >= max_iterations:
-                        completion_reason[0] = "Reached maximum iterations (50)."
-                        message_queue.put(('status', "⚠️ Reached maximum iterations"))
+                                issue = plan_issue_match.group(1).strip().split('\n')[0]
+                                phase = TaskPhase.INVESTIGATION
+                                investigation_iter = 0
+
+                                # Add phase divider with issue note
+                                add_phase_divider(phase)
+                                message_queue.put(('phase', f"⚠️ Plan issue: {issue}"))
+
+                                # Reinitialize investigation with context
+                                reinvestigate_prompt = f"""The previous plan had issues: {issue}
+
+{investigation_system}
+
+Previous plan that failed:
+{plan}
+
+Create a better plan that addresses the issue."""
+                                message_queue.put(('message_start', 'MANAGEMENT AI'))
+                                session_manager.send_to_management(reinvestigate_prompt)
+                                mgmt_response = session_manager.get_management_response(timeout=management_timeout)
+
+                                if check_cancelled() or not mgmt_response:
+                                    break
+
+                                mgmt_text = extract_final_codex_response(mgmt_response)
+                                message_queue.put(('message_complete', "MANAGEMENT AI", parse_codex_output(mgmt_response) or mgmt_text))
+                                continue
+
+                            # Check for IMPL_ISSUE - return to implementation with fix
+                            impl_issue_match = re.search(r'IMPL_ISSUE:\s*(.+)', mgmt_text, re.IGNORECASE | re.DOTALL)
+                            if impl_issue_match:
+                                issue = impl_issue_match.group(1).strip()
+                                phase = TaskPhase.IMPLEMENTATION
+                                # Don't reset implementation_iter to prevent infinite loops
+
+                                # Add phase divider with issue note
+                                add_phase_divider(phase)
+                                message_queue.put(('phase', f"⚠️ Implementation issue: {issue[:100]}..."))
+
+                                # Send fix instruction to coding AI
+                                message_queue.put(('ai_switch', 'CODING AI'))
+                                fix_instruction = f"{CODING_IMPLEMENTATION_CONTEXT}\n\nVERIFICATION FOUND AN ISSUE:\n{issue}\n\nPlease fix this and report back."
+                                session_manager.send_to_coding(fix_instruction)
+                                continue
+
+                            # Check if management is confirming completion in natural language
+                            completion_phrases = ['task is complete', 'task completed', 'successfully completed',
+                                                  'has been completed', 'is done', 'task done', 'confirmed complete',
+                                                  'yes, complete', 'verified complete', 'fulfills the requirement',
+                                                  'fulfill the original task', 'satisfies the requirement']
+                            if any(phrase in mgmt_text.lower() for phrase in completion_phrases):
+                                completion_reason[0] = "Management AI confirmed task completion."
+                                message_queue.put(('status', "✓ Task verified complete!"))
+                                task_success[0] = True
+                                break
+
+                            # Management is doing direct verification - prompt for verdict if needed
+                            if verification_iter >= 3:
+                                completion_reason[0] = "Task appears complete (verification loop limit reached)."
+                                message_queue.put(('status', "✓ Task complete (auto-verified)"))
+                                task_success[0] = True
+                                break
+
+                            message_queue.put(('message_start', 'MANAGEMENT AI'))
+                            session_manager.send_to_management("Output your verdict: COMPLETE, PLAN_ISSUE: <reason>, or IMPL_ISSUE: <reason>")
+                            mgmt_response = session_manager.get_management_response(timeout=management_timeout)
+
+                            if check_cancelled() or not mgmt_response:
+                                break
+
+                            mgmt_text = extract_final_codex_response(mgmt_response)
+                            message_queue.put(('message_complete', "MANAGEMENT AI", parse_codex_output(mgmt_response) or mgmt_text))
 
                 except Exception as e:
                     message_queue.put(('status', f"❌ Error: {str(e)}"))
@@ -1208,49 +1513,134 @@ Then on a NEW LINE output EXACTLY one of:
 
             # Stream updates with live activity
             current_status = status_text + "⏳ Management AI is planning..."
-            yield make_yield(chat_history, current_status, interactive=False)
+            current_live_stream = ""
+            yield make_yield(chat_history, current_status, current_live_stream, interactive=False)
 
             import time as time_module
             last_activity = ""
+            streaming_buffer = ""
+            current_ai = "MANAGEMENT AI"  # Track which AI is producing output
             last_yield_time = 0.0
-            min_yield_interval = 0.1  # Yield at most every 100ms to avoid overwhelming UI
+            min_yield_interval = 0.05  # 50ms for responsive streaming
+
+            def format_live_output(ai_name: str, content: str) -> str:
+                """Format live output with header showing active AI."""
+                if not content.strip():
+                    return ""
+                return f'<div class="live-output-header">▶ {ai_name}</div>\n<div class="live-output-content">{content}</div>'
+
+            # Track pending message index for placeholder updates
+            pending_message_idx = None
 
             while not relay_complete.is_set():
                 try:
-                    # Use short timeout to be responsive to activity updates
-                    msg = message_queue.get(timeout=0.05)
+                    msg = message_queue.get(timeout=0.02)
                     msg_type = msg[0]
 
                     if msg_type == 'message':
+                        # Legacy: direct message (no placeholder)
                         speaker, content = msg[1], msg[2]
                         chat_history.append(make_chat_message(speaker, content))
+                        streaming_buffer = ""
                         last_activity = ""
-                        yield make_yield(chat_history, current_status, interactive=False)
+                        current_live_stream = ""
+                        pending_message_idx = None
+                        yield make_yield(chat_history, current_status, current_live_stream, interactive=False)
+                        last_yield_time = time_module.time()
+
+                    elif msg_type == 'message_start':
+                        # Add placeholder message showing AI is working
+                        speaker = msg[1]
+                        placeholder = {"role": "user" if "MANAGEMENT" in speaker else "assistant",
+                                       "content": f"**{speaker}**\n\n⏳ *Working...*"}
+                        chat_history.append(placeholder)
+                        pending_message_idx = len(chat_history) - 1
+                        streaming_buffer = ""
+                        last_activity = ""
+                        current_live_stream = ""
+                        yield make_yield(chat_history, current_status, current_live_stream, interactive=False)
+                        last_yield_time = time_module.time()
+
+                    elif msg_type == 'message_complete':
+                        # Replace placeholder with actual content
+                        speaker, content = msg[1], msg[2]
+                        if pending_message_idx is not None and pending_message_idx < len(chat_history):
+                            chat_history[pending_message_idx] = make_chat_message(speaker, content)
+                        else:
+                            chat_history.append(make_chat_message(speaker, content))
+                        pending_message_idx = None
+                        streaming_buffer = ""
+                        last_activity = ""
+                        current_live_stream = ""
+                        yield make_yield(chat_history, current_status, current_live_stream, interactive=False)
                         last_yield_time = time_module.time()
 
                     elif msg_type == 'status':
                         current_status = status_text + msg[1]
-                        yield make_yield(chat_history, current_status, interactive=False)
+                        streaming_buffer = ""
+                        current_live_stream = ""
+                        yield make_yield(chat_history, current_status, current_live_stream, interactive=False)
                         last_yield_time = time_module.time()
+
+                    elif msg_type == 'phase_divider':
+                        # Phase divider - distinct visual separator
+                        phase_name = msg[1]
+                        divider = f"───────────── {phase_name} ─────────────"
+                        # Use a special format that stands out from agent messages
+                        chat_history.append({"role": "user", "content": divider})
+                        streaming_buffer = ""
+                        current_live_stream = ""
+                        yield make_yield(chat_history, current_status, current_live_stream, interactive=False)
+                        last_yield_time = time_module.time()
+
+                    elif msg_type == 'phase':
+                        # Phase info message (plan details, issues, etc.)
+                        phase_msg = msg[1]
+                        chat_history.append({"role": "user", "content": phase_msg})
+                        streaming_buffer = ""
+                        current_live_stream = ""
+                        yield make_yield(chat_history, current_status, current_live_stream, interactive=False)
+                        last_yield_time = time_module.time()
+
+                    elif msg_type == 'ai_switch':
+                        # Update which AI is currently active
+                        current_ai = msg[1]
+                        streaming_buffer = ""  # Clear buffer on AI switch
+
+                    elif msg_type == 'stream':
+                        # Accumulate streaming content
+                        streaming_buffer += msg[1]
+                        # Limit buffer size to last 2000 chars for display
+                        if len(streaming_buffer) > 2000:
+                            streaming_buffer = streaming_buffer[-2000:]
+                        now = time_module.time()
+                        if now - last_yield_time >= min_yield_interval:
+                            display_buffer = streaming_buffer[-1500:] if len(streaming_buffer) > 1500 else streaming_buffer
+                            current_live_stream = format_live_output(current_ai, display_buffer)
+                            yield make_yield(chat_history, current_status, current_live_stream, interactive=False)
+                            last_yield_time = now
 
                     elif msg_type == 'activity':
                         last_activity = msg[1]
-                        # Rate-limit activity updates
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
-                            activity_status = current_status + f"\n\n**Live:** {last_activity}"
-                            yield make_yield(chat_history, activity_status, interactive=False)
+                            if streaming_buffer:
+                                display_buffer = streaming_buffer[-1500:] if len(streaming_buffer) > 1500 else streaming_buffer
+                                current_live_stream = format_live_output(current_ai, display_buffer + f"\n\n{last_activity}")
+                            else:
+                                current_live_stream = f"**Live:** {last_activity}"
+                            yield make_yield(chat_history, current_status, current_live_stream, interactive=False)
                             last_yield_time = now
 
                 except queue.Empty:
-                    # Yield periodically even when queue is empty to keep UI responsive
                     now = time_module.time()
-                    if now - last_yield_time >= 0.5:  # Every 500ms when idle
-                        if last_activity:
-                            activity_status = current_status + f"\n\n**Live:** {last_activity}"
-                            yield make_yield(chat_history, activity_status, interactive=False)
-                        else:
-                            yield make_yield(chat_history, current_status, interactive=False)
+                    if now - last_yield_time >= 0.3:
+                        if streaming_buffer:
+                            display_buffer = streaming_buffer[-1500:] if len(streaming_buffer) > 1500 else streaming_buffer
+                            current_live_stream = format_live_output(current_ai, display_buffer)
+                        elif last_activity:
+                            current_live_stream = f"**Live:** {last_activity}"
+                        yield make_yield(chat_history, current_status, current_live_stream, interactive=False)
                         last_yield_time = now
 
             # Final update with completion reason
@@ -1258,13 +1648,17 @@ Then on a NEW LINE output EXACTLY one of:
             if task_success[0]:
                 final_status = f"✓ Task completed!\n\n*{completion_reason[0]}*" if completion_reason[0] else "✓ Task completed!"
             else:
-                final_status = f"❌ Task did not complete successfully\n\n*{completion_reason[0]}*" if completion_reason[0] else "❌ Task did not complete successfully"
-            yield make_yield(chat_history, status_text + final_status, interactive=True)
+                final_status = (
+                    f"❌ Task did not complete successfully\n\n*{completion_reason[0]}*"
+                    if completion_reason[0]
+                    else "❌ Task did not complete successfully"
+                )
+            yield make_yield(chat_history, status_text + final_status, "", interactive=True)
 
         except Exception as e:
             import traceback
             error_msg = f"❌ Error: {str(e)}\n\n```\n{traceback.format_exc()}\n```"
-            yield make_yield(chat_history, error_msg, interactive=True)
+            yield make_yield(chat_history, error_msg, "", interactive=True)
 
     def create_interface(self) -> gr.Blocks:
         """Create the Gradio interface."""
@@ -1274,8 +1668,11 @@ Then on a NEW LINE output EXACTLY one of:
 
             with gr.Tabs():
                 # Run Task Tab (default)
-                with gr.Tab("🚀 Run Task"):
+                with gr.Tab("🚀 Run Task") as run_task_tab:
                     gr.Markdown("## Start a New Task")
+
+                    # Check initial role configuration
+                    is_ready, config_status = self.get_role_config_status()
 
                     with gr.Row():
                         with gr.Column():
@@ -1293,25 +1690,35 @@ Then on a NEW LINE output EXACTLY one of:
                                 label="⚠️ INSANE MODE (disables safety constraints)",
                                 value=False
                             )
+                            # Show role configuration status
+                            role_status = gr.Markdown(config_status, elem_id="role-config-status")
                             with gr.Row():
-                                start_btn = gr.Button("Start Task", variant="primary")
+                                start_btn = gr.Button(
+                                    "Start Task",
+                                    variant="primary",
+                                    interactive=is_ready
+                                )
                                 cancel_btn = gr.Button("🛑 Cancel", variant="stop")
 
-                    gr.Markdown("## Live Chat Stream")
-                    status_box = gr.Markdown("*Ready to start*")
-
+                    gr.Markdown("## Agent Communication")
                     with gr.Row():
                         with gr.Column():
                             chatbot = gr.Chatbot(
-                                label="Agent Communication",
-                                height=500
+                                label="Conversation History",
+                                height=400,
+                                elem_id="agent-chatbot",
+                                autoscroll=False
                             )
+
+                    gr.Markdown("## Live Output")
+                    status_box = gr.Markdown("*Ready to start*", elem_id="status-box")
+                    live_stream_box = gr.Markdown("", elem_id="live-stream-box")
 
                     # Connect task execution
                     start_btn.click(
                         self.start_chad_task,
                         inputs=[project_path, task_description, insane_mode],
-                        outputs=[chatbot, status_box, project_path, task_description, insane_mode, start_btn, cancel_btn]
+                        outputs=[chatbot, status_box, live_stream_box, project_path, task_description, insane_mode, start_btn, cancel_btn]  # noqa: E501
                     )
 
                     cancel_btn.click(
@@ -1337,7 +1744,7 @@ Then on a NEW LINE output EXACTLY one of:
                         if idx < len(account_items):
                             account_name, provider_type = account_items[idx]
                             visible = True
-                            header_text = f"### {account_name} ({provider_type})"
+                            header_text = f'<span class="provider-card__header-text">{account_name} ({provider_type})</span>'
                             role_value = self._get_account_role(account_name) or "(none)"
                             model_choices = self.get_models_for_account(account_name)
                             stored_model = self.security_mgr.get_account_model(account_name)
@@ -1355,11 +1762,11 @@ Then on a NEW LINE output EXACTLY one of:
                         with gr.Group(visible=visible, elem_classes=["provider-card"]) as card_group:
                             with gr.Row(elem_classes=["provider-card__header-row"]):
                                 card_header = gr.Markdown(header_text, elem_classes=["provider-card__header"])
-                                delete_btn = gr.Button("✕", variant="stop", size="sm", min_width=30, scale=0, elem_classes=["provider-delete"])
+                                delete_btn = gr.Button("🗑️", variant="secondary", size="sm", min_width=0, scale=0, elem_classes=["provider-delete"])  # noqa: E501
                             account_state = gr.State(account_name)
                             with gr.Row(elem_classes=["provider-controls"]):
                                 role_dropdown = gr.Dropdown(
-                                    choices=["(none)", "CODING", "MANAGEMENT"],
+                                    choices=["(none)", "CODING", "MANAGEMENT", "BOTH"],
                                     label="Role",
                                     value=role_value,
                                     scale=1
@@ -1410,11 +1817,19 @@ Then on a NEW LINE output EXACTLY one of:
                             card["usage_box"]
                         ])
 
+                    # Add role status and start button to outputs so they update when roles change
+                    provider_outputs_with_task_status = provider_outputs + [role_status, start_btn]
+
                     add_provider_outputs = provider_outputs + [new_provider_name, add_btn, add_provider_accordion]
 
+                    def refresh_with_task_status():
+                        base = self._provider_action_response("")
+                        is_ready, config_msg = self.get_role_config_status()
+                        return (*base, config_msg, gr.update(interactive=is_ready))
+
                     refresh_btn.click(
-                        lambda: self._provider_action_response(""),
-                        outputs=provider_outputs
+                        refresh_with_task_status,
+                        outputs=provider_outputs_with_task_status
                     )
 
                     new_provider_name.change(
@@ -1429,11 +1844,16 @@ Then on a NEW LINE output EXACTLY one of:
                         outputs=add_provider_outputs
                     )
 
+                    def assign_role_with_task_status(account_name, role):
+                        base = self.assign_role(account_name, role)
+                        is_ready, config_msg = self.get_role_config_status()
+                        return (*base, config_msg, gr.update(interactive=is_ready))
+
                     for card in provider_cards:
                         card["role_dropdown"].change(
-                            self.assign_role,
+                            assign_role_with_task_status,
                             inputs=[card["account_state"], card["role_dropdown"]],
-                            outputs=provider_outputs
+                            outputs=provider_outputs_with_task_status
                         )
 
                         card["model_dropdown"].change(

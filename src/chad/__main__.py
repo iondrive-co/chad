@@ -1,10 +1,12 @@
 """Main entry point for Chad - launches web interface."""
 
-import sys
-
-from .web_ui import launch_web_ui
-from datetime import datetime
+import getpass
 import random
+import sys
+from datetime import datetime
+
+from .security import SecurityManager
+from .web_ui import launch_web_ui
 
 SCS = [
     "Chad wants to make you its reverse centaur",
@@ -18,15 +20,20 @@ SCS = [
     "Chad's mecha is fighting Arnie for control of the future",
 ]
 
+
 def main() -> int:
     """Main entry point for Chad web interface."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     print(f"It is {now} and {random.choice(SCS)}")
 
+    security = SecurityManager()
+
     try:
-        # Launch web UI - password handling done in launch_web_ui
-        # This allows the reset flow to work properly
-        launch_web_ui()
+        main_password = None
+        if security.is_first_run():
+            main_password = getpass.getpass("Create main password for Chad: ")
+
+        launch_web_ui(main_password)
         return 0
     except ValueError as e:
         print(f"\n❌ Error: {e}")

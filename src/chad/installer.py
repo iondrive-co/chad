@@ -1,6 +1,4 @@
 """Main installer logic for OpenAI Codex and Claude Code."""
-
-import os
 import webbrowser
 from pathlib import Path
 

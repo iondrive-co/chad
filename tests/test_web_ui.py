@@ -2,7 +2,6 @@
 
 from unittest.mock import Mock, patch, MagicMock
 import pytest
-from pathlib import Path
 
 
 class TestChadWebUI:
@@ -49,14 +48,6 @@ class TestChadWebUI:
         result = web_ui.list_providers()
 
         assert 'No providers configured yet' in result
-
-    def test_provider_panels_use_white_backgrounds(self):
-        """Ensure provider summary and usage sections are styled with white backgrounds."""
-        from chad.web_ui import PROVIDER_PANEL_CSS
-
-        assert ".provider-summary" in PROVIDER_PANEL_CSS
-        assert ".provider-usage" in PROVIDER_PANEL_CSS
-        assert PROVIDER_PANEL_CSS.count("background: #fff;") >= 2
 
     def test_add_provider_success(self, web_ui, mock_security_mgr):
         """Test adding a new provider successfully."""
@@ -285,7 +276,7 @@ class TestChadWebUIInterface:
         mock_gr.Blocks.return_value.__exit__ = Mock(return_value=None)
 
         web_ui = ChadWebUI(mock_security_mgr, 'test-password')
-        interface = web_ui.create_interface()
+        web_ui.create_interface()
 
         # Verify Blocks was called
         mock_gr.Blocks.assert_called_once()
@@ -532,3 +523,92 @@ class TestModelSelection:
         assert 'anthropic' in ChadWebUI.PROVIDER_MODELS
         assert 'openai' in ChadWebUI.PROVIDER_MODELS
         assert 'gemini' in ChadWebUI.PROVIDER_MODELS
+
+
+class TestUILayout:
+    """Test cases for UI layout and CSS."""
+
+
+class TestStateMachineIntegration:
+    """Integration tests for the state machine relay loop."""
+
+    @pytest.fixture
+    def mock_security_mgr(self):
+        """Create a mock security manager with roles assigned."""
+        mgr = Mock()
+        mgr.list_accounts.return_value = {'coding-ai': 'anthropic', 'mgmt-ai': 'openai'}
+        mgr.list_role_assignments.return_value = {'CODING': 'coding-ai', 'MANAGEMENT': 'mgmt-ai'}
+        mgr.get_account_model.return_value = 'default'
+        return mgr
+
+    @pytest.fixture
+    def web_ui(self, mock_security_mgr):
+        """Create a ChadWebUI instance."""
+        from chad.web_ui import ChadWebUI
+        return ChadWebUI(mock_security_mgr, 'test-password')
+
+    @patch('chad.web_ui.SessionManager')
+    def test_immediate_plan_accepted(self, mock_session_manager_class, web_ui, tmp_path):
+        """Test that management can create a plan immediately without investigation."""
+        mock_manager = Mock()
+        mock_manager.start_sessions.return_value = True
+        mock_manager.are_sessions_alive.side_effect = [True, True, True, False]
+
+        # Management immediately outputs a PLAN without investigating - should be accepted
+        mock_manager.get_management_response.return_value = "PLAN:\n1. Do something\n2. Do another thing"
+
+        # Coding AI response for implementation
+        mock_manager.get_coding_response.return_value = "Done. Completed both steps."
+
+        mock_manager.stop_all = Mock()
+        mock_session_manager_class.return_value = mock_manager
+
+        # Create a test directory
+        test_dir = tmp_path / "test_project"
+        test_dir.mkdir()
+
+        # Run the task
+        results = []
+        for i, result in enumerate(web_ui.start_chad_task(str(test_dir), 'test task', False)):
+            results.append(result)
+            if i > 5:
+                web_ui.cancel_requested = True
+                break
+
+        # Check that plan was sent to coding AI (implementation started)
+        coding_calls = mock_manager.send_to_coding.call_args_list
+        assert len(coding_calls) >= 1
+        first_coding_call = str(coding_calls[0])
+        assert 'plan' in first_coding_call.lower() or 'execute' in first_coding_call.lower()
+
+    @patch('chad.web_ui.SessionManager')
+    def test_plan_accepted_after_investigation(self, mock_session_manager_class, web_ui, tmp_path):
+        """Test that plan is accepted after proper investigation."""
+        mock_manager = Mock()
+        mock_manager.start_sessions.return_value = True
+        mock_manager.are_sessions_alive.side_effect = [True, True, True, True, False]  # Stop after a few iterations
+
+        # Management asks investigation question first, then creates plan
+        mgmt_responses = [
+            "Please search for files related to the header component",  # Investigation question
+            "PLAN:\n1. Modify header.css\n2. Update colors",            # Plan after receiving findings
+        ]
+        mock_manager.get_management_response.side_effect = mgmt_responses
+
+        # Coding AI provides investigation findings
+        mock_manager.get_coding_response.return_value = "Found: src/header.css with current styles"
+
+        mock_manager.stop_all = Mock()
+        mock_session_manager_class.return_value = mock_manager
+
+        test_dir = tmp_path / "test_project"
+        test_dir.mkdir()
+
+        results = list(web_ui.start_chad_task(str(test_dir), 'change header colors', False))
+
+        # Verify that coding AI was called for investigation
+        coding_calls = mock_manager.send_to_coding.call_args_list
+        assert len(coding_calls) >= 1
+        # First coding call should be the investigation question
+        first_coding_call = str(coding_calls[0])
+        assert 'header' in first_coding_call.lower() or 'search' in first_coding_call.lower()

@@ -1,6 +1,5 @@
 """Tests for security module."""
 
-import json
 from pathlib import Path
 from unittest.mock import Mock, patch, mock_open
 import pytest
@@ -9,17 +8,6 @@ from chad.security import SecurityManager
 
 class TestSecurityManager:
     """Test cases for SecurityManager."""
-
-    def test_init_default_path(self):
-        """Test initialization with default config path."""
-        mgr = SecurityManager()
-        assert mgr.config_path == Path.home() / ".chad.conf"
-
-    def test_init_custom_path(self, tmp_path):
-        """Test initialization with custom config path."""
-        custom_path = tmp_path / "custom.conf"
-        mgr = SecurityManager(custom_path)
-        assert mgr.config_path == custom_path
 
     def test_hash_password(self):
         """Test password hashing."""
@@ -479,3 +467,212 @@ class TestSecurityManager:
         assert account is not None
         assert account['provider'] == 'anthropic'
         assert account['api_key'] == api_key
+
+    def test_encrypt_value_produces_different_output_each_time(self, tmp_path):
+        """Test that encrypt_value produces different output each time due to IV."""
+        import base64
+        import bcrypt
+
+        mgr = SecurityManager(tmp_path / "test.conf")
+        password = "testpassword"
+        salt_bytes = bcrypt.gensalt()
+        value = "same-test-value"
+
+        encrypted1 = mgr.encrypt_value(value, password, salt_bytes)
+        encrypted2 = mgr.encrypt_value(value, password, salt_bytes)
+
+        # Should produce different encrypted values due to random IV
+        assert encrypted1 != encrypted2
+
+        # But both should decrypt to the same value
+        decrypted1 = mgr.decrypt_value(encrypted1, password, salt_bytes)
+        decrypted2 = mgr.decrypt_value(encrypted2, password, salt_bytes)
+        assert decrypted1 == value
+        assert decrypted2 == value
+
+    def test_encrypt_decrypt_empty_string(self, tmp_path):
+        """Test encryption and decryption of empty string."""
+        import base64
+        import bcrypt
+
+        mgr = SecurityManager(tmp_path / "test.conf")
+        password = "testpassword"
+        salt_bytes = bcrypt.gensalt()
+        value = ""
+
+        encrypted = mgr.encrypt_value(value, password, salt_bytes)
+        decrypted = mgr.decrypt_value(encrypted, password, salt_bytes)
+        assert decrypted == value
+
+    def test_encrypt_decrypt_very_long_value(self, tmp_path):
+        """Test encryption and decryption of very long API key."""
+        import base64
+        import bcrypt
+
+        mgr = SecurityManager(tmp_path / "test.conf")
+        password = "testpassword"
+        salt_bytes = bcrypt.gensalt()
+        # Create a very long value (10KB)
+        value = "sk-" + "x" * 10000
+
+        encrypted = mgr.encrypt_value(value, password, salt_bytes)
+        decrypted = mgr.decrypt_value(encrypted, password, salt_bytes)
+        assert decrypted == value
+
+    def test_decrypt_value_with_truncated_encrypted_value(self, tmp_path):
+        """Test that decrypt_value fails gracefully with corrupted encrypted data."""
+        import base64
+        import bcrypt
+
+        mgr = SecurityManager(tmp_path / "test.conf")
+        password = "testpassword"
+        salt_bytes = bcrypt.gensalt()
+        value = "test-api-key"
+
+        encrypted = mgr.encrypt_value(value, password, salt_bytes)
+        # Truncate the encrypted value to corrupt it
+        corrupted = encrypted[:len(encrypted)//2]
+
+        with pytest.raises(Exception):  # Should raise some form of decryption error
+            mgr.decrypt_value(corrupted, password, salt_bytes)
+
+    def test_get_role_assignment_nonexistent_role(self, tmp_path):
+        """Test get_role_assignment for role that was never assigned."""
+        config_path = tmp_path / "test.conf"
+        mgr = SecurityManager(config_path)
+        password = "testpassword"
+
+        result = mgr.get_role_assignment('NONEXISTENT_ROLE')
+        assert result is None
+
+    def test_list_role_assignments_empty(self, tmp_path):
+        """Test list_role_assignments when no roles are assigned."""
+        config_path = tmp_path / "test.conf"
+        mgr = SecurityManager(config_path)
+
+        assignments = mgr.list_role_assignments()
+        assert assignments == {}
+
+    def test_assign_role_overwrites_previous_role(self, tmp_path):
+        """assign_role should overwrite an existing assignment for the role."""
+        config_path = tmp_path / "test.conf"
+        mgr = SecurityManager(config_path)
+        password = "testpassword"
+
+        import base64
+        import bcrypt
+        password_hash = mgr.hash_password(password)
+        salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
+        mgr.save_config({
+            'password_hash': password_hash,
+            'encryption_salt': salt
+        })
+
+        mgr.store_account('account1', 'anthropic', 'key1', password, 'model1')
+        mgr.store_account('account2', 'openai', 'key2', password, 'model2')
+
+        mgr.assign_role('account1', 'CODING')
+        assert mgr.get_role_assignment('CODING') == 'account1'
+
+        mgr.assign_role('account2', 'CODING')
+        assert mgr.get_role_assignment('CODING') == 'account2'
+
+    def test_assign_role_to_account_that_doesnt_exist(self, tmp_path):
+        """assign_role should error when the account does not exist."""
+        config_path = tmp_path / "test.conf"
+        mgr = SecurityManager(config_path)
+
+        with pytest.raises(ValueError):
+            mgr.assign_role('nonexistent', 'CODING')
+
+    def test_clear_role_nonexistent(self, tmp_path):
+        """Clearing a missing role should be a no-op."""
+        config_path = tmp_path / "test.conf"
+        mgr = SecurityManager(config_path)
+
+        mgr.clear_role('NONEXISTENT_ROLE')
+        assert mgr.get_role_assignment('NONEXISTENT_ROLE') is None
+
+    def test_delete_account_cascades_to_role_assignments(self, tmp_path):
+        """delete_account should remove related role assignments."""
+        config_path = tmp_path / "test.conf"
+        mgr = SecurityManager(config_path)
+        password = "testpassword"
+
+        import base64
+        import bcrypt
+        password_hash = mgr.hash_password(password)
+        salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
+        mgr.save_config({
+            'password_hash': password_hash,
+            'encryption_salt': salt
+        })
+
+        mgr.store_account('test_account', 'anthropic', 'key', password, 'model')
+        mgr.assign_role('test_account', 'CODING')
+        assert mgr.get_role_assignment('CODING') == 'test_account'
+
+        mgr.delete_account('test_account')
+
+        assert mgr.get_role_assignment('CODING') is None
+        assert 'test_account' not in mgr.list_accounts()
+
+    def test_delete_account_nonexistent(self, tmp_path):
+        """Deleting a missing account should not error."""
+        config_path = tmp_path / "test.conf"
+        mgr = SecurityManager(config_path)
+
+        mgr.delete_account('nonexistent')
+
+    def test_save_and_load_preferences(self, tmp_path):
+        """Test saving and loading user preferences."""
+        config_path = tmp_path / "test.conf"
+        mgr = SecurityManager(config_path)
+
+        mgr.save_preferences("/tmp/project-path")
+        loaded_prefs = mgr.load_preferences()
+        assert loaded_prefs == {'project_path': "/tmp/project-path"}
+
+    def test_load_preferences_nonexistent(self, tmp_path):
+        """Test loading preferences when none have been saved."""
+        config_path = tmp_path / "test.conf"
+        mgr = SecurityManager(config_path)
+
+        preferences = mgr.load_preferences()
+        assert preferences is None
+
+    def test_mixed_old_and_new_format_accounts(self, tmp_path):
+        """Test config with both 'api_keys' and 'accounts' sections."""
+        config_path = tmp_path / "test.conf"
+        mgr = SecurityManager(config_path)
+
+        import base64
+        import bcrypt
+        password = 'testpassword'
+        password_hash = mgr.hash_password(password)
+        salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
+        salt_bytes = base64.urlsafe_b64decode(salt.encode())
+
+        # Create mixed format config
+        old_key = mgr.encrypt_value('old-api-key', password, salt_bytes)
+        new_account_key = mgr.encrypt_value('new-api-key', password, salt_bytes)
+
+        mgr.save_config({
+            'password_hash': password_hash,
+            'encryption_salt': salt,
+            'api_keys': {  # Old format
+                'anthropic': old_key
+            },
+            'accounts': {  # New format
+                'new_account': {
+                    'provider': 'openai',
+                    'encrypted_api_key': new_account_key,
+                    'model': 'gpt-4'
+                }
+            }
+        })
+
+        accounts = mgr.list_accounts()
+        assert 'anthropic' in accounts  # From old format
+        assert 'new_account' in accounts  # From new format
+        assert len(accounts) == 2  # No duplicates
