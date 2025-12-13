@@ -2,39 +2,22 @@
 - Re-open task
 - Load balance based on usage and user preference
 - Auto publish to pypi
-- For the verify add these:
-- [ ] **Verification**: Use one model to verify another's work
+- Prompts should be read in from the user config to be configurable
+- For the verify prompt add these suggestions:
   - Code review by different model
-  - Cross-validation of solutions
-
-- [ ] **File system tools**:
-  - Read files to verify changes
-  - Check if files exist
-  - List directory contents
-  - Verify file permissions
-
-- [ ] **Command execution**:
   - Run compilation/build commands
   - Execute tests and check results
   - Run linters/formatters
   - Check git status
-
-- [ ] **Code analysis**:
   - Parse code to verify structure
   - Check for specific functions/classes
   - Analyze dependencies
-
-- [ ] **Web search**: Management AI can search for solutions
   - Look up error messages
   - Find documentation
-  - Search Stack Overflow
-
-- [ ] **Documentation access**:
   - Fetch API documentation
   - Read library docs
   - Access language references
 
-- For AVAILABLE_RESPONSE add some options like:
 - Track how well each model is doing
   - Response time
   - Task completion rate
@@ -67,8 +50,4 @@
   - Revert failed changes
   - Try alternative approaches
 
-- These prompts should be read in from the user config to be configurable
 
-
-- [ ] **IDE integration**:
-  - JetBrains plugin

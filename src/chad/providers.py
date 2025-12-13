@@ -1,12 +1,14 @@
 """Generic AI provider interface for supporting multiple models."""
 
 import os
-import re
+import pty
+import select
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Callable
 
 
-def parse_codex_output(raw_output: str | None) -> str:
+def parse_codex_output(raw_output: str | None) -> str:  # noqa: C901
     """Parse Codex output to extract just thinking and response.
 
     Codex output has the format:
@@ -163,9 +165,6 @@ def extract_final_codex_response(raw_output: str | None) -> str:
     return '\n'.join(final_response) if final_response else raw_output
 
 
-from typing import Callable
-
-
 @dataclass
 class ModelConfig:
     """Configuration for an AI model."""
@@ -177,7 +176,7 @@ class ModelConfig:
 
 
 # Callback type for activity updates: (activity_type, detail)
-# activity_type: 'tool', 'thinking', 'text'
+# activity_type: 'tool', 'thinking', 'text', 'stream' (for raw streaming chunks)
 ActivityCallback = Callable[[str, str], None] | None
 
 
@@ -216,7 +215,7 @@ class AIProvider(ABC):
         pass
 
     @abstractmethod
-    def get_response(self, timeout: float = 30.0) -> str:
+    def get_response(self, timeout: float = 30.0) -> str:  # noqa: C901
         """Get the AI's response.
 
         Args:
@@ -249,25 +248,22 @@ class ClaudeCodeProvider(AIProvider):
         super().__init__(config)
         self.process: object | None = None
         self.project_path: str | None = None
+        self.accumulated_text: list[str] = []
 
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         import subprocess
-        import json
 
         self.project_path = project_path
 
-        # Use streaming JSON I/O mode for multi-turn conversations
-        # This allows programmatic usage without interactive prompts
         cmd = [
             'claude',
-            '-p',  # Print mode (non-interactive)
+            '-p',
             '--input-format', 'stream-json',
             '--output-format', 'stream-json',
-            '--permission-mode', 'bypassPermissions',  # Skip all permission prompts
-            '--verbose'  # Required for stream-json output
+            '--permission-mode', 'bypassPermissions',
+            '--verbose'
         ]
 
-        # Add model if specified and not default
         if self.config.model_name and self.config.model_name != 'default':
             cmd.extend(['--model', self.config.model_name])
 
@@ -279,16 +275,15 @@ class ClaudeCodeProvider(AIProvider):
                 stderr=subprocess.PIPE,
                 text=True,
                 cwd=project_path,
-                bufsize=1  # Line buffered
+                bufsize=1
             )
 
-            # Send initial message if provided
             if system_prompt:
                 self.send_message(system_prompt)
 
             return True
         except (FileNotFoundError, PermissionError, OSError) as e:
-            print(f"Failed to start Claude: {e}")
+            self._notify_activity('text', f"Failed to start Claude: {e}")
             return False
 
     def send_message(self, message: str) -> None:
@@ -297,8 +292,6 @@ class ClaudeCodeProvider(AIProvider):
         if not self.process or not self.process.stdin:
             return
 
-        # Format as streaming JSON message
-        # https://docs.anthropic.com/en/docs/claude-code/headless#streaming-json-input
         msg = {
             "type": "user",
             "message": {
@@ -315,9 +308,7 @@ class ClaudeCodeProvider(AIProvider):
 
     def get_response(self, timeout: float = 30.0) -> str:
         import time
-        import select
         import json
-        import sys
 
         if not self.process or not self.process.stdout:
             return ""
@@ -325,6 +316,7 @@ class ClaudeCodeProvider(AIProvider):
         result_text = None
         start_time = time.time()
         idle_timeout = 2.0
+        self.accumulated_text = []
 
         while time.time() - start_time < timeout:
             if self.process.poll() is not None:
@@ -346,18 +338,18 @@ class ClaudeCodeProvider(AIProvider):
             try:
                 msg = json.loads(line.strip())
 
-                # Print assistant messages in real-time for visibility
                 if msg.get('type') == 'assistant':
                     content = msg.get('message', {}).get('content', [])
                     for item in content:
                         if item.get('type') == 'text':
                             text = item.get('text', '')
-                            print(text, flush=True)
+                            self.accumulated_text.append(text)
+                            # Stream the text to UI
+                            self._notify_activity('stream', text + '\n')
                             self._notify_activity('text', text[:100])
                         elif item.get('type') == 'tool_use':
                             tool_name = item.get('name', 'unknown')
                             tool_input = item.get('input', {})
-                            # Extract meaningful detail from tool input
                             if tool_name in ('Read', 'Edit', 'Write'):
                                 detail = tool_input.get('file_path', '')
                             elif tool_name == 'Bash':
@@ -366,10 +358,9 @@ class ClaudeCodeProvider(AIProvider):
                                 detail = tool_input.get('pattern', '')
                             else:
                                 detail = ''
-                            print(f"[Using tool: {tool_name}]", flush=True)
                             self._notify_activity('tool', f"{tool_name}: {detail}")
+                            self._notify_activity('stream', f"[Tool: {tool_name}]\n")
 
-                # The 'result' message contains the final response text
                 if msg.get('type') == 'result':
                     result_text = msg.get('result', '')
                     break
@@ -404,7 +395,7 @@ class OpenAICodexProvider(AIProvider):
 
     Uses browser-based authentication like Claude Code.
     Run 'codex' to authenticate via browser if not already logged in.
-    Uses 'codex exec' for non-interactive execution.
+    Uses 'codex exec' for non-interactive execution with PTY for real-time streaming.
 
     Each account gets an isolated HOME directory to support multiple accounts.
     """
@@ -415,6 +406,7 @@ class OpenAICodexProvider(AIProvider):
         self.project_path: str | None = None
         self.current_message: str | None = None
         self.system_prompt: str | None = None
+        self.master_fd: int | None = None
 
     def _get_isolated_home(self) -> str:
         """Get the isolated HOME directory for this account."""
@@ -425,176 +417,11 @@ class OpenAICodexProvider(AIProvider):
 
     def _get_env(self) -> dict:
         """Get environment with isolated HOME for this account."""
-        import os
         env = os.environ.copy()
         env['HOME'] = self._get_isolated_home()
+        env['PYTHONUNBUFFERED'] = '1'
+        env['TERM'] = 'xterm-256color'
         return env
-
-    def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
-        self.project_path = project_path
-        self.system_prompt = system_prompt  # Store for prepending to each message
-        return True
-
-    def send_message(self, message: str) -> None:
-        # Prepend system prompt to each message since exec mode is stateless
-        if self.system_prompt:
-            self.current_message = f"{self.system_prompt}\n\n---\n\n{message}"
-        else:
-            self.current_message = message
-
-    def get_response(self, timeout: float = 1800.0) -> str:
-        import subprocess
-        import time
-        import threading
-        import os
-
-        if not self.current_message:
-            return ""
-
-        # Use 'codex exec' for non-interactive execution
-        cmd = [
-            'codex',
-            'exec',
-            '--full-auto',  # Automatic execution without approval prompts
-            '--skip-git-repo-check',  # Allow execution in non-git directories
-            '-C', self.project_path,  # Set working directory
-        ]
-
-        # Add model if specified and not default
-        if self.config.model_name and self.config.model_name != 'default':
-            cmd.extend(['-m', self.config.model_name])
-
-        # Send the prompt via stdin to avoid OS argument length limits
-        cmd.append('-')
-
-        try:
-            # Use unbuffered output by setting PYTHONUNBUFFERED and using os.pipe
-            env = self._get_env()
-            env['PYTHONUNBUFFERED'] = '1'
-
-            self.process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env,
-                bufsize=0  # Unbuffered
-            )
-
-            # Write input and close stdin
-            if self.process.stdin:
-                self.process.stdin.write(self.current_message)
-                self.process.stdin.close()
-
-            # Read output in a separate thread to avoid blocking
-            output_lines = []
-            read_complete = threading.Event()
-
-            def read_output():
-                import sys
-                try:
-                    if self.process and self.process.stdout:
-                        for line in iter(self.process.stdout.readline, ''):
-                            if not line:
-                                break
-                            output_lines.append(line)
-                            stripped = line.strip()
-
-                            # Debug: print each line we receive
-                            print(f"[Codex] {stripped}", file=sys.stderr, flush=True)
-
-                            # Parse Codex output for activity updates
-                            if stripped == 'thinking':
-                                self._notify_activity('text', 'Thinking...')
-                            elif stripped.startswith('**') and stripped.endswith('**'):
-                                self._notify_activity('text', stripped.strip('*')[:60])
-                            elif stripped == 'codex':
-                                self._notify_activity('text', 'Responding...')
-                            elif stripped.startswith('exec'):
-                                self._notify_activity('tool', f"exec: {stripped[5:65]}")
-                            elif stripped == 'user':
-                                self._notify_activity('text', 'Processing input...')
-                            elif stripped and not stripped.replace(',', '').isdigit() and stripped not in ('mcp startup: no servers', 'tokens used') and not stripped.startswith('--------') and not stripped.startswith('OpenAI Codex') and not stripped.startswith('workdir:') and not stripped.startswith('model:') and not stripped.startswith('provider:') and not stripped.startswith('approval:') and not stripped.startswith('sandbox:') and not stripped.startswith('reasoning') and not stripped.startswith('session id:'):
-                                if len(stripped) > 10:
-                                    self._notify_activity('text', stripped[:80])
-                except Exception as e:
-                    print(f"[Codex reader error: {e}]", file=sys.stderr, flush=True)
-                finally:
-                    read_complete.set()
-
-            reader_thread = threading.Thread(target=read_output, daemon=True)
-            reader_thread.start()
-
-            # Wait for process to complete or timeout
-            start_time = time.time()
-            while time.time() - start_time < timeout:
-                if self.process.poll() is not None:
-                    break
-                time.sleep(0.1)
-
-            # Check for timeout
-            if self.process.poll() is None:
-                self.process.kill()
-                self.process.wait()
-                self.current_message = None
-                self.process = None
-                timeout_mins = int(timeout / 60)
-                return f"Error: Codex execution timed out ({timeout_mins} minutes)"
-
-            # Wait for reader thread to finish (with short timeout)
-            read_complete.wait(timeout=2.0)
-
-            # Read any stderr
-            stderr = self.process.stderr.read() if self.process.stderr else ""
-
-            self.current_message = None
-            self.process = None
-
-            output = ''.join(output_lines)
-            if stderr:
-                output += f"\n{stderr}"
-            return output.strip() if output else "No response from Codex"
-        except (FileNotFoundError, PermissionError, OSError) as e:
-            self.current_message = None
-            self.process = None
-            return f"Failed to run Codex: {e}\n\nMake sure Codex CLI is installed and authenticated.\nRun 'codex' to authenticate."
-
-    def stop_session(self) -> None:
-        self.current_message = None
-        if self.process:
-            try:
-                self.process.kill()
-                self.process.wait(timeout=5)
-            except Exception:
-                pass
-            self.process = None
-
-    def is_alive(self) -> bool:
-        # With exec mode, we're "alive" if there's no active process or one is running
-        return self.process is None or self.process.poll() is None
-
-
-class GeminiCodeAssistProvider(AIProvider):
-    """Provider for Gemini Code Assist (one-shot per prompt).
-
-    Uses the `gemini` command-line interface in "YOLO" mode for
-    non-interactive, programmatic calls.
-    Authentication typically uses Application Default Credentials (ADC),
-    set up via `gcloud auth application-default login`.
-    """
-
-    def __init__(self, config: ModelConfig):
-        super().__init__(config)
-        self.project_path: str | None = None
-        self.system_prompt: str | None = None
-        self.current_message: str | None = None
-        self._debug_enabled = bool(os.environ.get("CHAD_GEMINI_DEBUG"))
-
-    def _debug(self, message: str) -> None:
-        if self._debug_enabled:
-            import sys
-            print(f"[Gemini debug] {message}", file=sys.stderr, flush=True)
 
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         self.project_path = project_path
@@ -607,8 +434,187 @@ class GeminiCodeAssistProvider(AIProvider):
         else:
             self.current_message = message
 
-    def get_response(self, timeout: float = 30.0) -> str:
+    def get_response(self, timeout: float = 1800.0) -> str:  # noqa: C901
         import subprocess
+        import time
+
+        if not self.current_message:
+            return ""
+
+        cmd = [
+            'codex',
+            'exec',
+            '--full-auto',
+            '--skip-git-repo-check',
+            '-C', self.project_path,
+            '-',  # Read from stdin
+        ]
+
+        if self.config.model_name and self.config.model_name != 'default':
+            cmd.extend(['-m', self.config.model_name])
+
+        try:
+            env = self._get_env()
+
+            # Use PTY for real-time unbuffered output
+            master_fd, slave_fd = pty.openpty()
+            self.master_fd = master_fd
+
+            self.process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                env=env,
+                close_fds=True
+            )
+
+            os.close(slave_fd)
+
+            # Write input and close stdin
+            if self.process.stdin:
+                self.process.stdin.write(self.current_message.encode())
+                self.process.stdin.close()
+
+            # Read output in real-time using PTY
+            output_chunks = []
+            start_time = time.time()
+
+            while time.time() - start_time < timeout:
+                if self.process.poll() is not None:
+                    # Process finished, read any remaining output
+                    try:
+                        while True:
+                            ready, _, _ = select.select([master_fd], [], [], 0.1)
+                            if not ready:
+                                break
+                            chunk = os.read(master_fd, 4096)
+                            if not chunk:
+                                break
+                            decoded = chunk.decode('utf-8', errors='replace')
+                            output_chunks.append(decoded)
+                            self._process_streaming_chunk(decoded)
+                    except OSError:
+                        pass
+                    break
+
+                try:
+                    ready, _, _ = select.select([master_fd], [], [], 0.1)
+                    if ready:
+                        chunk = os.read(master_fd, 4096)
+                        if chunk:
+                            decoded = chunk.decode('utf-8', errors='replace')
+                            output_chunks.append(decoded)
+                            self._process_streaming_chunk(decoded)
+                            # Keep extending timeout while we're receiving data
+                            start_time = time.time()
+                except OSError:
+                    break
+
+            os.close(master_fd)
+            self.master_fd = None
+
+            if self.process.poll() is None:
+                self.process.kill()
+                self.process.wait()
+                self.current_message = None
+                self.process = None
+                return f"Error: Codex execution timed out ({int(timeout / 60)} minutes)"
+
+            self.current_message = None
+            self.process = None
+
+            output = ''.join(output_chunks)
+            # Strip ANSI escape codes for clean output
+            import re
+            output = re.sub(r'\x1b\[[0-9;]*[mGKHF]', '', output)
+            return output.strip() if output else "No response from Codex"
+
+        except (FileNotFoundError, PermissionError, OSError) as e:
+            self.current_message = None
+            self.process = None
+            if self.master_fd:
+                try:
+                    os.close(self.master_fd)
+                except OSError:
+                    pass
+                self.master_fd = None
+            return (
+                f"Failed to run Codex: {e}\n\n"
+                "Make sure Codex CLI is installed and authenticated.\n"
+                "Run 'codex' to authenticate."
+            )
+
+    def _process_streaming_chunk(self, chunk: str) -> None:
+        """Process a streaming chunk for activity notifications."""
+        # Send raw stream to UI for live display
+        self._notify_activity('stream', chunk)
+
+        # Also parse for structured activity updates
+        for line in chunk.split('\n'):
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            if stripped == 'thinking':
+                self._notify_activity('thinking', 'Reasoning...')
+            elif stripped == 'codex':
+                self._notify_activity('text', 'Responding...')
+            elif stripped.startswith('exec'):
+                self._notify_activity('tool', f"Running: {stripped[5:65].strip()}")
+            elif stripped.startswith('**') and stripped.endswith('**'):
+                self._notify_activity('text', stripped.strip('*')[:60])
+
+    def stop_session(self) -> None:
+        self.current_message = None
+        if self.master_fd:
+            try:
+                os.close(self.master_fd)
+            except OSError:
+                pass
+            self.master_fd = None
+        if self.process:
+            try:
+                self.process.kill()
+                self.process.wait(timeout=5)
+            except Exception:
+                pass
+            self.process = None
+
+    def is_alive(self) -> bool:
+        return self.process is None or self.process.poll() is None
+
+
+class GeminiCodeAssistProvider(AIProvider):
+    """Provider for Gemini Code Assist (one-shot per prompt).
+
+    Uses the `gemini` command-line interface in "YOLO" mode for
+    non-interactive, programmatic calls with PTY for real-time streaming.
+    """
+
+    def __init__(self, config: ModelConfig):
+        super().__init__(config)
+        self.project_path: str | None = None
+        self.system_prompt: str | None = None
+        self.current_message: str | None = None
+        self.process: object | None = None
+        self.master_fd: int | None = None
+
+    def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
+        self.project_path = project_path
+        self.system_prompt = system_prompt
+        return True
+
+    def send_message(self, message: str) -> None:
+        if self.system_prompt:
+            self.current_message = f"{self.system_prompt}\n\n---\n\n{message}"
+        else:
+            self.current_message = message
+
+    def get_response(self, timeout: float = 1800.0) -> str:
+        import subprocess
+        import time
+        import re
 
         if not self.current_message:
             return ""
@@ -621,49 +627,128 @@ class GeminiCodeAssistProvider(AIProvider):
         cmd.extend(['-p', self.current_message])
 
         try:
-            self._debug(f"Running gemini with {len(self.current_message)} chars")
-            completed = subprocess.run(
+            env = os.environ.copy()
+            env['TERM'] = 'xterm-256color'
+
+            # Use PTY for real-time streaming
+            master_fd, slave_fd = pty.openpty()
+            self.master_fd = master_fd
+
+            self.process = subprocess.Popen(
                 cmd,
-                input="",
-                capture_output=True,
-                text=True,
+                stdin=subprocess.PIPE,
+                stdout=slave_fd,
+                stderr=slave_fd,
                 cwd=self.project_path,
-                timeout=timeout
+                env=env,
+                close_fds=True
             )
-        except subprocess.TimeoutExpired:
+
+            os.close(slave_fd)
+
+            if self.process.stdin:
+                self.process.stdin.close()
+
+            output_chunks = []
+            start_time = time.time()
+
+            while time.time() - start_time < timeout:
+                if self.process.poll() is not None:
+                    try:
+                        while True:
+                            ready, _, _ = select.select([master_fd], [], [], 0.1)
+                            if not ready:
+                                break
+                            chunk = os.read(master_fd, 4096)
+                            if not chunk:
+                                break
+                            decoded = chunk.decode('utf-8', errors='replace')
+                            output_chunks.append(decoded)
+                            self._notify_activity('stream', decoded)
+                    except OSError:
+                        pass
+                    break
+
+                try:
+                    ready, _, _ = select.select([master_fd], [], [], 0.1)
+                    if ready:
+                        chunk = os.read(master_fd, 4096)
+                        if chunk:
+                            decoded = chunk.decode('utf-8', errors='replace')
+                            output_chunks.append(decoded)
+                            self._notify_activity('stream', decoded)
+                            # Parse for activity updates
+                            for line in decoded.split('\n'):
+                                stripped = line.strip()
+                                if stripped and len(stripped) > 10:
+                                    self._notify_activity('text', stripped[:80])
+                            start_time = time.time()
+                except OSError:
+                    break
+
+            os.close(master_fd)
+            self.master_fd = None
+
+            if self.process.poll() is None:
+                self.process.kill()
+                self.process.wait()
+                self.current_message = None
+                self.process = None
+                return f"Error: Gemini execution timed out ({int(timeout / 60)} minutes)"
+
             self.current_message = None
-            return f"Error: Gemini execution timed out ({int(timeout/60)} minutes)"
+            self.process = None
+
+            output = ''.join(output_chunks)
+            output = re.sub(r'\x1b\[[0-9;]*[mGKHF]', '', output)
+            return output.strip() if output else "No response from Gemini"
+
         except FileNotFoundError:
             self.current_message = None
-            return "Failed to run Gemini: command not found\n\nInstall with: sudo npm install -g @google/gemini-cli"
+            self.process = None
+            if self.master_fd:
+                try:
+                    os.close(self.master_fd)
+                except OSError:
+                    pass
+                self.master_fd = None
+            return "Failed to run Gemini: command not found\n\nInstall with: npm install -g @google/gemini-cli"
         except (PermissionError, OSError) as exc:
             self.current_message = None
+            self.process = None
+            if self.master_fd:
+                try:
+                    os.close(self.master_fd)
+                except OSError:
+                    pass
+                self.master_fd = None
             return f"Failed to run Gemini: {exc}"
-
-        self.current_message = None
-
-        stdout_text = (completed.stdout or "").strip()
-        stderr_text = (completed.stderr or "").strip()
-
-        if stdout_text:
-            return stdout_text
-        if stderr_text:
-            return stderr_text
-        return "No response from Gemini"
 
     def stop_session(self) -> None:
         self.current_message = None
+        if self.master_fd:
+            try:
+                os.close(self.master_fd)
+            except OSError:
+                pass
+            self.master_fd = None
+        if self.process:
+            try:
+                self.process.kill()
+                self.process.wait(timeout=5)
+            except Exception:
+                pass
+            self.process = None
 
     def is_alive(self) -> bool:
-        # Stateless execution – always available unless explicitly shut down
-        return True
+        return self.process is None or self.process.poll() is None
 
 
 class MistralVibeProvider(AIProvider):
     """Provider for Mistral Vibe CLI.
 
-    Uses the `vibe` command-line interface in programmatic mode (-p).
-    Authentication is set up via `vibe --setup`.
+    Uses the `vibe` command-line interface in programmatic mode (-p)
+    with PTY for real-time streaming output.
     """
 
     def __init__(self, config: ModelConfig):
@@ -672,6 +757,7 @@ class MistralVibeProvider(AIProvider):
         self.project_path: str | None = None
         self.current_message: str | None = None
         self.system_prompt: str | None = None
+        self.master_fd: int | None = None
 
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         self.project_path = project_path
@@ -679,7 +765,6 @@ class MistralVibeProvider(AIProvider):
         return True
 
     def send_message(self, message: str) -> None:
-        # Prepend system prompt since programmatic mode is stateless
         if self.system_prompt:
             self.current_message = f"{self.system_prompt}\n\n---\n\n{message}"
         else:
@@ -687,58 +772,128 @@ class MistralVibeProvider(AIProvider):
 
     def get_response(self, timeout: float = 1800.0) -> str:
         import subprocess
+        import time
+        import re
 
         if not self.current_message:
             return ""
 
-        # Use vibe in programmatic mode (-p already auto-approves)
         cmd = [
             'vibe',
             '-p', self.current_message,
-            '--output', 'text',  # text output is clean; streaming outputs verbose JSON
+            '--output', 'text',
         ]
 
         try:
             self._notify_activity('text', 'Starting Vibe...')
 
+            env = os.environ.copy()
+            env['TERM'] = 'xterm-256color'
+
+            master_fd, slave_fd = pty.openpty()
+            self.master_fd = master_fd
+
             self.process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
+                stdout=slave_fd,
+                stderr=slave_fd,
                 cwd=self.project_path,
+                env=env,
+                close_fds=True
             )
 
-            # Use communicate() with timeout - simpler and handles buffering correctly
-            try:
-                stdout, stderr = self.process.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
+            os.close(slave_fd)
+
+            if self.process.stdin:
+                self.process.stdin.close()
+
+            output_chunks = []
+            start_time = time.time()
+
+            while time.time() - start_time < timeout:
+                if self.process.poll() is not None:
+                    try:
+                        while True:
+                            ready, _, _ = select.select([master_fd], [], [], 0.1)
+                            if not ready:
+                                break
+                            chunk = os.read(master_fd, 4096)
+                            if not chunk:
+                                break
+                            decoded = chunk.decode('utf-8', errors='replace')
+                            output_chunks.append(decoded)
+                            self._notify_activity('stream', decoded)
+                    except OSError:
+                        pass
+                    break
+
+                try:
+                    ready, _, _ = select.select([master_fd], [], [], 0.1)
+                    if ready:
+                        chunk = os.read(master_fd, 4096)
+                        if chunk:
+                            decoded = chunk.decode('utf-8', errors='replace')
+                            output_chunks.append(decoded)
+                            self._notify_activity('stream', decoded)
+                            for line in decoded.split('\n'):
+                                stripped = line.strip()
+                                if stripped and len(stripped) > 10:
+                                    self._notify_activity('text', stripped[:80])
+                            start_time = time.time()
+                except OSError:
+                    break
+
+            os.close(master_fd)
+            self.master_fd = None
+
+            if self.process.poll() is None:
                 self.process.kill()
-                self.process.communicate()
+                self.process.wait()
                 self.current_message = None
                 self.process = None
-                return f"Error: Vibe execution timed out ({int(timeout/60)} minutes)"
+                return f"Error: Vibe execution timed out ({int(timeout / 60)} minutes)"
 
             self.current_message = None
             self.process = None
 
-            output = stdout.strip() if stdout else ""
-            if stderr and stderr.strip():
-                output += f"\n{stderr.strip()}"
-            return output if output else "No response from Vibe"
+            output = ''.join(output_chunks)
+            output = re.sub(r'\x1b\[[0-9;]*[mGKHF]', '', output)
+            return output.strip() if output else "No response from Vibe"
 
         except FileNotFoundError:
             self.current_message = None
             self.process = None
-            return "Failed to run Vibe: command not found\n\nInstall with: pip install mistral-vibe\nThen run: vibe --setup"
+            if self.master_fd:
+                try:
+                    os.close(self.master_fd)
+                except OSError:
+                    pass
+                self.master_fd = None
+            return (
+                "Failed to run Vibe: command not found\n\n"
+                "Install with: pip install mistral-vibe\n"
+                "Then run: vibe --setup"
+            )
         except (PermissionError, OSError) as e:
             self.current_message = None
             self.process = None
+            if self.master_fd:
+                try:
+                    os.close(self.master_fd)
+                except OSError:
+                    pass
+                self.master_fd = None
             return f"Failed to run Vibe: {e}"
 
     def stop_session(self) -> None:
         self.current_message = None
+        if self.master_fd:
+            try:
+                os.close(self.master_fd)
+            except OSError:
+                pass
+            self.master_fd = None
         if self.process:
             try:
                 self.process.kill()

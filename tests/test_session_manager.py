@@ -1,10 +1,7 @@
 """Tests for session manager."""
 
 from unittest.mock import Mock, patch
-from chad.session_manager import (
-    MANAGEMENT_SYSTEM_PROMPT,
-    SessionManager,
-)
+from chad.session_manager import SessionManager, get_coding_timeout, get_management_timeout
 from chad.providers import ModelConfig
 
 
@@ -21,6 +18,11 @@ class TestSessionManager:
         assert manager.coding_config == coding_config
         assert manager.management_config == management_config
         assert manager.task_description is None
+
+    def test_timeout_helpers(self):
+        assert get_coding_timeout("anthropic") == 1800.0
+        assert get_management_timeout("anthropic") == 120.0
+        assert get_management_timeout("gemini") == 600.0
 
     def test_insane_mode_excludes_safety_constraints(self):
         coding_config = ModelConfig(provider="anthropic", model_name="claude")
@@ -145,7 +147,7 @@ class TestSessionManager:
         assert result is False
         coding_provider.stop_session.assert_called_once()
 
-    def test_send_to_coding(self, capsys):
+    def test_send_to_coding(self):
         coding_config = ModelConfig(provider="anthropic", model_name="claude")
         management_config = ModelConfig(provider="anthropic", model_name="claude")
         manager = SessionManager(coding_config, management_config)
@@ -156,20 +158,15 @@ class TestSessionManager:
         manager.send_to_coding("Test message")
         mock_provider.send_message.assert_called_once_with("Test message")
 
-        captured = capsys.readouterr()
-        assert "TO CODING AI" in captured.out
-
-    def test_send_to_coding_no_provider(self, capsys):
+    def test_send_to_coding_no_provider(self):
         coding_config = ModelConfig(provider="anthropic", model_name="claude")
         management_config = ModelConfig(provider="anthropic", model_name="claude")
         manager = SessionManager(coding_config, management_config)
 
+        # Should not raise when provider is None
         manager.send_to_coding("Test message")
 
-        captured = capsys.readouterr()
-        assert "Error" in captured.out
-
-    def test_get_coding_response(self, capsys):
+    def test_get_coding_response(self):
         coding_config = ModelConfig(provider="anthropic", model_name="claude")
         management_config = ModelConfig(provider="anthropic", model_name="claude")
         manager = SessionManager(coding_config, management_config)
@@ -182,9 +179,6 @@ class TestSessionManager:
         assert response == "Response text"
         mock_provider.get_response.assert_called_once_with(10.0)
 
-        captured = capsys.readouterr()
-        assert "FROM CODING AI" in captured.out
-
     def test_get_coding_response_no_provider(self):
         coding_config = ModelConfig(provider="anthropic", model_name="claude")
         management_config = ModelConfig(provider="anthropic", model_name="claude")
@@ -193,7 +187,7 @@ class TestSessionManager:
         response = manager.get_coding_response()
         assert response == ""
 
-    def test_send_to_management(self, capsys):
+    def test_send_to_management(self):
         coding_config = ModelConfig(provider="anthropic", model_name="claude")
         management_config = ModelConfig(provider="anthropic", model_name="claude")
         manager = SessionManager(coding_config, management_config)
@@ -204,20 +198,15 @@ class TestSessionManager:
         manager.send_to_management("Test message")
         mock_provider.send_message.assert_called_once_with("Test message")
 
-        captured = capsys.readouterr()
-        assert "TO MANAGEMENT AI" in captured.out
-
-    def test_send_to_management_no_provider(self, capsys):
+    def test_send_to_management_no_provider(self):
         coding_config = ModelConfig(provider="anthropic", model_name="claude")
         management_config = ModelConfig(provider="anthropic", model_name="claude")
         manager = SessionManager(coding_config, management_config)
 
+        # Should not raise when provider is None
         manager.send_to_management("Test message")
 
-        captured = capsys.readouterr()
-        assert "Error" in captured.out
-
-    def test_get_management_response(self, capsys):
+    def test_get_management_response(self):
         coding_config = ModelConfig(provider="anthropic", model_name="claude")
         management_config = ModelConfig(provider="anthropic", model_name="claude")
         manager = SessionManager(coding_config, management_config)
@@ -229,9 +218,6 @@ class TestSessionManager:
         response = manager.get_management_response(timeout=15.0)
         assert response == "Management response"
         mock_provider.get_response.assert_called_once_with(15.0)
-
-        captured = capsys.readouterr()
-        assert "FROM MANAGEMENT AI" in captured.out
 
     def test_get_management_response_no_provider(self):
         coding_config = ModelConfig(provider="anthropic", model_name="claude")

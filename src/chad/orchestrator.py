@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from .session_manager import SessionManager
+from .session_manager import SessionManager, get_coding_timeout, get_management_timeout
 from .providers import ModelConfig
 
 
@@ -19,6 +19,8 @@ class Chad:
     ):
         self.project_path = project_path
         self.task_description = task_description
+        self.coding_config = coding_config
+        self.management_config = management_config
         self.session_manager = SessionManager(coding_config, management_config, insane_mode)
 
     def run(self) -> bool:
@@ -57,12 +59,12 @@ Begin implementation. Ask for any permissions or clarifications you need.
 
         max_retries = 3
         retry_count = 0
-        last_coding_response: str | None = None
+        coding_timeout = get_coding_timeout(self.coding_config.provider)
+        management_timeout = get_management_timeout(self.management_config.provider)
 
         try:
             while self.session_manager.are_sessions_alive():
-                coding_response = self.session_manager.get_coding_response(timeout=120.0)
-                last_coding_response = coding_response
+                coding_response = self.session_manager.get_coding_response(timeout=coding_timeout)
 
                 if not coding_response:
                     retry_count += 1
@@ -97,7 +99,7 @@ Analyze this output and provide the next instruction for the CODING AI.
 
                 self.session_manager.send_to_management(relay_message)
 
-                management_response = self.session_manager.get_management_response(timeout=30.0)
+                management_response = self.session_manager.get_management_response(timeout=management_timeout)
 
                 if not management_response:
                     print("No response from MANAGEMENT AI")

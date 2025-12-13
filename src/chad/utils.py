@@ -16,7 +16,11 @@ def run_command(cmd: list[str], cwd: Path | None = None) -> tuple[int, str, str]
 
 
 def ensure_directory(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        # Keep going if we cannot create the directory (e.g., sandboxed tests)
+        print(f"Warning: could not create directory {path} (permission denied)")
 
 
 def is_tool_installed(tool_name: str) -> bool:

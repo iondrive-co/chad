@@ -11,6 +11,46 @@ Chad is an AI management relay system that orchestrates multiple AI providers fo
 └─────────────┘     └─────────────┘     └─────────────┘
 ```
 
+## Task Execution State Machine
+
+Chad uses a three-phase state machine for task execution:
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  INVESTIGATION  │────▶│ IMPLEMENTATION  │────▶│  VERIFICATION   │
+│                 │     │                 │     │                 │
+│  Management AI  │     │  Management AI  │     │  Management AI  │
+│  asks questions │     │  supervises     │     │  verifies work  │
+│  Coding AI      │     │  Coding AI      │     │  reads files    │
+│  explores       │     │  implements     │     │  delegates      │
+│                 │     │                 │     │                 │
+│  Output: PLAN:  │     │  Output: VERIFY │     │  Output:        │
+│                 │     │                 │     │  - COMPLETE     │
+│                 │◄────────────────────────────│  - PLAN_ISSUE   │
+│                 │     │                 │◄────│  - IMPL_ISSUE   │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+```
+
+### Phase 1: Investigation
+- Management AI cannot access filesystem directly
+- Asks Coding AI to explore codebase, find files, understand structure
+- Loops until Management outputs `PLAN:` with implementation steps
+- Max 10 iterations
+
+### Phase 2: Implementation
+- Coding AI executes the plan
+- Management AI supervises, answers questions, grants permissions
+- Management outputs `CONTINUE:` for guidance or `VERIFY` when done
+- Max 30 iterations
+
+### Phase 3: Verification
+- Management AI actively verifies using tools
+- Can read files directly, search web, delegate tests to Coding AI
+- Outputs:
+  - `COMPLETE` - task verified done
+  - `PLAN_ISSUE:` - return to Investigation with better context
+  - `IMPL_ISSUE:` - return to Implementation with fix instructions
+- Max 5 iterations, max 2 plan revisits
 
 ## Providers
 

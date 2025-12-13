@@ -242,7 +242,14 @@ class SecurityManager:
                 print("\n\nReset cancelled. Please try again.")
                 continue
 
-    def store_account(self, account_name: str, provider: str, api_key: str, password: str, model: str | None = None) -> None:
+    def store_account(
+        self,
+        account_name: str,
+        provider: str,
+        api_key: str,
+        password: str,
+        model: str | None = None
+    ) -> None:
         """Store a named account with encrypted API key.
 
         Args:
