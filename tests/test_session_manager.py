@@ -44,8 +44,6 @@ class TestSessionManager:
 
     @patch('chad.session_manager.create_provider')
     def test_start_sessions_includes_safety_in_safe_mode(self, mock_create_provider):
-        from chad.session_manager import SAFETY_CONSTRAINTS
-
         coding_provider = Mock()
         coding_provider.start_session.return_value = True
 

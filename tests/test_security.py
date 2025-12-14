@@ -1,7 +1,6 @@
 """Tests for security module."""
 
-from pathlib import Path
-from unittest.mock import Mock, patch, mock_open
+from unittest.mock import patch
 import pytest
 from chad.security import SecurityManager
 
@@ -470,7 +469,6 @@ class TestSecurityManager:
 
     def test_encrypt_value_produces_different_output_each_time(self, tmp_path):
         """Test that encrypt_value produces different output each time due to IV."""
-        import base64
         import bcrypt
 
         mgr = SecurityManager(tmp_path / "test.conf")
@@ -492,7 +490,6 @@ class TestSecurityManager:
 
     def test_encrypt_decrypt_empty_string(self, tmp_path):
         """Test encryption and decryption of empty string."""
-        import base64
         import bcrypt
 
         mgr = SecurityManager(tmp_path / "test.conf")
@@ -506,7 +503,6 @@ class TestSecurityManager:
 
     def test_encrypt_decrypt_very_long_value(self, tmp_path):
         """Test encryption and decryption of very long API key."""
-        import base64
         import bcrypt
 
         mgr = SecurityManager(tmp_path / "test.conf")
@@ -521,7 +517,6 @@ class TestSecurityManager:
 
     def test_decrypt_value_with_truncated_encrypted_value(self, tmp_path):
         """Test that decrypt_value fails gracefully with corrupted encrypted data."""
-        import base64
         import bcrypt
 
         mgr = SecurityManager(tmp_path / "test.conf")
@@ -540,7 +535,6 @@ class TestSecurityManager:
         """Test get_role_assignment for role that was never assigned."""
         config_path = tmp_path / "test.conf"
         mgr = SecurityManager(config_path)
-        password = "testpassword"
 
         result = mgr.get_role_assignment('NONEXISTENT_ROLE')
         assert result is None

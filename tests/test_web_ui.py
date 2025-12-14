@@ -117,7 +117,7 @@ class TestChadWebUI:
 
     def test_assign_role_lowercase_converted(self, web_ui, mock_security_mgr):
         """Test that lowercase role names are converted to uppercase."""
-        result = web_ui.assign_role('claude', 'coding')[0]
+        web_ui.assign_role('claude', 'coding')
 
         mock_security_mgr.assign_role.assert_called_once_with('claude', 'CODING')
 
@@ -604,7 +604,7 @@ class TestStateMachineIntegration:
         test_dir = tmp_path / "test_project"
         test_dir.mkdir()
 
-        results = list(web_ui.start_chad_task(str(test_dir), 'change header colors', False))
+        list(web_ui.start_chad_task(str(test_dir), 'change header colors', False))
 
         # Verify that coding AI was called for investigation
         coding_calls = mock_manager.send_to_coding.call_args_list
