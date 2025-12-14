@@ -511,7 +511,10 @@ class TestClaudeCodeProvider:
         })
         bash_tool = json.dumps({
             "type": "assistant",
-            "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": "ls -la very long command here that should be truncated"}}]}
+            "message": {"content": [{
+                "type": "tool_use", "name": "Bash",
+                "input": {"command": "ls -la very long command here that should be truncated"}
+            }]}
         })
         result_msg = json.dumps({"type": "result", "result": "Done"})
 
@@ -524,7 +527,9 @@ class TestClaudeCodeProvider:
         tool_calls = [call for call in activity_calls if call[0] == 'tool']
         assert len(tool_calls) == 2
         assert tool_calls[0] == ('tool', 'Read: /test/file.py')
-        assert tool_calls[1] == ('tool', 'Bash: ls -la very long command here that should be trunc')  # Truncated at 50 chars
+        # Truncated at 50 chars
+        expected = ('tool', 'Bash: ls -la very long command here that should be trunc')
+        assert tool_calls[1] == expected
 
     @patch('select.select')
     @patch('time.time')

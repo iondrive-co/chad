@@ -1245,8 +1245,8 @@ class ChadWebUI:
                         return
 
                     mgmt_text = extract_final_codex_response(mgmt_response)
-                    message_queue.put(('message_complete', "MANAGEMENT AI", parse_codex_output(mgmt_response) or mgmt_text))
-
+                    parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
+                    message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
 
                     # Main state machine loop
                     while session_manager.are_sessions_alive() and not self.cancel_requested:
@@ -1283,8 +1283,15 @@ class ChadWebUI:
                                     impl_system += "\n\n" + SAFETY_CONSTRAINTS
 
                                 # Send plan to coding AI to start implementation
-                                message_queue.put(('status', f"{get_phase_status(phase)} - Coding AI executing..."))
-                                coding_instruction = f"{CODING_IMPLEMENTATION_CONTEXT}\n\nORIGINAL TASK: {task_description}\n\nPLAN TO EXECUTE:\n{plan}\n\nExecute this plan to accomplish the task. Report back when complete."
+                                message_queue.put((
+                                    'status', f"{get_phase_status(phase)} - Coding AI executing..."
+                                ))
+                                coding_instruction = (
+                                    f"{CODING_IMPLEMENTATION_CONTEXT}\n\n"
+                                    f"ORIGINAL TASK: {task_description}\n\n"
+                                    f"PLAN TO EXECUTE:\n{plan}\n\n"
+                                    "Execute this plan to accomplish the task. Report back when complete."
+                                )
                                 session_manager.send_to_coding(coding_instruction)
                                 continue
 
@@ -1304,11 +1311,20 @@ class ChadWebUI:
                             message_queue.put(('message_complete', "CODING AI", parsed_coding))
 
                             # Send findings back to management
-                            message_queue.put(('status', f"{get_phase_status(phase)} - Management reviewing findings..."))
+                            status_msg = f"{get_phase_status(phase)} - Management reviewing findings..."
+                            message_queue.put(('status', status_msg))
                             message_queue.put(('ai_switch', 'MANAGEMENT AI'))
                             message_queue.put(('message_start', 'MANAGEMENT AI'))
-                            session_manager.send_to_management(f"CODING AI FINDINGS:\n{parsed_coding}\n\nIf you have enough info, output PLAN: with implementation steps. If not, ask for MORE info in ONE batched request (multiple files/searches at once).")
-                            mgmt_response = session_manager.get_management_response(timeout=management_timeout)
+                            findings_msg = (
+                                f"CODING AI FINDINGS:\n{parsed_coding}\n\n"
+                                "If you have enough info, output PLAN: with implementation steps. "
+                                "If not, ask for MORE info in ONE batched request "
+                                "(multiple files/searches at once)."
+                            )
+                            session_manager.send_to_management(findings_msg)
+                            mgmt_response = session_manager.get_management_response(
+                                timeout=management_timeout
+                            )
 
                             if check_cancelled() or not mgmt_response:
                                 if not mgmt_response:
@@ -1316,7 +1332,8 @@ class ChadWebUI:
                                 break
 
                             mgmt_text = extract_final_codex_response(mgmt_response)
-                            message_queue.put(('message_complete', "MANAGEMENT AI", parse_codex_output(mgmt_response) or mgmt_text))
+                            parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
+                            message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
 
                         # ==================== IMPLEMENTATION PHASE ====================
                         elif phase == TaskPhase.IMPLEMENTATION:
@@ -1343,11 +1360,20 @@ class ChadWebUI:
                             impl_notes.append(parsed_coding[:10000])  # Keep more context for verification
 
                             # Send to management for supervision
-                            message_queue.put(('status', f"{get_phase_status(phase)} - Management supervising..."))
+                            status_msg = f"{get_phase_status(phase)} - Management supervising..."
+                            message_queue.put(('status', status_msg))
                             message_queue.put(('ai_switch', 'MANAGEMENT AI'))
                             message_queue.put(('message_start', 'MANAGEMENT AI'))
-                            session_manager.send_to_management(f"CODING AI OUTPUT:\n{parsed_coding}\n\nRespond with CONTINUE: <guidance for remaining steps> or VERIFY if complete. Be direct - give ALL remaining instructions at once, not one step at a time.")
-                            mgmt_response = session_manager.get_management_response(timeout=management_timeout)
+                            supervision_msg = (
+                                f"CODING AI OUTPUT:\n{parsed_coding}\n\n"
+                                "Respond with CONTINUE: <guidance for remaining steps> or VERIFY "
+                                "if complete. Be direct - give ALL remaining instructions at once, "
+                                "not one step at a time."
+                            )
+                            session_manager.send_to_management(supervision_msg)
+                            mgmt_response = session_manager.get_management_response(
+                                timeout=management_timeout
+                            )
 
                             if check_cancelled() or not mgmt_response:
                                 if not mgmt_response:
@@ -1355,7 +1381,8 @@ class ChadWebUI:
                                 break
 
                             mgmt_text = extract_final_codex_response(mgmt_response)
-                            message_queue.put(('message_complete', "MANAGEMENT AI", parse_codex_output(mgmt_response) or mgmt_text))
+                            parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
+                            message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
 
                             # Check for phase transitions
                             mgmt_upper = mgmt_text.upper()
@@ -1377,10 +1404,13 @@ class ChadWebUI:
                                 if not insane_mode:
                                     verify_system += "\n\n" + SAFETY_CONSTRAINTS
 
-                                message_queue.put(('status', f"{get_phase_status(phase)} - Management verifying..."))
+                                status_msg = f"{get_phase_status(phase)} - Management verifying..."
+                                message_queue.put(('status', status_msg))
                                 message_queue.put(('message_start', 'MANAGEMENT AI'))
                                 session_manager.send_to_management(verify_system)
-                                mgmt_response = session_manager.get_management_response(timeout=management_timeout)
+                                mgmt_response = session_manager.get_management_response(
+                                    timeout=management_timeout
+                                )
 
                                 if check_cancelled() or not mgmt_response:
                                     if not mgmt_response:
@@ -1388,7 +1418,8 @@ class ChadWebUI:
                                     break
 
                                 mgmt_text = extract_final_codex_response(mgmt_response)
-                                message_queue.put(('message_complete', "MANAGEMENT AI", parse_codex_output(mgmt_response) or mgmt_text))
+                                parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
+                                message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
                                 continue
 
                             # Management providing guidance - relay to coding AI
@@ -1413,7 +1444,10 @@ class ChadWebUI:
                             mgmt_upper = mgmt_text.upper()
 
                             # Check for COMPLETE
-                            if "COMPLETE" in mgmt_upper and "PLAN_ISSUE" not in mgmt_upper and "IMPL_ISSUE" not in mgmt_upper:
+                            is_complete = ("COMPLETE" in mgmt_upper and
+                                           "PLAN_ISSUE" not in mgmt_upper and
+                                           "IMPL_ISSUE" not in mgmt_upper)
+                            if is_complete:
                                 completion_reason[0] = "Management AI verified task completion."
                                 message_queue.put(('status', "✓ Task verified complete!"))
                                 task_success[0] = True
@@ -1453,11 +1487,14 @@ Create a better plan that addresses the issue."""
                                     break
 
                                 mgmt_text = extract_final_codex_response(mgmt_response)
-                                message_queue.put(('message_complete', "MANAGEMENT AI", parse_codex_output(mgmt_response) or mgmt_text))
+                                parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
+                                message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
                                 continue
 
                             # Check for IMPL_ISSUE - return to implementation with fix
-                            impl_issue_match = re.search(r'IMPL_ISSUE:\s*(.+)', mgmt_text, re.IGNORECASE | re.DOTALL)
+                            impl_issue_pattern = r'IMPL_ISSUE:\s*(.+)'
+                            impl_issue_match = re.search(impl_issue_pattern, mgmt_text,
+                                                         re.IGNORECASE | re.DOTALL)
                             if impl_issue_match:
                                 issue = impl_issue_match.group(1).strip()
                                 phase = TaskPhase.IMPLEMENTATION
@@ -1465,11 +1502,16 @@ Create a better plan that addresses the issue."""
 
                                 # Add phase divider with issue note
                                 add_phase_divider(phase)
-                                message_queue.put(('phase', f"⚠️ Implementation issue: {issue[:100]}..."))
+                                phase_msg = f"⚠️ Implementation issue: {issue[:100]}..."
+                                message_queue.put(('phase', phase_msg))
 
                                 # Send fix instruction to coding AI
                                 message_queue.put(('ai_switch', 'CODING AI'))
-                                fix_instruction = f"{CODING_IMPLEMENTATION_CONTEXT}\n\nVERIFICATION FOUND AN ISSUE:\n{issue}\n\nPlease fix this and report back."
+                                fix_instruction = (
+                                    f"{CODING_IMPLEMENTATION_CONTEXT}\n\n"
+                                    f"VERIFICATION FOUND AN ISSUE:\n{issue}\n\n"
+                                    "Please fix this and report back."
+                                )
                                 session_manager.send_to_coding(fix_instruction)
                                 continue
 
@@ -1492,14 +1534,21 @@ Create a better plan that addresses the issue."""
                                 break
 
                             message_queue.put(('message_start', 'MANAGEMENT AI'))
-                            session_manager.send_to_management("Output your verdict: COMPLETE, PLAN_ISSUE: <reason>, or IMPL_ISSUE: <reason>")
-                            mgmt_response = session_manager.get_management_response(timeout=management_timeout)
+                            verdict_prompt = (
+                                "Output your verdict: COMPLETE, PLAN_ISSUE: <reason>, "
+                                "or IMPL_ISSUE: <reason>"
+                            )
+                            session_manager.send_to_management(verdict_prompt)
+                            mgmt_response = session_manager.get_management_response(
+                                timeout=management_timeout
+                            )
 
                             if check_cancelled() or not mgmt_response:
                                 break
 
                             mgmt_text = extract_final_codex_response(mgmt_response)
-                            message_queue.put(('message_complete', "MANAGEMENT AI", parse_codex_output(mgmt_response) or mgmt_text))
+                            parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
+                            message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
 
                 except Exception as e:
                     message_queue.put(('status', f"❌ Error: {str(e)}"))
@@ -1527,7 +1576,9 @@ Create a better plan that addresses the issue."""
                 """Format live output with header showing active AI."""
                 if not content.strip():
                     return ""
-                return f'<div class="live-output-header">▶ {ai_name}</div>\n<div class="live-output-content">{content}</div>'
+                header = f'<div class="live-output-header">▶ {ai_name}</div>'
+                body = f'<div class="live-output-content">{content}</div>'
+                return f'{header}\n{body}'
 
             # Track pending message index for placeholder updates
             pending_message_idx = None
@@ -1615,9 +1666,15 @@ Create a better plan that addresses the issue."""
                             streaming_buffer = streaming_buffer[-2000:]
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
-                            display_buffer = streaming_buffer[-1500:] if len(streaming_buffer) > 1500 else streaming_buffer
-                            current_live_stream = format_live_output(current_ai, display_buffer)
-                            yield make_yield(chat_history, current_status, current_live_stream, interactive=False)
+                            buf = streaming_buffer
+                            display_buffer = buf[-1500:] if len(buf) > 1500 else buf
+                            current_live_stream = format_live_output(
+                                current_ai, display_buffer
+                            )
+                            yield make_yield(
+                                chat_history, current_status, current_live_stream,
+                                interactive=False
+                            )
                             last_yield_time = now
 
                     elif msg_type == 'activity':
@@ -1625,28 +1682,44 @@ Create a better plan that addresses the issue."""
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
                             if streaming_buffer:
-                                display_buffer = streaming_buffer[-1500:] if len(streaming_buffer) > 1500 else streaming_buffer
-                                current_live_stream = format_live_output(current_ai, display_buffer + f"\n\n{last_activity}")
+                                buf = streaming_buffer
+                                display_buffer = buf[-1500:] if len(buf) > 1500 else buf
+                                content = display_buffer + f"\n\n{last_activity}"
+                                current_live_stream = format_live_output(
+                                    current_ai, content
+                                )
                             else:
                                 current_live_stream = f"**Live:** {last_activity}"
-                            yield make_yield(chat_history, current_status, current_live_stream, interactive=False)
+                            yield make_yield(
+                                chat_history, current_status, current_live_stream,
+                                interactive=False
+                            )
                             last_yield_time = now
 
                 except queue.Empty:
                     now = time_module.time()
                     if now - last_yield_time >= 0.3:
                         if streaming_buffer:
-                            display_buffer = streaming_buffer[-1500:] if len(streaming_buffer) > 1500 else streaming_buffer
-                            current_live_stream = format_live_output(current_ai, display_buffer)
+                            buf = streaming_buffer
+                            display_buffer = buf[-1500:] if len(buf) > 1500 else buf
+                            current_live_stream = format_live_output(
+                                current_ai, display_buffer
+                            )
                         elif last_activity:
                             current_live_stream = f"**Live:** {last_activity}"
-                        yield make_yield(chat_history, current_status, current_live_stream, interactive=False)
+                        yield make_yield(
+                            chat_history, current_status, current_live_stream,
+                            interactive=False
+                        )
                         last_yield_time = now
 
             # Final update with completion reason
             relay_thread.join(timeout=1)
             if task_success[0]:
-                final_status = f"✓ Task completed!\n\n*{completion_reason[0]}*" if completion_reason[0] else "✓ Task completed!"
+                if completion_reason[0]:
+                    final_status = f"✓ Task completed!\n\n*{completion_reason[0]}*"
+                else:
+                    final_status = "✓ Task completed!"
             else:
                 final_status = (
                     f"❌ Task did not complete successfully\n\n*{completion_reason[0]}*"
@@ -1668,7 +1741,7 @@ Create a better plan that addresses the issue."""
 
             with gr.Tabs():
                 # Run Task Tab (default)
-                with gr.Tab("🚀 Run Task") as run_task_tab:
+                with gr.Tab("🚀 Run Task"):
                     gr.Markdown("## Start a New Task")
 
                     # Check initial role configuration
@@ -1744,7 +1817,10 @@ Create a better plan that addresses the issue."""
                         if idx < len(account_items):
                             account_name, provider_type = account_items[idx]
                             visible = True
-                            header_text = f'<span class="provider-card__header-text">{account_name} ({provider_type})</span>'
+                            header_text = (
+                                f'<span class="provider-card__header-text">'
+                                f'{account_name} ({provider_type})</span>'
+                            )
                             role_value = self._get_account_role(account_name) or "(none)"
                             model_choices = self.get_models_for_account(account_name)
                             stored_model = self.security_mgr.get_account_model(account_name)

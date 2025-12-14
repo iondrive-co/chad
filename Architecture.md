@@ -78,6 +78,15 @@ PYTHONPATH=src python3 -m pytest -v
 PYTHONPATH=src python3 -m pytest tests/test_providers.py -v
 ```
 
+### Linting
+
+Run flake8 before committing:
+```bash
+flake8 .
+```
+
+The project is configured with max line length of 120 characters. C901 complexity warnings are ignored.
+
 
 ## Publishing to PyPI
 

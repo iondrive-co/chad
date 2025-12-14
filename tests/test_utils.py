@@ -1,6 +1,6 @@
 """Tests for utility functions."""
 
-from chad.utils import ensure_directory, get_platform
+from chad.utils import ensure_directory
 
 
 class TestUtils:
