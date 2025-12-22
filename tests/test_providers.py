@@ -199,6 +199,14 @@ Second thought
         assert "*Thinking: Second thought*" in result
         assert "codex" not in result
 
+
+def test_strip_ansi_codes_helper():
+    """Ensure ANSI stripping helper removes escape sequences."""
+    from chad.providers import _strip_ansi_codes
+
+    colored = "\x1b[31mError\x1b[0m message"
+    assert _strip_ansi_codes(colored) == "Error message"
+
     def test_parse_codex_output_preserves_multiline_content(self):
         """Test that multiline thinking/codex content with embedded newlines is preserved."""
         raw_output = """thinking

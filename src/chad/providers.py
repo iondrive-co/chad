@@ -2,7 +2,10 @@
 
 import os
 import pty
+import re
 import select
+import subprocess
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable
@@ -178,6 +181,110 @@ class ModelConfig:
 # Callback type for activity updates: (activity_type, detail)
 # activity_type: 'tool', 'thinking', 'text', 'stream' (for raw streaming chunks)
 ActivityCallback = Callable[[str, str], None] | None
+# Callback type for activity updates: (activity_type, detail)
+# activity_type: 'tool', 'thinking', 'text', 'stream' (for raw streaming chunks)
+ActivityCallback = Callable[[str, str], None] | None
+
+
+_ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[mGKHF]')
+
+
+def _strip_ansi_codes(text: str) -> str:
+    """Remove common ANSI escape codes from streamed output."""
+    return _ANSI_ESCAPE.sub('', text)
+
+
+def _close_master_fd(master_fd: int | None) -> None:
+    """Safely close a master PTY file descriptor."""
+    if master_fd is None:
+        return
+    try:
+        os.close(master_fd)
+    except OSError:
+        pass
+
+
+def _start_pty_process(cmd: list[str], cwd: str | None = None, env: dict | None = None) -> tuple[subprocess.Popen, int]:
+    """Start a subprocess with a PTY attached for streaming output."""
+    master_fd, slave_fd = pty.openpty()
+    process = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        cwd=cwd,
+        env=env,
+        close_fds=True
+    )
+    os.close(slave_fd)
+    return process, master_fd
+
+
+def _drain_pty(master_fd: int, output_chunks: list[str], on_chunk: Callable[[str], None] | None) -> None:
+    """Read any available data from the PTY and forward to callbacks."""
+    try:
+        while True:
+            ready, _, _ = select.select([master_fd], [], [], 0.1)
+            if not ready:
+                break
+            chunk = os.read(master_fd, 4096)
+            if not chunk:
+                break
+            decoded = chunk.decode('utf-8', errors='replace')
+            output_chunks.append(decoded)
+            if on_chunk:
+                on_chunk(decoded)
+    except OSError:
+        return
+
+
+def _stream_pty_output(
+    process: subprocess.Popen,
+    master_fd: int,
+    on_chunk: Callable[[str], None] | None,
+    timeout: float
+) -> tuple[str, bool]:
+    """Stream output from a PTY-backed process until completion or timeout."""
+    output_chunks: list[str] = []
+    start_time = time.time()
+
+    try:
+        while time.time() - start_time < timeout:
+            if process.poll() is not None:
+                _drain_pty(master_fd, output_chunks, on_chunk)
+                break
+
+            try:
+                ready, _, _ = select.select([master_fd], [], [], 0.1)
+            except OSError:
+                break
+
+            if ready:
+                try:
+                    chunk = os.read(master_fd, 4096)
+                except OSError:
+                    break
+
+                if chunk:
+                    decoded = chunk.decode('utf-8', errors='replace')
+                    output_chunks.append(decoded)
+                    if on_chunk:
+                        on_chunk(decoded)
+                    start_time = time.time()
+
+        timed_out = process.poll() is None
+        if timed_out:
+            process.kill()
+            process.wait()
+        else:
+            try:
+                process.wait(timeout=0.1)
+            except Exception:
+                pass
+    finally:
+        _close_master_fd(master_fd)
+
+    return ''.join(output_chunks), timed_out
 
 
 class AIProvider(ABC):
@@ -435,9 +542,6 @@ class OpenAICodexProvider(AIProvider):
             self.current_message = message
 
     def get_response(self, timeout: float = 1800.0) -> str:  # noqa: C901
-        import subprocess
-        import time
-
         if not self.current_message:
             return ""
 
@@ -455,90 +559,34 @@ class OpenAICodexProvider(AIProvider):
 
         try:
             env = self._get_env()
+            self.process, self.master_fd = _start_pty_process(cmd, cwd=self.project_path, env=env)
 
-            # Use PTY for real-time unbuffered output
-            master_fd, slave_fd = pty.openpty()
-            self.master_fd = master_fd
-
-            self.process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=slave_fd,
-                stderr=slave_fd,
-                env=env,
-                close_fds=True
-            )
-
-            os.close(slave_fd)
-
-            # Write input and close stdin
             if self.process.stdin:
                 self.process.stdin.write(self.current_message.encode())
                 self.process.stdin.close()
 
-            # Read output in real-time using PTY
-            output_chunks = []
-            start_time = time.time()
-
-            while time.time() - start_time < timeout:
-                if self.process.poll() is not None:
-                    # Process finished, read any remaining output
-                    try:
-                        while True:
-                            ready, _, _ = select.select([master_fd], [], [], 0.1)
-                            if not ready:
-                                break
-                            chunk = os.read(master_fd, 4096)
-                            if not chunk:
-                                break
-                            decoded = chunk.decode('utf-8', errors='replace')
-                            output_chunks.append(decoded)
-                            self._process_streaming_chunk(decoded)
-                    except OSError:
-                        pass
-                    break
-
-                try:
-                    ready, _, _ = select.select([master_fd], [], [], 0.1)
-                    if ready:
-                        chunk = os.read(master_fd, 4096)
-                        if chunk:
-                            decoded = chunk.decode('utf-8', errors='replace')
-                            output_chunks.append(decoded)
-                            self._process_streaming_chunk(decoded)
-                            # Keep extending timeout while we're receiving data
-                            start_time = time.time()
-                except OSError:
-                    break
-
-            os.close(master_fd)
-            self.master_fd = None
-
-            if self.process.poll() is None:
-                self.process.kill()
-                self.process.wait()
-                self.current_message = None
-                self.process = None
-                return f"Error: Codex execution timed out ({int(timeout / 60)} minutes)"
+            output, timed_out = _stream_pty_output(
+                self.process,
+                self.master_fd,
+                self._process_streaming_chunk,
+                timeout
+            )
 
             self.current_message = None
             self.process = None
+            self.master_fd = None
 
-            output = ''.join(output_chunks)
-            # Strip ANSI escape codes for clean output
-            import re
-            output = re.sub(r'\x1b\[[0-9;]*[mGKHF]', '', output)
+            if timed_out:
+                return f"Error: Codex execution timed out ({int(timeout / 60)} minutes)"
+
+            output = _strip_ansi_codes(output)
             return output.strip() if output else "No response from Codex"
 
         except (FileNotFoundError, PermissionError, OSError) as e:
             self.current_message = None
             self.process = None
-            if self.master_fd:
-                try:
-                    os.close(self.master_fd)
-                except OSError:
-                    pass
-                self.master_fd = None
+            _close_master_fd(self.master_fd)
+            self.master_fd = None
             return (
                 f"Failed to run Codex: {e}\n\n"
                 "Make sure Codex CLI is installed and authenticated.\n"
@@ -567,12 +615,8 @@ class OpenAICodexProvider(AIProvider):
 
     def stop_session(self) -> None:
         self.current_message = None
-        if self.master_fd:
-            try:
-                os.close(self.master_fd)
-            except OSError:
-                pass
-            self.master_fd = None
+        _close_master_fd(self.master_fd)
+        self.master_fd = None
         if self.process:
             try:
                 self.process.kill()
@@ -612,10 +656,6 @@ class GeminiCodeAssistProvider(AIProvider):
             self.current_message = message
 
     def get_response(self, timeout: float = 1800.0) -> str:
-        import subprocess
-        import time
-        import re
-
         if not self.current_message:
             return ""
 
@@ -630,108 +670,56 @@ class GeminiCodeAssistProvider(AIProvider):
             env = os.environ.copy()
             env['TERM'] = 'xterm-256color'
 
-            # Use PTY for real-time streaming
-            master_fd, slave_fd = pty.openpty()
-            self.master_fd = master_fd
+            def handle_chunk(decoded: str) -> None:
+                self._notify_activity('stream', decoded)
+                for line in decoded.split('\n'):
+                    stripped = line.strip()
+                    if stripped and len(stripped) > 10:
+                        self._notify_activity('text', stripped[:80])
 
-            self.process = subprocess.Popen(
+            self.process, self.master_fd = _start_pty_process(
                 cmd,
-                stdin=subprocess.PIPE,
-                stdout=slave_fd,
-                stderr=slave_fd,
                 cwd=self.project_path,
-                env=env,
-                close_fds=True
+                env=env
             )
-
-            os.close(slave_fd)
 
             if self.process.stdin:
                 self.process.stdin.close()
 
-            output_chunks = []
-            start_time = time.time()
-
-            while time.time() - start_time < timeout:
-                if self.process.poll() is not None:
-                    try:
-                        while True:
-                            ready, _, _ = select.select([master_fd], [], [], 0.1)
-                            if not ready:
-                                break
-                            chunk = os.read(master_fd, 4096)
-                            if not chunk:
-                                break
-                            decoded = chunk.decode('utf-8', errors='replace')
-                            output_chunks.append(decoded)
-                            self._notify_activity('stream', decoded)
-                    except OSError:
-                        pass
-                    break
-
-                try:
-                    ready, _, _ = select.select([master_fd], [], [], 0.1)
-                    if ready:
-                        chunk = os.read(master_fd, 4096)
-                        if chunk:
-                            decoded = chunk.decode('utf-8', errors='replace')
-                            output_chunks.append(decoded)
-                            self._notify_activity('stream', decoded)
-                            # Parse for activity updates
-                            for line in decoded.split('\n'):
-                                stripped = line.strip()
-                                if stripped and len(stripped) > 10:
-                                    self._notify_activity('text', stripped[:80])
-                            start_time = time.time()
-                except OSError:
-                    break
-
-            os.close(master_fd)
-            self.master_fd = None
-
-            if self.process.poll() is None:
-                self.process.kill()
-                self.process.wait()
-                self.current_message = None
-                self.process = None
-                return f"Error: Gemini execution timed out ({int(timeout / 60)} minutes)"
+            output, timed_out = _stream_pty_output(
+                self.process,
+                self.master_fd,
+                handle_chunk,
+                timeout
+            )
 
             self.current_message = None
             self.process = None
+            self.master_fd = None
 
-            output = ''.join(output_chunks)
-            output = re.sub(r'\x1b\[[0-9;]*[mGKHF]', '', output)
+            if timed_out:
+                return f"Error: Gemini execution timed out ({int(timeout / 60)} minutes)"
+
+            output = _strip_ansi_codes(output)
             return output.strip() if output else "No response from Gemini"
 
         except FileNotFoundError:
             self.current_message = None
             self.process = None
-            if self.master_fd:
-                try:
-                    os.close(self.master_fd)
-                except OSError:
-                    pass
-                self.master_fd = None
+            _close_master_fd(self.master_fd)
+            self.master_fd = None
             return "Failed to run Gemini: command not found\n\nInstall with: npm install -g @google/gemini-cli"
         except (PermissionError, OSError) as exc:
             self.current_message = None
             self.process = None
-            if self.master_fd:
-                try:
-                    os.close(self.master_fd)
-                except OSError:
-                    pass
-                self.master_fd = None
+            _close_master_fd(self.master_fd)
+            self.master_fd = None
             return f"Failed to run Gemini: {exc}"
 
     def stop_session(self) -> None:
         self.current_message = None
-        if self.master_fd:
-            try:
-                os.close(self.master_fd)
-            except OSError:
-                pass
-            self.master_fd = None
+        _close_master_fd(self.master_fd)
+        self.master_fd = None
         if self.process:
             try:
                 self.process.kill()
@@ -771,10 +759,6 @@ class MistralVibeProvider(AIProvider):
             self.current_message = message
 
     def get_response(self, timeout: float = 1800.0) -> str:
-        import subprocess
-        import time
-        import re
-
         if not self.current_message:
             return ""
 
@@ -790,86 +774,44 @@ class MistralVibeProvider(AIProvider):
             env = os.environ.copy()
             env['TERM'] = 'xterm-256color'
 
-            master_fd, slave_fd = pty.openpty()
-            self.master_fd = master_fd
+            def handle_chunk(decoded: str) -> None:
+                self._notify_activity('stream', decoded)
+                for line in decoded.split('\n'):
+                    stripped = line.strip()
+                    if stripped and len(stripped) > 10:
+                        self._notify_activity('text', stripped[:80])
 
-            self.process = subprocess.Popen(
+            self.process, self.master_fd = _start_pty_process(
                 cmd,
-                stdin=subprocess.PIPE,
-                stdout=slave_fd,
-                stderr=slave_fd,
                 cwd=self.project_path,
-                env=env,
-                close_fds=True
+                env=env
             )
-
-            os.close(slave_fd)
 
             if self.process.stdin:
                 self.process.stdin.close()
 
-            output_chunks = []
-            start_time = time.time()
-
-            while time.time() - start_time < timeout:
-                if self.process.poll() is not None:
-                    try:
-                        while True:
-                            ready, _, _ = select.select([master_fd], [], [], 0.1)
-                            if not ready:
-                                break
-                            chunk = os.read(master_fd, 4096)
-                            if not chunk:
-                                break
-                            decoded = chunk.decode('utf-8', errors='replace')
-                            output_chunks.append(decoded)
-                            self._notify_activity('stream', decoded)
-                    except OSError:
-                        pass
-                    break
-
-                try:
-                    ready, _, _ = select.select([master_fd], [], [], 0.1)
-                    if ready:
-                        chunk = os.read(master_fd, 4096)
-                        if chunk:
-                            decoded = chunk.decode('utf-8', errors='replace')
-                            output_chunks.append(decoded)
-                            self._notify_activity('stream', decoded)
-                            for line in decoded.split('\n'):
-                                stripped = line.strip()
-                                if stripped and len(stripped) > 10:
-                                    self._notify_activity('text', stripped[:80])
-                            start_time = time.time()
-                except OSError:
-                    break
-
-            os.close(master_fd)
-            self.master_fd = None
-
-            if self.process.poll() is None:
-                self.process.kill()
-                self.process.wait()
-                self.current_message = None
-                self.process = None
-                return f"Error: Vibe execution timed out ({int(timeout / 60)} minutes)"
+            output, timed_out = _stream_pty_output(
+                self.process,
+                self.master_fd,
+                handle_chunk,
+                timeout
+            )
 
             self.current_message = None
             self.process = None
+            self.master_fd = None
 
-            output = ''.join(output_chunks)
-            output = re.sub(r'\x1b\[[0-9;]*[mGKHF]', '', output)
+            if timed_out:
+                return f"Error: Vibe execution timed out ({int(timeout / 60)} minutes)"
+
+            output = _strip_ansi_codes(output)
             return output.strip() if output else "No response from Vibe"
 
         except FileNotFoundError:
             self.current_message = None
             self.process = None
-            if self.master_fd:
-                try:
-                    os.close(self.master_fd)
-                except OSError:
-                    pass
-                self.master_fd = None
+            _close_master_fd(self.master_fd)
+            self.master_fd = None
             return (
                 "Failed to run Vibe: command not found\n\n"
                 "Install with: pip install mistral-vibe\n"
@@ -878,22 +820,14 @@ class MistralVibeProvider(AIProvider):
         except (PermissionError, OSError) as e:
             self.current_message = None
             self.process = None
-            if self.master_fd:
-                try:
-                    os.close(self.master_fd)
-                except OSError:
-                    pass
-                self.master_fd = None
+            _close_master_fd(self.master_fd)
+            self.master_fd = None
             return f"Failed to run Vibe: {e}"
 
     def stop_session(self) -> None:
         self.current_message = None
-        if self.master_fd:
-            try:
-                os.close(self.master_fd)
-            except OSError:
-                pass
-            self.master_fd = None
+        _close_master_fd(self.master_fd)
+        self.master_fd = None
         if self.process:
             try:
                 self.process.kill()

@@ -87,7 +87,6 @@ flake8 .
 
 The project is configured with max line length of 120 characters. C901 complexity warnings are ignored.
 
-
 ## Publishing to PyPI
 
 ### Build the package
@@ -239,6 +238,32 @@ Chad aggregates this data across all sessions to display:
 
 ---
 
+## Session Logs
+
+Chad saves session logs to a dedicated directory in the system temp folder. Logs are created at session start and updated throughout:
+
+```
+/tmp/chad/chad_session_YYYYMMDD_HHMMSS.json
+```
+
+Each log contains:
+- `timestamp`: ISO format timestamp when session started
+- `task_description`: The original task
+- `project_path`: Working directory
+- `managed_mode`: Whether management AI supervision was enabled
+- `coding`/`management`: Account and provider info
+- `status`: Current status (`running`, `completed`, or `failed`)
+- `success`: Whether the task completed successfully (null while running)
+- `completion_reason`: Why the task ended
+- `conversation`: Full chat history (updated in real-time)
+
+To find session logs:
+```bash
+ls -la /tmp/chad/
+```
+
+Logs are updated in real-time, so you can monitor an ongoing session by watching the file.
+
 ## File Structure
 
 ```
@@ -285,3 +310,40 @@ Custom models can also be entered manually (allow_custom_value is enabled).
 4. Add provider type to web UI dropdown in `web_ui.py`
 5. Implement `_get_{provider}_usage()` method if usage API available
 6. Document in this Architecture.md
+
+## Visual Inspection
+
+Chad includes a screenshot utility for visually verifying UI changes. This uses Playwright to capture the Gradio interface.
+
+### Setup
+
+```bash
+pip install playwright
+playwright install chromium
+```
+
+### Usage
+
+With Chad running on port 7860:
+
+```bash
+# Screenshot default (Run Task) tab
+python scripts/screenshot_ui.py
+
+# Screenshot Providers tab
+python scripts/screenshot_ui.py --tab providers
+
+# Custom output path
+python scripts/screenshot_ui.py --output /tmp/my-screenshot.png
+```
+
+The screenshot is saved to `/tmp/chad_screenshot.png` by default. Use the Read tool to view it.
+
+### For Agents
+
+When making visual changes to the UI:
+
+1. Ensure Chad is running (`chad` command in another terminal)
+2. Run the screenshot utility: `python scripts/screenshot_ui.py --tab <affected-tab>`
+3. View the screenshot using the Read tool to verify changes look correct
+4. Screenshot both tabs if changes affect multiple areas

@@ -33,3 +33,7 @@ chad
 ### Is this satire?
 
 Sadly, no. "As a society, what are we even doing here?" might be a better question.
+
+<a href="https://github.com/iondrive-co/chad">
+  <img src="docs/Chad.png" alt="Chad Code" width="64">
+</a>

@@ -35,13 +35,13 @@ following task: {task_description}
 
 YOU MUST OUTPUT ONE OF TWO THINGS:
 
-1. "PLAN:" followed by numbered steps - if you can plan immediately OR you have received enough information from the 
-CODING AI. Use this for: summaries, explanations, simple questions, tasks with clear requirements. The CODING AI will 
-execute your plan. 
+1. "PLAN:" followed by numbered steps - if you can plan immediately OR you have received enough information from the
+CODING AI. Use this for: summaries, explanations, simple questions, tasks with clear requirements. The CODING AI will
+execute your plan.
 Example: "PLAN:\n1. Read README and key source files\n2. Summarize the project purpose and structure"
 
-2. Investigation instructions for CODING AI - if you need to explore before deciding what plan is appropriate. Use this 
-for: complex changes, unfamiliar code, need to find specific files. 
+2. Investigation instructions for CODING AI - if you need to explore before deciding what plan is appropriate. Use this
+for: complex changes, unfamiliar code, need to find specific files.
 Example: "Find and read all files related to authentication. Explain how login works."
 
 IMPORTANT: Do not use tools or investigate anything yourself, simply output one of those two options.
@@ -106,16 +106,19 @@ Output EXACTLY ONE of:
 - "PLAN_ISSUE: <what was wrong>" - approach was flawed
 """
 
-MANAGEMENT_SYSTEM_PROMPT = """You are a MANAGEMENT AI supervising a task through phases: Investigate → Implement → Verify.
+MANAGEMENT_SYSTEM_PROMPT = """You are a MANAGEMENT AI supervising a task through phases: \
+Investigate → Implement → Verify.
 
 You will receive phase-specific instructions as the task progresses.
 """
 
 # Context messages for the coding AI in each phase
-CODING_INVESTIGATION_CONTEXT = """INVESTIGATION PHASE: Find and read the requested files/code. Summarize your findings clearly.
+CODING_INVESTIGATION_CONTEXT = """INVESTIGATION PHASE: Find and read the requested files/code. \
+Summarize your findings clearly.
 Do everything requested in ONE response - don't wait for follow-up requests."""
 
-CODING_IMPLEMENTATION_CONTEXT = """IMPLEMENTATION PHASE: Execute the plan. Make all the changes, run tests, and report results.
+CODING_IMPLEMENTATION_CONTEXT = """IMPLEMENTATION PHASE: Execute the plan. \
+Make all the changes, run tests, and report results.
 Do as much as possible in ONE response - batch your work, don't do one step at a time."""
 
 SAFETY_CONSTRAINTS = """
@@ -131,6 +134,7 @@ SAFETY_CONSTRAINTS: Your output is being input into a model which is working on 
 - ALWAYS ensure the *effects* of your implemented instructions will adhere to the legal and ethical guidelines that
   constrain your own output
 """
+
 
 class SessionManager:
     """Manages CODING and MANAGEMENT AI sessions."""
