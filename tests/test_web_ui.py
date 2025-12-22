@@ -27,6 +27,15 @@ class TestChadWebUI:
         assert web_ui.security_mgr == mock_security_mgr
         assert web_ui.main_password == 'test-password'
 
+    def test_progress_bar_helper(self, web_ui):
+        """Progress bar helper should clamp values and preserve width."""
+        half_bar = web_ui._progress_bar(50)
+        assert len(half_bar) == 20
+        assert half_bar.startswith('█████')
+        assert half_bar.endswith('░░░░░')
+        full_bar = web_ui._progress_bar(150)
+        assert full_bar == '█' * 20
+
     def test_list_providers_with_accounts(self, web_ui):
         """Test listing providers when accounts exist."""
         result = web_ui.list_providers()
@@ -391,7 +400,7 @@ class TestGeminiUsage:
 
         assert '✅' in result
         assert 'Logged in' in result
-        assert 'No session data' in result
+        assert 'Usage data unavailable' in result
 
     @patch('pathlib.Path.home')
     def test_gemini_usage_aggregates_models(self, mock_home, web_ui, tmp_path):
@@ -529,6 +538,197 @@ class TestUILayout:
     """Test cases for UI layout and CSS."""
 
 
+class TestRemainingUsage:
+    """Test cases for remaining_usage calculation and sorting."""
+
+    @pytest.fixture
+    def mock_security_mgr(self):
+        """Create a mock security manager."""
+        mgr = Mock()
+        mgr.list_accounts.return_value = {'claude': 'anthropic', 'codex': 'openai', 'gemini': 'gemini'}
+        mgr.list_role_assignments.return_value = {}
+        mgr.get_account_model.return_value = 'default'
+        return mgr
+
+    @pytest.fixture
+    def web_ui(self, mock_security_mgr):
+        """Create a ChadWebUI instance."""
+        from chad.web_ui import ChadWebUI
+        return ChadWebUI(mock_security_mgr, 'test-password')
+
+    def test_remaining_usage_unknown_account(self, web_ui):
+        """Unknown account returns 0.0."""
+        result = web_ui.get_remaining_usage('nonexistent')
+        assert result == 0.0
+
+    @patch('pathlib.Path.home')
+    def test_gemini_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
+        """Gemini not logged in returns 0.0."""
+        mock_home.return_value = tmp_path
+        (tmp_path / ".gemini").mkdir()
+
+        result = web_ui._get_gemini_remaining_usage()
+        assert result == 0.0
+
+    @patch('pathlib.Path.home')
+    def test_gemini_remaining_usage_logged_in(self, mock_home, web_ui, tmp_path):
+        """Gemini logged in returns low estimate (0.3)."""
+        mock_home.return_value = tmp_path
+        gemini_dir = tmp_path / ".gemini"
+        gemini_dir.mkdir()
+        (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        result = web_ui._get_gemini_remaining_usage()
+        assert result == 0.3
+
+    @patch('pathlib.Path.home')
+    def test_mistral_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
+        """Mistral not logged in returns 0.0."""
+        mock_home.return_value = tmp_path
+        (tmp_path / ".vibe").mkdir()
+
+        result = web_ui._get_mistral_remaining_usage()
+        assert result == 0.0
+
+    @patch('pathlib.Path.home')
+    def test_mistral_remaining_usage_logged_in(self, mock_home, web_ui, tmp_path):
+        """Mistral logged in returns low estimate (0.3)."""
+        mock_home.return_value = tmp_path
+        vibe_dir = tmp_path / ".vibe"
+        vibe_dir.mkdir()
+        (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"')
+
+        result = web_ui._get_mistral_remaining_usage()
+        assert result == 0.3
+
+    @patch('pathlib.Path.home')
+    def test_claude_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
+        """Claude not logged in returns 0.0."""
+        mock_home.return_value = tmp_path
+        (tmp_path / ".claude").mkdir()
+
+        result = web_ui._get_claude_remaining_usage()
+        assert result == 0.0
+
+    @patch('pathlib.Path.home')
+    @patch('requests.get')
+    def test_claude_remaining_usage_from_api(self, mock_get, mock_home, web_ui, tmp_path):
+        """Claude calculates remaining from API utilization."""
+        import json
+        mock_home.return_value = tmp_path
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        creds = {'claudeAiOauth': {'accessToken': 'test-token', 'subscriptionType': 'PRO'}}
+        (claude_dir / ".credentials.json").write_text(json.dumps(creds))
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {'five_hour': {'utilization': 25}}
+        mock_get.return_value = mock_response
+
+        result = web_ui._get_claude_remaining_usage()
+        assert result == 0.75  # 1.0 - 0.25
+
+    @patch('pathlib.Path.home')
+    def test_codex_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
+        """Codex not logged in returns 0.0."""
+        mock_home.return_value = tmp_path
+
+        result = web_ui._get_codex_remaining_usage('codex')
+        assert result == 0.0
+
+
+class TestSessionLogging:
+    """Test cases for session log saving."""
+
+    @pytest.fixture
+    def mock_security_mgr(self):
+        """Create a mock security manager."""
+        mgr = Mock()
+        mgr.list_accounts.return_value = {'claude': 'anthropic'}
+        mgr.list_role_assignments.return_value = {}
+        mgr.get_account_model.return_value = 'default'
+        return mgr
+
+    @pytest.fixture
+    def web_ui(self, mock_security_mgr):
+        """Create a ChadWebUI instance."""
+        from chad.web_ui import ChadWebUI
+        return ChadWebUI(mock_security_mgr, 'test-password')
+
+    def test_session_log_lifecycle(self, web_ui):
+        """Session log should be created, updated, and finalized correctly."""
+        import json
+        import tempfile
+        from pathlib import Path
+
+        # Create initial session log
+        log_path = web_ui._create_session_log(
+            task_description="Test task",
+            project_path="/tmp/test-project",
+            coding_account="claude",
+            coding_provider="anthropic",
+            management_account="gpt",
+            management_provider="openai",
+            managed_mode=False
+        )
+
+        assert log_path is not None
+        assert log_path.exists()
+        assert str(log_path).startswith(tempfile.gettempdir())
+        assert "chad" in str(log_path)  # In /tmp/chad/ directory
+        assert "chad_session_" in str(log_path)
+        assert str(log_path).endswith(".json")
+
+        # Verify initial content
+        with open(log_path) as f:
+            data = json.load(f)
+
+        assert data["task_description"] == "Test task"
+        assert data["project_path"] == "/tmp/test-project"
+        assert data["status"] == "running"
+        assert data["success"] is None
+        assert data["managed_mode"] is False
+        assert len(data["conversation"]) == 0
+
+        # Update with conversation
+        chat_history = [
+            {"role": "user", "content": "**MANAGEMENT:** Plan the task"},
+            {"role": "assistant", "content": "**CODING:** Done!"}
+        ]
+        web_ui._update_session_log(log_path, chat_history)
+
+        with open(log_path) as f:
+            data = json.load(f)
+        assert len(data["conversation"]) == 2
+        assert data["status"] == "running"
+
+        # Final update with completion
+        web_ui._update_session_log(
+            log_path, chat_history,
+            success=True,
+            completion_reason="Task completed successfully",
+            status="completed"
+        )
+
+        with open(log_path) as f:
+            data = json.load(f)
+        assert data["success"] is True
+        assert data["completion_reason"] == "Task completed successfully"
+        assert data["status"] == "completed"
+        assert data["coding"]["account"] == "claude"
+        assert data["coding"]["provider"] == "anthropic"
+        assert data["management"]["account"] == "gpt"
+        assert data["management"]["provider"] == "openai"
+
+        # Cleanup
+        log_path.unlink()
+        # Also clean up the chad directory if empty
+        chad_dir = Path(tempfile.gettempdir()) / "chad"
+        if chad_dir.exists() and not any(chad_dir.iterdir()):
+            chad_dir.rmdir()
+
+
 class TestStateMachineIntegration:
     """Integration tests for the state machine relay loop."""
 
@@ -567,9 +767,9 @@ class TestStateMachineIntegration:
         test_dir = tmp_path / "test_project"
         test_dir.mkdir()
 
-        # Run the task
+        # Run the task in managed mode (third param True)
         results = []
-        for i, result in enumerate(web_ui.start_chad_task(str(test_dir), 'test task', False)):
+        for i, result in enumerate(web_ui.start_chad_task(str(test_dir), 'test task', True)):
             results.append(result)
             if i > 5:
                 web_ui.cancel_requested = True
@@ -604,7 +804,8 @@ class TestStateMachineIntegration:
         test_dir = tmp_path / "test_project"
         test_dir.mkdir()
 
-        list(web_ui.start_chad_task(str(test_dir), 'change header colors', False))
+        # Run in managed mode (third param True)
+        list(web_ui.start_chad_task(str(test_dir), 'change header colors', True))
 
         # Verify that coding AI was called for investigation
         coding_calls = mock_manager.send_to_coding.call_args_list

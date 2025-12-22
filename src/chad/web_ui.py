@@ -303,10 +303,161 @@ class ChadWebUI:
 
         return status_text
 
+    def _progress_bar(self, utilization_pct: float, width: int = 20) -> str:
+        """Create a text progress bar for usage displays."""
+        filled = int(max(0.0, min(100.0, utilization_pct)) / (100 / width))
+        return '█' * filled + '░' * (width - filled)
+
+    def get_remaining_usage(self, account_name: str) -> float:
+        """Get remaining usage as 0.0-1.0 (1.0 = full capacity remaining).
+
+        Used to sort providers by availability - highest remaining usage first.
+        """
+        accounts = self.security_mgr.list_accounts()
+        provider = accounts.get(account_name)
+
+        if not provider:
+            return 0.0
+
+        if provider == 'anthropic':
+            return self._get_claude_remaining_usage()
+        elif provider == 'openai':
+            return self._get_codex_remaining_usage(account_name)
+        elif provider == 'gemini':
+            return self._get_gemini_remaining_usage()
+        elif provider == 'mistral':
+            return self._get_mistral_remaining_usage()
+
+        return 0.3  # Unknown provider, bias low
+
+    def _get_claude_remaining_usage(self) -> float:
+        """Get Claude remaining usage from API (0.0-1.0)."""
+        import json
+        import requests
+        from pathlib import Path
+
+        creds_file = Path.home() / ".claude" / ".credentials.json"
+        if not creds_file.exists():
+            return 0.0
+
+        try:
+            with open(creds_file) as f:
+                creds = json.load(f)
+
+            oauth_data = creds.get('claudeAiOauth', {})
+            access_token = oauth_data.get('accessToken', '')
+            if not access_token:
+                return 0.0
+
+            response = requests.get(
+                'https://api.anthropic.com/api/oauth/usage',
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'anthropic-beta': 'oauth-2025-04-20',
+                    'User-Agent': 'claude-code/2.0.32',
+                    'Content-Type': 'application/json',
+                },
+                timeout=10
+            )
+
+            if response.status_code != 200:
+                return 0.3  # API error, bias low
+
+            usage_data = response.json()
+            five_hour = usage_data.get('five_hour', {})
+            util = five_hour.get('utilization', 0)
+            return max(0.0, min(1.0, 1.0 - (util / 100.0)))
+
+        except Exception:
+            return 0.3  # Error, bias low
+
+    def _get_codex_remaining_usage(self, account_name: str) -> float:
+        """Get Codex remaining usage from session files (0.0-1.0)."""
+        import json
+        import os
+        from pathlib import Path
+
+        codex_home = self._get_codex_home(account_name)
+        auth_file = codex_home / ".codex" / "auth.json"
+        if not auth_file.exists():
+            return 0.0
+
+        sessions_dir = codex_home / ".codex" / "sessions"
+        if not sessions_dir.exists():
+            return 0.8  # Logged in but no sessions, assume mostly available
+
+        session_files = []
+        for root, _, files in os.walk(sessions_dir):
+            for f in files:
+                if f.endswith('.jsonl'):
+                    path = Path(root) / f
+                    session_files.append((path.stat().st_mtime, path))
+
+        if not session_files:
+            return 0.8
+
+        session_files.sort(reverse=True)
+        latest_session = session_files[0][1]
+
+        try:
+            rate_limits = None
+            with open(latest_session) as f:
+                for line in f:
+                    if 'rate_limits' in line:
+                        data = json.loads(line.strip())
+                        if data.get('type') == 'event_msg':
+                            payload = data.get('payload', {})
+                            if payload.get('type') == 'token_count':
+                                rate_limits = payload.get('rate_limits')
+
+            if rate_limits:
+                primary = rate_limits.get('primary', {})
+                if primary:
+                    util = primary.get('used_percent', 0)
+                    return max(0.0, min(1.0, 1.0 - (util / 100.0)))
+
+        except Exception:
+            pass
+
+        return 0.3  # Error, bias low
+
+    def _get_gemini_remaining_usage(self) -> float:
+        """Estimate Gemini remaining usage (0.0-1.0).
+
+        No programmatic API available for quota, so we estimate based on
+        whether logged in. Biased low since we can't verify actual quota.
+        """
+        from pathlib import Path
+
+        oauth_file = Path.home() / ".gemini" / "oauth_creds.json"
+        if not oauth_file.exists():
+            return 0.0
+
+        return 0.3  # Logged in but no quota API, bias low
+
+    def _get_mistral_remaining_usage(self) -> float:
+        """Estimate Mistral remaining usage (0.0-1.0).
+
+        No programmatic API available for quota, so we estimate based on
+        whether logged in. Biased low since we can't verify actual quota.
+        """
+        from pathlib import Path
+
+        vibe_config = Path.home() / ".vibe" / "config.toml"
+        if not vibe_config.exists():
+            return 0.0
+
+        return 0.3  # Logged in but no quota API, bias low
+
     def _provider_state(self) -> tuple:
         """Build UI state for provider cards (summary + per-account controls)."""
         accounts = self.security_mgr.list_accounts()
-        account_items = list(accounts.items())
+        # Sort accounts by remaining_usage (highest first)
+        account_items = sorted(
+            accounts.items(),
+            key=lambda x: self.get_remaining_usage(x[0]),
+            reverse=True
+        )
         list_md = self.list_providers()
 
         outputs: list = [list_md]
@@ -408,7 +559,10 @@ class ChadWebUI:
                 result += "**Current Usage**\n\n"
                 result += usage_data
             else:
-                result += "*Usage data will appear after running Codex*"
+                result += "⚠️ **Usage data unavailable**\n\n"
+                result += "OpenAI/Codex only provides usage information after the first model interaction. "
+                result += "Start a coding session to see rate limit details.\n\n"
+                result += "*Press refresh after using this provider to see current data*"
 
             return result
 
@@ -469,9 +623,7 @@ class ChadWebUI:
             util = primary.get('used_percent', 0)
             reset_at = primary.get('resets_at', 0)
 
-            # Create progress bar
-            filled = int(util / 5)  # 20 chars total
-            bar = '█' * filled + '░' * (20 - filled)
+            bar = self._progress_bar(util)
 
             # Format reset time
             if reset_at:
@@ -490,8 +642,7 @@ class ChadWebUI:
             util = secondary.get('used_percent', 0)
             reset_at = secondary.get('resets_at', 0)
 
-            filled = int(util / 5)
-            bar = '█' * filled + '░' * (20 - filled)
+            bar = self._progress_bar(util)
 
             if reset_at:
                 reset_dt = datetime.fromtimestamp(reset_at)
@@ -574,9 +725,7 @@ class ChadWebUI:
                 util = five_hour.get('utilization', 0)
                 reset_at = five_hour.get('resets_at', '')
 
-                # Create progress bar
-                filled = int(util / 5)  # 20 chars total
-                bar = '█' * filled + '░' * (20 - filled)
+                bar = self._progress_bar(util)
 
                 # Format reset time
                 if reset_at:
@@ -598,8 +747,7 @@ class ChadWebUI:
                 util = seven_day.get('utilization', 0)
                 reset_at = seven_day.get('resets_at', '')
 
-                filled = int(util / 5)
-                bar = '█' * filled + '░' * (20 - filled)
+                bar = self._progress_bar(util)
 
                 if reset_at:
                     try:
@@ -621,8 +769,7 @@ class ChadWebUI:
                 limit = extra.get('monthly_limit', 0)
                 util = extra.get('utilization', 0)
 
-                filled = int(util / 5)
-                bar = '█' * filled + '░' * (20 - filled)
+                bar = self._progress_bar(util)
 
                 result += "**Extra credits**\n"
                 result += f"[{bar}] ${used:.0f} / ${limit:.0f} ({util:.1f}%)\n\n"
@@ -649,11 +796,19 @@ class ChadWebUI:
         # Find all session files
         tmp_dir = gemini_dir / "tmp"
         if not tmp_dir.exists():
-            return "✅ **Logged in**\n\n*No session data yet*"
+            return ("✅ **Logged in**\n\n"
+                    "⚠️ **Usage data unavailable**\n\n"
+                    "Google Gemini only provides usage information after the first model interaction. "
+                    "Start a coding session to see token usage details.\n\n"
+                    "*Press refresh after using this provider to see current data*")
 
         session_files = list(tmp_dir.glob("*/chats/session-*.json"))
         if not session_files:
-            return "✅ **Logged in**\n\n*No session data yet*"
+            return ("✅ **Logged in**\n\n"
+                    "⚠️ **Usage data unavailable**\n\n"
+                    "Google Gemini only provides usage information after the first model interaction. "
+                    "Start a coding session to see token usage details.\n\n"
+                    "*Press refresh after using this provider to see current data*")
 
         # Aggregate token usage by model
         model_usage = defaultdict(lambda: {"requests": 0, "input_tokens": 0, "output_tokens": 0, "cached_tokens": 0})
@@ -1067,11 +1222,90 @@ class ChadWebUI:
             self.session_manager = None
         return "🛑 Task cancelled"
 
+    def _get_session_log_dir(self) -> Path:
+        """Get the Chad session log directory, creating it if needed."""
+        import tempfile
+        log_dir = Path(tempfile.gettempdir()) / "chad"
+        log_dir.mkdir(exist_ok=True)
+        return log_dir
+
+    def _create_session_log(
+        self,
+        task_description: str,
+        project_path: str,
+        coding_account: str,
+        coding_provider: str,
+        management_account: str,
+        management_provider: str,
+        managed_mode: bool
+    ) -> Path:
+        """Create a new session log file and return its path.
+
+        The log is created at session start and updated throughout.
+        """
+        import json
+        from datetime import datetime
+
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"chad_session_{timestamp}.json"
+        filepath = self._get_session_log_dir() / filename
+
+        session_data = {
+            "timestamp": datetime.now().isoformat(),
+            "task_description": task_description,
+            "project_path": project_path,
+            "managed_mode": managed_mode,
+            "coding": {
+                "account": coding_account,
+                "provider": coding_provider
+            },
+            "management": {
+                "account": management_account,
+                "provider": management_provider
+            },
+            "status": "running",
+            "success": None,
+            "completion_reason": None,
+            "conversation": []
+        }
+
+        with open(filepath, 'w') as f:
+            json.dump(session_data, f, indent=2)
+
+        return filepath
+
+    def _update_session_log(
+        self,
+        filepath: Path,
+        chat_history: list,
+        success: bool | None = None,
+        completion_reason: str | None = None,
+        status: str = "running"
+    ) -> None:
+        """Update an existing session log with new conversation data."""
+        import json
+
+        try:
+            with open(filepath, 'r') as f:
+                session_data = json.load(f)
+
+            session_data["conversation"] = chat_history
+            session_data["status"] = status
+            if success is not None:
+                session_data["success"] = success
+            if completion_reason is not None:
+                session_data["completion_reason"] = completion_reason
+
+            with open(filepath, 'w') as f:
+                json.dump(session_data, f, indent=2)
+        except Exception:
+            pass  # Don't fail the task if logging fails
+
     def start_chad_task(  # noqa: C901
         self,
         project_path: str,
         task_description: str,
-        insane_mode: bool = False
+        managed_mode: bool = False
     ) -> Iterator[tuple[list, str, str, gr.Textbox, gr.TextArea, gr.Checkbox, gr.Button, gr.Button]]:
         """Start Chad task and stream updates.
 
@@ -1138,25 +1372,32 @@ class ChadWebUI:
             coding_timeout = get_coding_timeout(coding_provider)
             management_timeout = get_management_timeout(management_provider)
 
+            # Create session log at start (will be updated throughout session)
+            session_log_path = self._create_session_log(
+                task_description=task_description,
+                project_path=str(path),
+                coding_account=coding_account,
+                coding_provider=coding_provider,
+                management_account=management_account,
+                management_provider=management_provider,
+                managed_mode=managed_mode
+            )
+
             # Initialize status - start streaming immediately
             status_text = "**Starting Chad...**\n\n"
             status_text += f"• Project: {path}\n"
             status_text += f"• CODING: {coding_account} ({coding_provider})\n"
-            status_text += f"• MANAGEMENT: {management_account} ({management_provider})\n"
-            status_text += f"• Insane mode: {'ENABLED ⚠️' if insane_mode else 'DISABLED'}\n\n"
+            if managed_mode:
+                status_text += f"• MANAGEMENT: {management_account} ({management_provider})\n"
+            status_text += f"• Mode: {'Managed (AI supervision)' if managed_mode else 'Direct (coding AI only)'}\n\n"
 
             yield make_yield([], status_text + "⏳ Initializing sessions...", interactive=False)
 
             # Create session manager with silent mode enabled
-            session_manager = SessionManager(coding_config, management_config, insane_mode, silent=True)
+            # Note: In managed mode we pass insane_mode=False (safety enabled)
+            # In direct mode, we'll handle the coding AI directly below
+            session_manager = SessionManager(coding_config, management_config, insane_mode=False, silent=True)
             self.session_manager = session_manager
-
-            # Start sessions
-            if not session_manager.start_sessions(str(path), task_description):
-                yield make_yield([], status_text + "❌ Failed to start sessions", interactive=True)
-                return
-
-            yield make_yield([], status_text + "✓ Sessions started\n\n⏳ Management AI is planning...", interactive=False)  # noqa: E501
 
             # Activity callback to capture live updates
             def on_activity(activity_type: str, detail: str):
@@ -1170,244 +1411,218 @@ class ChadWebUI:
                 elif activity_type == 'text' and detail:
                     message_queue.put(('activity', f"💭 {detail[:80]}"))
 
-            session_manager.set_activity_callback(on_activity)
+            # ==================== DIRECT MODE (default) ====================
+            if not managed_mode:
+                # Direct mode: send task to coding AI, return response
+                yield make_yield([], status_text + "⏳ Starting coding AI...", interactive=False)
 
-            # Relay loop in separate thread
-            relay_complete = threading.Event()
-            task_success = [False]
-            completion_reason = [""]
+                # Create coding provider directly
+                from .providers import create_provider
+                coding_provider_instance = create_provider(coding_config)
+                coding_provider_instance.set_activity_callback(on_activity)
 
-            def relay_loop():  # noqa: C901
-                """Run the state machine: Investigation -> Implementation -> Verification."""
-                try:
-                    # State machine variables
-                    phase = TaskPhase.INVESTIGATION
-                    plan = None
-                    impl_notes = []
-                    investigation_revisits = 0
-                    max_investigation_revisits = 2
+                if not coding_provider_instance.start_session(str(path)):
+                    yield make_yield([], status_text + "❌ Failed to start coding session", interactive=True)
+                    return
 
-                    # Iteration limits per phase
-                    max_investigation_iters = 10
-                    max_implementation_iters = 30
-                    max_verification_iters = 5
+                yield make_yield([], status_text + "✓ Coding AI started\n\n⏳ Processing task...", interactive=False)
 
-                    investigation_iter = 0
-                    implementation_iter = 0
-                    verification_iter = 0
+                # Send task and get response
+                coding_provider_instance.send_message(task_description)
 
-                    def check_cancelled():
-                        if self.cancel_requested:
-                            message_queue.put(('status', "🛑 Task cancelled by user"))
-                            return True
-                        return False
+                # Stream response in background thread
+                relay_complete = threading.Event()
+                task_success = [False]
+                completion_reason = [""]
 
-                    def get_phase_status(p: TaskPhase) -> str:
-                        phase_names = {
-                            TaskPhase.INVESTIGATION: ("📋", "Investigate"),
-                            TaskPhase.IMPLEMENTATION: ("🔨", "Implement"),
-                            TaskPhase.VERIFICATION: ("✅", "Verify")
-                        }
-                        icon, name = phase_names[p]
-                        return f"{icon} Phase {p.value}: {name}"
+                def direct_loop():
+                    try:
+                        message_queue.put(('ai_switch', 'CODING AI'))
+                        message_queue.put(('message_start', 'CODING AI'))
+                        response = coding_provider_instance.get_response(timeout=coding_timeout)
+                        if response:
+                            parsed = parse_codex_output(response)
+                            message_queue.put(('message_complete', 'CODING AI', parsed))
+                            task_success[0] = True
+                            completion_reason[0] = "Coding AI completed task"
+                        else:
+                            message_queue.put(('status', "❌ No response from coding AI"))
+                            completion_reason[0] = "No response from coding AI"
+                    except Exception as e:
+                        message_queue.put(('status', f"❌ Error: {str(e)}"))
+                        completion_reason[0] = str(e)
+                    finally:
+                        coding_provider_instance.stop_session()
+                        relay_complete.set()
 
-                    def add_phase_divider(phase: TaskPhase):
-                        """Add a visual divider when entering a new phase."""
-                        phase_names = {
-                            TaskPhase.INVESTIGATION: ("📋", "INVESTIGATE"),
-                            TaskPhase.IMPLEMENTATION: ("🔨", "IMPLEMENT"),
-                            TaskPhase.VERIFICATION: ("✅", "VERIFY")
-                        }
-                        icon, name = phase_names[phase]
-                        message_queue.put(('phase_divider', f"{icon} PHASE {phase.value}: {name}"))
+                relay_thread = threading.Thread(target=direct_loop, daemon=True)
+                relay_thread.start()
 
-                    # Build investigation prompt with safety constraints
-                    investigation_system = INVESTIGATION_PROMPT.format(
-                        task_description=task_description,
-                        project_path=str(path)
-                    )
-                    if not insane_mode:
+                # Stream updates (reuse existing streaming logic below)
+                # Set these for the streaming section
+                self.session_manager = None  # No session manager in direct mode
+
+            # ==================== MANAGED MODE ====================
+            else:
+                # Start sessions
+                if not session_manager.start_sessions(str(path), task_description):
+                    yield make_yield([], status_text + "❌ Failed to start sessions", interactive=True)
+                    return
+
+                yield make_yield([], status_text + "✓ Sessions started\n\n⏳ Management AI is planning...", interactive=False)  # noqa: E501
+
+                session_manager.set_activity_callback(on_activity)
+
+                # Relay loop in separate thread
+                relay_complete = threading.Event()
+                task_success = [False]
+                completion_reason = [""]
+
+                def relay_loop():  # noqa: C901
+                    """Run the state machine: Investigation -> Implementation -> Verification."""
+                    try:
+                        # State machine variables
+                        phase = TaskPhase.INVESTIGATION
+                        plan = None
+                        impl_notes = []
+                        investigation_revisits = 0
+                        max_investigation_revisits = 2
+
+                        # Iteration limits per phase
+                        max_investigation_iters = 10
+                        max_implementation_iters = 30
+                        max_verification_iters = 5
+
+                        investigation_iter = 0
+                        implementation_iter = 0
+                        verification_iter = 0
+
+                        def check_cancelled():
+                            if self.cancel_requested:
+                                message_queue.put(('status', "🛑 Task cancelled by user"))
+                                return True
+                            return False
+
+                        def get_phase_status(p: TaskPhase) -> str:
+                            phase_names = {
+                                TaskPhase.INVESTIGATION: ("📋", "Investigate"),
+                                TaskPhase.IMPLEMENTATION: ("🔨", "Implement"),
+                                TaskPhase.VERIFICATION: ("✅", "Verify")
+                            }
+                            icon, name = phase_names[p]
+                            return f"{icon} Phase {p.value}: {name}"
+
+                        def add_phase_divider(phase: TaskPhase):
+                            """Add a visual divider when entering a new phase."""
+                            phase_names = {
+                                TaskPhase.INVESTIGATION: ("📋", "INVESTIGATE"),
+                                TaskPhase.IMPLEMENTATION: ("🔨", "IMPLEMENT"),
+                                TaskPhase.VERIFICATION: ("✅", "VERIFY")
+                            }
+                            icon, name = phase_names[phase]
+                            message_queue.put(('phase_divider', f"{icon} PHASE {phase.value}: {name}"))
+
+                        # Build investigation prompt with safety constraints
+                        investigation_system = INVESTIGATION_PROMPT.format(
+                            task_description=task_description,
+                            project_path=str(path)
+                        )
+                        # Managed mode always uses safety constraints
                         investigation_system += "\n\n" + SAFETY_CONSTRAINTS
 
-                    # Add phase divider for investigation start
-                    add_phase_divider(phase)
+                        # Add phase divider for investigation start
+                        add_phase_divider(phase)
 
-                    # Initialize management with investigation prompt
-                    message_queue.put(('status', f"{get_phase_status(phase)} - Starting..."))
-                    message_queue.put(('ai_switch', 'MANAGEMENT AI'))
-                    message_queue.put(('message_start', 'MANAGEMENT AI'))  # Placeholder while working
-                    session_manager.send_to_management(investigation_system)
-                    mgmt_response = session_manager.get_management_response(timeout=management_timeout)
+                        # Initialize management with investigation prompt
+                        message_queue.put(('status', f"{get_phase_status(phase)} - Starting..."))
+                        message_queue.put(('ai_switch', 'MANAGEMENT AI'))
+                        message_queue.put(('message_start', 'MANAGEMENT AI'))  # Placeholder while working
+                        session_manager.send_to_management(investigation_system)
+                        mgmt_response = session_manager.get_management_response(timeout=management_timeout)
 
-                    if check_cancelled() or not mgmt_response:
-                        if not mgmt_response:
-                            message_queue.put(('status', "❌ No response from MANAGEMENT AI"))
-                        return
+                        if check_cancelled() or not mgmt_response:
+                            if not mgmt_response:
+                                message_queue.put(('status', "❌ No response from MANAGEMENT AI"))
+                            return
 
-                    mgmt_text = extract_final_codex_response(mgmt_response)
-                    parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
-                    message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
+                        mgmt_text = extract_final_codex_response(mgmt_response)
+                        parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
+                        message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
 
-                    # Main state machine loop
-                    while session_manager.are_sessions_alive() and not self.cancel_requested:
+                        # Main state machine loop
+                        while session_manager.are_sessions_alive() and not self.cancel_requested:
 
-                        # ==================== INVESTIGATION PHASE ====================
-                        if phase == TaskPhase.INVESTIGATION:
-                            investigation_iter += 1
+                            # ==================== INVESTIGATION PHASE ====================
+                            if phase == TaskPhase.INVESTIGATION:
+                                investigation_iter += 1
 
-                            if investigation_iter > max_investigation_iters:
-                                message_queue.put(('status', "⚠️ Investigation taking too long, forcing plan"))
-                                plan = f"1. Implement the task: {task_description}"
-                                phase = TaskPhase.IMPLEMENTATION
-                                continue
+                                if investigation_iter > max_investigation_iters:
+                                    message_queue.put(('status', "⚠️ Investigation taking too long, forcing plan"))
+                                    plan = f"1. Implement the task: {task_description}"
+                                    phase = TaskPhase.IMPLEMENTATION
+                                    continue
 
-                            # Check if management has produced a PLAN:
-                            plan_match = re.search(r'PLAN:\s*(.+)', mgmt_text, re.IGNORECASE | re.DOTALL)
+                                # Check if management has produced a PLAN:
+                                plan_match = re.search(r'PLAN:\s*(.+)', mgmt_text, re.IGNORECASE | re.DOTALL)
 
-                            if plan_match:
-                                plan = plan_match.group(1).strip()
-                                phase = TaskPhase.IMPLEMENTATION
-                                implementation_iter = 0
+                                if plan_match:
+                                    plan = plan_match.group(1).strip()
+                                    phase = TaskPhase.IMPLEMENTATION
+                                    implementation_iter = 0
 
-                                # Add phase divider
-                                add_phase_divider(phase)
-                                message_queue.put(('phase', f"📝 **Plan:**\n{plan}"))
+                                    # Add phase divider
+                                    add_phase_divider(phase)
+                                    message_queue.put(('phase', f"📝 **Plan:**\n{plan}"))
 
-                                # Build implementation prompt
-                                impl_system = IMPLEMENTATION_PROMPT.format(
-                                    task_description=task_description,
-                                    project_path=str(path),
-                                    plan=plan
-                                )
-                                if not insane_mode:
+                                    # Build implementation prompt
+                                    impl_system = IMPLEMENTATION_PROMPT.format(
+                                        task_description=task_description,
+                                        project_path=str(path),
+                                        plan=plan
+                                    )
+                                    # Managed mode always uses safety constraints
                                     impl_system += "\n\n" + SAFETY_CONSTRAINTS
 
-                                # Send plan to coding AI to start implementation
-                                message_queue.put((
-                                    'status', f"{get_phase_status(phase)} - Coding AI executing..."
-                                ))
-                                coding_instruction = (
-                                    f"{CODING_IMPLEMENTATION_CONTEXT}\n\n"
-                                    f"ORIGINAL TASK: {task_description}\n\n"
-                                    f"PLAN TO EXECUTE:\n{plan}\n\n"
-                                    "Execute this plan to accomplish the task. Report back when complete."
-                                )
-                                session_manager.send_to_coding(coding_instruction)
-                                continue
+                                    # Send plan to coding AI to start implementation
+                                    message_queue.put((
+                                        'status', f"{get_phase_status(phase)} - Coding AI executing..."
+                                    ))
+                                    coding_instruction = (
+                                        f"{CODING_IMPLEMENTATION_CONTEXT}\n\n"
+                                        f"ORIGINAL TASK: {task_description}\n\n"
+                                        f"PLAN TO EXECUTE:\n{plan}\n\n"
+                                        "Execute this plan to accomplish the task. Report back when complete."
+                                    )
+                                    session_manager.send_to_coding(coding_instruction)
+                                    continue
 
-                            # Management wants more investigation - send to coding AI
-                            message_queue.put(('status', f"{get_phase_status(phase)} - Coding AI investigating..."))
-                            message_queue.put(('ai_switch', 'CODING AI'))
-                            message_queue.put(('message_start', 'CODING AI'))
-                            session_manager.send_to_coding(f"{CODING_INVESTIGATION_CONTEXT}\n\n{mgmt_text}")
+                                # Management wants more investigation - send to coding AI
+                                message_queue.put(('status', f"{get_phase_status(phase)} - Coding AI investigating..."))
+                                message_queue.put(('ai_switch', 'CODING AI'))
+                                message_queue.put(('message_start', 'CODING AI'))
+                                session_manager.send_to_coding(f"{CODING_INVESTIGATION_CONTEXT}\n\n{mgmt_text}")
 
-                            coding_response = session_manager.get_coding_response(timeout=coding_timeout)
-                            if check_cancelled() or not coding_response:
-                                if not coding_response:
-                                    message_queue.put(('status', "❌ No response from CODING AI"))
-                                break
+                                coding_response = session_manager.get_coding_response(timeout=coding_timeout)
+                                if check_cancelled() or not coding_response:
+                                    if not coding_response:
+                                        message_queue.put(('status', "❌ No response from CODING AI"))
+                                    break
 
-                            parsed_coding = parse_codex_output(coding_response)
-                            message_queue.put(('message_complete', "CODING AI", parsed_coding))
+                                parsed_coding = parse_codex_output(coding_response)
+                                message_queue.put(('message_complete', "CODING AI", parsed_coding))
 
-                            # Send findings back to management
-                            status_msg = f"{get_phase_status(phase)} - Management reviewing findings..."
-                            message_queue.put(('status', status_msg))
-                            message_queue.put(('ai_switch', 'MANAGEMENT AI'))
-                            message_queue.put(('message_start', 'MANAGEMENT AI'))
-                            findings_msg = (
-                                f"CODING AI FINDINGS:\n{parsed_coding}\n\n"
-                                "If you have enough info, output PLAN: with implementation steps. "
-                                "If not, ask for MORE info in ONE batched request "
-                                "(multiple files/searches at once)."
-                            )
-                            session_manager.send_to_management(findings_msg)
-                            mgmt_response = session_manager.get_management_response(
-                                timeout=management_timeout
-                            )
-
-                            if check_cancelled() or not mgmt_response:
-                                if not mgmt_response:
-                                    message_queue.put(('status', "❌ No response from MANAGEMENT AI"))
-                                break
-
-                            mgmt_text = extract_final_codex_response(mgmt_response)
-                            parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
-                            message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
-
-                        # ==================== IMPLEMENTATION PHASE ====================
-                        elif phase == TaskPhase.IMPLEMENTATION:
-                            implementation_iter += 1
-
-                            if implementation_iter > max_implementation_iters:
-                                completion_reason[0] = "Reached maximum implementation iterations."
-                                message_queue.put(('status', "⚠️ Implementation taking too long"))
-                                break
-
-                            # Get coding AI response
-                            message_queue.put(('status', f"{get_phase_status(phase)} - Coding AI working..."))
-                            message_queue.put(('ai_switch', 'CODING AI'))
-                            message_queue.put(('message_start', 'CODING AI'))
-                            coding_response = session_manager.get_coding_response(timeout=coding_timeout)
-
-                            if check_cancelled() or not coding_response:
-                                if not coding_response:
-                                    message_queue.put(('status', "❌ No response from CODING AI"))
-                                break
-
-                            parsed_coding = parse_codex_output(coding_response)
-                            message_queue.put(('message_complete', "CODING AI", parsed_coding))
-                            impl_notes.append(parsed_coding[:10000])  # Keep more context for verification
-
-                            # Send to management for supervision
-                            status_msg = f"{get_phase_status(phase)} - Management supervising..."
-                            message_queue.put(('status', status_msg))
-                            message_queue.put(('ai_switch', 'MANAGEMENT AI'))
-                            message_queue.put(('message_start', 'MANAGEMENT AI'))
-                            supervision_msg = (
-                                f"CODING AI OUTPUT:\n{parsed_coding}\n\n"
-                                "Respond with CONTINUE: <guidance for remaining steps> or VERIFY "
-                                "if complete. Be direct - give ALL remaining instructions at once, "
-                                "not one step at a time."
-                            )
-                            session_manager.send_to_management(supervision_msg)
-                            mgmt_response = session_manager.get_management_response(
-                                timeout=management_timeout
-                            )
-
-                            if check_cancelled() or not mgmt_response:
-                                if not mgmt_response:
-                                    message_queue.put(('status', "❌ No response from MANAGEMENT AI"))
-                                break
-
-                            mgmt_text = extract_final_codex_response(mgmt_response)
-                            parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
-                            message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
-
-                            # Check for phase transitions
-                            mgmt_upper = mgmt_text.upper()
-                            if "VERIFY" in mgmt_upper:
-                                phase = TaskPhase.VERIFICATION
-                                verification_iter = 0
-
-                                # Add phase divider
-                                add_phase_divider(phase)
-
-                                # Build verification prompt
-                                impl_summary = "\n".join(impl_notes[-5:])  # Last 5 notes
-                                verify_system = VERIFICATION_PROMPT.format(
-                                    task_description=task_description,
-                                    project_path=str(path),
-                                    plan=plan,
-                                    impl_notes=impl_summary
-                                )
-                                if not insane_mode:
-                                    verify_system += "\n\n" + SAFETY_CONSTRAINTS
-
-                                status_msg = f"{get_phase_status(phase)} - Management verifying..."
+                                # Send findings back to management
+                                status_msg = f"{get_phase_status(phase)} - Management reviewing findings..."
                                 message_queue.put(('status', status_msg))
+                                message_queue.put(('ai_switch', 'MANAGEMENT AI'))
                                 message_queue.put(('message_start', 'MANAGEMENT AI'))
-                                session_manager.send_to_management(verify_system)
+                                findings_msg = (
+                                    f"CODING AI FINDINGS:\n{parsed_coding}\n\n"
+                                    "If you have enough info, output PLAN: with implementation steps. "
+                                    "If not, ask for MORE info in ONE batched request "
+                                    "(multiple files/searches at once)."
+                                )
+                                session_manager.send_to_management(findings_msg)
                                 mgmt_response = session_manager.get_management_response(
                                     timeout=management_timeout
                                 )
@@ -1420,58 +1635,145 @@ class ChadWebUI:
                                 mgmt_text = extract_final_codex_response(mgmt_response)
                                 parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
                                 message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
-                                continue
 
-                            # Management providing guidance - relay to coding AI
-                            message_queue.put(('ai_switch', 'CODING AI'))
-                            continue_match = re.search(r'CONTINUE:\s*(.+)', mgmt_text, re.IGNORECASE | re.DOTALL)
-                            if continue_match:
-                                guidance = continue_match.group(1).strip()
-                                session_manager.send_to_coding(f"{CODING_IMPLEMENTATION_CONTEXT}\n\n{guidance}")
-                            else:
-                                # Fallback: send the whole response as guidance
-                                session_manager.send_to_coding(f"{CODING_IMPLEMENTATION_CONTEXT}\n\n{mgmt_text}")
+                            # ==================== IMPLEMENTATION PHASE ====================
+                            elif phase == TaskPhase.IMPLEMENTATION:
+                                implementation_iter += 1
 
-                        # ==================== VERIFICATION PHASE ====================
-                        elif phase == TaskPhase.VERIFICATION:
-                            verification_iter += 1
-
-                            if verification_iter > max_verification_iters:
-                                completion_reason[0] = "Verification inconclusive after maximum attempts."
-                                message_queue.put(('status', "⚠️ Verification inconclusive"))
-                                break
-
-                            mgmt_upper = mgmt_text.upper()
-
-                            # Check for COMPLETE
-                            is_complete = ("COMPLETE" in mgmt_upper and
-                                           "PLAN_ISSUE" not in mgmt_upper and
-                                           "IMPL_ISSUE" not in mgmt_upper)
-                            if is_complete:
-                                completion_reason[0] = "Management AI verified task completion."
-                                message_queue.put(('status', "✓ Task verified complete!"))
-                                task_success[0] = True
-                                break
-
-                            # Check for PLAN_ISSUE - return to investigation
-                            plan_issue_match = re.search(r'PLAN_ISSUE:\s*(.+)', mgmt_text, re.IGNORECASE | re.DOTALL)
-                            if plan_issue_match:
-                                investigation_revisits += 1
-                                if investigation_revisits > max_investigation_revisits:
-                                    completion_reason[0] = "Too many plan revisions needed."
-                                    message_queue.put(('status', "⚠️ Too many plan issues"))
+                                if implementation_iter > max_implementation_iters:
+                                    completion_reason[0] = "Reached maximum implementation iterations."
+                                    message_queue.put(('status', "⚠️ Implementation taking too long"))
                                     break
 
-                                issue = plan_issue_match.group(1).strip().split('\n')[0]
-                                phase = TaskPhase.INVESTIGATION
-                                investigation_iter = 0
+                                # Get coding AI response
+                                message_queue.put(('status', f"{get_phase_status(phase)} - Coding AI working..."))
+                                message_queue.put(('ai_switch', 'CODING AI'))
+                                message_queue.put(('message_start', 'CODING AI'))
+                                coding_response = session_manager.get_coding_response(timeout=coding_timeout)
 
-                                # Add phase divider with issue note
-                                add_phase_divider(phase)
-                                message_queue.put(('phase', f"⚠️ Plan issue: {issue}"))
+                                if check_cancelled() or not coding_response:
+                                    if not coding_response:
+                                        message_queue.put(('status', "❌ No response from CODING AI"))
+                                    break
 
-                                # Reinitialize investigation with context
-                                reinvestigate_prompt = f"""The previous plan had issues: {issue}
+                                parsed_coding = parse_codex_output(coding_response)
+                                message_queue.put(('message_complete', "CODING AI", parsed_coding))
+                                impl_notes.append(parsed_coding[:10000])  # Keep more context for verification
+
+                                # Send to management for supervision
+                                status_msg = f"{get_phase_status(phase)} - Management supervising..."
+                                message_queue.put(('status', status_msg))
+                                message_queue.put(('ai_switch', 'MANAGEMENT AI'))
+                                message_queue.put(('message_start', 'MANAGEMENT AI'))
+                                supervision_msg = (
+                                    f"CODING AI OUTPUT:\n{parsed_coding}\n\n"
+                                    "Respond with CONTINUE: <guidance for remaining steps> or VERIFY "
+                                    "if complete. Be direct - give ALL remaining instructions at once, "
+                                    "not one step at a time."
+                                )
+                                session_manager.send_to_management(supervision_msg)
+                                mgmt_response = session_manager.get_management_response(
+                                    timeout=management_timeout
+                                )
+
+                                if check_cancelled() or not mgmt_response:
+                                    if not mgmt_response:
+                                        message_queue.put(('status', "❌ No response from MANAGEMENT AI"))
+                                    break
+
+                                mgmt_text = extract_final_codex_response(mgmt_response)
+                                parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
+                                message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
+
+                                # Check for phase transitions
+                                mgmt_upper = mgmt_text.upper()
+                                if "VERIFY" in mgmt_upper:
+                                    phase = TaskPhase.VERIFICATION
+                                    verification_iter = 0
+
+                                    # Add phase divider
+                                    add_phase_divider(phase)
+
+                                    # Build verification prompt
+                                    impl_summary = "\n".join(impl_notes[-5:])  # Last 5 notes
+                                    verify_system = VERIFICATION_PROMPT.format(
+                                        task_description=task_description,
+                                        project_path=str(path),
+                                        plan=plan,
+                                        impl_notes=impl_summary
+                                    )
+                                    # Managed mode always uses safety constraints
+                                    verify_system += "\n\n" + SAFETY_CONSTRAINTS
+
+                                    status_msg = f"{get_phase_status(phase)} - Management verifying..."
+                                    message_queue.put(('status', status_msg))
+                                    message_queue.put(('message_start', 'MANAGEMENT AI'))
+                                    session_manager.send_to_management(verify_system)
+                                    mgmt_response = session_manager.get_management_response(
+                                        timeout=management_timeout
+                                    )
+
+                                    if check_cancelled() or not mgmt_response:
+                                        if not mgmt_response:
+                                            message_queue.put(('status', "❌ No response from MANAGEMENT AI"))
+                                        break
+
+                                    mgmt_text = extract_final_codex_response(mgmt_response)
+                                    parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
+                                    message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
+                                    continue
+
+                                # Management providing guidance - relay to coding AI
+                                message_queue.put(('ai_switch', 'CODING AI'))
+                                continue_match = re.search(r'CONTINUE:\s*(.+)', mgmt_text, re.IGNORECASE | re.DOTALL)
+                                if continue_match:
+                                    guidance = continue_match.group(1).strip()
+                                    session_manager.send_to_coding(f"{CODING_IMPLEMENTATION_CONTEXT}\n\n{guidance}")
+                                else:
+                                    # Fallback: send the whole response as guidance
+                                    session_manager.send_to_coding(f"{CODING_IMPLEMENTATION_CONTEXT}\n\n{mgmt_text}")
+
+                            # ==================== VERIFICATION PHASE ====================
+                            elif phase == TaskPhase.VERIFICATION:
+                                verification_iter += 1
+
+                                if verification_iter > max_verification_iters:
+                                    completion_reason[0] = "Verification inconclusive after maximum attempts."
+                                    message_queue.put(('status', "⚠️ Verification inconclusive"))
+                                    break
+
+                                mgmt_upper = mgmt_text.upper()
+
+                                # Check for COMPLETE
+                                is_complete = ("COMPLETE" in mgmt_upper and
+                                               "PLAN_ISSUE" not in mgmt_upper and
+                                               "IMPL_ISSUE" not in mgmt_upper)
+                                if is_complete:
+                                    completion_reason[0] = "Management AI verified task completion."
+                                    message_queue.put(('status', "✓ Task verified complete!"))
+                                    task_success[0] = True
+                                    break
+
+                                # Check for PLAN_ISSUE - return to investigation
+                                plan_issue_match = re.search(
+                                    r'PLAN_ISSUE:\s*(.+)', mgmt_text, re.IGNORECASE | re.DOTALL)
+                                if plan_issue_match:
+                                    investigation_revisits += 1
+                                    if investigation_revisits > max_investigation_revisits:
+                                        completion_reason[0] = "Too many plan revisions needed."
+                                        message_queue.put(('status', "⚠️ Too many plan issues"))
+                                        break
+
+                                    issue = plan_issue_match.group(1).strip().split('\n')[0]
+                                    phase = TaskPhase.INVESTIGATION
+                                    investigation_iter = 0
+
+                                    # Add phase divider with issue note
+                                    add_phase_divider(phase)
+                                    message_queue.put(('phase', f"⚠️ Plan issue: {issue}"))
+
+                                    # Reinitialize investigation with context
+                                    reinvestigate_prompt = f"""The previous plan had issues: {issue}
 
 {investigation_system}
 
@@ -1479,9 +1781,70 @@ Previous plan that failed:
 {plan}
 
 Create a better plan that addresses the issue."""
+                                    message_queue.put(('message_start', 'MANAGEMENT AI'))
+                                    session_manager.send_to_management(reinvestigate_prompt)
+                                    mgmt_response = session_manager.get_management_response(timeout=management_timeout)
+
+                                    if check_cancelled() or not mgmt_response:
+                                        break
+
+                                    mgmt_text = extract_final_codex_response(mgmt_response)
+                                    parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
+                                    message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
+                                    continue
+
+                                # Check for IMPL_ISSUE - return to implementation with fix
+                                impl_issue_pattern = r'IMPL_ISSUE:\s*(.+)'
+                                impl_issue_match = re.search(impl_issue_pattern, mgmt_text,
+                                                             re.IGNORECASE | re.DOTALL)
+                                if impl_issue_match:
+                                    issue = impl_issue_match.group(1).strip()
+                                    phase = TaskPhase.IMPLEMENTATION
+                                    # Don't reset implementation_iter to prevent infinite loops
+
+                                    # Add phase divider with issue note
+                                    add_phase_divider(phase)
+                                    phase_msg = f"⚠️ Implementation issue: {issue[:100]}..."
+                                    message_queue.put(('phase', phase_msg))
+
+                                    # Send fix instruction to coding AI
+                                    message_queue.put(('ai_switch', 'CODING AI'))
+                                    fix_instruction = (
+                                        f"{CODING_IMPLEMENTATION_CONTEXT}\n\n"
+                                        f"VERIFICATION FOUND AN ISSUE:\n{issue}\n\n"
+                                        "Please fix this and report back."
+                                    )
+                                    session_manager.send_to_coding(fix_instruction)
+                                    continue
+
+                                # Check if management is confirming completion in natural language
+                                completion_phrases = [
+                                    'task is complete', 'task completed', 'successfully completed',
+                                    'has been completed', 'is done', 'task done', 'confirmed complete',
+                                    'yes, complete', 'verified complete', 'fulfills the requirement',
+                                    'fulfill the original task', 'satisfies the requirement']
+                                if any(phrase in mgmt_text.lower() for phrase in completion_phrases):
+                                    completion_reason[0] = "Management AI confirmed task completion."
+                                    message_queue.put(('status', "✓ Task verified complete!"))
+                                    task_success[0] = True
+                                    break
+
+                                # Management is doing direct verification - prompt for verdict if needed
+                                if verification_iter >= 3:
+                                    completion_reason[0] = "Task appears complete (verification loop limit reached)."
+                                    message_queue.put(('status', "✓ Task complete (auto-verified)"))
+                                    task_success[0] = True
+                                    break
+
                                 message_queue.put(('message_start', 'MANAGEMENT AI'))
-                                session_manager.send_to_management(reinvestigate_prompt)
-                                mgmt_response = session_manager.get_management_response(timeout=management_timeout)
+                                verdict_prompt = (
+                                    "Output your verdict: COMPLETE, PLAN_ISSUE: <reason>, "
+                                    "or IMPL_ISSUE: <reason>"
+                                )
+                                session_manager.send_to_management(verdict_prompt)
+                                mgmt_response = session_manager.get_management_response(
+                                    timeout=management_timeout
+                                )
 
                                 if check_cancelled() or not mgmt_response:
                                     break
@@ -1489,76 +1852,16 @@ Create a better plan that addresses the issue."""
                                 mgmt_text = extract_final_codex_response(mgmt_response)
                                 parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
                                 message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
-                                continue
 
-                            # Check for IMPL_ISSUE - return to implementation with fix
-                            impl_issue_pattern = r'IMPL_ISSUE:\s*(.+)'
-                            impl_issue_match = re.search(impl_issue_pattern, mgmt_text,
-                                                         re.IGNORECASE | re.DOTALL)
-                            if impl_issue_match:
-                                issue = impl_issue_match.group(1).strip()
-                                phase = TaskPhase.IMPLEMENTATION
-                                # Don't reset implementation_iter to prevent infinite loops
+                    except Exception as e:
+                        message_queue.put(('status', f"❌ Error: {str(e)}"))
+                    finally:
+                        session_manager.stop_all()
+                        relay_complete.set()
 
-                                # Add phase divider with issue note
-                                add_phase_divider(phase)
-                                phase_msg = f"⚠️ Implementation issue: {issue[:100]}..."
-                                message_queue.put(('phase', phase_msg))
-
-                                # Send fix instruction to coding AI
-                                message_queue.put(('ai_switch', 'CODING AI'))
-                                fix_instruction = (
-                                    f"{CODING_IMPLEMENTATION_CONTEXT}\n\n"
-                                    f"VERIFICATION FOUND AN ISSUE:\n{issue}\n\n"
-                                    "Please fix this and report back."
-                                )
-                                session_manager.send_to_coding(fix_instruction)
-                                continue
-
-                            # Check if management is confirming completion in natural language
-                            completion_phrases = ['task is complete', 'task completed', 'successfully completed',
-                                                  'has been completed', 'is done', 'task done', 'confirmed complete',
-                                                  'yes, complete', 'verified complete', 'fulfills the requirement',
-                                                  'fulfill the original task', 'satisfies the requirement']
-                            if any(phrase in mgmt_text.lower() for phrase in completion_phrases):
-                                completion_reason[0] = "Management AI confirmed task completion."
-                                message_queue.put(('status', "✓ Task verified complete!"))
-                                task_success[0] = True
-                                break
-
-                            # Management is doing direct verification - prompt for verdict if needed
-                            if verification_iter >= 3:
-                                completion_reason[0] = "Task appears complete (verification loop limit reached)."
-                                message_queue.put(('status', "✓ Task complete (auto-verified)"))
-                                task_success[0] = True
-                                break
-
-                            message_queue.put(('message_start', 'MANAGEMENT AI'))
-                            verdict_prompt = (
-                                "Output your verdict: COMPLETE, PLAN_ISSUE: <reason>, "
-                                "or IMPL_ISSUE: <reason>"
-                            )
-                            session_manager.send_to_management(verdict_prompt)
-                            mgmt_response = session_manager.get_management_response(
-                                timeout=management_timeout
-                            )
-
-                            if check_cancelled() or not mgmt_response:
-                                break
-
-                            mgmt_text = extract_final_codex_response(mgmt_response)
-                            parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
-                            message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
-
-                except Exception as e:
-                    message_queue.put(('status', f"❌ Error: {str(e)}"))
-                finally:
-                    session_manager.stop_all()
-                    relay_complete.set()
-
-            # Start relay thread
-            relay_thread = threading.Thread(target=relay_loop, daemon=True)
-            relay_thread.start()
+                # Start relay thread
+                relay_thread = threading.Thread(target=relay_loop, daemon=True)
+                relay_thread.start()
 
             # Stream updates with live activity
             current_status = status_text + "⏳ Management AI is planning..."
@@ -1623,6 +1926,8 @@ Create a better plan that addresses the issue."""
                         streaming_buffer = ""
                         last_activity = ""
                         current_live_stream = ""
+                        # Update session log with new message
+                        self._update_session_log(session_log_path, chat_history)
                         yield make_yield(chat_history, current_status, current_live_stream, interactive=False)
                         last_yield_time = time_module.time()
 
@@ -1641,6 +1946,8 @@ Create a better plan that addresses the issue."""
                         chat_history.append({"role": "user", "content": divider})
                         streaming_buffer = ""
                         current_live_stream = ""
+                        # Update session log with phase divider
+                        self._update_session_log(session_log_path, chat_history)
                         yield make_yield(chat_history, current_status, current_live_stream, interactive=False)
                         last_yield_time = time_module.time()
 
@@ -1650,6 +1957,8 @@ Create a better plan that addresses the issue."""
                         chat_history.append({"role": "user", "content": phase_msg})
                         streaming_buffer = ""
                         current_live_stream = ""
+                        # Update session log with phase info
+                        self._update_session_log(session_log_path, chat_history)
                         yield make_yield(chat_history, current_status, current_live_stream, interactive=False)
                         last_yield_time = time_module.time()
 
@@ -1726,6 +2035,17 @@ Create a better plan that addresses the issue."""
                     if completion_reason[0]
                     else "❌ Task did not complete successfully"
                 )
+
+            # Final update to session log with completion status
+            self._update_session_log(
+                session_log_path,
+                chat_history,
+                success=task_success[0],
+                completion_reason=completion_reason[0],
+                status="completed" if task_success[0] else "failed"
+            )
+            final_status += f"\n\n*Session log: {session_log_path}*"
+
             yield make_yield(chat_history, status_text + final_status, "", interactive=True)
 
         except Exception as e:
@@ -1759,8 +2079,8 @@ Create a better plan that addresses the issue."""
                                 placeholder="Describe what you want done...",
                                 lines=5
                             )
-                            insane_mode = gr.Checkbox(
-                                label="⚠️ INSANE MODE (disables safety constraints)",
+                            managed_mode = gr.Checkbox(
+                                label="Managed mode (management AI supervises coding AI)",
                                 value=False
                             )
                             # Show role configuration status
@@ -1790,8 +2110,8 @@ Create a better plan that addresses the issue."""
                     # Connect task execution
                     start_btn.click(
                         self.start_chad_task,
-                        inputs=[project_path, task_description, insane_mode],
-                        outputs=[chatbot, status_box, live_stream_box, project_path, task_description, insane_mode, start_btn, cancel_btn]  # noqa: E501
+                        inputs=[project_path, task_description, managed_mode],
+                        outputs=[chatbot, status_box, live_stream_box, project_path, task_description, managed_mode, start_btn, cancel_btn]  # noqa: E501
                     )
 
                     cancel_btn.click(
