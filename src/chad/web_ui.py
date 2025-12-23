@@ -19,6 +19,28 @@ from .providers import ModelConfig, parse_codex_output, extract_final_codex_resp
 # Custom styling for the provider management area to improve contrast between
 # the summary header and each provider card.
 PROVIDER_PANEL_CSS = """
+:root {
+  --task-btn-bg: #8fd3ff;
+  --task-btn-border: #74c3f6;
+  --task-btn-text: #0a2236;
+  --task-btn-hover: #7bc9ff;
+}
+
+#start-task-btn,
+#cancel-task-btn {
+  background: var(--task-btn-bg) !important;
+  border: 1px solid var(--task-btn-border) !important;
+  color: var(--task-btn-text) !important;
+  font-size: 0.85rem !important;
+  min-height: 32px !important;
+  padding: 6px 12px !important;
+}
+
+#start-task-btn:hover,
+#cancel-task-btn:hover {
+  background: var(--task-btn-hover) !important;
+}
+
 .provider-section-title {
   color: #e2e8f0;
   letter-spacing: 0.01em;
@@ -2022,6 +2044,22 @@ Create a better plan that addresses the issue."""
                         )
                         last_yield_time = now
 
+            # Drain any remaining messages from queue before final update
+            while True:
+                try:
+                    msg = message_queue.get_nowait()
+                    msg_type = msg[0]
+                    if msg_type == 'message_complete':
+                        speaker, content = msg[1], msg[2]
+                        if pending_message_idx is not None and pending_message_idx < len(chat_history):
+                            chat_history[pending_message_idx] = make_chat_message(speaker, content)
+                        else:
+                            chat_history.append(make_chat_message(speaker, content))
+                        self._update_session_log(session_log_path, chat_history)
+                        yield make_yield(chat_history, current_status, "", interactive=False)
+                except queue.Empty:
+                    break
+
             # Final update with completion reason
             relay_thread.join(timeout=1)
             if task_success[0]:
@@ -2089,9 +2127,14 @@ Create a better plan that addresses the issue."""
                                 start_btn = gr.Button(
                                     "Start Task",
                                     variant="primary",
-                                    interactive=is_ready
+                                    interactive=is_ready,
+                                    elem_id="start-task-btn"
                                 )
-                                cancel_btn = gr.Button("🛑 Cancel", variant="stop")
+                                cancel_btn = gr.Button(
+                                    "🛑 Cancel",
+                                    variant="stop",
+                                    elem_id="cancel-task-btn"
+                                )
 
                     gr.Markdown("## Agent Communication")
                     with gr.Row():

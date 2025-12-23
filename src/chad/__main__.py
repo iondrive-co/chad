@@ -25,12 +25,14 @@ def main() -> int:
     """Main entry point for Chad web interface."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     print(f"It is {now} and {random.choice(SCS)}")
+    sys.stdout.flush()
 
     security = SecurityManager()
 
     try:
         main_password = None
         if security.is_first_run():
+            sys.stdout.flush()
             main_password = getpass.getpass("Create main password for Chad: ")
 
         launch_web_ui(main_password)

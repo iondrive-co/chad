@@ -1,14 +1,51 @@
 """Generic AI provider interface for supporting multiple models."""
 
+import glob
 import os
 import pty
 import re
 import select
+import shutil
 import subprocess
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable
+
+
+def find_cli_executable(name: str) -> str:
+    """Find a CLI executable, checking common locations if not in PATH.
+
+    Args:
+        name: The executable name (e.g., 'codex', 'claude', 'gemini')
+
+    Returns:
+        Full path to executable, or just the name if not found (will fail later with clear error)
+    """
+    # First check PATH
+    found = shutil.which(name)
+    if found:
+        return found
+
+    # Common locations for Node.js tools (nvm, fnm, etc.)
+    home = os.path.expanduser('~')
+    search_patterns = [
+        f"{home}/.nvm/versions/node/*/bin/{name}",
+        f"{home}/.fnm/node-versions/*/installation/bin/{name}",
+        f"{home}/.local/bin/{name}",
+        f"{home}/.cargo/bin/{name}",
+        f"/usr/local/bin/{name}",
+        f"{home}/bin/{name}",
+    ]
+
+    for pattern in search_patterns:
+        matches = glob.glob(pattern)
+        if matches:
+            # Return the most recent version (last in sorted list)
+            return sorted(matches)[-1]
+
+    # Return original name - will fail with clear error message
+    return name
 
 
 def parse_codex_output(raw_output: str | None) -> str:  # noqa: C901
@@ -363,7 +400,7 @@ class ClaudeCodeProvider(AIProvider):
         self.project_path = project_path
 
         cmd = [
-            'claude',
+            find_cli_executable('claude'),
             '-p',
             '--input-format', 'stream-json',
             '--output-format', 'stream-json',
@@ -546,7 +583,7 @@ class OpenAICodexProvider(AIProvider):
             return ""
 
         cmd = [
-            'codex',
+            find_cli_executable('codex'),
             'exec',
             '--full-auto',
             '--skip-git-repo-check',
@@ -659,7 +696,7 @@ class GeminiCodeAssistProvider(AIProvider):
         if not self.current_message:
             return ""
 
-        cmd = ['gemini', '-y', '--output-format', 'text']
+        cmd = [find_cli_executable('gemini'), '-y', '--output-format', 'text']
 
         if self.config.model_name and self.config.model_name != 'default':
             cmd.extend(['-m', self.config.model_name])
@@ -763,7 +800,7 @@ class MistralVibeProvider(AIProvider):
             return ""
 
         cmd = [
-            'vibe',
+            find_cli_executable('vibe'),
             '-p', self.current_message,
             '--output', 'text',
         ]

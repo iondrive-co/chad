@@ -96,10 +96,6 @@ pip install build twine
 python3 -m build
 ```
 
-This creates:
-- `dist/chad-0.1.0-py3-none-any.whl`
-- `dist/chad-0.1.0.tar.gz`
-
 ### Upload to PyPI
 
 ```bash

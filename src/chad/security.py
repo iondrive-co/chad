@@ -1,8 +1,9 @@
 """Security functions for password hashing and API key encryption."""
 
 import base64
-import json
 import getpass
+import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -145,6 +146,7 @@ class SecurityManager:
         print("=" * 70 + "\n")
 
         while True:
+            sys.stdout.flush()
             password = getpass.getpass("Enter main password: ")
 
             # Warn about short or empty passwords before confirmation
@@ -155,6 +157,7 @@ class SecurityManager:
                 print(f"\nWARNING: Your password is only {len(password)} character(s) long.")
                 print("For better security, consider using a longer password (8+ characters).")
 
+            sys.stdout.flush()
             confirm = getpass.getpass("Confirm main password: ")
             if password != confirm:
                 print("Error: Passwords do not match. Please try again.")
@@ -194,6 +197,7 @@ class SecurityManager:
             raise ValueError("No main password configured")
 
         while True:
+            sys.stdout.flush()
             password = getpass.getpass("\nEnter main password: ")
 
             if self.verify_password(password, password_hash):
@@ -218,6 +222,7 @@ class SecurityManager:
 
             # Ask for confirmation
             try:
+                sys.stdout.flush()
                 confirm_password = getpass.getpass("\nReenter new main password to confirm: ")
 
                 if password != confirm_password:
