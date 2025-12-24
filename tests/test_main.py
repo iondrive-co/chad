@@ -1,5 +1,6 @@
 """Tests for main module."""
 
+import sys
 from unittest.mock import Mock, patch
 from chad.__main__ import main
 
@@ -15,12 +16,13 @@ class TestMain:
         mock_security.is_first_run.return_value = False
         mock_security_class.return_value = mock_security
 
-        mock_launch.return_value = None
+        mock_launch.return_value = (None, 7860)
 
-        result = main()
+        with patch.object(sys, 'argv', ['chad']):
+            result = main()
 
         assert result == 0
-        mock_launch.assert_called_once_with(None)
+        mock_launch.assert_called_once_with(None, port=7860)
 
     @patch('chad.__main__.launch_web_ui')
     @patch('chad.__main__.SecurityManager')
@@ -31,13 +33,14 @@ class TestMain:
         mock_security.is_first_run.return_value = True
         mock_security_class.return_value = mock_security
 
-        mock_launch.return_value = None
+        mock_launch.return_value = (None, 7860)
 
-        result = main()
+        with patch.object(sys, 'argv', ['chad']):
+            result = main()
 
         assert result == 0
         mock_getpass.assert_called_once()
-        mock_launch.assert_called_once_with('test-password')
+        mock_launch.assert_called_once_with('test-password', port=7860)
 
     @patch('chad.__main__.launch_web_ui')
     @patch('chad.__main__.SecurityManager')
@@ -49,7 +52,8 @@ class TestMain:
 
         mock_launch.side_effect = ValueError("Invalid password")
 
-        result = main()
+        with patch.object(sys, 'argv', ['chad']):
+            result = main()
 
         assert result == 1
 
@@ -63,6 +67,7 @@ class TestMain:
 
         mock_launch.side_effect = KeyboardInterrupt()
 
-        result = main()
+        with patch.object(sys, 'argv', ['chad']):
+            result = main()
 
         assert result == 0

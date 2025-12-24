@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Screenshot utility for visual verification of Chad's Gradio UI.
 
-This script launches Chad in the background, waits for it to be ready,
+This script launches Chad on an ephemeral port, waits for it to be ready,
 takes a screenshot of the UI, and saves it for visual inspection.
 
 Usage:
@@ -19,6 +19,7 @@ Examples:
 """
 
 import argparse
+import re
 import subprocess
 import sys
 import time
@@ -33,9 +34,7 @@ except ImportError:
     sys.exit(1)
 
 
-DEFAULT_OUTPUT = Path("/tmp/chad_screenshot.png")
-CHAD_URL = "http://127.0.0.1:7860"
-STARTUP_TIMEOUT = 30  # seconds to wait for Chad to start
+DEFAULT_OUTPUT = Path("/tmp/chad/screenshot.png")
 TAB_SELECTORS = {
     "task": 'button:has-text("Run Task")',
     "run": 'button:has-text("Run Task")',
@@ -43,181 +42,187 @@ TAB_SELECTORS = {
 }
 
 
-def wait_for_chad(timeout: int = STARTUP_TIMEOUT) -> bool:
-    """Wait for Chad's Gradio server to be ready."""
-    import socket
+def wait_for_server(port: int, timeout: int = 30) -> bool:
+    """Wait for Gradio server to be fully ready."""
+    import urllib.request
 
+    url = f"http://127.0.0.1:{port}/"
     start = time.time()
+
     while time.time() - start < timeout:
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(1)
-            result = sock.connect_ex(("127.0.0.1", 7860))
-            sock.close()
-            if result == 0:
-                # Give Gradio a moment to fully initialize
-                time.sleep(1)
+            req = urllib.request.Request(url)
+            response = urllib.request.urlopen(req, timeout=5)
+            content = response.read().decode('utf-8', errors='ignore')
+            if 'gradio' in content.lower():
                 return True
-        except socket.error:
+        except Exception:
             pass
         time.sleep(0.5)
     return False
 
 
-def is_chad_running() -> bool:
-    """Check if Chad is already running on port 7860."""
-    import socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(1)
-    result = sock.connect_ex(("127.0.0.1", 7860))
-    sock.close()
-    return result == 0
-
-
 def take_screenshot(
+    port: int,
     output_path: Path,
     tab: str | None = None,
     viewport_width: int = 1280,
     viewport_height: int = 900
 ) -> bool:
-    """Take a screenshot of Chad's UI using Playwright.
+    """Take a screenshot of Chad's UI using Playwright."""
+    url = f"http://127.0.0.1:{port}"
 
-    Args:
-        output_path: Where to save the screenshot
-        tab: Which tab to screenshot ('task', 'providers', or None for current)
-        viewport_width: Browser viewport width
-        viewport_height: Browser viewport height
-
-    Returns:
-        True if screenshot was taken successfully
-    """
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=False)
         context = browser.new_context(
-            viewport={"width": viewport_width, "height": viewport_height}
+            viewport={"width": viewport_width, "height": viewport_height},
+            color_scheme="dark"  # Match the app's dark theme
         )
         page = context.new_page()
 
         try:
-            # Navigate to Chad
-            page.goto(CHAD_URL, wait_until="networkidle", timeout=30000)
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_selector("gradio-app", timeout=30000)
+            time.sleep(2)  # Let Gradio fully render
 
-            # Wait for Gradio to fully render
-            page.wait_for_selector("gradio-app", timeout=10000)
-            time.sleep(1)  # Extra time for dynamic content
-
-            # Switch to requested tab if specified
             if tab and tab.lower() in TAB_SELECTORS:
                 selector = TAB_SELECTORS[tab.lower()]
                 tab_button = page.locator(selector).first
                 if tab_button:
-                    # Use JS click to avoid Gradio element interception issues
                     tab_button.evaluate("el => el.click()")
-                    time.sleep(0.5)  # Wait for tab content to load
+                    time.sleep(0.5)
 
-            # Take screenshot
             page.screenshot(path=str(output_path), full_page=False)
             return True
 
         except Exception as e:
-            print(f"Error taking screenshot: {e}", file=sys.stderr)
+            print(f"Error: {e}", file=sys.stderr)
             return False
         finally:
             browser.close()
 
 
+def create_temp_config() -> Path:
+    """Create a temporary config file with empty password for screenshot mode."""
+    import json
+    import tempfile
+    import bcrypt
+    import base64
+
+    # Create temp directory
+    temp_dir = Path(tempfile.mkdtemp(prefix="chad_screenshot_"))
+    config_path = temp_dir / "config.json"
+
+    # Create config with empty password (no encryption)
+    password_hash = bcrypt.hashpw(b"", bcrypt.gensalt()).decode()
+    encryption_salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
+
+    config = {
+        'password_hash': password_hash,
+        'encryption_salt': encryption_salt,
+        'accounts': {}
+    }
+
+    with open(config_path, 'w') as f:
+        json.dump(config, f)
+    config_path.chmod(0o600)
+
+    return config_path
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Take a screenshot of Chad's Gradio UI for visual verification"
+        description="Take a screenshot of Chad's Gradio UI"
     )
     parser.add_argument(
         "--output", "-o",
         type=Path,
         default=DEFAULT_OUTPUT,
-        help=f"Output path for screenshot (default: {DEFAULT_OUTPUT})"
+        help=f"Output path (default: {DEFAULT_OUTPUT})"
     )
     parser.add_argument(
         "--tab", "-t",
         choices=["task", "run", "providers"],
         default=None,
-        help="Which tab to screenshot (default: current/first tab)"
+        help="Tab to screenshot"
     )
     parser.add_argument(
-        "--width",
-        type=int,
-        default=1280,
-        help="Viewport width (default: 1280)"
+        "--width", type=int, default=1280,
+        help="Viewport width"
     )
     parser.add_argument(
-        "--height",
-        type=int,
-        default=900,
-        help="Viewport height (default: 900)"
-    )
-    parser.add_argument(
-        "--start-chad",
-        action="store_true",
-        help="Start Chad if not already running (requires password env var CHAD_PASSWORD)"
+        "--height", type=int, default=900,
+        help="Viewport height"
     )
 
     args = parser.parse_args()
 
-    chad_process = None
+    # Create temporary config for blank slate startup
+    temp_config = create_temp_config()
 
-    # Check if Chad is running
-    if not is_chad_running():
-        if args.start_chad:
-            import os
-            password = os.environ.get("CHAD_PASSWORD")
-            if not password:
-                print("Error: CHAD_PASSWORD environment variable required when using --start-chad",
-                      file=sys.stderr)
-                sys.exit(1)
+    print("Starting Chad for screenshot...")
 
-            print("Starting Chad...")
-            # Start Chad in background
-            chad_process = subprocess.Popen(
-                ["python", "-m", "chad"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env={**os.environ, "CHAD_PASSWORD": password}
-            )
+    # Start Chad with ephemeral port, temp config, and empty password
+    env = {
+        **subprocess.os.environ,
+        'CHAD_CONFIG': str(temp_config),
+        'CHAD_PASSWORD': '',  # Empty password for blank slate
+        'CHAD_PROJECT_PATH': '/path/to/your/project'  # Placeholder for screenshots
+    }
+    chad_process = subprocess.Popen(
+        [sys.executable, "-m", "chad", "--port", "0"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,  # No password needed
+        text=True,
+        bufsize=1,
+        env=env
+    )
 
-            if not wait_for_chad():
-                print("Error: Chad failed to start within timeout", file=sys.stderr)
-                if chad_process:
-                    chad_process.terminate()
-                sys.exit(1)
-            print("Chad started successfully")
-        else:
-            print("Error: Chad is not running on port 7860", file=sys.stderr)
-            print("Either start Chad manually or use --start-chad flag", file=sys.stderr)
+    port = None
+    try:
+        # Read output looking for CHAD_PORT=xxxxx
+        while True:
+            line = chad_process.stdout.readline()
+            if not line:
+                if chad_process.poll() is not None:
+                    print("Error: Chad exited unexpectedly", file=sys.stderr)
+                    sys.exit(1)
+                continue
+
+            # Look for port announcement
+            match = re.search(r'CHAD_PORT=(\d+)', line)
+            if match:
+                port = int(match.group(1))
+                break
+
+        if not wait_for_server(port):
+            print("Error: Server not responding", file=sys.stderr)
             sys.exit(1)
 
-    try:
+        time.sleep(2)  # Let Gradio fully initialize
+
         # Ensure output directory exists
         args.output.parent.mkdir(parents=True, exist_ok=True)
 
-        print("Taking screenshot of Chad UI...")
-        if args.tab:
-            print(f"  Tab: {args.tab}")
-        print(f"  Output: {args.output}")
+        print(f"Taking screenshot of {'tab ' + args.tab if args.tab else 'default view'}...")
 
-        if take_screenshot(args.output, args.tab, args.width, args.height):
-            print(f"Screenshot saved to: {args.output}")
-            print("\nTo view the screenshot, use:")
-            print(f"  Read tool with file_path: {args.output}")
-            sys.exit(0)
+        if take_screenshot(port, args.output, args.tab, args.width, args.height):
+            print(f"✓ Saved: {args.output}")
         else:
-            print("Failed to take screenshot", file=sys.stderr)
+            print("✗ Failed", file=sys.stderr)
             sys.exit(1)
 
     finally:
-        if chad_process:
-            print("Stopping Chad...")
-            chad_process.terminate()
+        chad_process.terminate()
+        try:
             chad_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            chad_process.kill()
+
+        # Clean up temp config
+        import shutil
+        shutil.rmtree(temp_config.parent, ignore_errors=True)
 
 
 if __name__ == "__main__":

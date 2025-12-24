@@ -297,42 +297,55 @@ class TestLaunchWebUI:
     @patch('chad.web_ui.ChadWebUI')
     @patch('chad.web_ui.SecurityManager')
     def test_launch_with_existing_password(self, mock_security_class, mock_webui_class):
-        """Test launching with existing user and password."""
+        """Test launching with existing user and provided password (trusted)."""
         from chad.web_ui import launch_web_ui
 
         mock_security = Mock()
         mock_security.is_first_run.return_value = False
         mock_security.load_config.return_value = {'password_hash': 'hash'}
-        mock_security.verify_main_password.return_value = 'test-password'
         mock_security_class.return_value = mock_security
 
+        mock_server = Mock()
+        mock_server.server_port = 7860
         mock_app = Mock()
+        mock_app.launch.return_value = (mock_server, 'http://127.0.0.1:7860', None)
         mock_webui = Mock()
         mock_webui.create_interface.return_value = mock_app
         mock_webui_class.return_value = mock_webui
 
-        launch_web_ui('test-password')
+        result = launch_web_ui('test-password')
 
-        mock_security.verify_main_password.assert_called_once()
+        # When password is provided, verify_main_password should NOT be called
+        mock_security.verify_main_password.assert_not_called()
         mock_webui_class.assert_called_once_with(mock_security, 'test-password')
         mock_app.launch.assert_called_once()
+        assert result == (None, 7860)
 
     @patch('chad.web_ui.ChadWebUI')
     @patch('chad.web_ui.SecurityManager')
-    def test_launch_with_wrong_password(self, mock_security_class, mock_webui_class):
-        """Test launching with wrong password raises error."""
+    def test_launch_without_password_verifies(self, mock_security_class, mock_webui_class):
+        """Test launching without password triggers verification."""
         from chad.web_ui import launch_web_ui
 
         mock_security = Mock()
         mock_security.is_first_run.return_value = False
         mock_security.load_config.return_value = {'password_hash': 'hash'}
-        mock_security.verify_main_password.side_effect = ValueError("Incorrect password")
+        mock_security.verify_main_password.return_value = 'verified-password'
         mock_security_class.return_value = mock_security
 
-        with pytest.raises(ValueError, match="Incorrect password"):
-            launch_web_ui('wrong-password')
+        mock_server = Mock()
+        mock_server.server_port = 7860
+        mock_app = Mock()
+        mock_app.launch.return_value = (mock_server, 'http://127.0.0.1:7860', None)
+        mock_webui = Mock()
+        mock_webui.create_interface.return_value = mock_app
+        mock_webui_class.return_value = mock_webui
+
+        result = launch_web_ui(None)
 
         mock_security.verify_main_password.assert_called_once()
+        mock_webui_class.assert_called_once_with(mock_security, 'verified-password')
+        assert result == (None, 7860)
 
     @patch('chad.web_ui.ChadWebUI')
     @patch('chad.web_ui.SecurityManager')
@@ -345,16 +358,20 @@ class TestLaunchWebUI:
         mock_security.hash_password.return_value = 'hashed'
         mock_security_class.return_value = mock_security
 
+        mock_server = Mock()
+        mock_server.server_port = 7860
         mock_app = Mock()
+        mock_app.launch.return_value = (mock_server, 'http://127.0.0.1:7860', None)
         mock_webui = Mock()
         mock_webui.create_interface.return_value = mock_app
         mock_webui_class.return_value = mock_webui
 
-        launch_web_ui('new-password')
+        result = launch_web_ui('new-password')
 
         mock_security.hash_password.assert_called_once_with('new-password')
         mock_security.save_config.assert_called_once()
         mock_app.launch.assert_called_once()
+        assert result == (None, 7860)
 
 
 class TestGeminiUsage:

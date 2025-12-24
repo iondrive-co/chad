@@ -52,7 +52,7 @@ class TestParseCodexOutput:
     def test_extracts_thinking_and_response(self):
         raw_output = """OpenAI Codex v0.65.0 (research preview)
 --------
-workdir: /home/miles/chad
+workdir: ~/chad
 model: gpt-5.1-codex-max
 provider: openai
 approval: never
@@ -70,7 +70,7 @@ thinking
 Preparing to analyze project files
 
 exec
-/bin/bash -lc ls in /home/miles/chad succeeded in 26ms:
+/bin/bash -lc ls in ~/chad succeeded in 26ms:
 Architecture.md
 src
 tests
@@ -84,8 +84,8 @@ tokens used
 2,303
 """
         result = parse_codex_output(raw_output)
-        assert "*Thinking: Preparing to analyze project files*" in result
-        assert "*Thinking: Reading the README for context*" in result
+        # Thinking sections are now consolidated with arrows
+        assert "*Thinking: Preparing to analyze project files → Reading the README for context*" in result
         assert "This is a project management tool for AI coding agents." in result
         # Should NOT contain system metadata
         assert "OpenAI Codex" not in result
@@ -171,7 +171,7 @@ class TestAdditionalParseCodexOutput:
     """Additional test cases for parse_codex_output function."""
 
     def test_parse_codex_output_multiple_thinking_blocks(self):
-        """Test that multiple thinking blocks are all captured with proper formatting."""
+        """Test that multiple thinking blocks are consolidated with arrow separators."""
         raw_output = """thinking
 First thought here
 
@@ -182,8 +182,8 @@ codex
 Final response
 """
         result = parse_codex_output(raw_output)
-        assert "*Thinking: First thought here*" in result
-        assert "*Thinking: Second thought here*" in result
+        # Thinking sections are now consolidated with arrows
+        assert "*Thinking: First thought here → Second thought here*" in result
         assert "Final response" in result
 
     def test_parse_codex_output_thinking_without_codex(self):
@@ -195,8 +195,8 @@ thinking
 Second thought
 """
         result = parse_codex_output(raw_output)
-        assert "*Thinking: First thought*" in result
-        assert "*Thinking: Second thought*" in result
+        # Thinking sections are now consolidated
+        assert "*Thinking: First thought → Second thought*" in result
         assert "codex" not in result
 
 
@@ -208,7 +208,7 @@ def test_strip_ansi_codes_helper():
     assert _strip_ansi_codes(colored) == "Error message"
 
     def test_parse_codex_output_preserves_multiline_content(self):
-        """Test that multiline thinking/codex content with embedded newlines is preserved."""
+        """Test that multiline response content is preserved, thinking is consolidated."""
         raw_output = """thinking
 This is line 1
 This is line 2
@@ -223,8 +223,12 @@ Response after blank line
 tokens used: 1234
 """
         result = parse_codex_output(raw_output)
-        assert "*Thinking: This is line 1\nThis is line 2\nAnd after blank line*" in result
-        assert "Response line 1\nResponse line 2\nResponse after blank line" in result
+        # Thinking is consolidated into one line (spaces replace newlines)
+        assert "*Thinking: This is line 1 This is line 2 And after blank line*" in result
+        # Response preserves line breaks
+        assert "Response line 1" in result
+        assert "Response line 2" in result
+        assert "Response after blank line" in result
         assert "1234" not in result
 
     def test_parse_codex_output_malformed_markers(self):

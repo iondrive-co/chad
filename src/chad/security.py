@@ -17,7 +17,13 @@ class SecurityManager:
     """Manages main password and API key encryption."""
 
     def __init__(self, config_path: Path | None = None):
-        self.config_path = config_path or Path.home() / ".chad.conf"
+        import os
+        # Allow override via environment variable (for testing/screenshots)
+        env_config = os.environ.get('CHAD_CONFIG')
+        if env_config:
+            self.config_path = Path(env_config)
+        else:
+            self.config_path = config_path or Path.home() / ".chad.conf"
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _derive_encryption_key(self, password: str, salt: bytes) -> bytes:

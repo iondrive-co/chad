@@ -1,5 +1,6 @@
 """Gradio web interface for Chad."""
 
+import os
 import re
 import gradio as gr
 from pathlib import Path
@@ -73,7 +74,8 @@ PROVIDER_PANEL_CSS = """
 .provider-card__header-row {
   display: flex;
   align-items: stretch;
-  background: #000 !important;
+  background: var(--task-btn-bg) !important;
+  border: 1px solid var(--task-btn-border) !important;
   border-radius: 12px;
   padding: 8px 10px;
   gap: 8px;
@@ -81,8 +83,8 @@ PROVIDER_PANEL_CSS = """
 
 .provider-card .provider-card__header-row .provider-card__header,
 .provider-card .provider-card__header {
-  background: #000 !important;
-  color: #fff !important;
+  background: var(--task-btn-bg) !important;
+  color: var(--task-btn-text) !important;
   display: inline-flex;
   align-items: center;
   padding: 6px 10px;
@@ -92,8 +94,8 @@ PROVIDER_PANEL_CSS = """
 
 .provider-card .provider-card__header-row .provider-card__header-text,
 .provider-card__header-row .provider-card__header-text {
-  background: #000;
-  color: #fff;
+  background: var(--task-btn-bg);
+  color: var(--task-btn-text);
   padding: 6px 10px;
   border-radius: 10px;
   display: inline-flex;
@@ -105,16 +107,16 @@ PROVIDER_PANEL_CSS = """
 .provider-card .provider-card__header-row .provider-card__header .prose *,
 .provider-card .provider-card__header .prose,
 .provider-card .provider-card__header .prose * {
-  color: #fff !important;
-  background: #000 !important;
+  color: var(--task-btn-text) !important;
+  background: var(--task-btn-bg) !important;
   margin: 0;
   padding: 0;
 }
 
 .provider-card .provider-card__header-row .provider-card__header > *,
 .provider-card .provider-card__header > * {
-  background: #000 !important;
-  color: #fff !important;
+  background: var(--task-btn-bg) !important;
+  color: var(--task-btn-text) !important;
 }
 
 .provider-card .provider-card__header-row .provider-card__header :is(h1, h2, h3, h4, h5, h6, p, span),
@@ -202,7 +204,7 @@ PROVIDER_PANEL_CSS = """
   border-radius: 0 0 8px 8px !important;
   padding: 12px !important;
   margin: 0 !important;
-  max-height: 200px;
+  max-height: 400px;
   overflow-y: auto;
   white-space: pre-wrap;
   word-wrap: break-word;
@@ -1886,14 +1888,18 @@ Create a better plan that addresses the issue."""
                 relay_thread.start()
 
             # Stream updates with live activity
-            current_status = status_text + "⏳ Management AI is planning..."
+            if managed_mode:
+                current_status = status_text + "⏳ Management AI is planning..."
+                current_ai = "MANAGEMENT AI"
+            else:
+                current_status = status_text + "⏳ Coding AI is working..."
+                current_ai = "CODING AI"
             current_live_stream = ""
             yield make_yield(chat_history, current_status, current_live_stream, interactive=False)
 
             import time as time_module
             last_activity = ""
             streaming_buffer = ""
-            current_ai = "MANAGEMENT AI"  # Track which AI is producing output
             last_yield_time = 0.0
             min_yield_interval = 0.05  # 50ms for responsive streaming
 
@@ -1992,13 +1998,13 @@ Create a better plan that addresses the issue."""
                     elif msg_type == 'stream':
                         # Accumulate streaming content
                         streaming_buffer += msg[1]
-                        # Limit buffer size to last 2000 chars for display
-                        if len(streaming_buffer) > 2000:
-                            streaming_buffer = streaming_buffer[-2000:]
+                        # Limit buffer size to last 8000 chars for display
+                        if len(streaming_buffer) > 8000:
+                            streaming_buffer = streaming_buffer[-8000:]
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
                             buf = streaming_buffer
-                            display_buffer = buf[-1500:] if len(buf) > 1500 else buf
+                            display_buffer = buf[-6000:] if len(buf) > 6000 else buf
                             current_live_stream = format_live_output(
                                 current_ai, display_buffer
                             )
@@ -2014,7 +2020,7 @@ Create a better plan that addresses the issue."""
                         if now - last_yield_time >= min_yield_interval:
                             if streaming_buffer:
                                 buf = streaming_buffer
-                                display_buffer = buf[-1500:] if len(buf) > 1500 else buf
+                                display_buffer = buf[-6000:] if len(buf) > 6000 else buf
                                 content = display_buffer + f"\n\n{last_activity}"
                                 current_live_stream = format_live_output(
                                     current_ai, content
@@ -2032,7 +2038,7 @@ Create a better plan that addresses the issue."""
                     if now - last_yield_time >= 0.3:
                         if streaming_buffer:
                             buf = streaming_buffer
-                            display_buffer = buf[-1500:] if len(buf) > 1500 else buf
+                            display_buffer = buf[-6000:] if len(buf) > 6000 else buf
                             current_live_stream = format_live_output(
                                 current_ai, display_buffer
                             )
@@ -2107,10 +2113,12 @@ Create a better plan that addresses the issue."""
 
                     with gr.Row():
                         with gr.Column():
+                            # Allow override via env var (for screenshots)
+                            default_path = os.environ.get('CHAD_PROJECT_PATH', str(Path.cwd()))
                             project_path = gr.Textbox(
                                 label="Project Path",
                                 placeholder="/path/to/project",
-                                value=str(Path.cwd())
+                                value=default_path
                             )
                             task_description = gr.TextArea(
                                 label="Task Description",
@@ -2329,11 +2337,15 @@ Create a better plan that addresses the issue."""
             return interface
 
 
-def launch_web_ui(password: str = None) -> None:
+def launch_web_ui(password: str = None, port: int = 7860) -> tuple[None, int]:
     """Launch the Chad web interface.
 
     Args:
         password: Main password. If not provided, will prompt via CLI
+        port: Port to run on. Use 0 for ephemeral port.
+
+    Returns:
+        Tuple of (None, actual_port) where actual_port is the port used
     """
     security_mgr = SecurityManager()
 
@@ -2355,24 +2367,42 @@ def launch_web_ui(password: str = None) -> None:
         else:
             main_password = security_mgr.setup_main_password()
     else:
-        # Always use verify_main_password which includes the reset flow
-        main_password = security_mgr.verify_main_password()
+        if password is not None:
+            # Use provided password (for automation/screenshots)
+            main_password = password
+        else:
+            # Interactive mode - verify password which includes the reset flow
+            main_password = security_mgr.verify_main_password()
 
     # Create and launch UI
     ui = ChadWebUI(security_mgr, main_password)
     app = ui.create_interface()
 
+    # Find a free port if ephemeral requested
+    ephemeral = port == 0
+    if ephemeral:
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('127.0.0.1', 0))
+            port = s.getsockname()[1]
+
     print("\n" + "=" * 70)
     print("CHAD WEB UI")
     print("=" * 70)
-    print("Opening web interface in your browser...")
+    if not ephemeral:
+        print("Opening web interface in your browser...")
     print("Press Ctrl+C to stop the server")
     print("=" * 70 + "\n")
 
+    # Print port marker for scripts to parse (before launch blocks)
+    print(f"CHAD_PORT={port}", flush=True)
+
     app.launch(
         server_name="127.0.0.1",
-        server_port=7860,
+        server_port=port,
         share=False,
-        inbrowser=True,
+        inbrowser=not ephemeral,  # Don't open browser for screenshot mode
         quiet=False
     )
+
+    return None, port
