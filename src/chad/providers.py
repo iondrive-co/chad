@@ -144,9 +144,13 @@ def parse_codex_output(raw_output: str | None) -> str:  # noqa: C901
             continue
 
         # Accumulate content
-        if in_thinking or in_response:
+        if in_thinking:
+            # For thinking, just collect the core message
             if stripped:
                 current_section.append(stripped)
+        elif in_response:
+            # For response, preserve original formatting (but strip trailing whitespace)
+            current_section.append(line.rstrip())
 
         i += 1
 
@@ -155,13 +159,37 @@ def parse_codex_output(raw_output: str | None) -> str:  # noqa: C901
         section_type = 'response' if in_response else 'thinking'
         result_parts.append((section_type, '\n'.join(current_section)))
 
-    # Format output
-    formatted = []
+    # Format output - consolidate thinking, preserve response formatting
+    thinking_parts = []
+    response_parts = []
+
     for section_type, content in result_parts:
         if section_type == 'thinking':
-            formatted.append(f"*Thinking: {content}*")
+            # Collect all thinking for a compact summary
+            thinking_parts.append(content.replace('\n', ' ').strip())
         else:
-            formatted.append(content)
+            response_parts.append(content)
+
+    formatted = []
+
+    # Add consolidated thinking as a compact italic block
+    if thinking_parts:
+        # Show last few thinking steps, not all
+        recent_thoughts = thinking_parts[-5:] if len(thinking_parts) > 5 else thinking_parts
+        thinking_summary = ' → '.join(recent_thoughts)
+        formatted.append(f"*Thinking: {thinking_summary}*")
+
+    # Add response content with preserved formatting
+    for content in response_parts:
+        # Clean up excessive blank lines but preserve structure
+        lines = content.split('\n')
+        cleaned_lines = []
+        for i, line in enumerate(lines):
+            if line.strip() or (i > 0 and lines[i - 1].strip()):
+                cleaned_lines.append(line)
+        cleaned = '\n'.join(cleaned_lines)
+        if cleaned.strip():
+            formatted.append(cleaned.strip())
 
     return '\n\n'.join(formatted) if formatted else raw_output
 
@@ -223,12 +251,19 @@ ActivityCallback = Callable[[str, str], None] | None
 ActivityCallback = Callable[[str, str], None] | None
 
 
-_ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[mGKHF]')
+_ANSI_ESCAPE = re.compile(r'[\x1b\u241b]\[[0-9;]*[a-zA-Z]?')
 
 
 def _strip_ansi_codes(text: str) -> str:
-    """Remove common ANSI escape codes from streamed output."""
-    return _ANSI_ESCAPE.sub('', text)
+    """Remove ANSI escape codes from streamed output.
+
+    Handles both actual escape char (0x1b) and Unicode escape symbol (␛ U+241B).
+    Also removes partial/incomplete escape sequences.
+    """
+    text = _ANSI_ESCAPE.sub('', text)
+    # Also remove incomplete escape sequences that got split across chunks
+    text = re.sub(r'[\x1b\u241b]\[?[0-9;]*$', '', text)
+    return text
 
 
 def _close_master_fd(master_fd: int | None) -> None:
@@ -632,11 +667,31 @@ class OpenAICodexProvider(AIProvider):
 
     def _process_streaming_chunk(self, chunk: str) -> None:
         """Process a streaming chunk for activity notifications."""
-        # Send raw stream to UI for live display
-        self._notify_activity('stream', chunk)
+        # Strip ANSI codes and filter metadata for clean display
+        clean_chunk = _strip_ansi_codes(chunk)
+
+        # Filter out metadata and header lines
+        filtered_lines = []
+        for line in clean_chunk.split('\n'):
+            stripped = line.strip()
+            # Skip empty lines, header, and metadata
+            if not stripped:
+                continue
+            if stripped.startswith(('OpenAI Codex', '--------', 'workdir:', 'model:', 'provider:',
+                                    'approval:', 'sandbox:', 'reasoning effort:', 'reasoning summaries:',
+                                    'session id:', 'mcp startup:', 'tokens used')) or stripped in ('user',):
+                continue
+            # Skip lines that are just leftover ANSI fragments
+            if re.match(r'^[0-9;m]*$', stripped):
+                continue
+            filtered_lines.append(line)
+
+        # Send cleaned stream to UI
+        if filtered_lines:
+            self._notify_activity('stream', '\n'.join(filtered_lines) + '\n')
 
         # Also parse for structured activity updates
-        for line in chunk.split('\n'):
+        for line in clean_chunk.split('\n'):
             stripped = line.strip()
             if not stripped:
                 continue

@@ -1,6 +1,8 @@
 """Main entry point for Chad - launches web interface."""
 
+import argparse
 import getpass
+import os
 import random
 import sys
 from datetime import datetime
@@ -23,6 +25,11 @@ SCS = [
 
 def main() -> int:
     """Main entry point for Chad web interface."""
+    parser = argparse.ArgumentParser(description="Chad: YOLO AI")
+    parser.add_argument('--port', type=int, default=7860,
+                        help='Port to run on (default: 7860, use 0 for ephemeral)')
+    args = parser.parse_args()
+
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     print(f"It is {now} and {random.choice(SCS)}")
     sys.stdout.flush()
@@ -30,12 +37,15 @@ def main() -> int:
     security = SecurityManager()
 
     try:
-        main_password = None
-        if security.is_first_run():
-            sys.stdout.flush()
-            main_password = getpass.getpass("Create main password for Chad: ")
+        # Check for password from environment (for automation/screenshots)
+        main_password = os.environ.get('CHAD_PASSWORD')
 
-        launch_web_ui(main_password)
+        if main_password is None:
+            if security.is_first_run():
+                sys.stdout.flush()
+                main_password = getpass.getpass("Create main password for Chad: ")
+
+        launch_web_ui(main_password, port=args.port)
         return 0
     except ValueError as e:
         print(f"\n❌ Error: {e}")

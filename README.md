@@ -18,16 +18,20 @@ your internet connection. Responsible models will stop Chad if they have the rig
 safety prompt which will try to give them that context. However, if Chad REALLY wants to complete your task there
 are only so many ways I can explicitly prohibit it from ruining your life.
 
-### Beyond Grug
-
-- Gradio ui to make it easy to add and remove agents, assign them to roles, change their preferred model, and view their usage
-- Provider tokens encrypted with a master password you create and supply every session, which can be wiped by specifying a new password at login
-
 ### Blah blah how do I run it?
 ```bash
 pip install chad-ai
 chad 
 ```
+
+### How is this better than $Grug?
+
+- Gradio ui to make it easy to add and remove agents, assign them to roles, change their preferred model, and view their usage
+- Provider tokens encrypted with a master password you create and supply every session, which can be wiped by specifying a new password at login
+
+<p style="text-align: center;">
+  <img src="docs/screenshot.png" width="800">
+</p>
 
 ### Is this satire?
 
