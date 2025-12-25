@@ -15,6 +15,7 @@ from .session_manager import (
     CODING_INVESTIGATION_CONTEXT, CODING_IMPLEMENTATION_CONTEXT
 )
 from .providers import ModelConfig, parse_codex_output, extract_final_codex_response
+from .model_catalog import ModelCatalog
 
 
 # Custom styling for the provider management area to improve contrast between
@@ -459,14 +460,10 @@ class ChadWebUI:
         self._last_all_messages: list[dict] = []
         # Number of provider cards to render; expanded during UI creation to allow new providers
         self.provider_card_count = 10
+        self.model_catalog = ModelCatalog(security_mgr)
 
-    # Available models per provider
-    PROVIDER_MODELS = {
-        'anthropic': ['claude-sonnet-4-20250514', 'claude-opus-4-20250514', 'default'],
-        'openai': ['o3', 'o4-mini', 'codex-mini', 'default'],
-        'gemini': ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'default'],
-        'mistral': ['default']
-    }
+    SUPPORTED_PROVIDERS = {"anthropic", "openai", "gemini", "mistral"}
+    OPENAI_REASONING_LEVELS = ["default", "low", "medium", "high", "xhigh"]
 
     def list_providers(self) -> str:
         """Summarize all configured providers with role and model."""
@@ -482,7 +479,9 @@ class ChadWebUI:
             role_str = f" — roles: {', '.join(roles)}" if roles else ""
             model = self.security_mgr.get_account_model(account_name)
             model_str = f" | preferred model: `{model}`" if model != 'default' else ""
-            rows.append(f"- **{account_name}** ({provider}){role_str}{model_str}")
+            reasoning = self.security_mgr.get_account_reasoning(account_name)
+            reasoning_str = f" | reasoning: `{reasoning}`" if reasoning != 'default' else ""
+            rows.append(f"- **{account_name}** ({provider}){role_str}{model_str}{reasoning_str}")
 
         return "\n".join(rows)
 
@@ -686,6 +685,9 @@ class ChadWebUI:
                 model_choices = self.get_models_for_account(account_name)
                 stored_model = self.security_mgr.get_account_model(account_name)
                 model_value = stored_model if stored_model in model_choices else model_choices[0]
+                reasoning_choices = self.get_reasoning_choices(provider, account_name)
+                stored_reasoning = self.security_mgr.get_account_reasoning(account_name)
+                reasoning_value = stored_reasoning if stored_reasoning in reasoning_choices else reasoning_choices[0]
                 usage = self.get_provider_usage(account_name)
 
                 outputs.extend([
@@ -694,6 +696,7 @@ class ChadWebUI:
                     account_name,
                     gr.update(value=role_value),
                     gr.update(choices=model_choices, value=model_value),
+                    gr.update(choices=reasoning_choices, value=reasoning_value),
                     usage
                 ])
             else:
@@ -702,6 +705,7 @@ class ChadWebUI:
                     "",
                     "",
                     gr.update(value="(none)"),
+                    gr.update(choices=['default'], value='default'),
                     gr.update(choices=['default'], value='default'),
                     ""
                 ])
@@ -1232,7 +1236,7 @@ class ChadWebUI:
         accordion_state = gr.update(open=True)
 
         try:
-            if provider_type not in self.PROVIDER_MODELS:
+            if provider_type not in self.SUPPORTED_PROVIDERS:
                 base_response = self._provider_action_response(f"❌ Unsupported provider '{provider_type}'")
                 return (*base_response, name_field_value, add_btn_state, accordion_state)
 
@@ -1418,6 +1422,24 @@ class ChadWebUI:
         except Exception as e:
             return self._provider_action_response(f"❌ Error setting model: {str(e)}")
 
+    def set_reasoning(self, account_name: str, reasoning: str):
+        """Set reasoning effort for a provider account and refresh the provider panel."""
+        try:
+            if not account_name:
+                return self._provider_action_response("❌ Please select an account")
+
+            if not reasoning:
+                return self._provider_action_response("❌ Please select a reasoning level")
+
+            accounts = self.security_mgr.list_accounts()
+            if account_name not in accounts:
+                return self._provider_action_response(f"❌ Provider '{account_name}' not found")
+
+            self.security_mgr.set_account_reasoning(account_name, reasoning)
+            return self._provider_action_response(f"✓ Set reasoning to `{reasoning}` for {account_name}")
+        except Exception as e:
+            return self._provider_action_response(f"❌ Error setting reasoning: {str(e)}")
+
     def get_models_for_account(self, account_name: str) -> list[str]:
         """Get available models for an account based on its provider."""
         if not account_name:
@@ -1425,7 +1447,29 @@ class ChadWebUI:
 
         accounts = self.security_mgr.list_accounts()
         provider = accounts.get(account_name, '')
-        return self.PROVIDER_MODELS.get(provider, ['default'])
+        return self.model_catalog.get_models(provider, account_name)
+
+    def get_reasoning_choices(self, provider: str, account_name: str | None = None) -> list[str]:
+        """Return reasoning dropdown options for the provider."""
+        if provider == 'openai':
+            stored = 'default'
+            if account_name:
+                getter = getattr(self.security_mgr, "get_account_reasoning", None)
+                if getter:
+                    try:
+                        stored = getter(account_name) or 'default'
+                    except Exception:
+                        stored = 'default'
+            stored = stored if isinstance(stored, str) else 'default'
+            choices = set(self.OPENAI_REASONING_LEVELS)
+            if stored:
+                choices.add(stored)
+            ordered = [level for level in self.OPENAI_REASONING_LEVELS if level in choices]
+            for choice in sorted(choices):
+                if choice not in ordered:
+                    ordered.append(choice)
+            return ordered
+        return ['default']
 
     def delete_provider(self, account_name: str, confirmed: bool = False):
         """Delete a provider after confirmation and refresh the provider panel."""
@@ -1622,17 +1666,21 @@ class ChadWebUI:
             # Create configs with stored models
             coding_model = self.security_mgr.get_account_model(coding_account)
             management_model = self.security_mgr.get_account_model(management_account)
+            coding_reasoning = self.security_mgr.get_account_reasoning(coding_account)
+            management_reasoning = self.security_mgr.get_account_reasoning(management_account)
 
             coding_config = ModelConfig(
                 provider=coding_provider,
                 model_name=coding_model,
-                account_name=coding_account
+                account_name=coding_account,
+                reasoning_effort=None if coding_reasoning == 'default' else coding_reasoning
             )
 
             management_config = ModelConfig(
                 provider=management_provider,
                 model_name=management_model,
-                account_name=management_account
+                account_name=management_account,
+                reasoning_effort=None if management_reasoning == 'default' else management_reasoning
             )
 
             coding_timeout = get_coding_timeout(coding_provider)
@@ -2447,6 +2495,9 @@ Create a better plan that addresses the issue."""
                             model_choices = self.get_models_for_account(account_name)
                             stored_model = self.security_mgr.get_account_model(account_name)
                             model_value = stored_model if stored_model in model_choices else model_choices[0]
+                            reasoning_choices = self.get_reasoning_choices(provider_type, account_name)
+                            stored_reasoning = self.security_mgr.get_account_reasoning(account_name)
+                            reasoning_value = stored_reasoning if stored_reasoning in reasoning_choices else reasoning_choices[0]
                             usage_text = self.get_provider_usage(account_name)
                         else:
                             account_name = ""
@@ -2455,6 +2506,8 @@ Create a better plan that addresses the issue."""
                             role_value = "(none)"
                             model_choices = ["default"]
                             model_value = "default"
+                            reasoning_choices = ["default"]
+                            reasoning_value = "default"
                             usage_text = ""
 
                         with gr.Group(visible=visible, elem_classes=["provider-card"]) as card_group:
@@ -2476,6 +2529,13 @@ Create a better plan that addresses the issue."""
                                     allow_custom_value=True,
                                     scale=1
                                 )
+                                reasoning_dropdown = gr.Dropdown(
+                                    choices=reasoning_choices,
+                                    label="Reasoning Effort",
+                                    value=reasoning_value,
+                                    allow_custom_value=True,
+                                    scale=1
+                                )
 
                             gr.Markdown("Usage", elem_classes=["provider-usage-title"])
                             usage_box = gr.Markdown(usage_text, elem_classes=["provider-usage"])
@@ -2487,6 +2547,7 @@ Create a better plan that addresses the issue."""
                             "account_name": account_name,  # Store name for delete handler
                             "role_dropdown": role_dropdown,
                             "model_dropdown": model_dropdown,
+                            "reasoning_dropdown": reasoning_dropdown,
                             "usage_box": usage_box,
                             "delete_btn": delete_btn
                         })
@@ -2512,6 +2573,7 @@ Create a better plan that addresses the issue."""
                             card["account_state"],
                             card["role_dropdown"],
                             card["model_dropdown"],
+                            card["reasoning_dropdown"],
                             card["usage_box"]
                         ])
 
@@ -2557,6 +2619,11 @@ Create a better plan that addresses the issue."""
                         card["model_dropdown"].change(
                             self.set_model,
                             inputs=[card["account_state"], card["model_dropdown"]],
+                            outputs=provider_outputs
+                        )
+                        card["reasoning_dropdown"].change(
+                            self.set_reasoning,
+                            inputs=[card["account_state"], card["reasoning_dropdown"]],
                             outputs=provider_outputs
                         )
 

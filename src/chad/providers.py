@@ -241,6 +241,7 @@ class ModelConfig:
     model_name: str  # 'claude-3-5-sonnet-20241022', 'gpt-4', etc.
     account_name: str | None = None  # Account identifier (not an API key)
     base_url: str | None = None
+    reasoning_effort: str | None = None
 
 
 # Callback type for activity updates: (activity_type, detail)
@@ -629,6 +630,9 @@ class OpenAICodexProvider(AIProvider):
 
         if self.config.model_name and self.config.model_name != 'default':
             cmd.extend(['-m', self.config.model_name])
+
+        if self.config.reasoning_effort and self.config.reasoning_effort != 'default':
+            cmd.extend(['-c', f'model_reasoning_effort="{self.config.reasoning_effort}"'])
 
         try:
             env = self._get_env()

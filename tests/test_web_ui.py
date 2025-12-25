@@ -14,6 +14,7 @@ class TestChadWebUI:
         mgr.list_accounts.return_value = {'claude': 'anthropic', 'gpt': 'openai'}
         mgr.list_role_assignments.return_value = {'CODING': 'claude', 'MANAGEMENT': 'gpt'}
         mgr.get_account_model.return_value = 'default'
+        mgr.get_account_reasoning.return_value = 'default'
         return mgr
 
     @pytest.fixture
@@ -176,6 +177,26 @@ class TestChadWebUI:
         assert '❌' in result
         assert 'no provider selected' in result.lower()
 
+    def test_set_reasoning_success(self, web_ui, mock_security_mgr):
+        """Test setting reasoning level for an account."""
+        result = web_ui.set_reasoning('claude', 'high')[0]
+
+        assert '✓' in result
+        assert 'high' in result
+        mock_security_mgr.set_account_reasoning.assert_called_once_with('claude', 'high')
+
+    def test_get_models_includes_stored_model(self, web_ui, mock_security_mgr, tmp_path):
+        """Stored models should always be present in dropdown choices."""
+        mock_security_mgr.list_accounts.return_value = {'gpt': 'openai'}
+        mock_security_mgr.get_account_model.return_value = 'gpt-5.1-codex-max'
+        from chad.model_catalog import ModelCatalog
+
+        web_ui.model_catalog = ModelCatalog(security_mgr=mock_security_mgr, home_dir=tmp_path, cache_ttl=0)
+        models = web_ui.get_models_for_account('gpt')
+
+        assert 'gpt-5.1-codex-max' in models
+        assert 'default' in models
+
     def test_get_account_choices(self, web_ui, mock_security_mgr):
         """Test getting account choices for dropdowns."""
         choices = web_ui.get_account_choices()
@@ -215,6 +236,7 @@ class TestChadWebUITaskExecution:
         mgr.list_accounts.return_value = {'claude': 'anthropic'}
         mgr.list_role_assignments.return_value = {'CODING': 'claude', 'MANAGEMENT': 'claude'}
         mgr.get_account_model.return_value = 'default'
+        mgr.get_account_reasoning.return_value = 'default'
         return mgr
 
     @pytest.fixture
@@ -558,9 +580,9 @@ class TestModelSelection:
         """Test that PROVIDER_MODELS includes expected providers."""
         from chad.web_ui import ChadWebUI
 
-        assert 'anthropic' in ChadWebUI.PROVIDER_MODELS
-        assert 'openai' in ChadWebUI.PROVIDER_MODELS
-        assert 'gemini' in ChadWebUI.PROVIDER_MODELS
+        assert 'anthropic' in ChadWebUI.SUPPORTED_PROVIDERS
+        assert 'openai' in ChadWebUI.SUPPORTED_PROVIDERS
+        assert 'gemini' in ChadWebUI.SUPPORTED_PROVIDERS
 
 
 class TestUILayout:
