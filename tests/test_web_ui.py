@@ -229,8 +229,11 @@ class TestChadWebUITaskExecution:
 
         assert len(results) > 0
         last_result = results[-1]
-        assert '❌' in last_result[1]
-        assert 'project path' in last_result[1].lower() or 'task description' in last_result[1].lower()
+        # Error is in status header (position 4), not live stream box
+        status_header = last_result[4]
+        status_value = status_header.get('value', '') if isinstance(status_header, dict) else str(status_header)
+        assert '❌' in status_value
+        assert 'project path' in status_value.lower() or 'task description' in status_value.lower()
 
     def test_start_task_missing_description(self, web_ui):
         """Test starting task without task description."""
@@ -238,7 +241,10 @@ class TestChadWebUITaskExecution:
 
         assert len(results) > 0
         last_result = results[-1]
-        assert '❌' in last_result[1]
+        # Error is in status header (position 4), not live stream box
+        status_header = last_result[4]
+        status_value = status_header.get('value', '') if isinstance(status_header, dict) else str(status_header)
+        assert '❌' in status_value
 
     def test_start_task_invalid_path(self, web_ui):
         """Test starting task with invalid project path."""
@@ -246,8 +252,11 @@ class TestChadWebUITaskExecution:
 
         assert len(results) > 0
         last_result = results[-1]
-        assert '❌' in last_result[1]
-        assert 'Invalid project path' in last_result[1]
+        # Error is in status header (position 4), not live stream box
+        status_header = last_result[4]
+        status_value = status_header.get('value', '') if isinstance(status_header, dict) else str(status_header)
+        assert '❌' in status_value
+        assert 'Invalid project path' in status_value
 
     def test_start_task_missing_roles(self, mock_security_mgr):
         """Test starting task when roles are not assigned."""
@@ -259,8 +268,11 @@ class TestChadWebUITaskExecution:
 
         assert len(results) > 0
         last_result = results[-1]
-        assert '❌' in last_result[1]
-        assert 'CODING' in last_result[1] or 'MANAGEMENT' in last_result[1]
+        # Error is in status header (position 4), not live stream box
+        status_header = last_result[4]
+        status_value = status_header.get('value', '') if isinstance(status_header, dict) else str(status_header)
+        assert '❌' in status_value
+        assert 'CODING' in status_value or 'MANAGEMENT' in status_value
 
 
 class TestChadWebUIInterface:

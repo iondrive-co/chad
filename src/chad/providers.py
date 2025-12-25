@@ -286,7 +286,8 @@ def _start_pty_process(cmd: list[str], cwd: str | None = None, env: dict | None 
         stderr=slave_fd,
         cwd=cwd,
         env=env,
-        close_fds=True
+        close_fds=True,
+        start_new_session=True  # Run in own process group for clean termination
     )
     os.close(slave_fd)
     return process, master_fd
@@ -667,30 +668,12 @@ class OpenAICodexProvider(AIProvider):
 
     def _process_streaming_chunk(self, chunk: str) -> None:
         """Process a streaming chunk for activity notifications."""
-        # Strip ANSI codes and filter metadata for clean display
+        # Pass through raw chunk with ANSI codes preserved for native terminal look
+        if chunk.strip():
+            self._notify_activity('stream', chunk)
+
+        # Also parse for structured activity updates (using cleaned version)
         clean_chunk = _strip_ansi_codes(chunk)
-
-        # Filter out metadata and header lines
-        filtered_lines = []
-        for line in clean_chunk.split('\n'):
-            stripped = line.strip()
-            # Skip empty lines, header, and metadata
-            if not stripped:
-                continue
-            if stripped.startswith(('OpenAI Codex', '--------', 'workdir:', 'model:', 'provider:',
-                                    'approval:', 'sandbox:', 'reasoning effort:', 'reasoning summaries:',
-                                    'session id:', 'mcp startup:', 'tokens used')) or stripped in ('user',):
-                continue
-            # Skip lines that are just leftover ANSI fragments
-            if re.match(r'^[0-9;m]*$', stripped):
-                continue
-            filtered_lines.append(line)
-
-        # Send cleaned stream to UI
-        if filtered_lines:
-            self._notify_activity('stream', '\n'.join(filtered_lines) + '\n')
-
-        # Also parse for structured activity updates
         for line in clean_chunk.split('\n'):
             stripped = line.strip()
             if not stripped:
@@ -711,6 +694,12 @@ class OpenAICodexProvider(AIProvider):
         self.master_fd = None
         if self.process:
             try:
+                # Kill entire process group to stop child processes too
+                import signal
+                try:
+                    os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
                 self.process.kill()
                 self.process.wait(timeout=5)
             except Exception:
@@ -932,6 +921,51 @@ class MistralVibeProvider(AIProvider):
         return self.process is None or self.process.poll() is None
 
 
+class MockProvider(AIProvider):
+    """Mock provider for testing. Returns predictable responses."""
+
+    def __init__(self, config: ModelConfig):
+        super().__init__(config)
+        self._alive = False
+        self._messages = []
+        self._response_queue = []
+
+    def queue_response(self, response: str) -> None:
+        """Queue a response to be returned by get_response."""
+        self._response_queue.append(response)
+
+    def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
+        self._alive = True
+        self._notify_activity('text', 'Mock session started')
+        return True
+
+    def send_message(self, message: str) -> None:
+        self._messages.append(message)
+        self._notify_activity('tool', 'MockTool: processing')
+
+    def get_response(self, timeout: float = 30.0) -> str:
+        import time
+        time.sleep(0.1)  # Simulate some processing
+        self._notify_activity('text', 'Mock response ready')
+
+        if self._response_queue:
+            return self._response_queue.pop(0)
+
+        # Default response for breakdown requests
+        last_msg = self._messages[-1] if self._messages else ""
+        if "subtask" in last_msg.lower() or "break" in last_msg.lower():
+            return '{"subtasks": [{"id": "1", "description": "Mock task", "dependencies": []}]}'
+
+        # Default response for other requests
+        return "Mock response: Task completed successfully."
+
+    def stop_session(self) -> None:
+        self._alive = False
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+
 def create_provider(config: ModelConfig) -> AIProvider:
     """Factory function to create the appropriate provider.
 
@@ -952,5 +986,7 @@ def create_provider(config: ModelConfig) -> AIProvider:
         return GeminiCodeAssistProvider(config)
     elif config.provider == 'mistral':
         return MistralVibeProvider(config)
+    elif config.provider == 'mock':
+        return MockProvider(config)
     else:
         raise ValueError(f"Unsupported provider: {config.provider}")
