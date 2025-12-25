@@ -259,7 +259,8 @@ class SecurityManager:
         provider: str,
         api_key: str,
         password: str,
-        model: str | None = None
+        model: str | None = None,
+        reasoning: str | None = None
     ) -> None:
         """Store a named account with encrypted API key.
 
@@ -269,6 +270,7 @@ class SecurityManager:
             api_key: Plain text API key
             password: Main password for encryption
             model: Optional model name to use for this account
+            reasoning: Optional reasoning effort to use for this account
         """
         config = self.load_config()
         encryption_salt = base64.urlsafe_b64decode(config['encryption_salt'].encode())
@@ -281,7 +283,8 @@ class SecurityManager:
         config['accounts'][account_name] = {
             'provider': provider,
             'key': encrypted_key,
-            'model': model or 'default'
+            'model': model or 'default',
+            'reasoning': reasoning or 'default'
         }
         self.save_config(config)
 
@@ -300,6 +303,16 @@ class SecurityManager:
             config['accounts'][account_name]['model'] = model
             self.save_config(config)
 
+    def set_account_reasoning(self, account_name: str, reasoning: str) -> None:
+        """Set reasoning effort for an account."""
+        if not self.has_account(account_name):
+            raise ValueError(f"Account '{account_name}' does not exist")
+
+        config = self.load_config()
+        if 'accounts' in config and account_name in config['accounts']:
+            config['accounts'][account_name]['reasoning'] = reasoning
+            self.save_config(config)
+
     def get_account_model(self, account_name: str) -> str:
         """Get the model configured for an account.
 
@@ -312,6 +325,13 @@ class SecurityManager:
         config = self.load_config()
         if 'accounts' in config and account_name in config['accounts']:
             return config['accounts'][account_name].get('model', 'default')
+        return 'default'
+
+    def get_account_reasoning(self, account_name: str) -> str:
+        """Get the reasoning effort configured for an account."""
+        config = self.load_config()
+        if 'accounts' in config and account_name in config['accounts']:
+            return config['accounts'][account_name].get('reasoning', 'default')
         return 'default'
 
     def get_account(self, account_name: str, password: str) -> dict[str, str] | None:

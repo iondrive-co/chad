@@ -279,7 +279,7 @@ Config stored in `~/.chad.conf`:
   "password_hash": "bcrypt hash",
   "encryption_salt": "base64 salt",
   "accounts": {
-    "account-name": {"provider": "anthropic", "key": "encrypted", "model": "default"}
+    "account-name": {"provider": "anthropic", "key": "encrypted", "model": "default", "reasoning": "default"}
   },
   "role_assignments": {
     "CODING": "account-name",
@@ -291,12 +291,19 @@ Config stored in `~/.chad.conf`:
 ### Model Selection
 
 Each account can set its role and preferred model directly from its provider card in the Providers tab.
-Available models per provider:
-- **Anthropic:** claude-sonnet-4-20250514, claude-opus-4-20250514, default
-- **OpenAI:** o3, o4-mini, codex-mini, default
-- **Gemini:** gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite, default
+Model discovery is handled by `src/chad/model_catalog.py`, which merges:
+- Fallback lists per provider
+- Stored account model (so custom entries persist)
+- Provider metadata (e.g., Codex `~/.codex/config.toml` migrations)
+- Recent session files (e.g., `~/.codex/sessions/**/*.jsonl`)
 
-Custom models can also be entered manually (allow_custom_value is enabled).
+Fallback models per provider (merged with discoveries):
+- **Anthropic:** claude-sonnet-4-20250514, claude-opus-4-20250514, default
+- **OpenAI:** gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1-codex, gpt-5.1-codex-mini, gpt-5.2, gpt-4.1, gpt-4.1-mini, o3, o4-mini, codex-mini, default
+- **Gemini:** gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite, default
+- **Mistral:** default
+
+Custom models can also be entered manually (`allow_custom_value` is enabled). OpenAI accounts additionally store a `reasoning` preference (default, low, medium, high, xhigh) that is passed to the Codex CLI via `model_reasoning_effort`.
 
 ## Adding a New Provider
 
