@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chad-ai"
-version = "0.3.4"
+version = "0.3.5"
 description = "Chad: YOLO AI"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -33,6 +33,10 @@ dependencies = [
 dev = [
     "pytest>=7.4.0",
     "black>=23.0.0",
+    "flake8>=6.0.0",
+    "mypy>=1.0.0",
+    "playwright>=1.40.0",
+    "mcp>=1.25.0",
 ]
 
 [project.scripts]

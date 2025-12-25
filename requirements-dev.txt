@@ -9,3 +9,4 @@ mypy>=1.0.0
 
 # Visual testing
 playwright>=1.40.0
+mcp>=1.25.0
