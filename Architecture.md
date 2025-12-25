@@ -316,16 +316,26 @@ Custom models can also be entered manually (`allow_custom_value` is enabled). Op
 
 ## Visual Inspection
 
-Chad includes a screenshot utility for visually verifying UI changes. This uses Playwright to capture the Gradio interface.
+Chad includes a Playwright-based verification path (MCP) plus a standalone screenshot utility for visually validating the Gradio UI.
 
-### Setup
+### MCP (Recommended for agents)
+
+```bash
+python -m chad.mcp_playwright
+```
+
+- Tools: `run_ui_smoke` (Run + Providers screenshots and delete-button measurements), `screenshot` (tab-only), `measure_provider_delete` (Providers tab sizing with `fills_height` flag)
+- Outputs: artifacts under `/tmp/chad/mcp-playwright/<timestamp>/`
+- Requirements: `pip install playwright modelcontextprotocol` and `playwright install chromium`
+
+### Manual screenshot helper
 
 ```bash
 pip install playwright
 playwright install chromium
 ```
 
-### Usage
+Usage:
 
 With Chad running on port 7860:
 
