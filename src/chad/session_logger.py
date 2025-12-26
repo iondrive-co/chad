@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+import json
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from typing import Iterable
+
+
+class SessionLogger:
+    """Create and update per-session log files."""
+
+    def __init__(self, base_dir: Path | None = None) -> None:
+        self.base_dir = base_dir or Path(tempfile.gettempdir()) / "chad"
+        self.base_dir.mkdir(exist_ok=True)
+
+    def create_log(
+        self,
+        *,
+        task_description: str,
+        project_path: str,
+        coding_account: str,
+        coding_provider: str,
+        management_account: str,
+        management_provider: str,
+        managed_mode: bool = False,
+    ) -> Path:
+        """Create a new session log and return its path."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"chad_session_{timestamp}.json"
+        filepath = self.base_dir / filename
+
+        session_data = {
+            "timestamp": datetime.now().isoformat(),
+            "task_description": task_description,
+            "project_path": project_path,
+            "managed_mode": managed_mode,
+            "coding": {
+                "account": coding_account,
+                "provider": coding_provider,
+            },
+            "management": {
+                "account": management_account,
+                "provider": management_provider,
+            },
+            "status": "running",
+            "success": None,
+            "completion_reason": None,
+            "conversation": [],
+        }
+
+        with open(filepath, "w") as f:
+            json.dump(session_data, f, indent=2)
+
+        return filepath
+
+    def update_log(
+        self,
+        filepath: Path,
+        chat_history: Iterable,
+        *,
+        success: bool | None = None,
+        completion_reason: str | None = None,
+        status: str = "running",
+    ) -> None:
+        """Update an existing session log with new data."""
+        try:
+            with open(filepath) as f:
+                session_data = json.load(f)
+
+            session_data["conversation"] = list(chat_history)
+            session_data["status"] = status
+            if success is not None:
+                session_data["success"] = success
+            if completion_reason is not None:
+                session_data["completion_reason"] = completion_reason
+
+            with open(filepath, "w") as f:
+                json.dump(session_data, f, indent=2)
+        except Exception:
+            # Logging failures shouldn't break the task flow.
+            pass

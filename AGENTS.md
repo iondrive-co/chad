@@ -255,47 +255,60 @@ Custom models can also be entered manually (`allow_custom_value` is enabled). Op
 
 ## Visual Inspection
 
-Chad includes a Playwright-based verification path (MCP) plus a standalone screenshot utility for visually validating the Gradio UI.
+Chad provides multiple ways to verify UI changes, listed from most to least rigorous:
 
-### MCP (Recommended for agents)
+### 1. Pytest Integration Tests (Most Rigorous)
+
+Run the Playwright-based UI integration tests:
+
+```bash
+PYTHONPATH=src python3 -m pytest tests/test_ui_integration.py -v
+```
+
+These tests:
+- Start Chad with mock providers in a temporary environment
+- Use Playwright to verify all UI elements render correctly
+- Test the delete provider two-step confirmation flow
+- Validate element sizing and visibility
+- Take screenshots to pytest's `tmp_path` for inspection
+
+**Use this after any UI changes to ensure nothing is broken.**
+
+### 2. MCP Tools (For Agents During Development)
+
+Start the MCP server for agent-accessible UI verification:
 
 ```bash
 python -m chad.mcp_playwright
 ```
 
-- Tools: `run_ui_smoke` (Run + Providers screenshots and delete-button measurements), `screenshot` (tab-only), `measure_provider_delete` (Providers tab sizing with `fills_height` flag)
-- Outputs: artifacts under `/tmp/chad/mcp-playwright/<timestamp>/`
-- Requirements: `pip install playwright modelcontextprotocol` and `playwright install chromium`
+Available tools:
+- `run_ui_smoke` - Full smoke test with screenshots of both tabs
+- `screenshot` - Capture a specific tab
+- `measure_provider_delete` - Verify delete button sizing
+- `list_providers` - Get visible provider names
+- `test_delete_provider` - Test the delete flow end-to-end
 
-### Manual screenshot helper
+Artifacts are saved to `/tmp/chad/mcp-playwright/<timestamp>/`
+
+Requirements: `pip install playwright modelcontextprotocol && playwright install chromium`
+
+### 3. Screenshot Script (Quick Visual Check)
+
+For quick visual verification without running full tests:
 
 ```bash
-pip install playwright
-playwright install chromium
+python scripts/screenshot_ui.py --tab providers --headless
+python scripts/screenshot_ui.py --tab run -o /tmp/run-tab.png
 ```
 
-Usage:
+Options:
+- `--tab run|providers` - Which tab to screenshot
+- `--output PATH` - Output path (default: `/tmp/chad/screenshot.png`)
+- `--headless` - Run without visible browser window
 
-With Chad running on port 7860:
+### For Agents Making UI Changes
 
-```bash
-# Screenshot default (Run Task) tab
-python scripts/screenshot_ui.py
-
-# Screenshot Providers tab
-python scripts/screenshot_ui.py --tab providers
-
-# Custom output path
-python scripts/screenshot_ui.py --output /tmp/my-screenshot.png
-```
-
-The screenshot is saved to `/tmp/chad_screenshot.png` by default. Use the Read tool to view it.
-
-### For Agents
-
-When making visual changes to the UI:
-
-1. Ensure Chad is running (`chad` command in another terminal)
-2. Run the screenshot utility: `python scripts/screenshot_ui.py --tab <affected-tab>`
-3. View the screenshot using the Read tool to verify changes look correct
-4. Screenshot both tabs if changes affect multiple areas
+1. **After changes**: Run `PYTHONPATH=src python3 -m pytest tests/test_ui_integration.py -v`
+2. **During development**: Use MCP tools for quick visual checks
+3. **View screenshots**: Use the Read tool on saved PNG files

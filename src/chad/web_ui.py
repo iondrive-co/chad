@@ -2,17 +2,27 @@
 
 import os
 import re
-import gradio as gr
-from pathlib import Path
 import threading
 import queue
+from pathlib import Path
 from typing import Iterator
 
+import gradio as gr
+
+from .provider_ui import ProviderUIManager
 from .security import SecurityManager
+from .session_logger import SessionLogger
 from .session_manager import (
-    SessionManager, get_coding_timeout, get_management_timeout,
-    TaskPhase, INVESTIGATION_PROMPT, IMPLEMENTATION_PROMPT, VERIFICATION_PROMPT, SAFETY_CONSTRAINTS,
-    CODING_INVESTIGATION_CONTEXT, CODING_IMPLEMENTATION_CONTEXT
+    CODING_IMPLEMENTATION_CONTEXT,
+    CODING_INVESTIGATION_CONTEXT,
+    IMPLEMENTATION_PROMPT,
+    INVESTIGATION_PROMPT,
+    SAFETY_CONSTRAINTS,
+    SessionManager,
+    TaskPhase,
+    VERIFICATION_PROMPT,
+    get_coding_timeout,
+    get_management_timeout,
 )
 from .providers import ModelConfig, parse_codex_output, extract_final_codex_response
 from .model_catalog import ModelCatalog
@@ -468,756 +478,77 @@ class ChadWebUI:
         self.active_sessions = {}
         self.cancel_requested = False
         self._active_coding_provider = None
-        self._last_status_header = ""
-        self._last_summary = ""
-        self._last_all_messages: list[dict] = []
-        # Number of provider cards to render; expanded during UI creation to allow new providers
         self.provider_card_count = 10
         self.model_catalog = ModelCatalog(security_mgr)
+        self.provider_ui = ProviderUIManager(security_mgr, main_password, self.model_catalog)
+        self.session_logger = SessionLogger()
+        self.current_session_log_path: Path | None = None
 
-    SUPPORTED_PROVIDERS = {"anthropic", "openai", "gemini", "mistral"}
-    OPENAI_REASONING_LEVELS = ["default", "low", "medium", "high", "xhigh"]
+    SUPPORTED_PROVIDERS = ProviderUIManager.SUPPORTED_PROVIDERS
+    OPENAI_REASONING_LEVELS = ProviderUIManager.OPENAI_REASONING_LEVELS
 
     def list_providers(self) -> str:
-        """Summarize all configured providers with role and model."""
-        accounts = self.security_mgr.list_accounts()
-        role_assignments = self.security_mgr.list_role_assignments()
-
-        if not accounts:
-            return "No providers configured yet. Add a provider with the ➕ below."
-
-        rows = []
-        for account_name, provider in accounts.items():
-            roles = [role for role, acct in role_assignments.items() if acct == account_name]
-            role_str = f" — roles: {', '.join(roles)}" if roles else ""
-            model = self.security_mgr.get_account_model(account_name)
-            model_str = f" | preferred model: `{model}`" if model != 'default' else ""
-            reasoning = self.security_mgr.get_account_reasoning(account_name)
-            reasoning_str = f" | reasoning: `{reasoning}`" if reasoning != 'default' else ""
-            rows.append(f"- **{account_name}** ({provider}){role_str}{model_str}{reasoning_str}")
-
-        return "\n".join(rows)
+        return self.provider_ui.list_providers()
 
     def _get_account_role(self, account_name: str) -> str | None:
-        """Return the role assigned to the account, if any."""
-        role_assignments = self.security_mgr.list_role_assignments()
-        roles = [role for role, acct in role_assignments.items() if acct == account_name]
-        if len(roles) == 0:
-            return None
-        if 'CODING' in roles and 'MANAGEMENT' in roles:
-            return "BOTH"
-        return roles[0]
+        return self.provider_ui._get_account_role(account_name)
 
     def get_provider_usage(self, account_name: str) -> str:
-        """Get usage text for a single provider."""
-        accounts = self.security_mgr.list_accounts()
-        provider = accounts.get(account_name)
-
-        if not provider:
-            return "Select a provider to see usage details."
-
-        if provider == 'openai':
-            status_text = self._get_codex_usage(account_name)
-        elif provider == 'anthropic':
-            status_text = self._get_claude_usage()
-        elif provider == 'gemini':
-            status_text = self._get_gemini_usage()
-        elif provider == 'mistral':
-            status_text = self._get_mistral_usage()
-        else:
-            status_text = "⚠️ **Unknown provider**"
-
-        return status_text
+        return self.provider_ui.get_provider_usage(account_name)
 
     def _progress_bar(self, utilization_pct: float, width: int = 20) -> str:
-        """Create a text progress bar for usage displays."""
-        filled = int(max(0.0, min(100.0, utilization_pct)) / (100 / width))
-        return '█' * filled + '░' * (width - filled)
+        return self.provider_ui._progress_bar(utilization_pct, width)
 
     def get_remaining_usage(self, account_name: str) -> float:
-        """Get remaining usage as 0.0-1.0 (1.0 = full capacity remaining).
-
-        Used to sort providers by availability - highest remaining usage first.
-        """
-        accounts = self.security_mgr.list_accounts()
-        provider = accounts.get(account_name)
-
-        if not provider:
-            return 0.0
-
-        if provider == 'anthropic':
-            return self._get_claude_remaining_usage()
-        elif provider == 'openai':
-            return self._get_codex_remaining_usage(account_name)
-        elif provider == 'gemini':
-            return self._get_gemini_remaining_usage()
-        elif provider == 'mistral':
-            return self._get_mistral_remaining_usage()
-
-        return 0.3  # Unknown provider, bias low
+        return self.provider_ui.get_remaining_usage(account_name)
 
     def _get_claude_remaining_usage(self) -> float:
-        """Get Claude remaining usage from API (0.0-1.0)."""
-        import json
-        import requests
-        from pathlib import Path
-
-        creds_file = Path.home() / ".claude" / ".credentials.json"
-        if not creds_file.exists():
-            return 0.0
-
-        try:
-            with open(creds_file) as f:
-                creds = json.load(f)
-
-            oauth_data = creds.get('claudeAiOauth', {})
-            access_token = oauth_data.get('accessToken', '')
-            if not access_token:
-                return 0.0
-
-            response = requests.get(
-                'https://api.anthropic.com/api/oauth/usage',
-                headers={
-                    'Authorization': f'Bearer {access_token}',
-                    'anthropic-beta': 'oauth-2025-04-20',
-                    'User-Agent': 'claude-code/2.0.32',
-                    'Content-Type': 'application/json',
-                },
-                timeout=10
-            )
-
-            if response.status_code != 200:
-                return 0.3  # API error, bias low
-
-            usage_data = response.json()
-            five_hour = usage_data.get('five_hour', {})
-            util = five_hour.get('utilization', 0)
-            return max(0.0, min(1.0, 1.0 - (util / 100.0)))
-
-        except Exception:
-            return 0.3  # Error, bias low
+        return self.provider_ui._get_claude_remaining_usage()
 
     def _get_codex_remaining_usage(self, account_name: str) -> float:
-        """Get Codex remaining usage from session files (0.0-1.0)."""
-        import json
-        import os
-        from pathlib import Path
-
-        codex_home = self._get_codex_home(account_name)
-        auth_file = codex_home / ".codex" / "auth.json"
-        if not auth_file.exists():
-            return 0.0
-
-        sessions_dir = codex_home / ".codex" / "sessions"
-        if not sessions_dir.exists():
-            return 0.8  # Logged in but no sessions, assume mostly available
-
-        session_files = []
-        for root, _, files in os.walk(sessions_dir):
-            for f in files:
-                if f.endswith('.jsonl'):
-                    path = Path(root) / f
-                    session_files.append((path.stat().st_mtime, path))
-
-        if not session_files:
-            return 0.8
-
-        session_files.sort(reverse=True)
-        latest_session = session_files[0][1]
-
-        try:
-            rate_limits = None
-            with open(latest_session) as f:
-                for line in f:
-                    if 'rate_limits' in line:
-                        data = json.loads(line.strip())
-                        if data.get('type') == 'event_msg':
-                            payload = data.get('payload', {})
-                            if payload.get('type') == 'token_count':
-                                rate_limits = payload.get('rate_limits')
-
-            if rate_limits:
-                primary = rate_limits.get('primary', {})
-                if primary:
-                    util = primary.get('used_percent', 0)
-                    return max(0.0, min(1.0, 1.0 - (util / 100.0)))
-
-        except Exception:
-            pass
-
-        return 0.3  # Error, bias low
+        return self.provider_ui._get_codex_remaining_usage(account_name)
 
     def _get_gemini_remaining_usage(self) -> float:
-        """Estimate Gemini remaining usage (0.0-1.0).
-
-        No programmatic API available for quota, so we estimate based on
-        whether logged in. Biased low since we can't verify actual quota.
-        """
-        from pathlib import Path
-
-        oauth_file = Path.home() / ".gemini" / "oauth_creds.json"
-        if not oauth_file.exists():
-            return 0.0
-
-        return 0.3  # Logged in but no quota API, bias low
+        return self.provider_ui._get_gemini_remaining_usage()
 
     def _get_mistral_remaining_usage(self) -> float:
-        """Estimate Mistral remaining usage (0.0-1.0).
-
-        No programmatic API available for quota, so we estimate based on
-        whether logged in. Biased low since we can't verify actual quota.
-        """
-        from pathlib import Path
-
-        vibe_config = Path.home() / ".vibe" / "config.toml"
-        if not vibe_config.exists():
-            return 0.0
-
-        return 0.3  # Logged in but no quota API, bias low
+        return self.provider_ui._get_mistral_remaining_usage()
 
     def _provider_state(self, pending_delete: str = None) -> tuple:
-        """Build UI state for provider cards (summary + per-account controls).
-
-        Args:
-            pending_delete: If set, this account's delete button shows "Confirm?"
-        """
-        accounts = self.security_mgr.list_accounts()
-        # Sort accounts by remaining_usage (highest first)
-        account_items = sorted(
-            accounts.items(),
-            key=lambda x: self.get_remaining_usage(x[0]),
-            reverse=True
-        )
-        list_md = self.list_providers()
-
-        outputs: list = [list_md]
-        card_slots = self.provider_card_count
-
-        for idx in range(card_slots):
-            if idx < len(account_items):
-                account_name, provider = account_items[idx]
-                header = f'<span class="provider-card__header-text">{account_name} ({provider})</span>'
-                current_role = self._get_account_role(account_name)
-                role_value = current_role if current_role else "(none)"
-                model_choices = self.get_models_for_account(account_name)
-                stored_model = self.security_mgr.get_account_model(account_name)
-                model_value = stored_model if stored_model in model_choices else model_choices[0]
-                reasoning_choices = self.get_reasoning_choices(provider, account_name)
-                stored_reasoning = self.security_mgr.get_account_reasoning(account_name)
-                reasoning_value = stored_reasoning if stored_reasoning in reasoning_choices else reasoning_choices[0]
-                usage = self.get_provider_usage(account_name)
-
-                # Show confirm icon on pending delete button, normal trash icon otherwise
-                if pending_delete == account_name:
-                    delete_btn_update = gr.update(value="✓", variant="stop")
-                else:
-                    delete_btn_update = gr.update(value="🗑︎", variant="secondary")
-
-                outputs.extend([
-                    gr.update(visible=True),
-                    header,
-                    account_name,
-                    gr.update(value=role_value),
-                    gr.update(choices=model_choices, value=model_value),
-                    gr.update(choices=reasoning_choices, value=reasoning_value),
-                    usage,
-                    delete_btn_update
-                ])
-            else:
-                outputs.extend([
-                    gr.update(visible=False),
-                    "",
-                    "",
-                    gr.update(value="(none)"),
-                    gr.update(choices=['default'], value='default'),
-                    gr.update(choices=['default'], value='default'),
-                    "",
-                    gr.update(value="🗑︎", variant="secondary")  # Reset delete button
-                ])
-
-        return tuple(outputs)
+        return self.provider_ui.provider_state(self.provider_card_count, pending_delete=pending_delete)
 
     def _provider_action_response(self, feedback: str, pending_delete: str = None):
-        """Return standard provider panel updates with feedback text.
-
-        Args:
-            feedback: Message to show in the feedback area
-            pending_delete: If set, this account's delete button shows "Confirm?"
-        """
-        return (feedback, *self._provider_state(pending_delete=pending_delete))
+        return self.provider_ui.provider_action_response(feedback, self.provider_card_count, pending_delete=pending_delete)
 
     def _provider_state_with_confirm(self, pending_delete: str) -> tuple:
-        """Build provider state with one delete button showing 'Confirm?'."""
-        return self._provider_state(pending_delete=pending_delete)
+        return self.provider_ui.provider_state_with_confirm(pending_delete, self.provider_card_count)
 
     def _get_codex_home(self, account_name: str) -> Path:
-        """Get the isolated HOME directory for a Codex account."""
-        from pathlib import Path
-        return Path.home() / ".chad" / "codex-homes" / account_name
+        return self.provider_ui._get_codex_home(account_name)
 
     def _get_codex_usage(self, account_name: str) -> str:
-        """Get usage info from Codex by parsing JWT token and session files."""
-        import json
-        import base64
-        from datetime import datetime
-
-        codex_home = self._get_codex_home(account_name)
-        auth_file = codex_home / ".codex" / "auth.json"
-        if not auth_file.exists():
-            return "❌ **Not logged in**\n\nClick 'Login' to authenticate this account."
-
-        try:
-            with open(auth_file) as f:
-                auth_data = json.load(f)
-
-            tokens = auth_data.get('tokens', {})
-            access_token = tokens.get('access_token', '')
-
-            if not access_token:
-                return "❌ **Not logged in**\n\nClick 'Login' to authenticate this account."
-
-            # Decode JWT payload (middle part)
-            parts = access_token.split('.')
-            if len(parts) != 3:
-                return "⚠️ **Invalid token format**"
-
-            # Add padding for base64 decode
-            payload = parts[1]
-            padding = 4 - len(payload) % 4
-            if padding != 4:
-                payload += '=' * padding
-
-            decoded = base64.urlsafe_b64decode(payload)
-            jwt_data = json.loads(decoded)
-
-            # Extract info
-            auth_info = jwt_data.get('https://api.openai.com/auth', {})
-            profile = jwt_data.get('https://api.openai.com/profile', {})
-
-            plan_type = auth_info.get('chatgpt_plan_type', 'unknown').upper()
-            email = profile.get('email', 'Unknown')
-            exp_timestamp = jwt_data.get('exp', 0)
-
-            # Format expiration
-            exp_date = datetime.fromtimestamp(exp_timestamp).strftime('%Y-%m-%d %H:%M') if exp_timestamp else 'Unknown'
-
-            result = f"✅ **Logged in** ({plan_type} plan)\n\n"
-            result += f"**Account:** {email}\n"
-            result += f"**Token expires:** {exp_date}\n\n"
-
-            # Try to get usage data from Codex session files
-            usage_data = self._get_codex_session_usage(account_name)
-            if usage_data:
-                result += "**Current Usage**\n\n"
-                result += usage_data
-            else:
-                result += "⚠️ **Usage data unavailable**\n\n"
-                result += "OpenAI/Codex only provides usage information after the first model interaction. "
-                result += "Start a coding session to see rate limit details.\n\n"
-                result += "*Press refresh after using this provider to see current data*"
-
-            return result
-
-        except Exception as e:
-            return f"⚠️ **Error reading auth data:** {str(e)}"
+        return self.provider_ui._get_codex_usage(account_name)
 
     def _get_codex_session_usage(self, account_name: str) -> str | None:  # noqa: C901
-        """Extract usage data from the most recent Codex session file."""
-        import json
-        import os
-        from pathlib import Path
-        from datetime import datetime
-
-        codex_home = self._get_codex_home(account_name)
-        sessions_dir = codex_home / ".codex" / "sessions"
-        if not sessions_dir.exists():
-            return None
-
-        # Find the most recent session file
-        session_files = []
-        for root, _, files in os.walk(sessions_dir):
-            for f in files:
-                if f.endswith('.jsonl'):
-                    path = Path(root) / f
-                    session_files.append((path.stat().st_mtime, path))
-
-        if not session_files:
-            return None
-
-        # Sort by modification time, most recent first
-        session_files.sort(reverse=True)
-        latest_session = session_files[0][1]
-
-        # Read the file and find the last rate_limits entry
-        rate_limits = None
-        timestamp = None
-        try:
-            with open(latest_session) as f:
-                for line in f:
-                    if 'rate_limits' in line:
-                        data = json.loads(line.strip())
-                        if data.get('type') == 'event_msg':
-                            payload = data.get('payload', {})
-                            if payload.get('type') == 'token_count':
-                                rate_limits = payload.get('rate_limits')
-                                timestamp = data.get('timestamp')
-        except (json.JSONDecodeError, OSError):
-            return None
-
-        if not rate_limits:
-            return None
-
-        result = ""
-
-        # 5-hour limit (primary)
-        primary = rate_limits.get('primary', {})
-        if primary:
-            util = primary.get('used_percent', 0)
-            reset_at = primary.get('resets_at', 0)
-
-            bar = self._progress_bar(util)
-
-            # Format reset time
-            if reset_at:
-                reset_dt = datetime.fromtimestamp(reset_at)
-                reset_str = reset_dt.strftime('%I:%M%p')
-            else:
-                reset_str = 'N/A'
-
-            result += "**5-hour session**\n"
-            result += f"[{bar}] {util:.0f}% used\n"
-            result += f"Resets at {reset_str}\n\n"
-
-        # Weekly limit (secondary)
-        secondary = rate_limits.get('secondary', {})
-        if secondary:
-            util = secondary.get('used_percent', 0)
-            reset_at = secondary.get('resets_at', 0)
-
-            bar = self._progress_bar(util)
-
-            if reset_at:
-                reset_dt = datetime.fromtimestamp(reset_at)
-                reset_str = reset_dt.strftime('%b %d')
-            else:
-                reset_str = 'N/A'
-
-            result += "**Weekly limit**\n"
-            result += f"[{bar}] {util:.0f}% used\n"
-            result += f"Resets {reset_str}\n\n"
-
-        # Credits (if available)
-        credits = rate_limits.get('credits', {})
-        if credits:
-            has_credits = credits.get('has_credits', False)
-            unlimited = credits.get('unlimited', False)
-            balance = credits.get('balance')
-
-            if unlimited:
-                result += "**Credits:** Unlimited\n\n"
-            elif has_credits and balance is not None:
-                result += f"**Credits balance:** ${balance}\n\n"
-
-        # Show when data was last updated
-        if timestamp:
-            try:
-                update_dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                result += f"*Last updated: {update_dt.strftime('%Y-%m-%d %H:%M UTC')}*\n"
-            except ValueError:
-                pass
-
-        return result if result else None
+        return self.provider_ui._get_codex_session_usage(account_name)
 
     def _get_claude_usage(self) -> str:  # noqa: C901
-        """Get usage info from Claude via API."""
-        import json
-        import requests
-        from pathlib import Path
-        from datetime import datetime
-
-        creds_file = Path.home() / ".claude" / ".credentials.json"
-        if not creds_file.exists():
-            return "❌ **Not logged in**\n\nRun `claude` in terminal to authenticate."
-
-        try:
-            with open(creds_file) as f:
-                creds = json.load(f)
-
-            oauth_data = creds.get('claudeAiOauth', {})
-            access_token = oauth_data.get('accessToken', '')
-            subscription_type = oauth_data.get('subscriptionType', 'unknown').upper()
-
-            if not access_token:
-                return "❌ **Not logged in**\n\nRun `claude` in terminal to authenticate."
-
-            # Call the usage API
-            response = requests.get(
-                'https://api.anthropic.com/api/oauth/usage',
-                headers={
-                    'Authorization': f'Bearer {access_token}',
-                    'anthropic-beta': 'oauth-2025-04-20',
-                    'User-Agent': 'claude-code/2.0.32',
-                    'Content-Type': 'application/json',
-                },
-                timeout=10
-            )
-
-            if response.status_code != 200:
-                return f"⚠️ **Error fetching usage:** HTTP {response.status_code}"
-
-            usage_data = response.json()
-
-            # Build the display
-            result = f"✅ **Logged in** ({subscription_type} plan)\n\n"
-            result += "**Current Usage**\n\n"
-
-            # 5-hour limit
-            five_hour = usage_data.get('five_hour', {})
-            if five_hour:
-                util = five_hour.get('utilization', 0)
-                reset_at = five_hour.get('resets_at', '')
-
-                bar = self._progress_bar(util)
-
-                # Format reset time
-                if reset_at:
-                    try:
-                        reset_dt = datetime.fromisoformat(reset_at.replace('Z', '+00:00'))
-                        reset_str = reset_dt.strftime('%I:%M%p')
-                    except ValueError:
-                        reset_str = reset_at
-                else:
-                    reset_str = 'N/A'
-
-                result += "**5-hour session**\n"
-                result += f"[{bar}] {util:.0f}% used\n"
-                result += f"Resets at {reset_str}\n\n"
-
-            # 7-day limit (if present)
-            seven_day = usage_data.get('seven_day')
-            if seven_day:
-                util = seven_day.get('utilization', 0)
-                reset_at = seven_day.get('resets_at', '')
-
-                bar = self._progress_bar(util)
-
-                if reset_at:
-                    try:
-                        reset_dt = datetime.fromisoformat(reset_at.replace('Z', '+00:00'))
-                        reset_str = reset_dt.strftime('%b %d')
-                    except ValueError:
-                        reset_str = reset_at
-                else:
-                    reset_str = 'N/A'
-
-                result += "**Weekly limit**\n"
-                result += f"[{bar}] {util:.0f}% used\n"
-                result += f"Resets {reset_str}\n\n"
-
-            # Extra usage (if enabled)
-            extra = usage_data.get('extra_usage', {})
-            if extra and extra.get('is_enabled'):
-                used = extra.get('used_credits', 0)
-                limit = extra.get('monthly_limit', 0)
-                util = extra.get('utilization', 0)
-
-                bar = self._progress_bar(util)
-
-                result += "**Extra credits**\n"
-                result += f"[{bar}] ${used:.0f} / ${limit:.0f} ({util:.1f}%)\n\n"
-
-            return result
-
-        except requests.exceptions.RequestException as e:
-            return f"⚠️ **Network error:** {str(e)}"
-        except Exception as e:
-            return f"⚠️ **Error:** {str(e)}"
+        return self.provider_ui._get_claude_usage()
 
     def _get_gemini_usage(self) -> str:  # noqa: C901
-        """Get usage info from Gemini by parsing session files."""
-        import json
-        from pathlib import Path
-        from collections import defaultdict
-
-        gemini_dir = Path.home() / ".gemini"
-        oauth_file = gemini_dir / "oauth_creds.json"
-
-        if not oauth_file.exists():
-            return "❌ **Not logged in**\n\nRun `gemini` in terminal to authenticate."
-
-        # Find all session files
-        tmp_dir = gemini_dir / "tmp"
-        if not tmp_dir.exists():
-            return ("✅ **Logged in**\n\n"
-                    "⚠️ **Usage data unavailable**\n\n"
-                    "Google Gemini only provides usage information after the first model interaction. "
-                    "Start a coding session to see token usage details.\n\n"
-                    "*Press refresh after using this provider to see current data*")
-
-        session_files = list(tmp_dir.glob("*/chats/session-*.json"))
-        if not session_files:
-            return ("✅ **Logged in**\n\n"
-                    "⚠️ **Usage data unavailable**\n\n"
-                    "Google Gemini only provides usage information after the first model interaction. "
-                    "Start a coding session to see token usage details.\n\n"
-                    "*Press refresh after using this provider to see current data*")
-
-        # Aggregate token usage by model
-        model_usage = defaultdict(lambda: {"requests": 0, "input_tokens": 0, "output_tokens": 0, "cached_tokens": 0})
-
-        for session_file in session_files:
-            try:
-                with open(session_file) as f:
-                    session_data = json.load(f)
-
-                messages = session_data.get("messages", [])
-                for msg in messages:
-                    if msg.get("type") == "gemini":
-                        tokens = msg.get("tokens", {})
-                        model = msg.get("model", "unknown")
-
-                        model_usage[model]["requests"] += 1
-                        model_usage[model]["input_tokens"] += tokens.get("input", 0)
-                        model_usage[model]["output_tokens"] += tokens.get("output", 0)
-                        model_usage[model]["cached_tokens"] += tokens.get("cached", 0)
-            except (json.JSONDecodeError, OSError, KeyError):
-                continue
-
-        if not model_usage:
-            return "✅ **Logged in**\n\n*No usage data yet*"
-
-        # Build display
-        result = "✅ **Logged in**\n\n"
-        result += "**Model Usage**\n\n"
-        result += "| Model | Reqs | Input | Output |\n"
-        result += "|-------|------|-------|--------|\n"
-
-        total_input = 0
-        total_output = 0
-        total_cached = 0
-        total_requests = 0
-
-        for model, usage in sorted(model_usage.items()):
-            reqs = usage["requests"]
-            input_tok = usage["input_tokens"]
-            output_tok = usage["output_tokens"]
-            cached_tok = usage["cached_tokens"]
-
-            total_requests += reqs
-            total_input += input_tok
-            total_output += output_tok
-            total_cached += cached_tok
-
-            result += f"| {model} | {reqs:,} | {input_tok:,} | {output_tok:,} |\n"
-
-        # Summary with cache savings
-        if total_cached > 0 and total_input > 0:
-            cache_pct = (total_cached / total_input) * 100
-            result += f"\n**Cache savings:** {total_cached:,} ({cache_pct:.1f}%) tokens served from cache\n"
-
-        return result
+        return self.provider_ui._get_gemini_usage()
 
     def _get_mistral_usage(self) -> str:
-        """Get usage info from Mistral Vibe by parsing session files."""
-        import json
-        from pathlib import Path
-
-        vibe_config = Path.home() / ".vibe" / "config.toml"
-        if not vibe_config.exists():
-            return "❌ **Not logged in**\n\nRun `vibe --setup` in terminal to authenticate."
-
-        # Find session files in default location
-        sessions_dir = Path.home() / ".vibe" / "logs" / "session"
-        if not sessions_dir.exists():
-            return "✅ **Logged in**\n\n*No session data yet*"
-
-        session_files = list(sessions_dir.glob("session_*.json"))
-        if not session_files:
-            return "✅ **Logged in**\n\n*No session data yet*"
-
-        # Aggregate stats from all session files
-        total_prompt_tokens = 0
-        total_completion_tokens = 0
-        total_cost = 0.0
-        session_count = 0
-
-        for session_file in session_files:
-            try:
-                with open(session_file) as f:
-                    data = json.load(f)
-
-                metadata = data.get("metadata", {})
-                stats = metadata.get("stats", {})
-
-                total_prompt_tokens += stats.get("session_prompt_tokens", 0)
-                total_completion_tokens += stats.get("session_completion_tokens", 0)
-                total_cost += stats.get("session_cost", 0.0)
-                session_count += 1
-            except (json.JSONDecodeError, OSError, KeyError):
-                continue
-
-        if session_count == 0:
-            return "✅ **Logged in**\n\n*No valid session data found*"
-
-        total_tokens = total_prompt_tokens + total_completion_tokens
-
-        result = "✅ **Logged in**\n\n"
-        result += "**Cumulative Usage**\n\n"
-        result += f"**Sessions:** {session_count:,}\n"
-        result += f"**Input tokens:** {total_prompt_tokens:,}\n"
-        result += f"**Output tokens:** {total_completion_tokens:,}\n"
-        result += f"**Total tokens:** {total_tokens:,}\n"
-        result += f"**Estimated cost:** ${total_cost:.4f}\n"
-
-        return result
+        return self.provider_ui._get_mistral_usage()
 
     def get_account_choices(self) -> list[str]:
-        """Get list of account names for dropdowns."""
-        return list(self.security_mgr.list_accounts().keys())
+        return self.provider_ui.get_account_choices()
 
     def _check_provider_login(self, provider_type: str, account_name: str) -> tuple[bool, str]:  # noqa: C901
-        """Check if a provider is logged in."""
-        from pathlib import Path
-
-        try:
-            if provider_type == 'openai':
-                codex_home = self._get_codex_home(account_name)
-                auth_file = codex_home / ".codex" / "auth.json"
-                if auth_file.exists():
-                    return True, "Logged in"
-                return False, "Not logged in"
-
-            elif provider_type == 'anthropic':
-                creds_file = Path.home() / ".claude" / ".credentials.json"
-                if creds_file.exists():
-                    return True, "Logged in"
-                return False, "Not logged in"
-
-            elif provider_type == 'gemini':
-                # Check for Gemini CLI's own oauth credentials, not gcloud
-                gemini_oauth = Path.home() / ".gemini" / "oauth_creds.json"
-                if gemini_oauth.exists():
-                    return True, "Logged in"
-                return False, "Not logged in"
-
-            elif provider_type == 'mistral':
-                # Check for Vibe config file
-                vibe_config = Path.home() / ".vibe" / "config.toml"
-                if vibe_config.exists():
-                    return True, "Logged in"
-                return False, "Not logged in"
-
-            return False, "Unknown provider type"
-
-        except Exception as e:
-            return False, f"Error: {str(e)}"
+        return self.provider_ui._check_provider_login(provider_type, account_name)
 
     def _setup_codex_account(self, account_name: str) -> str:
-        """Setup isolated home directory for a Codex account."""
-        codex_home = self._get_codex_home(account_name)
-        codex_dir = codex_home / ".codex"
-        codex_dir.mkdir(parents=True, exist_ok=True)
-        return str(codex_home)
+        return self.provider_ui._setup_codex_account(account_name)
 
     def login_codex_account(self, account_name: str) -> str:
         """Initiate login for a Codex account. Returns instructions for the user."""
@@ -1260,273 +591,35 @@ class ChadWebUI:
             return f"⚠️ **Login may have failed**\n\n{error}\n\nTry refreshing Usage Statistics to check status."
 
     def add_provider(self, provider_name: str, provider_type: str):  # noqa: C901
-        """Add a new provider and return refreshed provider panel state."""
-        import subprocess
-        import os
-
-        # Default form updates: keep current entry and leave accordion open
-        name_field_value = provider_name
-        add_btn_state = gr.update(interactive=bool(provider_name.strip()))
-        accordion_state = gr.update(open=True)
-
-        try:
-            if provider_type not in self.SUPPORTED_PROVIDERS:
-                base_response = self._provider_action_response(f"❌ Unsupported provider '{provider_type}'")
-                return (*base_response, name_field_value, add_btn_state, accordion_state)
-
-            existing_accounts = self.security_mgr.list_accounts()
-            base_name = provider_type
-            counter = 1
-            account_name = provider_name if provider_name else base_name
-
-            while account_name in existing_accounts:
-                account_name = f"{base_name}-{counter}"
-                counter += 1
-
-            if provider_type == 'openai':
-                # For OpenAI, setup isolated home and run login immediately
-                codex_home = self._setup_codex_account(account_name)
-
-                # Create environment with isolated HOME
-                env = os.environ.copy()
-                env['HOME'] = codex_home
-
-                # Run login - this will open a browser
-                login_result = subprocess.run(
-                    ['codex', 'login'],
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=120
-                )
-
-                if login_result.returncode == 0:
-                    # Login succeeded, now save the account
-                    self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
-                    result = f"✅ Provider '{account_name}' added and logged in!"
-                    name_field_value = ""
-                    add_btn_state = gr.update(interactive=False)
-                    accordion_state = gr.update(open=False)
-                else:
-                    # Login failed, clean up
-                    import shutil
-                    codex_home_path = self._get_codex_home(account_name)
-                    if codex_home_path.exists():
-                        shutil.rmtree(codex_home_path, ignore_errors=True)
-
-                    error = login_result.stderr.strip() if login_result.stderr else "Login was cancelled or failed"
-                    result = f"❌ Login failed for '{account_name}': {error}"
-                    base_response = self._provider_action_response(result)
-                    return (*base_response, name_field_value, add_btn_state, accordion_state)
-
-            else:
-                # For other providers, store account and check login status
-                self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
-                result = f"✓ Provider '{account_name}' ({provider_type}) added."
-
-                login_success, login_msg = self._check_provider_login(provider_type, account_name)
-
-                if login_success:
-                    result += f" ✅ {login_msg}"
-                else:
-                    result += f" ⚠️ {login_msg}"
-
-                    # Provide manual login instructions
-                    auth_info = {
-                        'anthropic': ('claude', 'Opens browser to authenticate with your Anthropic account'),
-                        'gemini': ('gemini', 'Opens browser to authenticate with your Google account'),
-                        'mistral': ('vibe --setup', 'Set up your Mistral API key')
-                    }
-                    auth_cmd, auth_desc = auth_info.get(provider_type, ('unknown', ''))
-                    result += f" — manual login: run `{auth_cmd}` ({auth_desc})"
-
-                # Only clear the form on successful add of non-OpenAI accounts
-                name_field_value = ""
-                add_btn_state = gr.update(interactive=False)
-                accordion_state = gr.update(open=False)
-
-            base_response = self._provider_action_response(result)
-            return (*base_response, name_field_value, add_btn_state, accordion_state)
-        except subprocess.TimeoutExpired:
-            # Clean up on timeout
-            import shutil
-            codex_home_path = self._get_codex_home(account_name)
-            if codex_home_path.exists():
-                shutil.rmtree(codex_home_path, ignore_errors=True)
-            base_response = self._provider_action_response(f"❌ Login timed out for '{account_name}'. Please try again.")
-            return (*base_response, name_field_value, add_btn_state, accordion_state)
-        except Exception as e:
-            base_response = self._provider_action_response(f"❌ Error adding provider: {str(e)}")
-            return (*base_response, name_field_value, add_btn_state, accordion_state)
+        return self.provider_ui.add_provider(provider_name, provider_type, self.provider_card_count)
 
     def _unassign_account_roles(self, account_name: str) -> None:
-        """Remove all role assignments for an account."""
-        role_assignments = self.security_mgr.list_role_assignments()
-        for role, acct in list(role_assignments.items()):
-            if acct == account_name:
-                self.security_mgr.clear_role(role)
+        self.provider_ui._unassign_account_roles(account_name)
 
     def get_role_config_status(self) -> tuple[bool, str]:
-        """Check if roles are properly configured for running tasks.
+        return self.provider_ui.get_role_config_status()
 
-        Returns:
-            Tuple of (is_ready, status_message) where status includes model assignments when ready
-        """
-        role_assignments = self.security_mgr.list_role_assignments()
-        coding_account = role_assignments.get('CODING')
-        management_account = role_assignments.get('MANAGEMENT')
-
-        missing = []
-        if not coding_account:
-            missing.append("CODING")
-        if not management_account:
-            missing.append("MANAGEMENT")
-
-        if missing:
-            return False, f"⚠️ Missing role assignments: {', '.join(missing)}. Configure in Providers tab."
-
-        # Build model assignment info
-        accounts = self.security_mgr.list_accounts()
-        coding_provider = accounts.get(coding_account, 'unknown')
-        coding_model = self.security_mgr.get_account_model(coding_account)
-        coding_model_str = coding_model if coding_model != 'default' else ''
-
-        management_provider = accounts.get(management_account, 'unknown')
-        management_model = self.security_mgr.get_account_model(management_account)
-        management_model_str = management_model if management_model != 'default' else ''
-
-        # Format: ✓ Ready — Coding: account (provider, model) | Management: account (provider, model)
-        coding_info = f"{coding_account} ({coding_provider}"
-        if coding_model_str:
-            coding_info += f", {coding_model_str}"
-        coding_info += ")"
-
-        mgmt_info = f"{management_account} ({management_provider}"
-        if management_model_str:
-            mgmt_info += f", {management_model_str}"
-        mgmt_info += ")"
-
-        return True, f"✓ Ready — **Coding:** {coding_info} | **Management:** {mgmt_info}"
+    def format_role_status(self, session_log_path: Path | None = None) -> str:
+        return self.provider_ui.format_role_status(session_log_path)
 
     def assign_role(self, account_name: str, role: str):
-        """Assign a role to a provider and refresh the provider panel."""
-        try:
-            if not account_name:
-                return self._provider_action_response("❌ Please select an account to assign a role")
-            if not role or not str(role).strip():
-                return self._provider_action_response("❌ Please select a role")
-
-            accounts = self.security_mgr.list_accounts()
-            if account_name not in accounts:
-                return self._provider_action_response(f"❌ Provider '{account_name}' not found")
-
-            if role == '(none)':
-                # Clear all roles for this account
-                self._unassign_account_roles(account_name)
-                return self._provider_action_response(f"✓ Removed role assignments from {account_name}")
-
-            # First, remove any existing roles for this account
-            self._unassign_account_roles(account_name)
-
-            if role.upper() == "BOTH":
-                self.security_mgr.assign_role(account_name, "CODING")
-                self.security_mgr.assign_role(account_name, "MANAGEMENT")
-                return self._provider_action_response(f"✓ Assigned CODING and MANAGEMENT roles to {account_name}")
-            else:
-                self.security_mgr.assign_role(account_name, role.upper())
-                return self._provider_action_response(f"✓ Assigned {role.upper()} role to {account_name}")
-        except Exception as e:
-            return self._provider_action_response(f"❌ Error assigning role: {str(e)}")
+        return self.provider_ui.assign_role(account_name, role, self.provider_card_count)
 
     def set_model(self, account_name: str, model: str):
-        """Set the model for a provider account and refresh the provider panel."""
-        try:
-            if not account_name:
-                return self._provider_action_response("❌ Please select an account")
-
-            if not model:
-                return self._provider_action_response("❌ Please select a model")
-
-            accounts = self.security_mgr.list_accounts()
-            if account_name not in accounts:
-                return self._provider_action_response(f"❌ Provider '{account_name}' not found")
-
-            self.security_mgr.set_account_model(account_name, model)
-            return self._provider_action_response(f"✓ Set model to `{model}` for {account_name}")
-        except Exception as e:
-            return self._provider_action_response(f"❌ Error setting model: {str(e)}")
+        return self.provider_ui.set_model(account_name, model, self.provider_card_count)
 
     def set_reasoning(self, account_name: str, reasoning: str):
-        """Set reasoning effort for a provider account and refresh the provider panel."""
-        try:
-            if not account_name:
-                return self._provider_action_response("❌ Please select an account")
-
-            if not reasoning:
-                return self._provider_action_response("❌ Please select a reasoning level")
-
-            accounts = self.security_mgr.list_accounts()
-            if account_name not in accounts:
-                return self._provider_action_response(f"❌ Provider '{account_name}' not found")
-
-            self.security_mgr.set_account_reasoning(account_name, reasoning)
-            return self._provider_action_response(f"✓ Set reasoning to `{reasoning}` for {account_name}")
-        except Exception as e:
-            return self._provider_action_response(f"❌ Error setting reasoning: {str(e)}")
+        return self.provider_ui.set_reasoning(account_name, reasoning, self.provider_card_count)
 
     def get_models_for_account(self, account_name: str) -> list[str]:
-        """Get available models for an account based on its provider."""
-        if not account_name:
-            return ['default']
-
-        accounts = self.security_mgr.list_accounts()
-        provider = accounts.get(account_name, '')
-        return self.model_catalog.get_models(provider, account_name)
+        self.provider_ui.model_catalog = self.model_catalog
+        return self.provider_ui.get_models_for_account(account_name, model_catalog_override=self.model_catalog)
 
     def get_reasoning_choices(self, provider: str, account_name: str | None = None) -> list[str]:
-        """Return reasoning dropdown options for the provider."""
-        if provider == 'openai':
-            stored = 'default'
-            if account_name:
-                getter = getattr(self.security_mgr, "get_account_reasoning", None)
-                if getter:
-                    try:
-                        stored = getter(account_name) or 'default'
-                    except Exception:
-                        stored = 'default'
-            stored = stored if isinstance(stored, str) else 'default'
-            choices = set(self.OPENAI_REASONING_LEVELS)
-            if stored:
-                choices.add(stored)
-            ordered = [level for level in self.OPENAI_REASONING_LEVELS if level in choices]
-            for choice in sorted(choices):
-                if choice not in ordered:
-                    ordered.append(choice)
-            return ordered
-        return ['default']
+        return self.provider_ui.get_reasoning_choices(provider, account_name)
 
     def delete_provider(self, account_name: str, confirmed: bool = False):
-        """Delete a provider after confirmation and refresh the provider panel."""
-        import shutil
-
-        try:
-            if not account_name:
-                return self._provider_action_response("❌ No provider selected")
-
-            if not confirmed:
-                return self._provider_action_response("Deletion cancelled.")
-
-            # Check if it's an OpenAI account and clean up isolated home
-            accounts = self.security_mgr.list_accounts()
-            if accounts.get(account_name) == 'openai':
-                codex_home = self._get_codex_home(account_name)
-                if codex_home.exists():
-                    shutil.rmtree(codex_home, ignore_errors=True)
-
-            self.security_mgr.delete_account(account_name)
-            return self._provider_action_response(f"✓ Provider '{account_name}' deleted")
-        except Exception as e:
-            return self._provider_action_response(f"❌ Error deleting provider: {str(e)}")
+        return self.provider_ui.delete_provider(account_name, confirmed, self.provider_card_count)
 
     def cancel_task(self) -> str:
         """Cancel the running task."""
@@ -1539,91 +632,12 @@ class ChadWebUI:
             self._active_coding_provider = None
         return "🛑 Task cancelled"
 
-    def _get_session_log_dir(self) -> Path:
-        """Get the Chad session log directory, creating it if needed."""
-        import tempfile
-        log_dir = Path(tempfile.gettempdir()) / "chad"
-        log_dir.mkdir(exist_ok=True)
-        return log_dir
-
-    def _create_session_log(
-        self,
-        task_description: str,
-        project_path: str,
-        coding_account: str,
-        coding_provider: str,
-        management_account: str,
-        management_provider: str,
-        managed_mode: bool = False
-    ) -> Path:
-        """Create a new session log file and return its path.
-
-        The log is created at session start and updated throughout.
-        """
-        import json
-        from datetime import datetime
-
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"chad_session_{timestamp}.json"
-        filepath = self._get_session_log_dir() / filename
-
-        session_data = {
-            "timestamp": datetime.now().isoformat(),
-            "task_description": task_description,
-            "project_path": project_path,
-            "managed_mode": managed_mode,
-            "coding": {
-                "account": coding_account,
-                "provider": coding_provider
-            },
-            "management": {
-                "account": management_account,
-                "provider": management_provider
-            },
-            "status": "running",
-            "success": None,
-            "completion_reason": None,
-            "conversation": []
-        }
-
-        with open(filepath, 'w') as f:
-            json.dump(session_data, f, indent=2)
-
-        return filepath
-
-    def _update_session_log(
-        self,
-        filepath: Path,
-        chat_history: list,
-        success: bool | None = None,
-        completion_reason: str | None = None,
-        status: str = "running"
-    ) -> None:
-        """Update an existing session log with new conversation data."""
-        import json
-
-        try:
-            with open(filepath, 'r') as f:
-                session_data = json.load(f)
-
-            session_data["conversation"] = chat_history
-            session_data["status"] = status
-            if success is not None:
-                session_data["success"] = success
-            if completion_reason is not None:
-                session_data["completion_reason"] = completion_reason
-
-            with open(filepath, 'w') as f:
-                json.dump(session_data, f, indent=2)
-        except Exception:
-            pass  # Don't fail the task if logging fails
-
     def start_chad_task(  # noqa: C901
         self,
         project_path: str,
         task_description: str,
         managed_mode: bool = False
-    ) -> Iterator[tuple[list, str, str, gr.Radio, gr.Markdown, list, gr.Textbox, gr.TextArea, gr.Button, gr.Button]]:
+    ) -> Iterator[tuple[list, str, gr.Markdown, gr.Textbox, gr.TextArea, gr.Button, gr.Button, gr.Markdown]]:
         """Start Chad task and stream updates.
 
         Flow: Management AI plans first, then coding AI executes.
@@ -1631,42 +645,28 @@ class ChadWebUI:
         chat_history = []
         message_queue = queue.Queue()
         self.cancel_requested = False
-        self._last_status_header = ""
-        self._last_summary = ""
-        self._last_all_messages = []
-        current_summary = ""
+        session_log_path: Path | None = None
+        role_status_text = self.format_role_status(None)
 
         def make_yield(
             history,
             status: str,
             live_stream: str = "",
             summary: str | None = None,
-            tabs_visible: bool = False,
             interactive: bool = False
         ):
             """Format output tuple for Gradio with current UI state."""
-            nonlocal current_summary
-            if summary is not None:
-                current_summary = summary
             display_stream = live_stream
-            tabs_update = gr.update(choices=["All"], value="All", visible=tabs_visible)
-            all_messages_state = list(history)
-            self._last_status_header = status
-            self._last_summary = current_summary
-            self._last_all_messages = all_messages_state
-            # Only show status header for errors (indicated by ❌)
             is_error = '❌' in status
             return (
                 history,
                 display_stream,
-                gr.update(value="", visible=False),  # subtask_list - always hidden
-                tabs_update,
                 gr.update(value=status if is_error else "", visible=is_error),  # task_status_header - errors only
-                all_messages_state,
                 gr.update(value=project_path, interactive=interactive),
                 gr.update(value=task_description, interactive=interactive),
                 gr.update(interactive=interactive),
-                gr.update(interactive=not interactive)
+                gr.update(interactive=not interactive),
+                gr.update(value=role_status_text)
             )
 
         try:
@@ -1721,7 +721,7 @@ class ChadWebUI:
             management_timeout = get_management_timeout(management_provider)
 
             # Create session log at start
-            session_log_path = self._create_session_log(
+            session_log_path = self.session_logger.create_log(
                 task_description=task_description,
                 project_path=str(path),
                 coding_account=coding_account,
@@ -1730,6 +730,8 @@ class ChadWebUI:
                 management_provider=management_provider,
                 managed_mode=managed_mode
             )
+            self.current_session_log_path = session_log_path
+            role_status_text = self.format_role_status(session_log_path)
 
             status_prefix = "**Starting Chad...**\n\n"
             status_prefix += f"• Project: {path}\n"
@@ -2263,7 +1265,7 @@ Create a better plan that addresses the issue."""
                         streaming_buffer = ""
                         last_activity = ""
                         current_live_stream = ""
-                        self._update_session_log(session_log_path, chat_history)
+                        self.session_logger.update_log(session_log_path, chat_history)
                         yield make_yield(chat_history, current_status, current_live_stream)
                         last_yield_time = time_module.time()
 
@@ -2281,7 +1283,7 @@ Create a better plan that addresses the issue."""
                         chat_history.append({"role": "user", "content": divider})
                         streaming_buffer = ""
                         current_live_stream = ""
-                        self._update_session_log(session_log_path, chat_history)
+                        self.session_logger.update_log(session_log_path, chat_history)
                         yield make_yield(chat_history, current_status, current_live_stream)
                         last_yield_time = time_module.time()
 
@@ -2291,7 +1293,7 @@ Create a better plan that addresses the issue."""
                         streaming_buffer = ""
                         current_live_stream = ""
                         summary_text = f"{status_prefix}{phase_msg}"
-                        self._update_session_log(session_log_path, chat_history)
+                        self.session_logger.update_log(session_log_path, chat_history)
                         yield make_yield(chat_history, current_status, current_live_stream, summary=summary_text)
                         last_yield_time = time_module.time()
 
@@ -2373,7 +1375,7 @@ Create a better plan that addresses the issue."""
                                 chat_history[pending_message_idx] = make_chat_message(speaker, content)
                             else:
                                 chat_history.append(make_chat_message(speaker, content))
-                            self._update_session_log(session_log_path, chat_history)
+                            self.session_logger.update_log(session_log_path, chat_history)
                             yield make_yield(chat_history, current_status, "")
                     except queue.Empty:
                         break
@@ -2393,14 +1395,15 @@ Create a better plan that addresses the issue."""
                     else "❌ Task did not complete successfully"
                 )
 
-            self._update_session_log(
+            self.session_logger.update_log(
                 session_log_path,
                 chat_history,
                 success=task_success[0],
                 completion_reason=completion_reason[0],
                 status="completed" if task_success[0] else "failed"
             )
-            final_status += f"\n\n*Session log: {session_log_path}*"
+            if session_log_path:
+                final_status += f"\n\n*Session log: {session_log_path}*"
             final_summary = f"{status_prefix}{final_status}"
 
             yield make_yield(chat_history, final_summary, "", summary=final_summary, interactive=True)
@@ -2409,21 +1412,6 @@ Create a better plan that addresses the issue."""
             import traceback
             error_msg = f"❌ Error: {str(e)}\n\n```\n{traceback.format_exc()}\n```"
             yield make_yield(chat_history, error_msg, summary=error_msg, interactive=True)
-
-    def _filter_messages_by_task(self, all_messages: list, selected_tab: str) -> list:
-        """Filter chat messages by task tab selection (single task currently)."""
-        if not all_messages:
-            return []
-        if not selected_tab or selected_tab == "All":
-            return all_messages
-        return [
-            msg for msg in all_messages
-            if isinstance(msg, dict) and msg.get("task_id") == selected_tab
-        ]
-
-    def _get_task_status_header(self, selected_tab: str | None = None) -> str:
-        """Get the current task status header for the selected tab."""
-        return self._last_status_header or ""
 
     def create_interface(self) -> gr.Blocks:
         """Create the Gradio interface."""
@@ -2468,27 +1456,8 @@ Create a better plan that addresses the issue."""
                                     elem_id="cancel-task-btn"
                                 )
 
-                    # Radio button tabs for filtering by task
-                    subtask_tabs = gr.Radio(
-                        choices=["All"],
-                        value="All",
-                        label="View",
-                        visible=False,
-                        elem_id="subtask-tabs"
-                    )
-
-                    # Planning view - shows model assignments and subtask status
-                    subtask_list = gr.Markdown(
-                        "",
-                        elem_id="subtask-list",
-                        visible=False
-                    )
-
                     # Task status header (shows selected task description and status)
                     task_status_header = gr.Markdown("", elem_id="task-status-header", visible=False)
-
-                    # State to store all messages with task IDs for filtering
-                    all_messages_state = gr.State([])
 
                     # Agent communication view
                     with gr.Row():
@@ -2698,19 +1667,7 @@ Create a better plan that addresses the issue."""
             start_btn.click(
                 self.start_chad_task,
                 inputs=[project_path, task_description],
-                outputs=[chatbot, live_stream_box, subtask_list, subtask_tabs, task_status_header, all_messages_state, project_path, task_description, start_btn, cancel_btn]  # noqa: E501
-            )
-
-            # Handle tab changes to filter messages
-            def on_tab_change(selected_tab, all_messages):
-                filtered = self._filter_messages_by_task(all_messages, selected_tab)
-                header = self._get_task_status_header(selected_tab)
-                return filtered, gr.update(value=header, visible=bool(header))
-
-            subtask_tabs.change(
-                on_tab_change,
-                inputs=[subtask_tabs, all_messages_state],
-                outputs=[chatbot, task_status_header]
+                outputs=[chatbot, live_stream_box, task_status_header, project_path, task_description, start_btn, cancel_btn, role_status]  # noqa: E501
             )
 
             cancel_btn.click(

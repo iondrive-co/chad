@@ -79,7 +79,7 @@ class TestChadWebUI:
         mock_security_mgr.list_accounts.return_value = {}
         mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
-        with patch.object(web_ui, '_setup_codex_account', return_value=str(tmp_path)):
+        with patch.object(web_ui.provider_ui, '_setup_codex_account', return_value=str(tmp_path)):
             result = web_ui.add_provider('', 'openai')[0]
 
         assert '✓' in result or 'Provider' in result
@@ -251,8 +251,8 @@ class TestChadWebUITaskExecution:
 
         assert len(results) > 0
         last_result = results[-1]
-        # Error is in status header (position 4), not live stream box
-        status_header = last_result[4]
+        # Error is in status header (position 2), not live stream box
+        status_header = last_result[2]
         status_value = status_header.get('value', '') if isinstance(status_header, dict) else str(status_header)
         assert '❌' in status_value
         assert 'project path' in status_value.lower() or 'task description' in status_value.lower()
@@ -263,8 +263,8 @@ class TestChadWebUITaskExecution:
 
         assert len(results) > 0
         last_result = results[-1]
-        # Error is in status header (position 4), not live stream box
-        status_header = last_result[4]
+        # Error is in status header (position 2), not live stream box
+        status_header = last_result[2]
         status_value = status_header.get('value', '') if isinstance(status_header, dict) else str(status_header)
         assert '❌' in status_value
 
@@ -274,8 +274,8 @@ class TestChadWebUITaskExecution:
 
         assert len(results) > 0
         last_result = results[-1]
-        # Error is in status header (position 4), not live stream box
-        status_header = last_result[4]
+        # Error is in status header (position 2), not live stream box
+        status_header = last_result[2]
         status_value = status_header.get('value', '') if isinstance(status_header, dict) else str(status_header)
         assert '❌' in status_value
         assert 'Invalid project path' in status_value
@@ -290,8 +290,8 @@ class TestChadWebUITaskExecution:
 
         assert len(results) > 0
         last_result = results[-1]
-        # Error is in status header (position 4), not live stream box
-        status_header = last_result[4]
+        # Error is in status header (position 2), not live stream box
+        status_header = last_result[2]
         status_value = status_header.get('value', '') if isinstance(status_header, dict) else str(status_header)
         assert '❌' in status_value
         assert 'CODING' in status_value or 'MANAGEMENT' in status_value
@@ -714,7 +714,7 @@ class TestSessionLogging:
         from pathlib import Path
 
         # Create initial session log
-        log_path = web_ui._create_session_log(
+        log_path = web_ui.session_logger.create_log(
             task_description="Test task",
             project_path="/tmp/test-project",
             coding_account="claude",
@@ -747,7 +747,7 @@ class TestSessionLogging:
             {"role": "user", "content": "**MANAGEMENT:** Plan the task"},
             {"role": "assistant", "content": "**CODING:** Done!"}
         ]
-        web_ui._update_session_log(log_path, chat_history)
+        web_ui.session_logger.update_log(log_path, chat_history)
 
         with open(log_path) as f:
             data = json.load(f)
@@ -755,7 +755,7 @@ class TestSessionLogging:
         assert data["status"] == "running"
 
         # Final update with completion
-        web_ui._update_session_log(
+        web_ui.session_logger.update_log(
             log_path, chat_history,
             success=True,
             completion_reason="Task completed successfully",
