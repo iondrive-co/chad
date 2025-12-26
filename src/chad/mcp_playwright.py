@@ -11,6 +11,8 @@ from .ui_playwright_runner import (
     ChadLaunchError,
     PlaywrightUnavailable,
     chad_page_session,
+    delete_provider_by_name,
+    get_provider_names,
     measure_provider_delete_button,
     screenshot_page,
 )
@@ -133,6 +135,86 @@ def measure_provider_delete(
     except ChadLaunchError as exc:
         return _failure(str(exc))
     except Exception as exc:  # pragma: no cover - defensive
+        return _failure(f"Unexpected error: {exc}")
+
+
+@SERVER.tool()
+def list_providers(
+    headless: bool = True, viewport_width: int = 1280, viewport_height: int = 900
+) -> Dict[str, object]:
+    """List all provider names visible in the Providers tab."""
+    try:
+        with chad_page_session(
+            tab="providers", headless=headless, viewport=_viewport(viewport_width, viewport_height)
+        ) as (page, _instance):
+            names = get_provider_names(page)
+        return {"success": True, "providers": names, "count": len(names)}
+    except PlaywrightUnavailable as exc:
+        return _failure(str(exc))
+    except ChadLaunchError as exc:
+        return _failure(str(exc))
+    except Exception as exc:
+        return _failure(f"Unexpected error: {exc}")
+
+
+@SERVER.tool()
+def test_delete_provider(
+    provider_name: str = "mock-coding",
+    headless: bool = True,
+    viewport_width: int = 1280,
+    viewport_height: int = 900,
+) -> Dict[str, object]:
+    """Test deleting a provider and report detailed results.
+
+    This tool is used to verify the delete provider functionality works correctly.
+    It will:
+    1. Check if the provider exists
+    2. Click the delete button (first click shows 'Confirm?')
+    3. Click the 'Confirm?' button (second click deletes)
+    4. Check if the provider was actually deleted
+    """
+    try:
+        artifacts = _artifact_dir()
+        with chad_page_session(
+            tab="providers", headless=headless, viewport=_viewport(viewport_width, viewport_height)
+        ) as (page, _instance):
+            # Take screenshot before deletion
+            before_screenshot = screenshot_page(page, artifacts / "before_delete.png")
+
+            # Get providers before
+            providers_before = get_provider_names(page)
+
+            # Attempt deletion
+            result = delete_provider_by_name(page, provider_name)
+
+            # Take screenshot after deletion attempt
+            after_screenshot = screenshot_page(page, artifacts / "after_delete.png")
+
+            # Get providers after
+            providers_after = get_provider_names(page)
+
+        return {
+            "success": True,
+            "provider_name": result.provider_name,
+            "existed_before": result.existed_before,
+            "confirm_button_appeared": result.confirm_button_appeared,
+            "confirm_clicked": result.confirm_clicked,
+            "exists_after": result.exists_after,
+            "deleted": result.deleted,
+            "feedback_message": result.feedback_message,
+            "providers_before": providers_before,
+            "providers_after": providers_after,
+            "screenshots": {
+                "before": str(before_screenshot),
+                "after": str(after_screenshot),
+            },
+            "artifacts_dir": str(artifacts),
+        }
+    except PlaywrightUnavailable as exc:
+        return _failure(str(exc))
+    except ChadLaunchError as exc:
+        return _failure(str(exc))
+    except Exception as exc:
         return _failure(f"Unexpected error: {exc}")
 
 

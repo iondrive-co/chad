@@ -78,7 +78,7 @@ PROVIDER_PANEL_CSS = """
   background: var(--task-btn-bg) !important;
   border: 1px solid var(--task-btn-border) !important;
   border-radius: 12px;
-  padding: 8px 10px;
+  padding: 0 10px;
   gap: 8px;
 }
 
@@ -152,13 +152,18 @@ PROVIDER_PANEL_CSS = """
   box-shadow: 0 4px 10px rgba(15, 23, 42, 0.06);
 }
 
+.provider-card__header-row .provider-delete,
 .provider-delete {
   margin-left: auto;
+  margin-top: -1px;
+  margin-bottom: -1px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  align-self: stretch !important;
+  height: auto !important;
+  min-height: 0 !important;
   width: 36px;
-  height: 36px;
   min-width: 36px;
   max-width: 36px;
   flex-shrink: 0;
@@ -170,6 +175,14 @@ PROVIDER_PANEL_CSS = """
   font-size: 17px;
   line-height: 1;
   box-shadow: none;
+}
+
+/* Hide empty provider cards (Gradio's gr.update(visible=False) doesn't work on Columns) */
+.gr-group:has(.provider-card__header-row):not(:has(.provider-card__header-text)) {
+  display: none !important;
+}
+.column:has(.gr-group:has(.provider-card__header-row):not(:has(.provider-card__header-text))) {
+  display: none !important;
 }
 
 #live-output-box {
@@ -662,8 +675,12 @@ class ChadWebUI:
 
         return 0.3  # Logged in but no quota API, bias low
 
-    def _provider_state(self) -> tuple:
-        """Build UI state for provider cards (summary + per-account controls)."""
+    def _provider_state(self, pending_delete: str = None) -> tuple:
+        """Build UI state for provider cards (summary + per-account controls).
+
+        Args:
+            pending_delete: If set, this account's delete button shows "Confirm?"
+        """
         accounts = self.security_mgr.list_accounts()
         # Sort accounts by remaining_usage (highest first)
         account_items = sorted(
@@ -690,6 +707,12 @@ class ChadWebUI:
                 reasoning_value = stored_reasoning if stored_reasoning in reasoning_choices else reasoning_choices[0]
                 usage = self.get_provider_usage(account_name)
 
+                # Show confirm icon on pending delete button, normal trash icon otherwise
+                if pending_delete == account_name:
+                    delete_btn_update = gr.update(value="✓", variant="stop")
+                else:
+                    delete_btn_update = gr.update(value="🗑︎", variant="secondary")
+
                 outputs.extend([
                     gr.update(visible=True),
                     header,
@@ -697,7 +720,8 @@ class ChadWebUI:
                     gr.update(value=role_value),
                     gr.update(choices=model_choices, value=model_value),
                     gr.update(choices=reasoning_choices, value=reasoning_value),
-                    usage
+                    usage,
+                    delete_btn_update
                 ])
             else:
                 outputs.extend([
@@ -707,14 +731,24 @@ class ChadWebUI:
                     gr.update(value="(none)"),
                     gr.update(choices=['default'], value='default'),
                     gr.update(choices=['default'], value='default'),
-                    ""
+                    "",
+                    gr.update(value="🗑︎", variant="secondary")  # Reset delete button
                 ])
 
         return tuple(outputs)
 
-    def _provider_action_response(self, feedback: str):
-        """Return standard provider panel updates with feedback text."""
-        return (feedback, *self._provider_state())
+    def _provider_action_response(self, feedback: str, pending_delete: str = None):
+        """Return standard provider panel updates with feedback text.
+
+        Args:
+            feedback: Message to show in the feedback area
+            pending_delete: If set, this account's delete button shows "Confirm?"
+        """
+        return (feedback, *self._provider_state(pending_delete=pending_delete))
+
+    def _provider_state_with_confirm(self, pending_delete: str) -> tuple:
+        """Build provider state with one delete button showing 'Confirm?'."""
+        return self._provider_state(pending_delete=pending_delete)
 
     def _get_codex_home(self, account_name: str) -> Path:
         """Get the isolated HOME directory for a Codex account."""
@@ -2480,7 +2514,7 @@ Create a better plan that addresses the issue."""
 
                     provider_list = gr.Markdown(self.list_providers(), elem_classes=["provider-summary"])
                     refresh_btn = gr.Button("🔄 Refresh", variant="secondary")
-                    delete_confirm_state = gr.State(False)
+                    pending_delete_state = gr.State(None)  # Tracks which account is pending deletion
 
                     provider_cards = []
                     for idx in range(self.provider_card_count):
@@ -2510,38 +2544,40 @@ Create a better plan that addresses the issue."""
                             reasoning_value = "default"
                             usage_text = ""
 
-                        with gr.Group(visible=visible, elem_classes=["provider-card"]) as card_group:
-                            with gr.Row(elem_classes=["provider-card__header-row"]):
-                                card_header = gr.Markdown(header_text, elem_classes=["provider-card__header"])
-                                delete_btn = gr.Button("🗑︎", variant="secondary", size="sm", min_width=0, scale=0, elem_classes=["provider-delete"])  # noqa: E501
-                            account_state = gr.State(account_name)
-                            with gr.Row(elem_classes=["provider-controls"]):
-                                role_dropdown = gr.Dropdown(
-                                    choices=["(none)", "CODING", "MANAGEMENT", "BOTH"],
-                                    label="Role",
-                                    value=role_value,
-                                    scale=1
-                                )
-                                model_dropdown = gr.Dropdown(
-                                    choices=model_choices,
-                                    label="Preferred Model",
-                                    value=model_value,
-                                    allow_custom_value=True,
-                                    scale=1
-                                )
-                                reasoning_dropdown = gr.Dropdown(
-                                    choices=reasoning_choices,
-                                    label="Reasoning Effort",
-                                    value=reasoning_value,
-                                    allow_custom_value=True,
-                                    scale=1
-                                )
+                        # Wrap in Column for visibility control (Group doesn't support dynamic visibility)
+                        with gr.Column(visible=visible) as card_column:
+                            with gr.Group(elem_classes=["provider-card"]):
+                                with gr.Row(elem_classes=["provider-card__header-row"]):
+                                    card_header = gr.Markdown(header_text, elem_classes=["provider-card__header"])
+                                    delete_btn = gr.Button("🗑︎", variant="secondary", size="sm", min_width=0, scale=0, elem_classes=["provider-delete"])  # noqa: E501
+                                account_state = gr.State(account_name)
+                                with gr.Row(elem_classes=["provider-controls"]):
+                                    role_dropdown = gr.Dropdown(
+                                        choices=["(none)", "CODING", "MANAGEMENT", "BOTH"],
+                                        label="Role",
+                                        value=role_value,
+                                        scale=1
+                                    )
+                                    model_dropdown = gr.Dropdown(
+                                        choices=model_choices,
+                                        label="Preferred Model",
+                                        value=model_value,
+                                        allow_custom_value=True,
+                                        scale=1
+                                    )
+                                    reasoning_dropdown = gr.Dropdown(
+                                        choices=reasoning_choices,
+                                        label="Reasoning Effort",
+                                        value=reasoning_value,
+                                        allow_custom_value=True,
+                                        scale=1
+                                    )
 
-                            gr.Markdown("Usage", elem_classes=["provider-usage-title"])
-                            usage_box = gr.Markdown(usage_text, elem_classes=["provider-usage"])
+                                gr.Markdown("Usage", elem_classes=["provider-usage-title"])
+                                usage_box = gr.Markdown(usage_text, elem_classes=["provider-usage"])
 
                         provider_cards.append({
-                            "group": card_group,
+                            "column": card_column,
                             "header": card_header,
                             "account_state": account_state,
                             "account_name": account_name,  # Store name for delete handler
@@ -2568,13 +2604,14 @@ Create a better plan that addresses the issue."""
                     provider_outputs = [provider_feedback, provider_list]
                     for card in provider_cards:
                         provider_outputs.extend([
-                            card["group"],
+                            card["column"],
                             card["header"],
                             card["account_state"],
                             card["role_dropdown"],
                             card["model_dropdown"],
                             card["reasoning_dropdown"],
-                            card["usage_box"]
+                            card["usage_box"],
+                            card["delete_btn"]
                         ])
 
                     # Add role status and start button to outputs so they update when roles change
@@ -2627,29 +2664,34 @@ Create a better plan that addresses the issue."""
                             outputs=provider_outputs
                         )
 
-                        # Get the stored account name for this specific card
-                        card_account_name = card["account_name"]
+                        # Two-step delete using dynamic account_state (not captured name)
+                        # This ensures handlers work correctly after cards shift due to deletions
+                        def make_delete_handler():
+                            def handler(pending_delete, current_account):
+                                # Skip if card has no account (empty slot)
+                                if not current_account:
+                                    return (pending_delete, *self._provider_action_response(""))
 
-                        # Create delete handler with account name baked into closure
-                        def make_delete_handler(acc_name):
-                            def handler(confirmed):
-                                return self.delete_provider(acc_name, confirmed)
+                                if pending_delete == current_account:
+                                    # Second click - actually delete
+                                    result = self.delete_provider(current_account, confirmed=True)
+                                    return (None, *result)  # Reset pending state + provider outputs
+                                else:
+                                    # First click - show confirmation button (tick icon)
+                                    result = self._provider_action_response(
+                                        f"Click the ✓ icon in '{current_account}' titlebar to confirm deletion",
+                                        pending_delete=current_account
+                                    )
+                                    return (current_account, *result)  # Set pending state + provider outputs
                             return handler
 
-                        # Skip empty cards (no account)
-                        if not card_account_name:
-                            continue
+                        # Outputs include pending_delete_state + all provider outputs
+                        delete_outputs = [pending_delete_state] + provider_outputs
 
-                        # Use JS to show confirmation, then call Python handler with result
                         card["delete_btn"].click(
-                            fn=None,
-                            inputs=[],
-                            outputs=[delete_confirm_state],
-                            js=f"() => window.confirm('Please confirm you want to delete {card_account_name}')"
-                        ).then(
-                            fn=make_delete_handler(card_account_name),
-                            inputs=[delete_confirm_state],
-                            outputs=provider_outputs
+                            fn=make_delete_handler(),
+                            inputs=[pending_delete_state, card["account_state"]],
+                            outputs=delete_outputs
                         )
 
             # Connect task execution (outside tabs)
