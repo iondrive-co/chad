@@ -12,10 +12,13 @@ except Exception:  # pragma: no cover - handled by pytest skip
 from chad.ui_playwright_runner import (
     ChadLaunchError,
     create_temp_env,
+    delete_provider_by_name,
+    get_card_visibility_debug,
+    get_provider_names,
+    measure_provider_delete_button,
+    open_playwright_page,
     start_chad,
     stop_chad,
-    open_playwright_page,
-    measure_provider_delete_button,
 )
 
 
@@ -152,6 +155,111 @@ class TestTaskStatusHeader:
         # Should either not exist or be hidden
         if header.count() > 0:
             expect(header).to_be_hidden()
+
+
+class TestDeleteProvider:
+    """Test delete provider functionality.
+
+    Note: These tests share a server, so each test uses a different provider
+    to avoid interference between tests.
+    """
+
+    def test_mock_providers_exist(self, page: Page):
+        """Mock providers should be present before any deletion tests."""
+        providers = get_provider_names(page)
+        # At least one mock provider should exist
+        assert len(providers) > 0, f"Expected at least one provider, got {providers}"
+
+    def test_delete_provider_two_step_flow(self, page: Page):
+        """Clicking delete should show confirm icon and second click should delete.
+
+        This is the key test - it verifies the bug is fixed.
+        The bug was that clicking OK on the JS confirmation dialog
+        did not actually delete the provider because Gradio's fn=None
+        doesn't route JS return values to state components.
+
+        The fix uses a two-step flow: first click shows confirm icon,
+        second click actually deletes.
+        """
+        # Get available providers before deletion
+        providers_before = get_provider_names(page)
+        assert len(providers_before) > 0, "Need at least one provider to test deletion"
+
+        # Pick the first provider to delete
+        provider_to_delete = providers_before[0]
+        other_providers = [p for p in providers_before if p != provider_to_delete]
+
+        # Delete the provider
+        result = delete_provider_by_name(page, provider_to_delete)
+
+        # Verify the two-step flow worked
+        assert result.existed_before, f"Provider '{provider_to_delete}' should exist before deletion"
+        assert result.confirm_button_appeared, (
+            f"Confirm button should appear after first click. "
+            f"feedback='{result.feedback_message}'"
+        )
+        assert result.confirm_clicked, "Confirm button should be clickable"
+
+        # This is the critical assertion - the provider should be gone
+        assert result.deleted, (
+            f"Provider should be deleted after confirming. "
+            f"existed_before={result.existed_before}, "
+            f"exists_after={result.exists_after}, "
+            f"confirm_button_appeared={result.confirm_button_appeared}, "
+            f"confirm_clicked={result.confirm_clicked}, "
+            f"feedback='{result.feedback_message}'"
+        )
+        assert not result.exists_after, f"Provider '{provider_to_delete}' should not exist after deletion"
+
+        # Verify remaining providers are still visible and correct
+        providers_after = get_provider_names(page)
+        for other in other_providers:
+            assert other in providers_after, (
+                f"Other provider '{other}' should still exist after deleting '{provider_to_delete}'. "
+                f"Before: {providers_before}, After: {providers_after}"
+            )
+
+    def test_deleted_card_container_is_hidden(self, page: Page):
+        """Card container should be hidden after provider deletion, not just header blanked.
+
+        This verifies the UI actually hides the card's dropdowns and controls,
+        not just the header text.
+        """
+        # Get card visibility before any deletion
+        cards_before = get_card_visibility_debug(page)
+        visible_cards_before = [c for c in cards_before if c['hasHeaderSpan']]
+
+        if len(visible_cards_before) < 1:
+            pytest.skip("No visible provider cards to test deletion")
+
+        # Pick a provider to delete
+        providers = get_provider_names(page)
+        if not providers:
+            pytest.skip("No providers to test deletion")
+        provider_to_delete = providers[0]
+
+        # Delete the provider
+        delete_provider_by_name(page, provider_to_delete)
+
+        # Check card visibility after deletion
+        cards_after = get_card_visibility_debug(page)
+
+        # Count visible vs empty cards
+        visible_cards_after = [c for c in cards_after if c['hasHeaderSpan']]
+        empty_cards_after = [c for c in cards_after if not c['hasHeaderSpan']]
+
+        # Verify there's one less visible card
+        assert len(visible_cards_after) == len(visible_cards_before) - 1, (
+            f"Should have one less visible card after deletion. "
+            f"Before: {len(visible_cards_before)}, After: {len(visible_cards_after)}"
+        )
+
+        # Verify empty cards are actually hidden (display: none)
+        for empty_card in empty_cards_after:
+            assert empty_card['cardDisplay'] == 'none' or empty_card['columnDisplay'] == 'none', (
+                f"Empty card should be hidden but has cardDisplay={empty_card['cardDisplay']}, "
+                f"columnDisplay={empty_card['columnDisplay']}. Card: {empty_card}"
+            )
 
 
 # Screenshot tests for visual verification

@@ -231,6 +231,245 @@ def measure_provider_delete_button(page: "Page") -> Dict[str, float]:
     return measurement
 
 
+def get_provider_names(page: "Page") -> list[str]:
+    """Get a list of all visible provider names from the providers tab."""
+    _select_tab(page, "providers")
+    names = page.evaluate(
+        """
+() => {
+  const headers = document.querySelectorAll('.provider-card__header-text');
+  const visibleNames = [];
+  for (const header of headers) {
+    // Check if the header is visible
+    const style = window.getComputedStyle(header);
+    if (style.display === 'none' || style.visibility === 'hidden') {
+      continue;
+    }
+    // Walk up the DOM to check if any parent is hidden
+    let parent = header.parentElement;
+    let isHidden = false;
+    while (parent && parent !== document.body) {
+      const parentStyle = window.getComputedStyle(parent);
+      if (parentStyle.display === 'none' || parentStyle.visibility === 'hidden') {
+        isHidden = true;
+        break;
+      }
+      parent = parent.parentElement;
+    }
+    if (isHidden) continue;
+
+    const text = header.textContent || '';
+    const match = text.match(/^([^(]+)/);
+    const name = match ? match[1].trim() : text.trim();
+    if (name.length > 0) {
+      visibleNames.push(name);
+    }
+  }
+  return visibleNames;
+}
+"""
+    )
+    return names or []
+
+
+def provider_exists(page: "Page", provider_name: str) -> bool:
+    """Check if a provider with the given name exists in the UI."""
+    return provider_name in get_provider_names(page)
+
+
+def get_card_visibility_debug(page: "Page") -> list[dict]:
+    """Get detailed visibility info for all provider card containers.
+
+    Returns list of dicts with cardDisplay, columnDisplay, hasHeaderSpan, headerText for each card.
+    """
+    _select_tab(page, "providers")
+    return page.evaluate(
+        """
+() => {
+  const groups = document.querySelectorAll('.gr-group');
+  const results = [];
+  for (const group of groups) {
+    // Only include groups that have a provider card header row
+    const headerRow = group.querySelector('.provider-card__header-row');
+    if (!headerRow) continue;
+
+    const headerText = group.querySelector('.provider-card__header-text');
+    const header = headerText ? headerText.textContent.trim() : '';
+
+    // Get group's computed style
+    const groupStyle = window.getComputedStyle(group);
+
+    // Walk up to find Column container
+    let parent = group.parentElement;
+    let columnDisplay = 'unknown';
+    while (parent && parent !== document.body) {
+      if (parent.classList.contains('column')) {
+        columnDisplay = window.getComputedStyle(parent).display;
+        break;
+      }
+      parent = parent.parentElement;
+    }
+
+    results.push({
+      headerText: header,
+      cardDisplay: groupStyle.display,
+      columnDisplay: columnDisplay,
+      hasHeaderSpan: !!headerText
+    });
+  }
+  return results;
+}
+"""
+    )
+
+
+@dataclass
+class DeleteProviderResult:
+    """Result of a delete provider operation."""
+    provider_name: str
+    existed_before: bool
+    confirm_button_appeared: bool
+    confirm_clicked: bool
+    exists_after: bool
+    deleted: bool
+    feedback_message: str
+
+
+def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderResult:
+    """Delete a provider using two-step confirmation (click delete, then click Confirm?).
+
+    Returns a DeleteProviderResult with details about what happened.
+    """
+    _select_tab(page, "providers")
+
+    # Check if provider exists before deletion
+    existed_before = provider_exists(page, provider_name)
+    if not existed_before:
+        return DeleteProviderResult(
+            provider_name=provider_name,
+            existed_before=False,
+            confirm_button_appeared=False,
+            confirm_clicked=False,
+            exists_after=False,
+            deleted=False,
+            feedback_message=f"Provider '{provider_name}' not found"
+        )
+
+    # Find and click the delete button for this provider (first click)
+    first_click = page.evaluate(
+        """
+(providerName) => {
+  const headers = document.querySelectorAll('.provider-card__header-text');
+  for (const header of headers) {
+    const text = header.textContent || '';
+    if (text.includes(providerName)) {
+      const row = header.closest('.provider-card__header-row');
+      if (row) {
+        const deleteBtn = row.querySelector('.provider-delete');
+        if (deleteBtn) {
+          deleteBtn.click();
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+""",
+        provider_name
+    )
+
+    if not first_click:
+        return DeleteProviderResult(
+            provider_name=provider_name,
+            existed_before=existed_before,
+            confirm_button_appeared=False,
+            confirm_clicked=False,
+            exists_after=provider_exists(page, provider_name),
+            deleted=False,
+            feedback_message=f"Could not find delete button for '{provider_name}'"
+        )
+
+    # Wait for button to change to "Confirm?"
+    page.wait_for_timeout(500)
+
+    # Check if any button now shows the confirm symbol (✓) or has stop variant
+    confirm_button_appeared = page.evaluate(
+        """
+() => {
+  const buttons = document.querySelectorAll('.provider-delete');
+  for (const btn of buttons) {
+    // Check for confirm symbol or stop variant class
+    const text = btn.textContent || '';
+    const hasConfirmSymbol = text.includes('✓') || text.includes('Confirm');
+    const hasStopVariant = btn.classList.contains('stop');
+    if (hasConfirmSymbol || hasStopVariant) {
+      return true;
+    }
+  }
+  return false;
+}
+"""
+    )
+
+    if not confirm_button_appeared:
+        return DeleteProviderResult(
+            provider_name=provider_name,
+            existed_before=existed_before,
+            confirm_button_appeared=False,
+            confirm_clicked=False,
+            exists_after=provider_exists(page, provider_name),
+            deleted=False,
+            feedback_message="Confirm button did not appear after first click"
+        )
+
+    # Click the confirm button (second click)
+    confirm_clicked = page.evaluate(
+        """
+() => {
+  const buttons = document.querySelectorAll('.provider-delete');
+  for (const btn of buttons) {
+    const text = btn.textContent || '';
+    const hasConfirmSymbol = text.includes('✓') || text.includes('Confirm');
+    const hasStopVariant = btn.classList.contains('stop');
+    if (hasConfirmSymbol || hasStopVariant) {
+      btn.click();
+      return true;
+    }
+  }
+  return false;
+}
+"""
+    )
+
+    # Wait for deletion to process
+    page.wait_for_timeout(1000)
+
+    # Check if provider still exists
+    exists_after = provider_exists(page, provider_name)
+
+    # Get feedback message
+    feedback = page.evaluate(
+        """
+() => {
+  // Look for feedback in the provider panel area
+  const feedback = document.querySelector('.provider-summary');
+  return feedback ? feedback.textContent : '';
+}
+"""
+    ) or ""
+
+    return DeleteProviderResult(
+        provider_name=provider_name,
+        existed_before=existed_before,
+        confirm_button_appeared=confirm_button_appeared,
+        confirm_clicked=confirm_clicked,
+        exists_after=exists_after,
+        deleted=existed_before and not exists_after,
+        feedback_message=feedback.strip()
+    )
+
+
 @contextlib.contextmanager
 def chad_page_session(
     *,
