@@ -1,0 +1,951 @@
+from __future__ import annotations
+
+import base64
+import json
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Iterable
+
+import gradio as gr
+
+from .model_catalog import ModelCatalog
+
+
+class ProviderUIManager:
+    """Provider management and display helpers for the web UI."""
+
+    SUPPORTED_PROVIDERS = {"anthropic", "openai", "gemini", "mistral"}
+    OPENAI_REASONING_LEVELS = ["default", "low", "medium", "high", "xhigh"]
+
+    def __init__(self, security_mgr, main_password: str, model_catalog: ModelCatalog | None = None):
+        self.security_mgr = security_mgr
+        self.main_password = main_password
+        self.model_catalog = model_catalog or ModelCatalog(security_mgr)
+
+    def list_providers(self) -> str:
+        """Summarize all configured providers with role and model."""
+        accounts = self.security_mgr.list_accounts()
+        role_assignments = self.security_mgr.list_role_assignments()
+
+        if not accounts:
+            return "No providers configured yet. Add a provider with the ➕ below."
+
+        rows = []
+        for account_name, provider in accounts.items():
+            roles = [role for role, acct in role_assignments.items() if acct == account_name]
+            role_str = f" — roles: {', '.join(roles)}" if roles else ""
+            model = self.security_mgr.get_account_model(account_name)
+            model_str = f" | preferred model: `{model}`" if model != "default" else ""
+            reasoning = self.security_mgr.get_account_reasoning(account_name)
+            reasoning_str = f" | reasoning: `{reasoning}`" if reasoning != "default" else ""
+            rows.append(f"- **{account_name}** ({provider}){role_str}{model_str}{reasoning_str}")
+
+        return "\n".join(rows)
+
+    def _get_account_role(self, account_name: str) -> str | None:
+        """Return the role assigned to the account, if any."""
+        role_assignments = self.security_mgr.list_role_assignments()
+        roles = [role for role, acct in role_assignments.items() if acct == account_name]
+        if len(roles) == 0:
+            return None
+        if "CODING" in roles and "MANAGEMENT" in roles:
+            return "BOTH"
+        return roles[0]
+
+    def get_provider_usage(self, account_name: str) -> str:
+        """Get usage text for a single provider."""
+        accounts = self.security_mgr.list_accounts()
+        provider = accounts.get(account_name)
+
+        if not provider:
+            return "Select a provider to see usage details."
+
+        if provider == "openai":
+            status_text = self._get_codex_usage(account_name)
+        elif provider == "anthropic":
+            status_text = self._get_claude_usage()
+        elif provider == "gemini":
+            status_text = self._get_gemini_usage()
+        elif provider == "mistral":
+            status_text = self._get_mistral_usage()
+        else:
+            status_text = "⚠️ **Unknown provider**"
+
+        return status_text
+
+    def _progress_bar(self, utilization_pct: float, width: int = 20) -> str:
+        """Create a text progress bar for usage displays."""
+        filled = int(max(0.0, min(100.0, utilization_pct)) / (100 / width))
+        return "█" * filled + "░" * (width - filled)
+
+    def get_remaining_usage(self, account_name: str) -> float:
+        """Get remaining usage as 0.0-1.0 (1.0 = full capacity remaining).
+
+        Used to sort providers by availability - highest remaining usage first.
+        """
+        accounts = self.security_mgr.list_accounts()
+        provider = accounts.get(account_name)
+
+        if not provider:
+            return 0.0
+
+        if provider == "anthropic":
+            return self._get_claude_remaining_usage()
+        if provider == "openai":
+            return self._get_codex_remaining_usage(account_name)
+        if provider == "gemini":
+            return self._get_gemini_remaining_usage()
+        if provider == "mistral":
+            return self._get_mistral_remaining_usage()
+
+        return 0.3  # Unknown provider, bias low
+
+    def _get_claude_remaining_usage(self) -> float:
+        """Get Claude remaining usage from API (0.0-1.0)."""
+        import requests
+
+        creds_file = Path.home() / ".claude" / ".credentials.json"
+        if not creds_file.exists():
+            return 0.0
+
+        try:
+            with open(creds_file) as f:
+                creds = json.load(f)
+
+            oauth_data = creds.get("claudeAiOauth", {})
+            access_token = oauth_data.get("accessToken", "")
+            if not access_token:
+                return 0.0
+
+            response = requests.get(
+                "https://api.anthropic.com/api/oauth/usage",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "anthropic-beta": "oauth-2025-04-20",
+                    "User-Agent": "claude-code/2.0.32",
+                    "Content-Type": "application/json",
+                },
+                timeout=10,
+            )
+
+            if response.status_code != 200:
+                return 0.3  # API error, bias low
+
+            usage_data = response.json()
+            five_hour = usage_data.get("five_hour", {})
+            util = five_hour.get("utilization", 0)
+            return max(0.0, min(1.0, 1.0 - (util / 100.0)))
+
+        except Exception:
+            return 0.3  # Error, bias low
+
+    def _get_codex_remaining_usage(self, account_name: str) -> float:
+        """Get Codex remaining usage from session files (0.0-1.0)."""
+        codex_home = self._get_codex_home(account_name)
+        auth_file = codex_home / ".codex" / "auth.json"
+        if not auth_file.exists():
+            return 0.0
+
+        sessions_dir = codex_home / ".codex" / "sessions"
+        if not sessions_dir.exists():
+            return 0.8  # Logged in but no sessions, assume mostly available
+
+        session_files: list[tuple[float, Path]] = []
+        for root, _, files in os.walk(sessions_dir):
+            for filename in files:
+                if filename.endswith(".jsonl"):
+                    path = Path(root) / filename
+                    session_files.append((path.stat().st_mtime, path))
+
+        if not session_files:
+            return 0.8
+
+        session_files.sort(reverse=True)
+        latest_session = session_files[0][1]
+
+        try:
+            rate_limits = None
+            with open(latest_session) as f:
+                for line in f:
+                    if "rate_limits" in line:
+                        data = json.loads(line.strip())
+                        if data.get("type") == "event_msg":
+                            payload = data.get("payload", {})
+                            if payload.get("type") == "token_count":
+                                rate_limits = payload.get("rate_limits")
+
+            if rate_limits:
+                primary = rate_limits.get("primary", {})
+                if primary:
+                    util = primary.get("used_percent", 0)
+                    return max(0.0, min(1.0, 1.0 - (util / 100.0)))
+
+        except Exception:
+            pass
+
+        return 0.3  # Error, bias low
+
+    def _get_gemini_remaining_usage(self) -> float:
+        """Estimate Gemini remaining usage (0.0-1.0).
+
+        No programmatic API available for quota, so we estimate based on
+        whether logged in. Biased low since we can't verify actual quota.
+        """
+        oauth_file = Path.home() / ".gemini" / "oauth_creds.json"
+        if not oauth_file.exists():
+            return 0.0
+
+        return 0.3  # Logged in but no quota API, bias low
+
+    def _get_mistral_remaining_usage(self) -> float:
+        """Estimate Mistral remaining usage (0.0-1.0).
+
+        No programmatic API available for quota, so we estimate based on
+        whether logged in. Biased low since we can't verify actual quota.
+        """
+        vibe_config = Path.home() / ".vibe" / "config.toml"
+        if not vibe_config.exists():
+            return 0.0
+
+        return 0.3  # Logged in but no quota API, bias low
+
+    def provider_state(self, card_slots: int, pending_delete: str | None = None) -> tuple:
+        """Build UI state for provider cards (summary + per-account controls)."""
+        accounts = self.security_mgr.list_accounts()
+        account_items = sorted(
+            accounts.items(),
+            key=lambda x: self.get_remaining_usage(x[0]),
+            reverse=True,
+        )
+        list_md = self.list_providers()
+
+        outputs: list = [list_md]
+        for idx in range(card_slots):
+            if idx < len(account_items):
+                account_name, provider = account_items[idx]
+                header = f'<span class="provider-card__header-text">{account_name} ({provider})</span>'
+                current_role = self._get_account_role(account_name)
+                role_value = current_role if current_role else "(none)"
+                model_choices = self.get_models_for_account(account_name)
+                stored_model = self.security_mgr.get_account_model(account_name)
+                model_value = stored_model if stored_model in model_choices else model_choices[0]
+                reasoning_choices = self.get_reasoning_choices(provider, account_name)
+                stored_reasoning = self.security_mgr.get_account_reasoning(account_name)
+                reasoning_value = stored_reasoning if stored_reasoning in reasoning_choices else reasoning_choices[0]
+                usage = self.get_provider_usage(account_name)
+
+                delete_btn_update = (
+                    gr.update(value="Confirm?", variant="stop")
+                    if pending_delete == account_name
+                    else gr.update(value="🗑︎", variant="secondary")
+                )
+
+                outputs.extend(
+                    [
+                        gr.update(visible=True),
+                        header,
+                        account_name,
+                        gr.update(value=role_value),
+                        gr.update(choices=model_choices, value=model_value),
+                        gr.update(choices=reasoning_choices, value=reasoning_value),
+                        usage,
+                        delete_btn_update,
+                    ]
+                )
+            else:
+                outputs.extend(
+                    [
+                        gr.update(visible=False),
+                        "",
+                        "",
+                        gr.update(value="(none)"),
+                        gr.update(choices=["default"], value="default"),
+                        gr.update(choices=["default"], value="default"),
+                        "",
+                        gr.update(value="🗑︎", variant="secondary"),
+                    ]
+                )
+
+        return tuple(outputs)
+
+    def provider_action_response(self, feedback: str, card_slots: int, pending_delete: str | None = None):
+        """Return standard provider panel updates with feedback text."""
+        return (feedback, *self.provider_state(card_slots, pending_delete=pending_delete))
+
+    def provider_state_with_confirm(self, pending_delete: str, card_slots: int) -> tuple:
+        """Build provider state with one delete button showing 'Confirm?'."""
+        return self.provider_state(card_slots, pending_delete=pending_delete)
+
+    def _get_codex_home(self, account_name: str) -> Path:
+        """Get the isolated HOME directory for a Codex account."""
+        return Path.home() / ".chad" / "codex-homes" / account_name
+
+    def _get_codex_usage(self, account_name: str) -> str:
+        """Get usage info from Codex by parsing JWT token and session files."""
+        codex_home = self._get_codex_home(account_name)
+        auth_file = codex_home / ".codex" / "auth.json"
+        if not auth_file.exists():
+            return "❌ **Not logged in**\n\nClick 'Login' to authenticate this account."
+
+        try:
+            with open(auth_file) as f:
+                auth_data = json.load(f)
+
+            tokens = auth_data.get("tokens", {})
+            access_token = tokens.get("access_token", "")
+
+            if not access_token:
+                return "❌ **Not logged in**\n\nClick 'Login' to authenticate this account."
+
+            parts = access_token.split(".")
+            if len(parts) != 3:
+                return "⚠️ **Invalid token format**"
+
+            payload = parts[1]
+            padding = 4 - len(payload) % 4
+            if padding != 4:
+                payload += "=" * padding
+
+            decoded = base64.urlsafe_b64decode(payload)
+            jwt_data = json.loads(decoded)
+
+            auth_info = jwt_data.get("https://api.openai.com/auth", {})
+            profile = jwt_data.get("https://api.openai.com/profile", {})
+
+            plan_type = auth_info.get("chatgpt_plan_type", "unknown").upper()
+            email = profile.get("email", "Unknown")
+            exp_timestamp = jwt_data.get("exp", 0)
+            exp_date = datetime.fromtimestamp(exp_timestamp).strftime("%Y-%m-%d %H:%M") if exp_timestamp else "Unknown"
+
+            result = f"✅ **Logged in** ({plan_type} plan)\n\n"
+            result += f"**Account:** {email}\n"
+            result += f"**Token expires:** {exp_date}\n\n"
+
+            usage_data = self._get_codex_session_usage(account_name)
+            if usage_data:
+                result += "**Current Usage**\n\n"
+                result += usage_data
+            else:
+                result += "⚠️ **Usage data unavailable**\n\n"
+                result += "OpenAI/Codex only provides usage information after the first model interaction. "
+                result += "Start a coding session to see rate limit details.\n\n"
+                result += "*Press refresh after using this provider to see current data*"
+
+            return result
+
+        except Exception as exc:  # pragma: no cover - defensive catch
+            return f"⚠️ **Error reading auth data:** {str(exc)}"
+
+    def _get_codex_session_usage(self, account_name: str) -> str | None:  # noqa: C901
+        """Extract usage data from the most recent Codex session file."""
+        codex_home = self._get_codex_home(account_name)
+        sessions_dir = codex_home / ".codex" / "sessions"
+        if not sessions_dir.exists():
+            return None
+
+        session_files: list[tuple[float, Path]] = []
+        for root, _, files in os.walk(sessions_dir):
+            for filename in files:
+                if filename.endswith(".jsonl"):
+                    path = Path(root) / filename
+                    session_files.append((path.stat().st_mtime, path))
+
+        if not session_files:
+            return None
+
+        session_files.sort(reverse=True)
+        latest_session = session_files[0][1]
+
+        rate_limits = None
+        timestamp = None
+        try:
+            with open(latest_session) as f:
+                for line in f:
+                    if "rate_limits" in line:
+                        data = json.loads(line.strip())
+                        if data.get("type") == "event_msg":
+                            payload = data.get("payload", {})
+                            if payload.get("type") == "token_count":
+                                rate_limits = payload.get("rate_limits")
+                                timestamp = data.get("timestamp")
+        except (json.JSONDecodeError, OSError):
+            return None
+
+        if not rate_limits:
+            return None
+
+        result = ""
+
+        primary = rate_limits.get("primary", {})
+        if primary:
+            util = primary.get("used_percent", 0)
+            reset_at = primary.get("resets_at", 0)
+            bar = self._progress_bar(util)
+
+            reset_str = datetime.fromtimestamp(reset_at).strftime("%I:%M%p") if reset_at else "N/A"
+            result += "**5-hour session**\n"
+            result += f"[{bar}] {util:.0f}% used\n"
+            result += f"Resets at {reset_str}\n\n"
+
+        secondary = rate_limits.get("secondary", {})
+        if secondary:
+            util = secondary.get("used_percent", 0)
+            reset_at = secondary.get("resets_at", 0)
+            bar = self._progress_bar(util)
+
+            reset_str = datetime.fromtimestamp(reset_at).strftime("%b %d") if reset_at else "N/A"
+            result += "**Weekly limit**\n"
+            result += f"[{bar}] {util:.0f}% used\n"
+            result += f"Resets {reset_str}\n\n"
+
+        credits = rate_limits.get("credits", {})
+        if credits:
+            has_credits = credits.get("has_credits", False)
+            unlimited = credits.get("unlimited", False)
+            balance = credits.get("balance")
+
+            if unlimited:
+                result += "**Credits:** Unlimited\n\n"
+            elif has_credits and balance is not None:
+                result += f"**Credits balance:** ${balance}\n\n"
+
+        if timestamp:
+            try:
+                update_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                result += f"*Last updated: {update_dt.strftime('%Y-%m-%d %H:%M UTC')}*\n"
+            except ValueError:
+                pass
+
+        return result if result else None
+
+    def _get_claude_usage(self) -> str:  # noqa: C901
+        """Get usage info from Claude via API."""
+        import requests
+
+        creds_file = Path.home() / ".claude" / ".credentials.json"
+        if not creds_file.exists():
+            return "❌ **Not logged in**\n\nRun `claude` in terminal to authenticate."
+
+        try:
+            with open(creds_file) as f:
+                creds = json.load(f)
+
+            oauth_data = creds.get("claudeAiOauth", {})
+            access_token = oauth_data.get("accessToken", "")
+            subscription_type = oauth_data.get("subscriptionType", "unknown").upper()
+
+            if not access_token:
+                return "❌ **Not logged in**\n\nRun `claude` in terminal to authenticate."
+
+            response = requests.get(
+                "https://api.anthropic.com/api/oauth/usage",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "anthropic-beta": "oauth-2025-04-20",
+                    "User-Agent": "claude-code/2.0.32",
+                    "Content-Type": "application/json",
+                },
+                timeout=10,
+            )
+
+            if response.status_code != 200:
+                return f"⚠️ **Error fetching usage:** HTTP {response.status_code}"
+
+            usage_data = response.json()
+
+            result = f"✅ **Logged in** ({subscription_type} plan)\n\n"
+            result += "**Current Usage**\n\n"
+
+            five_hour = usage_data.get("five_hour", {})
+            if five_hour:
+                util = five_hour.get("utilization", 0)
+                reset_at = five_hour.get("resets_at", "")
+                bar = self._progress_bar(util)
+
+                if reset_at:
+                    try:
+                        reset_dt = datetime.fromisoformat(reset_at.replace("Z", "+00:00"))
+                        reset_str = reset_dt.strftime("%I:%M%p")
+                    except ValueError:
+                        reset_str = reset_at
+                else:
+                    reset_str = "N/A"
+
+                result += "**5-hour session**\n"
+                result += f"[{bar}] {util:.0f}% used\n"
+                result += f"Resets at {reset_str}\n\n"
+
+            seven_day = usage_data.get("seven_day")
+            if seven_day:
+                util = seven_day.get("utilization", 0)
+                reset_at = seven_day.get("resets_at", "")
+                bar = self._progress_bar(util)
+
+                if reset_at:
+                    try:
+                        reset_dt = datetime.fromisoformat(reset_at.replace("Z", "+00:00"))
+                        reset_str = reset_dt.strftime("%b %d")
+                    except ValueError:
+                        reset_str = reset_at
+                else:
+                    reset_str = "N/A"
+
+                result += "**Weekly limit**\n"
+                result += f"[{bar}] {util:.0f}% used\n"
+                result += f"Resets {reset_str}\n\n"
+
+            extra = usage_data.get("extra_usage", {})
+            if extra and extra.get("is_enabled"):
+                used = extra.get("used_credits", 0)
+                limit = extra.get("monthly_limit", 0)
+                util = extra.get("utilization", 0)
+                bar = self._progress_bar(util)
+                result += "**Extra credits**\n"
+                result += f"[{bar}] ${used:.0f} / ${limit:.0f} ({util:.1f}%)\n\n"
+
+            return result
+
+        except requests.exceptions.RequestException as exc:
+            return f"⚠️ **Network error:** {str(exc)}"
+        except Exception as exc:  # pragma: no cover - defensive
+            return f"⚠️ **Error:** {str(exc)}"
+
+    def _get_gemini_usage(self) -> str:  # noqa: C901
+        """Get usage info from Gemini by parsing session files."""
+        from collections import defaultdict
+
+        gemini_dir = Path.home() / ".gemini"
+        oauth_file = gemini_dir / "oauth_creds.json"
+
+        if not oauth_file.exists():
+            return "❌ **Not logged in**\n\nRun `gemini` in terminal to authenticate."
+
+        tmp_dir = gemini_dir / "tmp"
+        if not tmp_dir.exists():
+            return (
+                "✅ **Logged in**\n\n"
+                "⚠️ **Usage data unavailable**\n\n"
+                "Google Gemini only provides usage information after the first model interaction. "
+                "Start a coding session to see token usage details.\n\n"
+                "*Press refresh after using this provider to see current data*"
+            )
+
+        session_files = list(tmp_dir.glob("*/chats/session-*.json"))
+        if not session_files:
+            return (
+                "✅ **Logged in**\n\n"
+                "⚠️ **Usage data unavailable**\n\n"
+                "Google Gemini only provides usage information after the first model interaction. "
+                "Start a coding session to see token usage details.\n\n"
+                "*Press refresh after using this provider to see current data*"
+            )
+
+        model_usage: dict[str, dict[str, int]] = defaultdict(
+            lambda: {"requests": 0, "input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+        )
+
+        for session_file in session_files:
+            try:
+                with open(session_file) as f:
+                    session_data = json.load(f)
+
+                messages = session_data.get("messages", [])
+                for msg in messages:
+                    if msg.get("type") == "gemini":
+                        tokens = msg.get("tokens", {})
+                        model = msg.get("model", "unknown")
+
+                        model_usage[model]["requests"] += 1
+                        model_usage[model]["input_tokens"] += tokens.get("input", 0)
+                        model_usage[model]["output_tokens"] += tokens.get("output", 0)
+                        model_usage[model]["cached_tokens"] += tokens.get("cached", 0)
+            except (json.JSONDecodeError, OSError, KeyError):
+                continue
+
+        if not model_usage:
+            return "✅ **Logged in**\n\n*No usage data yet*"
+
+        result = "✅ **Logged in**\n\n"
+        result += "**Model Usage**\n\n"
+        result += "| Model | Reqs | Input | Output |\n"
+        result += "|-------|------|-------|--------|\n"
+
+        total_input = 0
+        total_output = 0
+        total_cached = 0
+        total_requests = 0
+
+        for model, usage in sorted(model_usage.items()):
+            reqs = usage["requests"]
+            input_tok = usage["input_tokens"]
+            output_tok = usage["output_tokens"]
+            cached_tok = usage["cached_tokens"]
+
+            total_requests += reqs
+            total_input += input_tok
+            total_output += output_tok
+            total_cached += cached_tok
+
+            result += f"| {model} | {reqs:,} | {input_tok:,} | {output_tok:,} |\n"
+
+        if total_cached > 0 and total_input > 0:
+            cache_pct = (total_cached / total_input) * 100
+            result += f"\n**Cache savings:** {total_cached:,} ({cache_pct:.1f}%) tokens served from cache\n"
+
+        return result
+
+    def _get_mistral_usage(self) -> str:
+        """Get usage info from Mistral Vibe by parsing session files."""
+        vibe_config = Path.home() / ".vibe" / "config.toml"
+        if not vibe_config.exists():
+            return "❌ **Not logged in**\n\nRun `vibe --setup` in terminal to authenticate."
+
+        sessions_dir = Path.home() / ".vibe" / "logs" / "session"
+        if not sessions_dir.exists():
+            return "✅ **Logged in**\n\n*No session data yet*"
+
+        session_files = list(sessions_dir.glob("session_*.json"))
+        if not session_files:
+            return "✅ **Logged in**\n\n*No session data yet*"
+
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_cost = 0.0
+        session_count = 0
+
+        for session_file in session_files:
+            try:
+                with open(session_file) as f:
+                    data = json.load(f)
+
+                metadata = data.get("metadata", {})
+                stats = metadata.get("stats", {})
+
+                total_prompt_tokens += stats.get("session_prompt_tokens", 0)
+                total_completion_tokens += stats.get("session_completion_tokens", 0)
+                total_cost += stats.get("session_cost", 0.0)
+                session_count += 1
+            except (json.JSONDecodeError, OSError, KeyError):
+                continue
+
+        if session_count == 0:
+            return "✅ **Logged in**\n\n*No valid session data found*"
+
+        total_tokens = total_prompt_tokens + total_completion_tokens
+
+        result = "✅ **Logged in**\n\n"
+        result += "**Cumulative Usage**\n\n"
+        result += f"**Sessions:** {session_count:,}\n"
+        result += f"**Input tokens:** {total_prompt_tokens:,}\n"
+        result += f"**Output tokens:** {total_completion_tokens:,}\n"
+        result += f"**Total tokens:** {total_tokens:,}\n"
+        result += f"**Estimated cost:** ${total_cost:.4f}\n"
+
+        return result
+
+    def get_account_choices(self) -> list[str]:
+        """Get list of account names for dropdowns."""
+        return list(self.security_mgr.list_accounts().keys())
+
+    def _check_provider_login(self, provider_type: str, account_name: str) -> tuple[bool, str]:  # noqa: C901
+        """Check if a provider is logged in."""
+        try:
+            if provider_type == "openai":
+                codex_home = self._get_codex_home(account_name)
+                auth_file = codex_home / ".codex" / "auth.json"
+                if auth_file.exists():
+                    return True, "Logged in"
+                return False, "Not logged in"
+
+            if provider_type == "anthropic":
+                creds_file = Path.home() / ".claude" / ".credentials.json"
+                if creds_file.exists():
+                    return True, "Logged in"
+                return False, "Not logged in"
+
+            if provider_type == "gemini":
+                gemini_oauth = Path.home() / ".gemini" / "oauth_creds.json"
+                if gemini_oauth.exists():
+                    return True, "Logged in"
+                return False, "Not logged in"
+
+            if provider_type == "mistral":
+                vibe_config = Path.home() / ".vibe" / "config.toml"
+                if vibe_config.exists():
+                    return True, "Logged in"
+                return False, "Not logged in"
+
+            return False, "Unknown provider type"
+
+        except Exception as exc:
+            return False, f"Error: {str(exc)}"
+
+    def _setup_codex_account(self, account_name: str) -> str:
+        """Setup isolated home directory for a Codex account."""
+        codex_home = self._get_codex_home(account_name)
+        codex_dir = codex_home / ".codex"
+        codex_dir.mkdir(parents=True, exist_ok=True)
+        return str(codex_home)
+
+    def add_provider(self, provider_name: str, provider_type: str, card_slots: int):  # noqa: C901
+        """Add a new provider and return refreshed provider panel state."""
+        import subprocess
+
+        name_field_value = provider_name
+        add_btn_state = gr.update(interactive=bool(provider_name.strip()))
+        accordion_state = gr.update(open=True)
+
+        try:
+            if provider_type not in self.SUPPORTED_PROVIDERS:
+                base_response = self.provider_action_response(f"❌ Unsupported provider '{provider_type}'", card_slots)
+                return (*base_response, name_field_value, add_btn_state, accordion_state)
+
+            existing_accounts = self.security_mgr.list_accounts()
+            base_name = provider_type
+            counter = 1
+            account_name = provider_name if provider_name else base_name
+
+            while account_name in existing_accounts:
+                account_name = f"{base_name}-{counter}"
+                counter += 1
+
+            if provider_type == "openai":
+                codex_home = self._setup_codex_account(account_name)
+
+                env = os.environ.copy()
+                env["HOME"] = codex_home
+
+                login_result = subprocess.run(
+                    ["codex", "login"],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+
+                if login_result.returncode == 0:
+                    self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
+                    result = f"✅ Provider '{account_name}' added and logged in!"
+                    name_field_value = ""
+                    add_btn_state = gr.update(interactive=False)
+                    accordion_state = gr.update(open=False)
+                else:
+                    import shutil
+
+                    codex_home_path = self._get_codex_home(account_name)
+                    if codex_home_path.exists():
+                        shutil.rmtree(codex_home_path, ignore_errors=True)
+
+                    error = login_result.stderr.strip() if login_result.stderr else "Login was cancelled or failed"
+                    result = f"❌ Login failed for '{account_name}': {error}"
+                    base_response = self.provider_action_response(result, card_slots)
+                    return (*base_response, name_field_value, add_btn_state, accordion_state)
+
+            else:
+                self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
+                result = f"✓ Provider '{account_name}' ({provider_type}) added."
+
+                login_success, login_msg = self._check_provider_login(provider_type, account_name)
+
+                if login_success:
+                    result += f" ✅ {login_msg}"
+                else:
+                    result += f" ⚠️ {login_msg}"
+                    auth_info = {
+                        "anthropic": ("claude", "Opens browser to authenticate with your Anthropic account"),
+                        "gemini": ("gemini", "Opens browser to authenticate with your Google account"),
+                        "mistral": ("vibe --setup", "Set up your Mistral API key"),
+                    }
+                    auth_cmd, auth_desc = auth_info.get(provider_type, ("unknown", ""))
+                    result += f" — manual login: run `{auth_cmd}` ({auth_desc})"
+
+                name_field_value = ""
+                add_btn_state = gr.update(interactive=False)
+                accordion_state = gr.update(open=False)
+
+            base_response = self.provider_action_response(result, card_slots)
+            return (*base_response, name_field_value, add_btn_state, accordion_state)
+        except subprocess.TimeoutExpired:
+            import shutil
+
+            codex_home_path = self._get_codex_home(account_name)
+            if codex_home_path.exists():
+                shutil.rmtree(codex_home_path, ignore_errors=True)
+            base_response = self.provider_action_response(
+                f"❌ Login timed out for '{account_name}'. Please try again.", card_slots
+            )
+            return (*base_response, name_field_value, add_btn_state, accordion_state)
+        except Exception as exc:
+            base_response = self.provider_action_response(f"❌ Error adding provider: {str(exc)}", card_slots)
+            return (*base_response, name_field_value, add_btn_state, accordion_state)
+
+    def _unassign_account_roles(self, account_name: str) -> None:
+        """Remove all role assignments for an account."""
+        role_assignments = self.security_mgr.list_role_assignments()
+        for role, acct in list(role_assignments.items()):
+            if acct == account_name:
+                self.security_mgr.clear_role(role)
+
+    def get_role_config_status(self) -> tuple[bool, str]:
+        """Check if roles are properly configured for running tasks."""
+        role_assignments = self.security_mgr.list_role_assignments()
+        coding_account = role_assignments.get("CODING")
+        management_account = role_assignments.get("MANAGEMENT")
+
+        missing: list[str] = []
+        if not coding_account:
+            missing.append("CODING")
+        if not management_account:
+            missing.append("MANAGEMENT")
+
+        if missing:
+            return False, f"⚠️ Missing role assignments: {', '.join(missing)}. Configure in Providers tab."
+
+        accounts = self.security_mgr.list_accounts()
+        coding_provider = accounts.get(coding_account, "unknown")
+        coding_model = self.security_mgr.get_account_model(coding_account)
+        coding_model_str = coding_model if coding_model != "default" else ""
+
+        management_provider = accounts.get(management_account, "unknown")
+        management_model = self.security_mgr.get_account_model(management_account)
+        management_model_str = management_model if management_model != "default" else ""
+
+        coding_info = f"{coding_account} ({coding_provider}"
+        if coding_model_str:
+            coding_info += f", {coding_model_str}"
+        coding_info += ")"
+
+        mgmt_info = f"{management_account} ({management_provider}"
+        if management_model_str:
+            mgmt_info += f", {management_model_str}"
+        mgmt_info += ")"
+
+        return True, f"✓ Ready — **Coding:** {coding_info} | **Management:** {mgmt_info}"
+
+    def format_role_status(self, session_log_path: Path | None = None) -> str:
+        """Return role status text, optionally annotated with session log path."""
+        _, status = self.get_role_config_status()
+        if session_log_path:
+            return f"{status} | Session log: `{session_log_path}`"
+        return status
+
+    def assign_role(self, account_name: str, role: str, card_slots: int):
+        """Assign a role to a provider and refresh the provider panel."""
+        try:
+            if not account_name:
+                return self.provider_action_response("❌ Please select an account to assign a role", card_slots)
+            if not role or not str(role).strip():
+                return self.provider_action_response("❌ Please select a role", card_slots)
+
+            accounts = self.security_mgr.list_accounts()
+            if account_name not in accounts:
+                return self.provider_action_response(f"❌ Provider '{account_name}' not found", card_slots)
+
+            if role == "(none)":
+                self._unassign_account_roles(account_name)
+                return self.provider_action_response(f"✓ Removed role assignments from {account_name}", card_slots)
+
+            self._unassign_account_roles(account_name)
+
+            if role.upper() == "BOTH":
+                self.security_mgr.assign_role(account_name, "CODING")
+                self.security_mgr.assign_role(account_name, "MANAGEMENT")
+                return self.provider_action_response(
+                    f"✓ Assigned CODING and MANAGEMENT roles to {account_name}", card_slots
+                )
+
+            self.security_mgr.assign_role(account_name, role.upper())
+            return self.provider_action_response(f"✓ Assigned {role.upper()} role to {account_name}", card_slots)
+        except Exception as exc:
+            return self.provider_action_response(f"❌ Error assigning role: {str(exc)}", card_slots)
+
+    def set_model(self, account_name: str, model: str, card_slots: int):
+        """Set the model for a provider account and refresh the provider panel."""
+        try:
+            if not account_name:
+                return self.provider_action_response("❌ Please select an account", card_slots)
+
+            if not model:
+                return self.provider_action_response("❌ Please select a model", card_slots)
+
+            accounts = self.security_mgr.list_accounts()
+            if account_name not in accounts:
+                return self.provider_action_response(f"❌ Provider '{account_name}' not found", card_slots)
+
+            self.security_mgr.set_account_model(account_name, model)
+            return self.provider_action_response(f"✓ Set model to `{model}` for {account_name}", card_slots)
+        except Exception as exc:
+            return self.provider_action_response(f"❌ Error setting model: {str(exc)}", card_slots)
+
+    def set_reasoning(self, account_name: str, reasoning: str, card_slots: int):
+        """Set reasoning effort for a provider account and refresh the provider panel."""
+        try:
+            if not account_name:
+                return self.provider_action_response("❌ Please select an account", card_slots)
+
+            if not reasoning:
+                return self.provider_action_response("❌ Please select a reasoning level", card_slots)
+
+            accounts = self.security_mgr.list_accounts()
+            if account_name not in accounts:
+                return self.provider_action_response(f"❌ Provider '{account_name}' not found", card_slots)
+
+            self.security_mgr.set_account_reasoning(account_name, reasoning)
+            return self.provider_action_response(f"✓ Set reasoning to `{reasoning}` for {account_name}", card_slots)
+        except Exception as exc:
+            return self.provider_action_response(f"❌ Error setting reasoning: {str(exc)}", card_slots)
+
+    def get_models_for_account(self, account_name: str, model_catalog_override: ModelCatalog | None = None) -> list[str]:
+        """Get available models for an account based on its provider."""
+        if not account_name:
+            return ["default"]
+
+        accounts = self.security_mgr.list_accounts()
+        provider = accounts.get(account_name, "")
+        catalog = model_catalog_override or self.model_catalog
+        return catalog.get_models(provider, account_name)
+
+    def get_reasoning_choices(self, provider: str, account_name: str | None = None) -> list[str]:
+        """Return reasoning dropdown options for the provider."""
+        if provider == "openai":
+            stored = "default"
+            if account_name:
+                getter = getattr(self.security_mgr, "get_account_reasoning", None)
+                if getter:
+                    try:
+                        stored = getter(account_name) or "default"
+                    except Exception:
+                        stored = "default"
+            stored = stored if isinstance(stored, str) else "default"
+            choices = set(self.OPENAI_REASONING_LEVELS)
+            if stored:
+                choices.add(stored)
+            ordered = [level for level in self.OPENAI_REASONING_LEVELS if level in choices]
+            for choice in sorted(choices):
+                if choice not in ordered:
+                    ordered.append(choice)
+            return ordered
+        return ["default"]
+
+    def delete_provider(self, account_name: str, confirmed: bool, card_slots: int):
+        """Delete a provider after confirmation and refresh the provider panel."""
+        import shutil
+
+        try:
+            if not account_name:
+                return self.provider_action_response("❌ No provider selected", card_slots)
+
+            if not confirmed:
+                return self.provider_action_response("Deletion cancelled.", card_slots)
+
+            accounts = self.security_mgr.list_accounts()
+            if accounts.get(account_name) == "openai":
+                codex_home = self._get_codex_home(account_name)
+                if codex_home.exists():
+                    shutil.rmtree(codex_home, ignore_errors=True)
+
+            self.security_mgr.delete_account(account_name)
+            return self.provider_action_response(f"✓ Provider '{account_name}' deleted", card_slots)
+        except Exception as exc:
+            return self.provider_action_response(f"❌ Error deleting provider: {str(exc)}", card_slots)
