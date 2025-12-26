@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -13,9 +16,11 @@ from .ui_playwright_runner import (
     chad_page_session,
     delete_provider_by_name,
     get_provider_names,
+    measure_add_provider_accordion,
     measure_provider_delete_button,
     screenshot_page,
 )
+from .visual_test_map import VISUAL_TEST_MAP, get_tests_for_file, get_tests_for_files
 
 SERVER = FastMCP("chad-ui-playwright")
 ARTIFACT_ROOT = Path(tempfile.gettempdir()) / "chad" / "mcp-playwright"
@@ -135,6 +140,61 @@ def measure_provider_delete(
     except ChadLaunchError as exc:
         return _failure(str(exc))
     except Exception as exc:  # pragma: no cover - defensive
+        return _failure(f"Unexpected error: {exc}")
+
+
+@SERVER.tool()
+def test_add_provider_accordion_gap(
+    max_gap_px: int = 16,
+    headless: bool = True,
+    viewport_width: int = 1280,
+    viewport_height: int = 900,
+) -> Dict[str, object]:
+    """Test the gap between the last provider card and Add New Provider accordion.
+
+    The Add New Provider accordion should sit tight to the provider cards,
+    not have a large gap between them. A gap larger than max_gap_px indicates
+    a layout issue.
+
+    Args:
+        max_gap_px: Maximum acceptable gap in pixels (default 16px)
+        headless: Run browser in headless mode
+        viewport_width: Viewport width in pixels
+        viewport_height: Viewport height in pixels
+
+    Returns:
+        Test results including actual gap measurement and pass/fail status
+    """
+    try:
+        artifacts = _artifact_dir()
+        with chad_page_session(
+            tab="providers", headless=headless, viewport=_viewport(viewport_width, viewport_height)
+        ) as (page, _instance):
+            measurement = measure_add_provider_accordion(page)
+            screenshot = screenshot_page(page, artifacts / "accordion_gap.png")
+
+        gap = measurement.get("gap", 0)
+        passed = gap <= max_gap_px
+
+        return {
+            "success": True,
+            "test_passed": passed,
+            "gap_px": gap,
+            "max_allowed_px": max_gap_px,
+            "font_size": measurement.get("fontSize"),
+            "font_weight": measurement.get("fontWeight"),
+            "message": (
+                f"Gap is {gap}px (max allowed: {max_gap_px}px)"
+                if passed else f"FAIL: Gap is {gap}px, exceeds max of {max_gap_px}px"
+            ),
+            "screenshot": str(screenshot),
+            "artifacts_dir": str(artifacts),
+        }
+    except PlaywrightUnavailable as exc:
+        return _failure(str(exc))
+    except ChadLaunchError as exc:
+        return _failure(str(exc))
+    except Exception as exc:
         return _failure(f"Unexpected error: {exc}")
 
 
@@ -481,6 +541,317 @@ def test_scroll_preservation(
     except Exception as exc:
         import traceback
         return _failure(f"Unexpected error: {exc}\n{traceback.format_exc()}")
+
+
+def _project_root() -> Path:
+    """Get the project root directory."""
+    return Path(__file__).parents[2]
+
+
+@SERVER.tool()
+def run_tests_for_file(file_path: str, headless: bool = True) -> Dict[str, object]:
+    """Run visual tests that cover a specific source file.
+
+    Looks up which visual tests are associated with the given source file
+    using the annotation system, then runs those tests.
+
+    Args:
+        file_path: Path to the modified source file (e.g., 'src/chad/provider_ui.py')
+        headless: Run browser in headless mode
+    """
+    try:
+        tests = get_tests_for_file(file_path)
+        if not tests:
+            return {
+                "success": True,
+                "message": f"No visual tests mapped to {file_path}",
+                "tests_run": [],
+                "file": file_path,
+            }
+
+        test_filter = " or ".join(tests)
+        env = {**os.environ, "PYTHONPATH": str(_project_root() / "src")}
+        if not headless:
+            env["HEADED"] = "1"
+
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "tests/test_ui_integration.py", "-v", "--tb=short", "-k", test_filter],
+            capture_output=True,
+            text=True,
+            cwd=str(_project_root()),
+            env=env,
+        )
+
+        return {
+            "success": result.returncode == 0,
+            "file": file_path,
+            "tests_run": tests,
+            "test_filter": test_filter,
+            "stdout": result.stdout[-5000:] if len(result.stdout) > 5000 else result.stdout,
+            "stderr": result.stderr[-2000:] if len(result.stderr) > 2000 else result.stderr,
+            "return_code": result.returncode,
+        }
+    except Exception as exc:
+        return _failure(f"Error running tests: {exc}")
+
+
+@SERVER.tool()
+def run_tests_for_modified_files(headless: bool = True) -> Dict[str, object]:
+    """Run visual tests for all files modified in the current git working tree.
+
+    Uses `git status` to find modified files, looks up their associated
+    visual tests, and runs them.
+    """
+    try:
+        git_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            cwd=str(_project_root()),
+        )
+
+        if git_result.returncode != 0:
+            return _failure("Failed to get git status")
+
+        modified_files = []
+        for line in git_result.stdout.split("\n"):
+            line = line.rstrip()  # Only strip trailing whitespace, preserve leading status chars
+            if line and len(line) > 3:
+                filename = line[3:].strip()
+                if filename.startswith("src/chad/") and filename.endswith(".py"):
+                    modified_files.append(filename)
+
+        if not modified_files:
+            return {
+                "success": True,
+                "message": "No modified Python files in src/chad/",
+                "modified_files": [],
+                "tests_run": [],
+            }
+
+        tests = get_tests_for_files(modified_files)
+        if not tests:
+            return {
+                "success": True,
+                "message": "No visual tests mapped to modified files",
+                "modified_files": modified_files,
+                "tests_run": [],
+            }
+
+        test_filter = " or ".join(tests)
+        env = {**os.environ, "PYTHONPATH": str(_project_root() / "src")}
+
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "tests/test_ui_integration.py", "-v", "--tb=short", "-k", test_filter],
+            capture_output=True,
+            text=True,
+            cwd=str(_project_root()),
+            env=env,
+        )
+
+        return {
+            "success": result.returncode == 0,
+            "modified_files": modified_files,
+            "tests_run": tests,
+            "test_filter": test_filter,
+            "stdout": result.stdout[-5000:] if len(result.stdout) > 5000 else result.stdout,
+            "stderr": result.stderr[-2000:] if len(result.stderr) > 2000 else result.stderr,
+            "return_code": result.returncode,
+        }
+    except Exception as exc:
+        return _failure(f"Error: {exc}")
+
+
+@SERVER.tool()
+def run_ci_tests(include_visual: bool = False) -> Dict[str, object]:
+    """Run the full GitHub Actions test suite.
+
+    Args:
+        include_visual: If True, include visual tests (slow).
+                       If False (default), exclude visual tests.
+    """
+    try:
+        cmd = [sys.executable, "-m", "pytest", "-v", "--tb=short"]
+        if not include_visual:
+            cmd.extend(["-m", "not visual"])
+
+        env = {**os.environ, "PYTHONPATH": str(_project_root() / "src")}
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=str(_project_root()),
+            env=env,
+        )
+
+        return {
+            "success": result.returncode == 0,
+            "include_visual": include_visual,
+            "stdout": result.stdout[-8000:] if len(result.stdout) > 8000 else result.stdout,
+            "stderr": result.stderr[-2000:] if len(result.stderr) > 2000 else result.stderr,
+            "return_code": result.returncode,
+        }
+    except Exception as exc:
+        return _failure(f"Error: {exc}")
+
+
+@SERVER.tool()
+def verify_all_tests_pass() -> Dict[str, object]:
+    """Run complete verification before completing an issue.
+
+    Runs:
+    1. Linting (flake8)
+    2. Unit tests (excluding visual)
+    3. Visual tests for modified files only
+    """
+    try:
+        results: Dict[str, object] = {"phases": {}}
+        project_root = _project_root()
+        env = {**os.environ, "PYTHONPATH": str(project_root / "src")}
+
+        # Phase 1: Lint
+        lint_result = subprocess.run(
+            [sys.executable, "-m", "flake8", "."],
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+        )
+        results["phases"]["lint"] = {  # type: ignore[index]
+            "success": lint_result.returncode == 0,
+            "output": lint_result.stdout[-2000:] if lint_result.stdout else "",
+            "errors": lint_result.stderr[-1000:] if lint_result.stderr else "",
+        }
+
+        if lint_result.returncode != 0:
+            results["success"] = False
+            results["failed_phase"] = "lint"
+            return results
+
+        # Phase 2: Unit tests (excluding visual)
+        unit_result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-v", "--tb=short", "-m", "not visual"],
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+            env=env,
+        )
+        results["phases"]["unit_tests"] = {  # type: ignore[index]
+            "success": unit_result.returncode == 0,
+            "output": unit_result.stdout[-4000:] if len(unit_result.stdout) > 4000 else unit_result.stdout,
+        }
+
+        if unit_result.returncode != 0:
+            results["success"] = False
+            results["failed_phase"] = "unit_tests"
+            return results
+
+        # Phase 3: Visual tests for modified files
+        visual_result = run_tests_for_modified_files(headless=True)
+        results["phases"]["visual_tests"] = visual_result  # type: ignore[index]
+
+        if not visual_result.get("success", False):
+            results["success"] = False
+            results["failed_phase"] = "visual_tests"
+            return results
+
+        results["success"] = True
+        results["message"] = "All verification phases passed"
+        return results
+
+    except Exception as exc:
+        return _failure(f"Verification error: {exc}")
+
+
+@SERVER.tool()
+def list_visual_test_mappings() -> Dict[str, object]:
+    """List all source file to visual test mappings.
+
+    Returns the complete annotation registry showing which source files
+    are covered by which visual tests.
+    """
+    return {
+        "success": True,
+        "mappings": VISUAL_TEST_MAP,
+        "total_mappings": len(VISUAL_TEST_MAP),
+    }
+
+
+@SERVER.tool()
+def capture_visual_change(
+    label: str,
+    tab: str = "providers",
+    issue_id: str = "",
+    headless: bool = True,
+    viewport_width: int = 1280,
+    viewport_height: int = 900,
+) -> Dict[str, object]:
+    """Capture a screenshot documenting a visual change (before or after).
+
+    IMPORTANT: Agents working on visual issues MUST use this tool to:
+    1. Take a "before" screenshot BEFORE making any changes
+    2. Take an "after" screenshot AFTER making changes
+    3. Report both screenshot paths to the user
+
+    The screenshots are saved to a timestamped directory in /tmp/chad/visual-changes/
+    with descriptive filenames including the label and issue ID.
+
+    Args:
+        label: Descriptive label like "before" or "after" (required)
+        tab: Which tab to screenshot ("run" or "providers")
+        issue_id: Optional issue/ticket ID for organization
+        headless: Run browser in headless mode
+        viewport_width: Viewport width in pixels
+        viewport_height: Viewport height in pixels
+
+    Returns:
+        Screenshot path and artifacts directory for reporting to user
+
+    Example workflow:
+        1. capture_visual_change(label="before", tab="providers", issue_id="gap-fix")
+        2. Make code changes to fix the issue
+        3. capture_visual_change(label="after", tab="providers", issue_id="gap-fix")
+        4. Report both paths to user in summary
+    """
+    try:
+        # Create directory structure: /tmp/chad/visual-changes/YYYYMMDD_HHMMSS/
+        base_dir = Path(tempfile.gettempdir()) / "chad" / "visual-changes"
+        run_dir = base_dir / datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        # Build filename: {issue_id}_{label}_{tab}.png or {label}_{tab}.png
+        parts = []
+        if issue_id:
+            parts.append(issue_id.replace(" ", "-").replace("/", "-"))
+        parts.append(label.replace(" ", "-"))
+        parts.append(tab)
+        filename = "_".join(parts) + ".png"
+
+        normalized_tab = "providers" if tab.lower().startswith("p") else "run"
+
+        with chad_page_session(
+            tab=normalized_tab,
+            headless=headless,
+            viewport=_viewport(viewport_width, viewport_height),
+        ) as (page, _instance):
+            screenshot_path = screenshot_page(page, run_dir / filename)
+
+        return {
+            "success": True,
+            "label": label,
+            "tab": normalized_tab,
+            "issue_id": issue_id or "(none)",
+            "screenshot": str(screenshot_path),
+            "artifacts_dir": str(run_dir),
+            "message": f"Screenshot saved: {screenshot_path}",
+            "reminder": "Remember to take both 'before' and 'after' screenshots and report paths to user!",
+        }
+    except PlaywrightUnavailable as exc:
+        return _failure(str(exc))
+    except ChadLaunchError as exc:
+        return _failure(str(exc))
+    except Exception as exc:
+        return _failure(f"Unexpected error: {exc}")
 
 
 if __name__ == "__main__":
