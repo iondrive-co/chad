@@ -27,6 +27,8 @@ from .session_manager import (
 from .providers import ModelConfig, parse_codex_output, extract_final_codex_response
 from .model_catalog import ModelCatalog
 
+ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\][^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")
+
 
 # Custom styling for the provider management area to improve contrast between
 # the summary header and each provider card.
@@ -506,77 +508,11 @@ function() {
 
 
 def ansi_to_html(text: str) -> str:
-    """Convert ANSI escape codes to HTML spans with colors.
+    """Strip ANSI escape codes and escape HTML entities for display."""
+    import html
 
-    Preserves the terminal's native coloring instead of stripping it.
-    """
-    # ANSI color code to CSS color mapping
-    # Note: dim colors (90-97) are brightened to be readable on dark backgrounds
-    colors = {
-        '30': '#6b7280', '31': '#e06c75', '32': '#98c379', '33': '#e5c07b',
-        '34': '#61afef', '35': '#c678dd', '36': '#56b6c2', '37': '#d4d4d4',
-        '90': '#9ca3af', '91': '#f87171', '92': '#a3e635', '93': '#fbbf24',
-        '94': '#60a5fa', '95': '#e879f9', '96': '#22d3ee', '97': '#ffffff',
-    }
-    bg_colors = {
-        '40': '#000000', '41': '#e06c75', '42': '#98c379', '43': '#e5c07b',
-        '44': '#61afef', '45': '#c678dd', '46': '#56b6c2', '47': '#abb2bf',
-    }
-
-    result = []
-    i = 0
-    current_styles = []
-
-    while i < len(text):
-        # Check for ANSI escape sequence
-        if text[i] == '\x1b' and i + 1 < len(text) and text[i + 1] == '[':
-            # Find the end of the escape sequence
-            j = i + 2
-            while j < len(text) and text[j] not in 'mHJK':
-                j += 1
-            if j < len(text) and text[j] == 'm':
-                # Parse the codes
-                codes = text[i + 2:j].split(';')
-                for code in codes:
-                    if code == '0' or code == '':
-                        # Reset
-                        if current_styles:
-                            result.append('</span>' * len(current_styles))
-                            current_styles = []
-                    elif code == '1':
-                        result.append('<span style="font-weight:bold">')
-                        current_styles.append('bold')
-                    elif code == '3':
-                        result.append('<span style="font-style:italic">')
-                        current_styles.append('italic')
-                    elif code == '4':
-                        result.append('<span style="text-decoration:underline">')
-                        current_styles.append('underline')
-                    elif code in colors:
-                        result.append(f'<span style="color:{colors[code]}">')
-                        current_styles.append('color')
-                    elif code in bg_colors:
-                        result.append(f'<span style="background-color:{bg_colors[code]}">')
-                        current_styles.append('bg')
-                i = j + 1
-                continue
-            elif j < len(text):
-                # Other escape sequence (cursor movement, etc.) - skip it
-                i = j + 1
-                continue
-
-        # Regular character - escape HTML entities
-        char = text[i]
-        if char == '<':
-            result.append('&lt;')
-        elif char == '>':
-            result.append('&gt;')
-        elif char == '&':
-            result.append('&amp;')
-        else:
-            result.append(char)
-
-    return ''.join(result)
+    cleaned = ANSI_ESCAPE_RE.sub('', text).replace('\x1b', '')
+    return html.escape(cleaned)
 
 
 def summarize_content(content: str, max_length: int = 200) -> str:
@@ -756,6 +692,11 @@ class ChadWebUI:
         if accounts[account_name] != 'openai':
             return f"❌ Account '{account_name}' is not an OpenAI account"
 
+        cli_ok, cli_detail = self.provider_ui._ensure_provider_cli('openai')
+        if not cli_ok:
+            return f"❌ {cli_detail}"
+        codex_cli = cli_detail or "codex"
+
         # Setup isolated home
         codex_home = self._setup_codex_account(account_name)
 
@@ -764,11 +705,11 @@ class ChadWebUI:
         env['HOME'] = codex_home
 
         # First logout any existing session
-        subprocess.run(['codex', 'logout'], env=env, capture_output=True, timeout=10)
+        subprocess.run([codex_cli, 'logout'], env=env, capture_output=True, timeout=10)
 
         # Now run login - this will open a browser
         result = subprocess.run(
-            ['codex', 'login'],
+            [codex_cli, 'login'],
             env=env,
             capture_output=True,
             text=True,

@@ -21,7 +21,9 @@ class TestChadWebUI:
     def web_ui(self, mock_security_mgr):
         """Create a ChadWebUI instance with mocked dependencies."""
         from chad.web_ui import ChadWebUI
-        return ChadWebUI(mock_security_mgr, 'test-password')
+        ui = ChadWebUI(mock_security_mgr, 'test-password')
+        ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/codex"))
+        return ui
 
     def test_init(self, web_ui, mock_security_mgr):
         """Test ChadWebUI initialization."""
@@ -184,6 +186,17 @@ class TestChadWebUI:
         assert '✓' in result
         assert 'high' in result
         mock_security_mgr.set_account_reasoning.assert_called_once_with('claude', 'high')
+
+    def test_add_provider_install_failure(self, web_ui, mock_security_mgr):
+        """Installer failures should surface to the user."""
+        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(False, "Node missing"))
+        mock_security_mgr.list_accounts.return_value = {}
+
+        result = web_ui.add_provider('', 'openai')[0]
+
+        assert '❌' in result
+        assert 'Node missing' in result
+        mock_security_mgr.store_account.assert_not_called()
 
     def test_get_models_includes_stored_model(self, web_ui, mock_security_mgr, tmp_path):
         """Stored models should always be present in dropdown choices."""

@@ -9,6 +9,7 @@ from pathlib import Path
 import gradio as gr
 
 from .model_catalog import ModelCatalog
+from .installer import AIToolInstaller
 
 
 class ProviderUIManager:
@@ -17,10 +18,17 @@ class ProviderUIManager:
     SUPPORTED_PROVIDERS = {"anthropic", "openai", "gemini", "mistral"}
     OPENAI_REASONING_LEVELS = ["default", "low", "medium", "high", "xhigh"]
 
-    def __init__(self, security_mgr, main_password: str, model_catalog: ModelCatalog | None = None):
+    def __init__(
+        self,
+        security_mgr,
+        main_password: str,
+        model_catalog: ModelCatalog | None = None,
+        installer: AIToolInstaller | None = None,
+    ):
         self.security_mgr = security_mgr
         self.main_password = main_password
         self.model_catalog = model_catalog or ModelCatalog(security_mgr)
+        self.installer = installer or AIToolInstaller()
 
     def list_providers(self) -> str:
         """Summarize all configured providers with role and model."""
@@ -687,6 +695,19 @@ class ProviderUIManager:
         codex_dir.mkdir(parents=True, exist_ok=True)
         return str(codex_home)
 
+    def _ensure_provider_cli(self, provider_type: str) -> tuple[bool, str]:
+        """Ensure the provider's CLI is present; install if missing."""
+        tool_map = {
+            "openai": "codex",
+            "anthropic": "claude",
+            "gemini": "gemini",
+            "mistral": "vibe",
+        }
+        tool_key = tool_map.get(provider_type)
+        if not tool_key:
+            return True, ""
+        return self.installer.ensure_tool(tool_key)
+
     def add_provider(self, provider_name: str, provider_type: str, card_slots: int):  # noqa: C901
         """Add a new provider and return refreshed provider panel state."""
         import subprocess
@@ -700,6 +721,11 @@ class ProviderUIManager:
                 base_response = self.provider_action_response(f"❌ Unsupported provider '{provider_type}'", card_slots)
                 return (*base_response, name_field_value, add_btn_state, accordion_state)
 
+            cli_ok, cli_detail = self._ensure_provider_cli(provider_type)
+            if not cli_ok:
+                base_response = self.provider_action_response(f"❌ {cli_detail}", card_slots)
+                return (*base_response, name_field_value, add_btn_state, accordion_state)
+
             existing_accounts = self.security_mgr.list_accounts()
             base_name = provider_type
             counter = 1
@@ -711,12 +737,13 @@ class ProviderUIManager:
 
             if provider_type == "openai":
                 codex_home = self._setup_codex_account(account_name)
+                codex_cli = cli_detail or "codex"
 
                 env = os.environ.copy()
                 env["HOME"] = codex_home
 
                 login_result = subprocess.run(
-                    ["codex", "login"],
+                    [codex_cli, "login"],
                     env=env,
                     capture_output=True,
                     text=True,

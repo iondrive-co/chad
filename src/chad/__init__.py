@@ -3,4 +3,4 @@
 A tool to install and configure OpenAI Codex and Anthropic Claude Code on user systems.
 """
 
-__version__ = "0.3.9"
+__version__ = "0.3.10"
