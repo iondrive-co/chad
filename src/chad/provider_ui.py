@@ -235,7 +235,7 @@ class ProviderUIManager:
                 usage = self.get_provider_usage(account_name)
 
                 delete_btn_update = (
-                    gr.update(value="Confirm?", variant="stop")
+                    gr.update(value="✓", variant="stop")
                     if pending_delete == account_name
                     else gr.update(value="🗑︎", variant="secondary")
                 )

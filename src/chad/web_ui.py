@@ -342,14 +342,26 @@ PROVIDER_PANEL_CSS = """
   position: relative;
 }
 
-/* Role status row: keep status and session log button on one line */
+/* Role status row: keep status and session log button on one line, aligned with button row below */
+#role-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+}
+
 #role-config-status {
-  flex: 1;
+  flex: 1 1 0;  /* Grow, shrink, start from 0 width */
   margin: 0;
+  min-width: 0;  /* Allow text to shrink so session log can have space */
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 #session-log-btn {
-  flex-shrink: 0;
+  flex: 0 0 auto;  /* Don't grow, don't shrink, auto width based on content */
   border: none !important;
   box-shadow: none !important;
   background: transparent !important;
@@ -561,15 +573,8 @@ def ansi_to_html(text: str) -> str:
             result.append('&gt;')
         elif char == '&':
             result.append('&amp;')
-        elif char == '\n':
-            result.append('\n')
         else:
             result.append(char)
-        i += 1
-
-    # Close any remaining spans
-    if current_styles:
-        result.append('</span>' * len(current_styles))
 
     return ''.join(result)
 
@@ -943,8 +948,16 @@ class ChadWebUI:
                 status_prefix += f"• MANAGEMENT: {management_account} ({management_provider})\n"
             status_prefix += f"• Mode: {'Managed (AI supervision)' if managed_mode else 'Direct (coding AI only)'}\n\n"
 
+            # Add task description as the first message in chat history
+            chat_history.append({
+                "role": "user",
+                "content": f"**Task**\n\n{task_description}"
+            })
+            # Update session log with initial task message
+            self.session_logger.update_log(session_log_path, chat_history)
+
             initial_status = f"{status_prefix}⏳ Initializing sessions..."
-            yield make_yield([], initial_status, summary=initial_status, interactive=False)
+            yield make_yield(chat_history, initial_status, summary=initial_status, interactive=False)
 
             # Activity callback to capture live updates
             # Format in Claude Code style: ● ToolName(params) with ⎿ for results
@@ -1517,20 +1530,23 @@ Create a better plan that addresses the issue."""
                         full_history.append((current_ai, f"\n--- {current_ai} ---\n"))
 
                     elif msg_type == 'stream':
-                        streaming_buffer += msg[1]
-                        # Add to infinite history (no truncation)
-                        full_history.append((current_ai, msg[1]))
-                        now = time_module.time()
-                        if now - last_yield_time >= min_yield_interval:
-                            # Get display content from full history
-                            display_content = get_display_content()
-                            current_live_stream = format_live_output(
-                                current_ai, display_content
-                            )
-                            yield make_yield(
-                                chat_history, current_status, current_live_stream
-                            )
-                            last_yield_time = now
+                        chunk = msg[1]
+                        # Filter out empty/whitespace-only chunks
+                        if chunk.strip():
+                            streaming_buffer += chunk
+                            # Add to infinite history (no truncation)
+                            full_history.append((current_ai, chunk))
+                            now = time_module.time()
+                            if now - last_yield_time >= min_yield_interval:
+                                # Get display content from full history
+                                display_content = get_display_content()
+                                current_live_stream = format_live_output(
+                                    current_ai, display_content
+                                )
+                                yield make_yield(
+                                    chat_history, current_status, current_live_stream
+                                )
+                                last_yield_time = now
 
                     elif msg_type == 'activity':
                         last_activity = msg[1]
@@ -1631,9 +1647,13 @@ Create a better plan that addresses the issue."""
                     "content": failure_msg
                 })
 
+            # Build streaming transcript from full_history
+            streaming_transcript = ''.join(chunk for _, chunk in full_history) if full_history else None
+
             self.session_logger.update_log(
                 session_log_path,
                 chat_history,
+                streaming_transcript=streaming_transcript,
                 success=task_success[0],
                 completion_reason=completion_reason[0],
                 status="completed" if task_success[0] else "failed"
@@ -1685,7 +1705,7 @@ Create a better plan that addresses the issue."""
                                 lines=5
                             )
                             # Show role configuration status with session log download
-                            with gr.Row():
+                            with gr.Row(elem_id="role-status-row"):
                                 role_status = gr.Markdown(config_status, elem_id="role-config-status")
                                 log_path = self.current_session_log_path
                                 session_log_btn = gr.DownloadButton(
@@ -1708,6 +1728,7 @@ Create a better plan that addresses the issue."""
                                 cancel_btn = gr.Button(
                                     "🛑 Cancel",
                                     variant="stop",
+                                    interactive=False,
                                     elem_id="cancel-task-btn"
                                 )
 

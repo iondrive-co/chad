@@ -390,7 +390,7 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
             feedback_message=f"Could not find delete button for '{provider_name}'"
         )
 
-    # Wait for button to change to "Confirm?"
+    # Wait for button to change to tick symbol
     page.wait_for_timeout(500)
 
     # Check if any button now shows the confirm symbol (✓) or has stop variant
@@ -399,9 +399,9 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
 () => {
   const buttons = document.querySelectorAll('.provider-delete');
   for (const btn of buttons) {
-    // Check for confirm symbol or stop variant class
+    // Check for confirm symbol (tick) or stop variant class
     const text = btn.textContent || '';
-    const hasConfirmSymbol = text.includes('✓') || text.includes('Confirm');
+    const hasConfirmSymbol = text.includes('✓');
     const hasStopVariant = btn.classList.contains('stop');
     if (hasConfirmSymbol || hasStopVariant) {
       return true;
@@ -430,7 +430,7 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
   const buttons = document.querySelectorAll('.provider-delete');
   for (const btn of buttons) {
     const text = btn.textContent || '';
-    const hasConfirmSymbol = text.includes('✓') || text.includes('Confirm');
+    const hasConfirmSymbol = text.includes('✓');
     const hasStopVariant = btn.classList.contains('stop');
     if (hasConfirmSymbol || hasStopVariant) {
       btn.click();

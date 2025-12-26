@@ -84,6 +84,27 @@ class TestUIElements:
         button = page.locator('#start-task-btn')
         expect(button).to_be_visible()
 
+    def test_cancel_button_disabled_initially(self, page: Page):
+        """Cancel button should be disabled before task starts."""
+        # The cancel button should exist but not be interactive/enabled
+        cancel_btn = page.locator('#cancel-task-btn')
+        expect(cancel_btn).to_be_visible()
+        # Check that button is disabled (has disabled attribute or class)
+        is_disabled = page.evaluate(
+            """
+            () => {
+              const btn = document.querySelector('#cancel-task-btn');
+              if (!btn) return true;
+              // Check various ways Gradio might disable a button
+              return btn.disabled ||
+                     btn.classList.contains('disabled') ||
+                     btn.getAttribute('aria-disabled') === 'true' ||
+                     btn.hasAttribute('disabled');
+            }
+            """
+        )
+        assert is_disabled, "Cancel button should be disabled before task starts"
+
 
 class TestReadyStatus:
     """Test the Ready status display with model assignments."""

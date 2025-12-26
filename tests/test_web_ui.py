@@ -864,3 +864,188 @@ class TestStateMachineIntegration:
         # First coding call should be the investigation question
         first_coding_call = str(coding_calls[0])
         assert 'header' in first_coding_call.lower() or 'search' in first_coding_call.lower()
+
+
+class TestDeleteConfirmationIcon:
+    """Test that delete confirmation button shows tick icon."""
+
+    @pytest.fixture
+    def mock_security_mgr(self):
+        """Create a mock security manager."""
+        mgr = Mock()
+        mgr.list_accounts.return_value = {'claude': 'anthropic', 'gpt': 'openai'}
+        mgr.list_role_assignments.return_value = {'CODING': 'claude'}
+        mgr.get_account_model.return_value = 'default'
+        mgr.get_account_reasoning.return_value = 'default'
+        return mgr
+
+    def test_delete_button_shows_tick_for_pending(self, mock_security_mgr):
+        """Delete button should show tick symbol when pending confirmation."""
+        from chad.provider_ui import ProviderUIManager
+
+        provider_ui = ProviderUIManager(mock_security_mgr, 'test-password')
+        state = provider_ui.provider_state(5, pending_delete='claude')
+
+        # Check that one of the delete button updates contains tick symbol
+        found_tick = False
+        for item in state:
+            if isinstance(item, dict) and 'value' in item:
+                if item.get('value') == '✓':
+                    found_tick = True
+                    break
+        assert found_tick, "Delete confirmation button should show ✓ symbol"
+
+    def test_delete_button_shows_trash_normally(self, mock_security_mgr):
+        """Delete button should show trash icon when not pending."""
+        from chad.provider_ui import ProviderUIManager
+
+        provider_ui = ProviderUIManager(mock_security_mgr, 'test-password')
+        state = provider_ui.provider_state(5, pending_delete=None)
+
+        # Check that delete buttons show trash icon
+        found_trash = False
+        for item in state:
+            if isinstance(item, dict) and 'value' in item:
+                if '🗑' in str(item.get('value', '')):
+                    found_trash = True
+                    break
+        assert found_trash, "Delete button should show trash icon when not pending"
+
+
+class TestSessionLogIncludesTask:
+    """Test that session log conversation includes the task description."""
+
+    @pytest.fixture
+    def mock_security_mgr(self):
+        """Create a mock security manager with roles assigned."""
+        mgr = Mock()
+        mgr.list_accounts.return_value = {'coding-ai': 'mock', 'mgmt-ai': 'mock'}
+        mgr.list_role_assignments.return_value = {'CODING': 'coding-ai', 'MANAGEMENT': 'mgmt-ai'}
+        mgr.get_account_model.return_value = 'default'
+        mgr.get_account_reasoning.return_value = 'default'
+        return mgr
+
+    @pytest.fixture
+    def web_ui(self, mock_security_mgr):
+        """Create a ChadWebUI instance."""
+        from chad.web_ui import ChadWebUI
+        return ChadWebUI(mock_security_mgr, 'test-password')
+
+    @patch('chad.providers.create_provider')
+    def test_session_log_starts_with_task(self, mock_create_provider, web_ui, tmp_path):
+        """Session log should include task description as first message."""
+        import json
+
+        # Setup mock provider
+        mock_provider = Mock()
+        mock_provider.start_session.return_value = True
+        mock_provider.get_response.return_value = "Task completed successfully"
+        mock_provider.stop_session.return_value = None
+        mock_provider.is_alive.return_value = False  # Task completes immediately
+        mock_create_provider.return_value = mock_provider
+
+        test_dir = tmp_path / "test_project"
+        test_dir.mkdir()
+
+        task_description = "Fix the login bug"
+
+        # Run task in direct mode (third param False or omitted)
+        list(web_ui.start_chad_task(str(test_dir), task_description, False))
+
+        # Get the session log path
+        session_log_path = web_ui.current_session_log_path
+        assert session_log_path is not None
+        assert session_log_path.exists()
+
+        # Read and verify the log contains the task description in conversation
+        with open(session_log_path) as f:
+            data = json.load(f)
+
+        # Conversation should include the task description
+        assert len(data["conversation"]) >= 1
+        first_message = data["conversation"][0]
+        assert "Task" in first_message.get("content", "")
+        assert task_description in first_message.get("content", "")
+
+        # Cleanup
+        session_log_path.unlink(missing_ok=True)
+
+
+class TestAnsiToHtml:
+    """Test that ANSI escape codes are properly stripped from live view output."""
+
+    def test_strips_basic_color_codes(self):
+        """Basic SGR color codes should be stripped."""
+        from chad.web_ui import ansi_to_html
+        # Purple/magenta color code
+        text = "\x1b[35mPurple text\x1b[0m"
+        result = ansi_to_html(text)
+        assert result == "Purple text"
+        assert "\x1b" not in result
+
+    def test_strips_256_color_codes(self):
+        """256-color codes should be stripped."""
+        from chad.web_ui import ansi_to_html
+        # 256-color purple
+        text = "\x1b[38;5;141mColored\x1b[0m"
+        result = ansi_to_html(text)
+        assert result == "Colored"
+
+    def test_strips_rgb_color_codes(self):
+        """RGB true-color codes should be stripped."""
+        from chad.web_ui import ansi_to_html
+        # RGB purple
+        text = "\x1b[38;2;198;120;221mRGB color\x1b[0m"
+        result = ansi_to_html(text)
+        assert result == "RGB color"
+
+    def test_strips_cursor_codes(self):
+        """Cursor control sequences with ? should be stripped."""
+        from chad.web_ui import ansi_to_html
+        # Show/hide cursor
+        text = "\x1b[?25hVisible\x1b[?25l"
+        result = ansi_to_html(text)
+        assert result == "Visible"
+
+    def test_strips_osc_sequences(self):
+        """OSC sequences (like terminal title) should be stripped."""
+        from chad.web_ui import ansi_to_html
+        # Set terminal title
+        text = "\x1b]0;My Title\x07Content here"
+        result = ansi_to_html(text)
+        assert result == "Content here"
+
+    def test_preserves_newlines(self):
+        """Newlines should be preserved."""
+        from chad.web_ui import ansi_to_html
+        text = "Line 1\n\nLine 3"
+        result = ansi_to_html(text)
+        assert result == "Line 1\n\nLine 3"
+
+    def test_escapes_html_entities(self):
+        """HTML entities should be escaped."""
+        from chad.web_ui import ansi_to_html
+        text = "<script>alert('xss')</script>"
+        result = ansi_to_html(text)
+        assert "&lt;script&gt;" in result
+        assert "<script>" not in result
+
+    def test_strips_unclosed_color_codes(self):
+        """Unclosed color codes should not affect subsequent text."""
+        from chad.web_ui import ansi_to_html
+        # Color without reset
+        text = "\x1b[35mPurple start\n\nText after blank line"
+        result = ansi_to_html(text)
+        assert result == "Purple start\n\nText after blank line"
+        assert "\x1b" not in result
+
+    def test_strips_stray_escape_characters(self):
+        """Any remaining escape characters should be stripped."""
+        from chad.web_ui import ansi_to_html
+        # Stray escape that doesn't match known patterns
+        text = "Before\x1b[999zAfter"
+        result = ansi_to_html(text)
+        assert "\x1b" not in result
+        # The content before and after should be present
+        assert "Before" in result
+        assert "After" in result
