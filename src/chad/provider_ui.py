@@ -5,7 +5,6 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
 
 import gradio as gr
 
@@ -243,7 +242,7 @@ class ProviderUIManager:
 
                 outputs.extend(
                     [
-                        gr.update(visible=True),
+                        gr.update(visible=True),  # Show card
                         header,
                         account_name,
                         gr.update(value=role_value),
@@ -256,7 +255,7 @@ class ProviderUIManager:
             else:
                 outputs.extend(
                     [
-                        gr.update(visible=False),
+                        gr.update(visible=False),  # Hide card
                         "",
                         "",
                         gr.update(value="(none)"),
@@ -823,11 +822,9 @@ class ProviderUIManager:
 
         return True, f"✓ Ready — **Coding:** {coding_info} | **Management:** {mgmt_info}"
 
-    def format_role_status(self, session_log_path: Path | None = None) -> str:
-        """Return role status text, optionally annotated with session log path."""
+    def format_role_status(self) -> str:
+        """Return role status text."""
         _, status = self.get_role_config_status()
-        if session_log_path:
-            return f"{status} | Session log: `{session_log_path}`"
         return status
 
     def assign_role(self, account_name: str, role: str, card_slots: int):
@@ -896,7 +893,9 @@ class ProviderUIManager:
         except Exception as exc:
             return self.provider_action_response(f"❌ Error setting reasoning: {str(exc)}", card_slots)
 
-    def get_models_for_account(self, account_name: str, model_catalog_override: ModelCatalog | None = None) -> list[str]:
+    def get_models_for_account(
+        self, account_name: str, model_catalog_override: ModelCatalog | None = None
+    ) -> list[str]:
         """Get available models for an account based on its provider."""
         if not account_name:
             return ["default"]
