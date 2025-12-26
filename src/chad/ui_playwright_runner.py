@@ -239,11 +239,16 @@ def measure_add_provider_accordion(page: "Page") -> Dict[str, float | str]:
 () => {
   const accordion = document.querySelector('.add-provider-accordion');
   if (!accordion) return null;
-  const summary = accordion.querySelector('summary') || accordion.querySelector('.label');
+  const summary = accordion.querySelector('summary') ||
+    accordion.querySelector('.label') || accordion.querySelector('.label-wrap');
   const summaryBox = summary ? summary.getBoundingClientRect() : accordion.getBoundingClientRect();
 
-  const cards = Array.from(document.querySelectorAll('.provider-card'));
-  const visibleCards = cards.filter((card) => {
+  // Find provider card groups by looking for gr-groups that contain header rows
+  // (elem_classes on gr.Group doesn't apply in Gradio, so we can't use .provider-card)
+  const groups = Array.from(document.querySelectorAll('.gr-group'));
+  const cardGroups = groups.filter(g => g.querySelector('.provider-card__header-row'));
+
+  const visibleCards = cardGroups.filter((card) => {
     const style = window.getComputedStyle(card);
     if (style.display === 'none' || style.visibility === 'hidden') return false;
     const rect = card.getBoundingClientRect();

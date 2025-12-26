@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "chad-ui-playwright": {
+      "command": "python",
+      "args": ["-m", "chad.mcp_playwright"],
+      "env": {
+        "PYTHONPATH": "src"
+      }
+    }
+  }
+}

@@ -3,15 +3,28 @@
 ## Before making changes
 
 If the request is to fix an issue, write a test which should fail until the issue is fixed. If the issue has a visual
-component then take a "before" screenshot which shows the issue occurring. Come up with as many theories as possible
-about potential causes of the issue, then examine your screenshot and the existing test coverage and see if this rules
-any of them out. Make a fix for the most likely of your theories but keep a record of the others.
+component then **you MUST take a "before" screenshot** using the MCP tool:
+```
+capture_visual_change(label="before", tab="providers", issue_id="your-issue-name")
+```
+This saves screenshots to `/tmp/chad/visual-changes/<timestamp>/` with descriptive filenames.
+See the Visual Inspection section for more details.
+
+Then, come up with as many theories as possible about potential causes of the issue, then examine your screenshot and 
+the existing test coverage and see if this rules any of them out. Research and find out which of your theories is most
+likely to be the cause. Build a plan for fixing which includes hypothesis testing, i.e. if this really is the cause,
+then when I change X I expect to see Y. Make sure you run and verify these during development, if any of them fail or
+have unexpected results then STOP and re-evaluate your theories to see if they are still correct.
 
 ## After making changes
 
 Re-run your new test, ensure it passes and then:
-- if the issue has a visual component take an "after" screenshot and examine it critically to make sure that it has
-changed from the before screenshot, and that it actually demonstrates the fix has worked
+- if the issue has a visual component, **you MUST take an "after" screenshot** using the MCP tool:
+  ```
+  capture_visual_change(label="after", tab="providers", issue_id="your-issue-name")
+  ```
+  Examine the screenshot critically to make sure it has changed from the before screenshot and actually demonstrates
+  the fix has worked.
 - regardless of whether there is a visual component, perform a critical code review of your changes and note any issues
 
 If there are major issues with either of the above then consider whether you should instead pursue another one of your
@@ -30,9 +43,94 @@ python scripts/verify.py --file tests/test_web_ui.py  # Specific file
 Fix any lint issues you discover regardless of whether your change caused them.
 
 Finally, once you are satisfied, report back to the user with:
-- A short summary of the issue and how you fixed it
-- Before and after screenshots (if needed). Put these in a timestamped directory under the system temp dir and report this.
+- A short summary of the issue
+- How you proved that your fix worked and was the only explanation that made sense
+- Before and after screenshot paths (from `/tmp/chad/visual-changes/`)
 - Any remaining issues or failing tests
+
+## Visual Inspection
+
+Chad provides multiple ways to verify UI changes, listed from most to least rigorous:
+
+### 1. Pytest Integration Tests
+
+Run the Playwright-based UI integration tests:
+```bash
+PYTHONPATH=src python3 -m pytest tests/test_ui_integration.py -v
+```
+These tests:
+- Start Chad with mock providers in a temporary environment
+- Use Playwright to verify all UI elements render correctly
+- Test the delete provider two-step confirmation flow
+- Validate element sizing and visibility
+- Take screenshots to pytest's `tmp_path` for inspection
+
+### 2. MCP Tools
+
+The MCP server is auto-configured via `.mcp.json` in the project root for Claude Code.
+
+Codex does not support project-level MCP config. Users must add to `~/.codex/config.toml`:
+```toml
+[mcp_servers.chad-ui-playwright]
+command = "python"
+args = ["-m", "chad.mcp_playwright"]
+cwd = "/path/to/chad"
+env = { PYTHONPATH = "/path/to/chad/src" }
+```
+Verify with `/mcp` command in Claude Code or `codex mcp list` in Codex.
+
+**Manual Start (if needed):**
+```bash
+PYTHONPATH=src python -m chad.mcp_playwright
+```
+
+**Available Tools:**
+
+| Tool | Description |
+|------|-------------|
+| `capture_visual_change` | **REQUIRED** for before/after screenshots - saves to `/tmp/chad/visual-changes/` |
+| `run_ui_smoke` | Full UI smoke test with screenshots of both tabs |
+| `screenshot` | Capture screenshot of a specific tab |
+| `run_tests_for_file` | Run visual tests covering a source file |
+| `run_tests_for_modified_files` | Run tests for all git-modified files |
+| `run_ci_tests` | Run full CI test suite (excludes visual by default) |
+| `verify_all_tests_pass` | Complete verification before issue completion |
+| `list_visual_test_mappings` | Show source file to test mappings |
+| `test_add_provider_accordion_gap` | Test gap between cards and Add Provider button |
+| `measure_provider_delete` | Verify delete button sizing |
+| `list_providers` | Get visible provider names |
+| `test_delete_provider` | Test the delete flow end-to-end |
+
+**Workflow for UI Changes:**
+1. **BEFORE making changes**: `capture_visual_change(label="before", issue_id="issue-name")`
+2. Make code changes to fix the issue
+3. **AFTER making changes**: `capture_visual_change(label="after", issue_id="issue-name")`
+4. Run `run_tests_for_file` with the modified file path
+5. Review screenshots in `/tmp/chad/visual-changes/` and `/tmp/chad/mcp-playwright/`
+6. Before completing: run `verify_all_tests_pass`
+7. Report screenshot paths to user
+
+**Test Mappings:**
+Source files declare their visual tests in `src/chad/visual_test_map.py`.
+To add coverage for a new file, add an entry to `VISUAL_TEST_MAP`.
+
+Artifacts are saved to `/tmp/chad/mcp-playwright/<timestamp>/`
+
+Requirements: `pip install playwright mcp && playwright install chromium`
+
+### 3. Quick Visual Checks
+
+For quick visual verification without running full tests:
+
+```bash
+python scripts/screenshot_ui.py --tab providers --headless
+python scripts/screenshot_ui.py --tab run -o /tmp/run-tab.png
+```
+
+Options:
+- `--tab run|providers` - Which tab to screenshot
+- `--output PATH` - Output path (default: `/tmp/chad/screenshot.png`)
+- `--headless` - Run without visible browser window
 
 ## Providers
 
@@ -233,64 +331,3 @@ Custom models can also be entered manually (`allow_custom_value` is enabled). Op
 4. Add provider type to web UI dropdown in `web_ui.py`
 5. Implement `_get_{provider}_usage()` method if usage API available
 6. Document in this Architecture.md
-
-## Visual Inspection
-
-Chad provides multiple ways to verify UI changes, listed from most to least rigorous:
-
-### 1. Pytest Integration Tests (Most Rigorous)
-
-Run the Playwright-based UI integration tests:
-
-```bash
-PYTHONPATH=src python3 -m pytest tests/test_ui_integration.py -v
-```
-
-These tests:
-- Start Chad with mock providers in a temporary environment
-- Use Playwright to verify all UI elements render correctly
-- Test the delete provider two-step confirmation flow
-- Validate element sizing and visibility
-- Take screenshots to pytest's `tmp_path` for inspection
-
-**Use this after any UI changes to ensure nothing is broken.**
-
-### 2. MCP Tools (For Agents During Development)
-
-Start the MCP server for agent-accessible UI verification:
-
-```bash
-python -m chad.mcp_playwright
-```
-
-Available tools:
-- `run_ui_smoke` - Full smoke test with screenshots of both tabs
-- `screenshot` - Capture a specific tab
-- `measure_provider_delete` - Verify delete button sizing
-- `list_providers` - Get visible provider names
-- `test_delete_provider` - Test the delete flow end-to-end
-
-Artifacts are saved to `/tmp/chad/mcp-playwright/<timestamp>/`
-
-Requirements: `pip install playwright modelcontextprotocol && playwright install chromium`
-
-### 3. Screenshot Script (Quick Visual Check)
-
-For quick visual verification without running full tests:
-
-```bash
-python scripts/screenshot_ui.py --tab providers --headless
-python scripts/screenshot_ui.py --tab run -o /tmp/run-tab.png
-```
-
-Options:
-- `--tab run|providers` - Which tab to screenshot
-- `--output PATH` - Output path (default: `/tmp/chad/screenshot.png`)
-- `--headless` - Run without visible browser window
-
-### For Agents Making UI Changes
-
-1. **After changes**: Run `python scripts/verify.py` for full verification
-2. **Quick check**: Run `python scripts/verify.py --ui` for UI tests only
-3. **During development**: Use MCP tools for quick visual checks
-4. **View screenshots**: Use the Read tool on saved PNG files

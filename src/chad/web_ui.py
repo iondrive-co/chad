@@ -177,9 +177,10 @@ PROVIDER_PANEL_CSS = """
 
 .add-provider-accordion > summary,
 .add-provider-accordion summary,
-.add-provider-accordion .label {
-  font-size: 1.125rem;
-  font-weight: 800;
+.add-provider-accordion .label,
+.add-provider-accordion .label-wrap {
+  font-size: 1.125rem !important;
+  font-weight: 800 !important;
 }
 
 /* Ensure all text in provider usage is readable */
@@ -218,11 +219,8 @@ PROVIDER_PANEL_CSS = """
   box-shadow: none;
 }
 
-/* Hide empty provider cards (Gradio's gr.update(visible=False) doesn't work on Columns) */
+/* Hide empty provider cards - groups are hidden via CSS, columns via JavaScript */
 .gr-group:has(.provider-card__header-row):not(:has(.provider-card__header-text)) {
-  display: none !important;
-}
-.column:has(.gr-group:has(.provider-card__header-row):not(:has(.provider-card__header-text))) {
   display: none !important;
 }
 
@@ -433,12 +431,18 @@ function() {
     function fixProviderCardVisibility() {
         const columns = document.querySelectorAll('.column');
         columns.forEach(col => {
-            const header = col.querySelector('.provider-card__header');
-            if (header) {
-                const headerText = header.textContent.trim();
-                if (headerText && headerText.length > 5) {
+            const headerRow = col.querySelector('.provider-card__header-row');
+            const headerText = col.querySelector('.provider-card__header-text');
+
+            if (headerRow) {
+                // This is a provider card column
+                if (headerText && headerText.textContent.trim().length > 0) {
+                    // Has content - show it
                     col.style.display = '';
                     col.style.visibility = '';
+                } else {
+                    // Empty card - hide it to prevent gap
+                    col.style.display = 'none';
                 }
             }
         });
