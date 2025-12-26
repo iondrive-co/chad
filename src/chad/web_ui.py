@@ -73,6 +73,7 @@ PROVIDER_PANEL_CSS = """
   background: linear-gradient(135deg, #0c1424 0%, #0a1a32 100%);
   border: 1px solid #1f2b46;
   border-radius: 16px;
+  margin-bottom: 0 !important;
   padding: 14px 16px;
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28);
   gap: 8px;
@@ -167,6 +168,18 @@ PROVIDER_PANEL_CSS = """
   padding: 10px 12px;
   color: #1e293b;
   box-shadow: 0 4px 10px rgba(15, 23, 42, 0.06);
+}
+
+.add-provider-accordion {
+  margin-top: calc(var(--block-gap, 0px) * -1 - 4px) !important;
+  padding-top: 0 !important;
+}
+
+.add-provider-accordion > summary,
+.add-provider-accordion summary,
+.add-provider-accordion .label {
+  font-size: 1.125rem;
+  font-weight: 800;
 }
 
 /* Ensure all text in provider usage is readable */
@@ -281,6 +294,23 @@ PROVIDER_PANEL_CSS = """
 #live-stream-box .live-output-content {
   color: #e2e8f0;
   background: #1e1e2e !important;
+}
+
+/* Override Tailwind prose class that Gradio applies - it sets dark text colors */
+#live-stream-box .prose,
+#live-stream-box .prose *:not([style*="color"]),
+#live-stream-box .md,
+#live-stream-box .md *:not([style*="color"]),
+#live-stream-box p,
+#live-stream-box span:not([style*="color"]),
+#live-stream-box div:not([style*="color"]) {
+  color: #e2e8f0 !important;
+}
+
+/* Ensure live-output-content and ALL its children have light text */
+#live-stream-box .live-output-content,
+#live-stream-box .live-output-content *:not([style*="color"]) {
+  color: #e2e8f0 !important;
 }
 
 /* Code elements (rendered from backticks in Markdown) - bright pink */
@@ -507,12 +537,219 @@ function() {
 """
 
 
-def ansi_to_html(text: str) -> str:
-    """Strip ANSI escape codes and escape HTML entities for display."""
-    import html
+def _brighten_color(r: int, g: int, b: int, min_brightness: int = 140) -> tuple[int, int, int]:
+    """Brighten a color if it's too dark for a dark background.
 
-    cleaned = ANSI_ESCAPE_RE.sub('', text).replace('\x1b', '')
-    return html.escape(cleaned)
+    Uses perceived brightness (ITU-R BT.709) and boosts dark colors.
+    """
+    brightness = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    if brightness < min_brightness:
+        # Boost the color to be readable
+        if brightness < 10:
+            # Nearly black - use light grey
+            return (156, 163, 175)  # #9ca3af
+        # Scale up to reach minimum brightness
+        factor = min_brightness / max(brightness, 1)
+        return (
+            min(255, int(r * factor)),
+            min(255, int(g * factor)),
+            min(255, int(b * factor))
+        )
+    return (r, g, b)
+
+
+def _256_to_rgb(n: int) -> tuple[int, int, int]:
+    """Convert 256-color palette index to RGB."""
+    if n < 8:
+        # Standard colors 0-7
+        return [(0, 0, 0), (205, 0, 0), (0, 205, 0), (205, 205, 0),
+                (0, 0, 238), (205, 0, 205), (0, 205, 205), (229, 229, 229)][n]
+    elif n < 16:
+        # Bright colors 8-15
+        return [(127, 127, 127), (255, 0, 0), (0, 255, 0), (255, 255, 0),
+                (92, 92, 255), (255, 0, 255), (0, 255, 255), (255, 255, 255)][n - 8]
+    elif n < 232:
+        # 6x6x6 color cube (16-231)
+        n -= 16
+        r = (n // 36) % 6
+        g = (n // 6) % 6
+        b = n % 6
+        return (r * 51, g * 51, b * 51)
+    else:
+        # Grayscale (232-255)
+        gray = (n - 232) * 10 + 8
+        return (gray, gray, gray)
+
+
+def ansi_to_html(text: str) -> str:
+    """Convert ANSI escape codes to HTML spans with colors.
+
+    Preserves the terminal's native coloring instead of stripping it.
+    Handles CSI sequences (ESC[), OSC sequences (ESC]), and other escapes.
+    Automatically brightens dark colors for readability on dark backgrounds.
+    """
+    # ANSI 16-color to RGB mapping
+    basic_colors = {
+        '30': (0, 0, 0), '31': (224, 108, 117), '32': (152, 195, 121), '33': (229, 192, 123),
+        '34': (97, 175, 239), '35': (198, 120, 221), '36': (86, 182, 194), '37': (171, 178, 191),
+        '90': (92, 99, 112), '91': (224, 108, 117), '92': (152, 195, 121), '93': (229, 192, 123),
+        '94': (97, 175, 239), '95': (198, 120, 221), '96': (86, 182, 194), '97': (255, 255, 255),
+    }
+    bg_colors = {
+        '40': '#1e1e2e', '41': '#e06c75', '42': '#98c379', '43': '#e5c07b',
+        '44': '#61afef', '45': '#c678dd', '46': '#56b6c2', '47': '#abb2bf',
+    }
+
+    # CSI sequence ending characters (covers most terminal sequences)
+    CSI_ENDINGS = 'ABCDEFGHJKLMPSTXZcfghlmnpqrstuz'
+
+    result = []
+    i = 0
+    current_styles = []
+
+    while i < len(text):
+        # Check for escape character
+        if text[i] == '\x1b':
+            if i + 1 < len(text):
+                next_char = text[i + 1]
+
+                # CSI sequence: ESC[...
+                if next_char == '[':
+                    j = i + 2
+                    while j < len(text) and text[j] not in CSI_ENDINGS:
+                        j += 1
+                    if j < len(text):
+                        if text[j] == 'm':
+                            # SGR (color/style) sequence - parse it
+                            codes = text[i + 2:j].split(';')
+                            idx = 0
+                            while idx < len(codes):
+                                code = codes[idx]
+                                if code == '0' or code == '':
+                                    # Reset
+                                    if current_styles:
+                                        result.append('</span>' * len(current_styles))
+                                        current_styles = []
+                                elif code == '1':
+                                    result.append('<span style="font-weight:bold">')
+                                    current_styles.append('bold')
+                                elif code == '3':
+                                    result.append('<span style="font-style:italic">')
+                                    current_styles.append('italic')
+                                elif code == '4':
+                                    result.append('<span style="text-decoration:underline">')
+                                    current_styles.append('underline')
+                                elif code == '38':
+                                    # Extended foreground color
+                                    if idx + 1 < len(codes):
+                                        if codes[idx + 1] == '5' and idx + 2 < len(codes):
+                                            # 256-color: 38;5;N
+                                            try:
+                                                n = int(codes[idx + 2])
+                                                r, g, b = _brighten_color(*_256_to_rgb(n))
+                                                result.append(f'<span style="color:rgb({r},{g},{b})">')
+                                                current_styles.append('color')
+                                            except ValueError:
+                                                pass
+                                            idx += 2
+                                        elif codes[idx + 1] == '2' and idx + 4 < len(codes):
+                                            # True color: 38;2;R;G;B
+                                            try:
+                                                r = int(codes[idx + 2])
+                                                g = int(codes[idx + 3])
+                                                b = int(codes[idx + 4])
+                                                r, g, b = _brighten_color(r, g, b)
+                                                result.append(f'<span style="color:rgb({r},{g},{b})">')
+                                                current_styles.append('color')
+                                            except ValueError:
+                                                pass
+                                            idx += 4
+                                elif code == '48':
+                                    # Extended background color (skip, don't change bg)
+                                    if idx + 1 < len(codes):
+                                        if codes[idx + 1] == '5':
+                                            idx += 2
+                                        elif codes[idx + 1] == '2':
+                                            idx += 4
+                                elif code in basic_colors:
+                                    r, g, b = _brighten_color(*basic_colors[code])
+                                    result.append(f'<span style="color:rgb({r},{g},{b})">')
+                                    current_styles.append('color')
+                                elif code in bg_colors:
+                                    result.append(f'<span style="background-color:{bg_colors[code]}">')
+                                    current_styles.append('bg')
+                                idx += 1
+                        # Skip the entire CSI sequence (including non-SGR ones)
+                        i = j + 1
+                        continue
+
+                # OSC sequence: ESC]...BEL or ESC]...ST
+                elif next_char == ']':
+                    j = i + 2
+                    while j < len(text):
+                        # BEL (0x07) or ST (ESC\) terminates OSC
+                        if text[j] == '\x07':
+                            j += 1
+                            break
+                        if text[j] == '\x1b' and j + 1 < len(text) and text[j + 1] == '\\':
+                            j += 2
+                            break
+                        j += 1
+                    i = j
+                    continue
+
+            # Unrecognized escape - skip just the escape char
+            i += 1
+            continue
+
+        # Regular character - escape HTML entities
+        char = text[i]
+        if char == '<':
+            result.append('&lt;')
+        elif char == '>':
+            result.append('&gt;')
+        elif char == '&':
+            result.append('&amp;')
+        elif char == '\n':
+            result.append('\n')
+        else:
+            result.append(char)
+        i += 1
+
+    # Close any remaining spans
+    if current_styles:
+        result.append('</span>' * len(current_styles))
+
+    return ''.join(result)
+
+
+def highlight_diffs(html_content: str) -> str:
+    """Add diff highlighting CSS classes to diff-style lines.
+
+    Detects unified diff format lines and wraps them in appropriate classes.
+    """
+    import re
+
+    lines = html_content.split('\n')
+    result = []
+
+    for line in lines:
+        # Strip HTML tags to check the actual text content for diff patterns
+        text_only = re.sub(r'<[^>]+>', '', line)
+
+        if re.match(r'^@@\s.*\s@@', text_only):
+            # Diff header line like "@@ -1,5 +1,7 @@"
+            result.append(f'<span class="diff-header">{line}</span>')
+        elif text_only.startswith('+') and not text_only.startswith('+++'):
+            # Added line
+            result.append(f'<span class="diff-add">{line}</span>')
+        elif text_only.startswith('-') and not text_only.startswith('---'):
+            # Removed line
+            result.append(f'<span class="diff-remove">{line}</span>')
+        else:
+            result.append(line)
+
+    return '\n'.join(result)
 
 
 def summarize_content(content: str, max_length: int = 200) -> str:
@@ -1370,6 +1607,8 @@ Create a better plan that addresses the issue."""
                     return ""
                 # Convert ANSI codes to HTML for native terminal colors
                 html_content = ansi_to_html(content)
+                # Add diff highlighting for unified diff format
+                html_content = highlight_diffs(html_content)
                 header = f'<div class="live-output-header">▶ {ai_name} (Live Stream)</div>'
                 body = f'<div class="live-output-content">{html_content}</div>'
                 return f'{header}\n{body}'
@@ -1467,8 +1706,8 @@ Create a better plan that addresses the issue."""
                     elif msg_type == 'ai_switch':
                         current_ai = msg[1]
                         streaming_buffer = ""
-                        # Add separator to history for AI switch
-                        full_history.append((current_ai, f"\n--- {current_ai} ---\n"))
+                        # Add brief status to history for AI switch
+                        full_history.append((current_ai, "Investigating request\n"))
 
                     elif msg_type == 'stream':
                         chunk = msg[1]
@@ -1687,7 +1926,7 @@ Create a better plan that addresses the issue."""
                             )
 
                     # Live activity stream
-                    live_stream_box = gr.Markdown("", elem_id="live-stream-box")
+                    live_stream_box = gr.Markdown("", elem_id="live-stream-box", sanitize_html=False)
 
                 # Providers Tab (combined management + usage)
                 with gr.Tab("⚙️ Providers"):
@@ -1780,7 +2019,11 @@ Create a better plan that addresses the issue."""
                             "delete_btn": delete_btn
                         })
 
-                    with gr.Accordion("Add New Provider", open=False) as add_provider_accordion:
+                    with gr.Accordion(
+                        "Add New Provider",
+                        open=False,
+                        elem_classes=["add-provider-accordion"]
+                    ) as add_provider_accordion:
                         gr.Markdown("Click to add another provider. Close the accordion to retract without adding.")
                         new_provider_name = gr.Textbox(
                             label="Provider Name",

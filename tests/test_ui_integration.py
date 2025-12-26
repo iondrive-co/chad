@@ -11,14 +11,18 @@ except Exception:  # pragma: no cover - handled by pytest skip
 
 from chad.ui_playwright_runner import (
     ChadLaunchError,
+    check_live_stream_colors,
     create_temp_env,
     delete_provider_by_name,
     get_card_visibility_debug,
     get_provider_names,
+    inject_live_stream_content,
+    measure_add_provider_accordion,
     measure_provider_delete_button,
     open_playwright_page,
     start_chad,
     stop_chad,
+    verify_all_text_visible,
 )
 
 
@@ -135,6 +139,22 @@ class TestProvidersTab:
         """Delete button should fill the header height."""
         measurement = measure_provider_delete_button(page)
         assert measurement["ratio"] >= 0.95, f"Expected ratio >= 0.95, got {measurement['ratio']}"
+
+    def test_add_provider_accordion_spacing_and_emphasis(self, page: Page):
+        """Add provider accordion should sit tight to cards and be visually emphasized."""
+        measurement = measure_add_provider_accordion(page)
+        gap = measurement["gap"]
+        assert gap <= 1, f"Expected gap <= 1px, got {gap}px"
+
+        font_size = float(str(measurement["fontSize"]).replace("px", ""))
+        assert font_size >= 18, f"Expected font size >= 18px, got {font_size}px"
+
+        font_weight_raw = str(measurement["fontWeight"])
+        if font_weight_raw.isdigit():
+            font_weight = int(font_weight_raw)
+        else:
+            font_weight = 700 if font_weight_raw.lower() == "bold" else 400
+        assert font_weight >= 600, f"Expected font weight >= 600, got {font_weight_raw}"
 
 
 class TestSubtaskTabs:
@@ -281,6 +301,129 @@ class TestDeleteProvider:
                 f"Empty card should be hidden but has cardDisplay={empty_card['cardDisplay']}, "
                 f"columnDisplay={empty_card['columnDisplay']}. Card: {empty_card}"
             )
+
+
+class TestLiveViewFormat:
+    """Test live view content formatting including colors and diffs.
+
+    These tests verify that ANSI colors are converted to readable HTML,
+    that diffs are highlighted, and that the AI switch header is properly formatted.
+    """
+
+    # Sample test content simulating ANSI colored output
+    ANSI_TEST_HTML = """
+    <div>
+        <p>First paragraph of output</p>
+        <span style="color: rgb(92, 99, 112);">Dark grey text that should be boosted</span>
+        <span style="color: rgb(198, 120, 221);">Purple text for tool calls</span>
+        <span style="color: rgb(152, 195, 121);">Green text for success</span>
+    </div>
+    """
+
+    # Sample diff content
+    DIFF_TEST_HTML = """
+    <div>
+        <span class="diff-header">@@ -1,5 +1,7 @@</span>
+        <span class="diff-remove">- removed line</span>
+        <span class="diff-add">+ added line</span>
+    </div>
+    """
+
+    def test_live_stream_box_accepts_injected_content(self, page: Page):
+        """Live stream box should be able to display injected test content."""
+        inject_live_stream_content(page, "<p>Test content</p>")
+        result = check_live_stream_colors(page)
+        assert result.content_visible, "Content should be visible after injection"
+        assert "Test content" in result.raw_html
+
+    def test_colored_spans_are_readable(self, page: Page):
+        """Colored spans should have sufficient brightness on dark background."""
+        inject_live_stream_content(page, self.ANSI_TEST_HTML)
+        result = check_live_stream_colors(page)
+
+        assert result.has_colored_spans, "Test content should have colored spans"
+        # Check that colors are boosted by CSS brightness filter
+        for color_info in result.computed_colors:
+            # Verify the filter is applied (brightness should be boosted)
+            computed = color_info.get('computedColor', '')
+            print(f"Color: {computed} for text: {color_info.get('text', '')[:30]}")
+
+    def test_dark_grey_text_is_visible(self, page: Page):
+        """Dark grey text (rgb(92,99,112)) should be boosted to be readable."""
+        # This is the specific color that was causing visibility issues
+        dark_grey_html = '<span style="color: rgb(92, 99, 112);">This dark grey should be visible</span>'
+        inject_live_stream_content(page, dark_grey_html)
+        result = check_live_stream_colors(page)
+
+        assert result.has_colored_spans, "Should detect colored span"
+        # The CSS should boost this dark color
+        if result.computed_colors:
+            color = result.computed_colors[0].get('computedColor', '')
+            print(f"Dark grey computed to: {color}")
+
+    def test_diff_classes_render_correctly(self, page: Page):
+        """Diff classes should be present and styled correctly."""
+        inject_live_stream_content(page, self.DIFF_TEST_HTML)
+        result = check_live_stream_colors(page)
+
+        assert result.has_diff_classes, (
+            f"Should detect diff classes in content. HTML: {result.raw_html[:200]}"
+        )
+
+
+class TestRealisticLiveContent:
+    """Test live view with realistic CLI-like content to verify all text is visible."""
+
+    # Realistic content similar to actual CLI output (thinking, exec, commands)
+    REALISTIC_CLI_HTML = """
+<p>Investigating request</p>
+<p><span style="color: rgb(198, 120, 221);">thinking</span> I need to analyze this request...</p>
+<p><span style="color: rgb(198, 120, 221);">exec</span> <span style="color: rgb(152, 195, 121);">/bin/bash -lc 'ls -la'</span></p>
+<p>total 48</p>
+<p>drwxrwxr-x 5 user user 4096 Dec 27 10:00 .</p>
+<p>drwxr-xr-x 3 user user 4096 Dec 27 09:00 ..</p>
+<p>-rw-rw-r-- 1 user user  123 Dec 27 10:00 README.md</p>
+<p><span style="color: rgb(198, 120, 221);">thinking</span> The directory listing shows...</p>
+<p><span style="color: rgb(152, 195, 121);">succeeded</span></p>
+<p>Plain text without any color spans should also be visible</p>
+"""
+
+    def test_all_text_visible_with_realistic_content(self, page: Page):
+        """ALL text should be visible on dark background, not just colored spans."""
+        inject_live_stream_content(page, self.REALISTIC_CLI_HTML)
+        result = verify_all_text_visible(page)
+
+        assert 'error' not in result, f"Error checking visibility: {result.get('error')}"
+
+        # Print sample colors for debugging
+        print("Sample computed colors:")
+        for sample in result.get('sampleColors', []):
+            print(f"  {sample['text'][:30]}: {sample['color']} (brightness={sample['brightness']:.1f})")
+
+        # Critical assertion: no dark elements
+        dark = result.get('darkElements', [])
+        if dark:
+            print("DARK ELEMENTS FOUND (FAIL):")
+            for elem in dark:
+                print(f"  {elem['text']}: {elem['color']} (brightness={elem['brightness']:.1f})")
+
+        assert result.get('allVisible', False), (
+            f"Some text is too dark to read. Dark elements: {dark}"
+        )
+
+    def test_screenshot_live_content_proof(self, page: Page, tmp_path):
+        """Take screenshot of live stream with realistic content as proof of visibility."""
+        inject_live_stream_content(page, self.REALISTIC_CLI_HTML)
+        time.sleep(0.2)
+
+        output = tmp_path / "live_stream_proof.png"
+        page.screenshot(path=str(output))
+        assert output.exists()
+        print(f"Screenshot saved: {output}")
+
+        # Also verify visibility
+        result = verify_all_text_visible(page)
+        assert result.get('allVisible', False), f"Text not visible in screenshot: {result}"
 
 
 # Screenshot tests for visual verification

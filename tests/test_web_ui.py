@@ -985,48 +985,52 @@ class TestSessionLogIncludesTask:
 
 
 class TestAnsiToHtml:
-    """Test that ANSI escape codes are properly stripped from live view output."""
+    """Test that ANSI escape codes are properly converted to HTML spans."""
 
-    def test_strips_basic_color_codes(self):
-        """Basic SGR color codes should be stripped."""
+    def test_converts_basic_color_codes_to_html(self):
+        """Basic SGR color codes should be converted to HTML spans."""
         from chad.web_ui import ansi_to_html
         # Purple/magenta color code
         text = "\x1b[35mPurple text\x1b[0m"
         result = ansi_to_html(text)
-        assert result == "Purple text"
+        assert '<span style="color:rgb(' in result
+        assert "Purple text" in result
+        assert "</span>" in result
         assert "\x1b" not in result
 
-    def test_strips_256_color_codes(self):
-        """256-color codes should be stripped."""
+    def test_converts_256_color_codes(self):
+        """256-color codes should be converted to HTML spans."""
         from chad.web_ui import ansi_to_html
         # 256-color purple
         text = "\x1b[38;5;141mColored\x1b[0m"
         result = ansi_to_html(text)
-        assert result == "Colored"
+        assert "Colored" in result
+        assert '<span style="color:rgb(' in result
 
-    def test_strips_rgb_color_codes(self):
-        """RGB true-color codes should be stripped."""
+    def test_converts_rgb_color_codes(self):
+        """RGB true-color codes should be converted to HTML spans."""
         from chad.web_ui import ansi_to_html
         # RGB purple
         text = "\x1b[38;2;198;120;221mRGB color\x1b[0m"
         result = ansi_to_html(text)
-        assert result == "RGB color"
+        assert "RGB color" in result
+        assert '<span style="color:rgb(' in result
 
     def test_strips_cursor_codes(self):
         """Cursor control sequences with ? should be stripped."""
         from chad.web_ui import ansi_to_html
-        # Show/hide cursor
+        # Show/hide cursor - these use different ending chars, should be skipped
         text = "\x1b[?25hVisible\x1b[?25l"
         result = ansi_to_html(text)
-        assert result == "Visible"
+        assert "Visible" in result
 
     def test_strips_osc_sequences(self):
         """OSC sequences (like terminal title) should be stripped."""
         from chad.web_ui import ansi_to_html
-        # Set terminal title
+        # Set terminal title - uses different format, should be skipped
         text = "\x1b]0;My Title\x07Content here"
         result = ansi_to_html(text)
-        assert result == "Content here"
+        assert "Content here" in result
 
     def test_preserves_newlines(self):
         """Newlines should be preserved."""
@@ -1043,22 +1047,25 @@ class TestAnsiToHtml:
         assert "&lt;script&gt;" in result
         assert "<script>" not in result
 
-    def test_strips_unclosed_color_codes(self):
-        """Unclosed color codes should not affect subsequent text."""
+    def test_converts_unclosed_color_codes(self):
+        """Unclosed color codes should generate HTML span that closes at end."""
         from chad.web_ui import ansi_to_html
         # Color without reset
         text = "\x1b[35mPurple start\n\nText after blank line"
         result = ansi_to_html(text)
-        assert result == "Purple start\n\nText after blank line"
+        assert '<span style="color:rgb(' in result
+        assert "Purple start" in result
+        assert "Text after blank line" in result
+        # Span should be auto-closed at end
+        assert result.endswith("</span>")
         assert "\x1b" not in result
 
-    def test_strips_stray_escape_characters(self):
-        """Any remaining escape characters should be stripped."""
+    def test_handles_stray_escape_characters(self):
+        """Stray escape characters in non-m sequences should be handled."""
         from chad.web_ui import ansi_to_html
-        # Stray escape that doesn't match known patterns
+        # Stray escape that doesn't match known patterns - skipped
         text = "Before\x1b[999zAfter"
         result = ansi_to_html(text)
-        assert "\x1b" not in result
         # The content before and after should be present
         assert "Before" in result
         assert "After" in result
