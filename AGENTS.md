@@ -6,14 +6,28 @@ If the request is to fix an issue, write a test which should fail until the issu
 
 ## After making changes
 
-1. Run flake8
+Run the unified verification script:
 ```bash
-flake8 .
+python scripts/verify.py
 ```
-The project is configured with max line length of 120 characters. C901 complexity warnings are ignored.
-Fix any issues regardless of whether your change was the one which caused them
 
-Run tests, including visual tests (see Visual Inspection).
+This runs in order:
+1. **Linting** (flake8) - max line length 120, C901 ignored
+2. **Unit tests** - fast tests without UI dependencies
+3. **UI integration tests** - Playwright-based UI verification
+
+### Quick options
+
+```bash
+python scripts/verify.py --quick      # Lint + unit tests only (fast)
+python scripts/verify.py --lint       # Lint only
+python scripts/verify.py --unit       # Unit tests only
+python scripts/verify.py --ui         # UI tests only
+python scripts/verify.py -k "pattern" # Tests matching pattern
+python scripts/verify.py --file tests/test_web_ui.py  # Specific file
+```
+
+Fix any issues regardless of whether your change caused them.
 
 ## Providers
 
@@ -271,6 +285,7 @@ Options:
 
 ### For Agents Making UI Changes
 
-1. **After changes**: Run `PYTHONPATH=src python3 -m pytest tests/test_ui_integration.py -v`
-2. **During development**: Use MCP tools for quick visual checks
-3. **View screenshots**: Use the Read tool on saved PNG files
+1. **After changes**: Run `python scripts/verify.py` for full verification
+2. **Quick check**: Run `python scripts/verify.py --ui` for UI tests only
+3. **During development**: Use MCP tools for quick visual checks
+4. **View screenshots**: Use the Read tool on saved PNG files

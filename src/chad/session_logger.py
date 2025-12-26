@@ -116,17 +116,32 @@ class SessionLogger:
         filepath: Path,
         chat_history: Iterable,
         *,
+        streaming_transcript: str | None = None,
         success: bool | None = None,
         completion_reason: str | None = None,
         status: str = "running",
     ) -> None:
-        """Update an existing session log with new data."""
+        """Update an existing session log with new data.
+
+        Args:
+            filepath: Path to the session log file
+            chat_history: Structured chat messages (for backward compatibility)
+            streaming_transcript: Full streaming output from the session
+            success: Whether the task succeeded
+            completion_reason: Why the task ended
+            status: Current status (running, completed, failed)
+        """
         try:
             with open(filepath) as f:
                 session_data = json.load(f)
 
             session_data["conversation"] = list(chat_history)
             session_data["status"] = status
+
+            # Store the full streaming transcript if provided
+            if streaming_transcript is not None:
+                session_data["streaming_transcript"] = streaming_transcript
+
             if success is not None:
                 session_data["success"] = success
             if completion_reason is not None:

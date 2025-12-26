@@ -540,7 +540,6 @@ class ClaudeCodeProvider(AIProvider):
                             else:
                                 detail = ''
                             self._notify_activity('tool', f"{tool_name}: {detail}")
-                            self._notify_activity('stream', f"[Tool: {tool_name}]\n")
 
                 if msg.get('type') == 'result':
                     result_text = msg.get('result', '')
