@@ -10,7 +10,10 @@ import subprocess
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
+
+from .installer import DEFAULT_TOOLS_DIR
 
 
 def find_cli_executable(name: str) -> str:
@@ -22,6 +25,14 @@ def find_cli_executable(name: str) -> str:
     Returns:
         Full path to executable, or just the name if not found (will fail later with clear error)
     """
+    tools_dir = Path(os.environ.get("CHAD_TOOLS_DIR", DEFAULT_TOOLS_DIR))
+    tools_candidate = tools_dir / "bin" / name
+    if tools_candidate.exists():
+        return str(tools_candidate)
+    npm_bin = tools_dir / "node_modules" / ".bin" / name
+    if npm_bin.exists():
+        return str(npm_bin)
+
     # First check PATH
     found = shutil.which(name)
     if found:

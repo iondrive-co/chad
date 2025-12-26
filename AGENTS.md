@@ -6,18 +6,7 @@ If the request is to fix an issue, write a test which should fail until the issu
 
 ## After making changes
 
-Run the unified verification script:
-```bash
-python scripts/verify.py
-```
-
-This runs in order:
-1. **Linting** (flake8) - max line length 120, C901 ignored
-2. **Unit tests** - fast tests without UI dependencies
-3. **UI integration tests** - Playwright-based UI verification
-
-### Quick options
-
+Run the verification script with the --quick option, and also run visual tests on areas you changed:
 ```bash
 python scripts/verify.py --quick      # Lint + unit tests only (fast)
 python scripts/verify.py --lint       # Lint only
@@ -26,8 +15,7 @@ python scripts/verify.py --ui         # UI tests only
 python scripts/verify.py -k "pattern" # Tests matching pattern
 python scripts/verify.py --file tests/test_web_ui.py  # Specific file
 ```
-
-Fix any issues regardless of whether your change caused them.
+Fix any lint issues regardless of whether your change caused them.
 
 ## Providers
 
