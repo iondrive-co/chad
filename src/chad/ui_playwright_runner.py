@@ -231,6 +231,50 @@ def measure_provider_delete_button(page: "Page") -> Dict[str, float]:
     return measurement
 
 
+def measure_add_provider_accordion(page: "Page") -> Dict[str, float | str]:
+    """Measure spacing and typography for the Add New Provider accordion."""
+    _select_tab(page, "providers")
+    measurement = page.evaluate(
+        """
+() => {
+  const accordion = document.querySelector('.add-provider-accordion');
+  if (!accordion) return null;
+  const summary = accordion.querySelector('summary') || accordion.querySelector('.label');
+  const summaryBox = summary ? summary.getBoundingClientRect() : accordion.getBoundingClientRect();
+
+  const cards = Array.from(document.querySelectorAll('.provider-card'));
+  const visibleCards = cards.filter((card) => {
+    const style = window.getComputedStyle(card);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    const rect = card.getBoundingClientRect();
+    return rect.height > 0;
+  });
+
+  let lastCardBox = null;
+  for (const card of visibleCards) {
+    const rect = card.getBoundingClientRect();
+    if (!lastCardBox || rect.bottom > lastCardBox.bottom) {
+      lastCardBox = rect;
+    }
+  }
+
+  if (!lastCardBox) return null;
+
+  const computed = summary ? window.getComputedStyle(summary) : window.getComputedStyle(accordion);
+
+  return {
+    gap: summaryBox.top - lastCardBox.bottom,
+    fontSize: computed.fontSize,
+    fontWeight: computed.fontWeight
+  };
+}
+"""
+    )
+    if not measurement:
+        raise ChadLaunchError("Could not locate provider cards or add provider accordion")
+    return measurement
+
+
 def get_provider_names(page: "Page") -> list[str]:
     """Get a list of all visible provider names from the providers tab."""
     _select_tab(page, "providers")
@@ -486,3 +530,209 @@ def chad_page_session(
     finally:
         stop_chad(instance)
         env.cleanup()
+
+
+@dataclass
+class LiveStreamTestResult:
+    """Result of testing live stream content."""
+    content_visible: bool
+    has_colored_spans: bool
+    color_is_readable: bool
+    has_diff_classes: bool
+    raw_html: str
+    computed_colors: list[dict]
+
+
+def inject_live_stream_content(page: "Page", html_content: str) -> None:
+    """Inject test content into the live stream box for testing.
+
+    This makes the live stream box visible and inserts test HTML content.
+    """
+    page.evaluate(
+        """
+(htmlContent) => {
+    const box = document.querySelector('#live-stream-box');
+    if (!box) return false;
+    // Make the box visible and prominent
+    box.style.display = 'block';
+    box.style.minHeight = '300px';
+    // Find the markdown content area or create one
+    let contentDiv = box.querySelector('.live-output-content');
+    if (!contentDiv) {
+        contentDiv = document.createElement('div');
+        contentDiv.className = 'live-output-content';
+        box.appendChild(contentDiv);
+    }
+    contentDiv.innerHTML = htmlContent;
+    contentDiv.style.minHeight = '250px';
+    // Scroll into view
+    box.scrollIntoView({ behavior: 'instant', block: 'center' });
+    return true;
+}
+""",
+        html_content
+    )
+    page.wait_for_timeout(100)
+
+
+def check_live_stream_colors(page: "Page") -> LiveStreamTestResult:
+    """Check if colors in the live stream are readable.
+
+    Returns details about color spans and their computed colors.
+    """
+    result = page.evaluate(
+        """
+() => {
+    const box = document.querySelector('#live-stream-box');
+    if (!box) return null;
+
+    const contentDiv = box.querySelector('.live-output-content');
+    if (!contentDiv) return null;
+
+    // Get all color spans
+    const colorSpans = contentDiv.querySelectorAll('span[style*="color"]');
+    const computedColors = [];
+
+    for (const span of colorSpans) {
+        const computed = window.getComputedStyle(span);
+        const text = span.textContent || '';
+        computedColors.push({
+            text: text.substring(0, 50),
+            inlineStyle: span.getAttribute('style') || '',
+            computedColor: computed.color,
+            computedBackground: computed.backgroundColor
+        });
+    }
+
+    // Check for diff classes
+    const diffAdds = contentDiv.querySelectorAll('.diff-add');
+    const diffRemoves = contentDiv.querySelectorAll('.diff-remove');
+    const diffHeaders = contentDiv.querySelectorAll('.diff-header');
+
+    // Get raw HTML
+    const rawHtml = contentDiv.innerHTML;
+
+    return {
+        hasColoredSpans: colorSpans.length > 0,
+        hasDiffClasses: diffAdds.length > 0 || diffRemoves.length > 0 || diffHeaders.length > 0,
+        rawHtml: rawHtml,
+        computedColors: computedColors
+    };
+}
+"""
+    )
+
+    if not result:
+        return LiveStreamTestResult(
+            content_visible=False,
+            has_colored_spans=False,
+            color_is_readable=False,
+            has_diff_classes=False,
+            raw_html="",
+            computed_colors=[]
+        )
+
+    # Check if colors are readable (not too dark on dark background)
+    color_is_readable = True
+    for color_info in result.get('computedColors', []):
+        computed = color_info.get('computedColor', '')
+        # Parse rgb values and check brightness
+        if 'rgb' in computed:
+            match = re.search(r'rgb\((\d+),\s*(\d+),\s*(\d+)\)', computed)
+            if match:
+                r, g, b = int(match.group(1)), int(match.group(2)), int(match.group(3))
+                # Calculate perceived brightness (ITU-R BT.709)
+                brightness = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                # If brightness is too low (< 80), text is hard to read on dark background
+                if brightness < 80:
+                    color_is_readable = False
+                    break
+
+    return LiveStreamTestResult(
+        content_visible=True,
+        has_colored_spans=result.get('hasColoredSpans', False),
+        color_is_readable=color_is_readable,
+        has_diff_classes=result.get('hasDiffClasses', False),
+        raw_html=result.get('rawHtml', ''),
+        computed_colors=result.get('computedColors', [])
+    )
+
+
+def verify_all_text_visible(page: "Page", min_brightness: int = 80) -> dict:
+    """Verify that ALL text in the live stream box is visible (not too dark).
+
+    This checks every text node, not just colored spans, to ensure Tailwind's
+    prose class doesn't override our light text colors.
+
+    Returns a dict with:
+        - all_visible: bool - True if all text has sufficient brightness
+        - dark_elements: list of dicts with details about dark elements
+        - sample_colors: list of computed colors for verification
+    """
+    result = page.evaluate(
+        """
+(minBrightness) => {
+    const box = document.querySelector('#live-stream-box');
+    if (!box) return { error: 'live-stream-box not found' };
+
+    const contentDiv = box.querySelector('.live-output-content');
+    if (!contentDiv) return { error: 'live-output-content not found' };
+
+    function parseBrightness(colorStr) {
+        const match = colorStr.match(/rgb\\((\\d+),\\s*(\\d+),\\s*(\\d+)/);
+        if (!match) return 255;  // Assume visible if can't parse
+        const r = parseInt(match[1]);
+        const g = parseInt(match[2]);
+        const b = parseInt(match[3]);
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    }
+
+    const darkElements = [];
+    const sampleColors = [];
+
+    // Check all elements with text content
+    const walker = document.createTreeWalker(contentDiv, NodeFilter.SHOW_TEXT);
+    const seen = new Set();
+
+    while (walker.nextNode()) {
+        const textNode = walker.currentNode;
+        const text = textNode.textContent.trim();
+        if (!text) continue;
+
+        const parent = textNode.parentElement;
+        if (!parent || seen.has(parent)) continue;
+        seen.add(parent);
+
+        const computed = window.getComputedStyle(parent);
+        const color = computed.color;
+        const brightness = parseBrightness(color);
+
+        sampleColors.push({
+            text: text.substring(0, 40),
+            color: color,
+            brightness: brightness,
+            tagName: parent.tagName,
+            className: parent.className
+        });
+
+        if (brightness < minBrightness) {
+            darkElements.push({
+                text: text.substring(0, 60),
+                color: color,
+                brightness: brightness,
+                tagName: parent.tagName,
+                className: parent.className
+            });
+        }
+    }
+
+    return {
+        allVisible: darkElements.length === 0,
+        darkElements: darkElements,
+        sampleColors: sampleColors.slice(0, 10)  // Limit sample size
+    };
+}
+""",
+        min_brightness
+    )
+    return result or {"error": "evaluation returned null"}

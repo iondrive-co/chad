@@ -6,7 +6,9 @@
 - Verify standard approach:
   - Before implementing describe the problem, then write a test to demonstrate the problem (visually with MCP browser if 
   necessary), then modify your description of the problem based on what the test shows
+  - Make sure that there is a solid explanation for how it slipped through the existing tests and what will be improved in tests
   - After fixing demonstrate that the test now passes and that no other tests are broken
+  - Make a screenshot / output and a code diff for the user to confirm you changed it
 - Classes for 1 sentence summaries and splitting tasks, self-contained including prompt, tested first then integration
 - Load balance based on usage, user preference, context limits hit, etc - will need: 
   - task splitting to support session continuation per agent

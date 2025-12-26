@@ -2,11 +2,23 @@
 
 ## Before making changes
 
-If the request is to fix an issue, write a test which should fail until the issue is fixed.
+If the request is to fix an issue, write a test which should fail until the issue is fixed. If the issue has a visual
+component then take a "before" screenshot which shows the issue occurring. Come up with as many theories as possible
+about potential causes of the issue, then examine your screenshot and the existing test coverage and see if this rules
+any of them out. Make a fix for the most likely of your theories but keep a record of the others.
 
 ## After making changes
 
-Run the verification script with the --quick option, and also run visual tests on areas you changed:
+Re-run your new test, ensure it passes and then:
+- if the issue has a visual component take an "after" screenshot and examine it critically to make sure that it has
+changed from the before screenshot, and that it actually demonstrates the fix has worked
+- regardless of whether there is a visual component, perform a critical code review of your changes and note any issues
+
+If there are major issues with either of the above then consider whether you should instead pursue another one of your
+theories and create some new ones. If there are only minor issues then you can just correct them here.
+
+Next, run the verification script with the --quick option, and also run visual tests on areas you changed. Here are
+some possible options for running verification:
 ```bash
 python scripts/verify.py --quick      # Lint + unit tests only (fast)
 python scripts/verify.py --lint       # Lint only
@@ -15,7 +27,12 @@ python scripts/verify.py --ui         # UI tests only
 python scripts/verify.py -k "pattern" # Tests matching pattern
 python scripts/verify.py --file tests/test_web_ui.py  # Specific file
 ```
-Fix any lint issues regardless of whether your change caused them.
+Fix any lint issues you discover regardless of whether your change caused them.
+
+Finally, once you are satisfied, report back to the user with:
+- A short summary of the issue and how you fixed it
+- Before and after screenshots (if needed). Put these in a timestamped directory under the system temp dir and report this.
+- Any remaining issues or failing tests
 
 ## Providers
 
