@@ -14,6 +14,63 @@ class SessionLogger:
         self.base_dir = base_dir or Path(tempfile.gettempdir()) / "chad"
         self.base_dir.mkdir(exist_ok=True)
 
+    def precreate_log(self) -> Path:
+        """Pre-create an empty session log file and return its path.
+
+        The file will be populated later when the task actually starts.
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"chad_session_{timestamp}.json"
+        filepath = self.base_dir / filename
+
+        session_data = {
+            "timestamp": datetime.now().isoformat(),
+            "status": "pending",
+            "task_description": None,
+            "project_path": None,
+            "conversation": [],
+        }
+
+        with open(filepath, "w") as f:
+            json.dump(session_data, f, indent=2)
+
+        return filepath
+
+    def initialize_log(
+        self,
+        filepath: Path,
+        *,
+        task_description: str,
+        project_path: str,
+        coding_account: str,
+        coding_provider: str,
+        management_account: str,
+        management_provider: str,
+        managed_mode: bool = False,
+    ) -> None:
+        """Initialize a pre-created log file with task details."""
+        session_data = {
+            "timestamp": datetime.now().isoformat(),
+            "task_description": task_description,
+            "project_path": project_path,
+            "managed_mode": managed_mode,
+            "coding": {
+                "account": coding_account,
+                "provider": coding_provider,
+            },
+            "management": {
+                "account": management_account,
+                "provider": management_provider,
+            },
+            "status": "running",
+            "success": None,
+            "completion_reason": None,
+            "conversation": [],
+        }
+
+        with open(filepath, "w") as f:
+            json.dump(session_data, f, indent=2)
+
     def create_log(
         self,
         *,

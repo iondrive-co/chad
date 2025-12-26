@@ -153,13 +153,29 @@ PROVIDER_PANEL_CSS = """
   letter-spacing: 0.01em;
 }
 
+/* Hide empty provider cards via CSS class */
+.provider-card-hidden {
+  display: none !important;
+}
+
 .provider-usage {
   background: #fff;
   border: 1px solid #e2e8f0;
   border-radius: 12px;
   padding: 10px 12px;
-  color: #0f172a;
+  color: #1e293b;
   box-shadow: 0 4px 10px rgba(15, 23, 42, 0.06);
+}
+
+/* Ensure all text in provider usage is readable */
+.provider-usage * {
+  color: #1e293b !important;
+}
+
+/* Warning text should be visible */
+.provider-usage .warning-text,
+.provider-usage:has(⚠️) {
+  color: #b45309 !important;
 }
 
 .provider-card__header-row .provider-delete,
@@ -259,8 +275,50 @@ PROVIDER_PANEL_CSS = """
   border-radius: 3px;
 }
 
-#live-stream-box .live-output-content * {
-  background: transparent !important;
+/* Base styling for live stream - light text on dark background */
+#live-stream-box .live-output-content {
+  color: #e2e8f0;
+  background: #1e1e2e !important;
+}
+
+/* Code elements (rendered from backticks in Markdown) - bright pink */
+#live-stream-box code,
+#live-stream-box .live-output-content code,
+#live-stream-box pre,
+#live-stream-box .live-output-content pre {
+  color: #f0abfc !important;
+  background: rgba(0, 0, 0, 0.3) !important;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: inherit;
+}
+
+/* ANSI colored spans - let them keep their inline colors with brightness boost */
+#live-stream-box .live-output-content span[style*="color"] {
+  filter: brightness(1.3);
+}
+
+/* Override specific dark grey colors that are hard to read */
+/* Handle various spacing formats: rgb(92, rgb(92,99 etc */
+#live-stream-box .live-output-content span[style*="rgb(92"],
+#live-stream-box .live-output-content span[style*="color:#5c6370"],
+#live-stream-box .live-output-content span[style*="color: #5c6370"],
+#live-stream-box .live-output-content span[style*="#5c6370"] {
+  color: #9ca3af !important;
+  filter: none !important;
+}
+
+/* Boost any dark colors (RGB values starting with low numbers) */
+#live-stream-box .live-output-content span[style*="color: rgb(1"],
+#live-stream-box .live-output-content span[style*="color: rgb(2"],
+#live-stream-box .live-output-content span[style*="color: rgb(3"],
+#live-stream-box .live-output-content span[style*="color: rgb(4"],
+#live-stream-box .live-output-content span[style*="color: rgb(5"],
+#live-stream-box .live-output-content span[style*="color: rgb(6"],
+#live-stream-box .live-output-content span[style*="color: rgb(7"],
+#live-stream-box .live-output-content span[style*="color: rgb(8"],
+#live-stream-box .live-output-content span[style*="color: rgb(9"] {
+  filter: brightness(1.5) !important;
 }
 
 /* Scroll position indicator */
@@ -282,6 +340,23 @@ PROVIDER_PANEL_CSS = """
 }
 #live-stream-box {
   position: relative;
+}
+
+/* Role status row: keep status and session log button on one line */
+#role-config-status {
+  flex: 1;
+  margin: 0;
+}
+
+#session-log-btn {
+  flex-shrink: 0;
+  border: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  padding: 0 8px !important;
+  min-height: unset !important;
+  height: auto !important;
+  white-space: nowrap;
 }
 
 /* Agent communication chatbot - preserve scroll position */
@@ -306,8 +381,116 @@ PROVIDER_PANEL_CSS = """
 }
 """
 
-# No JavaScript needed - using CSS for scroll behavior
-LIVE_STREAM_JS = ""
+# JavaScript to fix Gradio visibility updates and maintain scroll position
+# Note: This is passed to gr.Blocks(js=...) to execute on page load
+CUSTOM_JS = """
+function() {
+    // Fix for Gradio not properly updating column visibility after initial render
+    function fixProviderCardVisibility() {
+        const columns = document.querySelectorAll('.column');
+        columns.forEach(col => {
+            const header = col.querySelector('.provider-card__header');
+            if (header) {
+                const headerText = header.textContent.trim();
+                if (headerText && headerText.length > 5) {
+                    col.style.display = '';
+                    col.style.visibility = '';
+                }
+            }
+        });
+    }
+    setInterval(fixProviderCardVisibility, 500);
+    const visObserver = new MutationObserver(fixProviderCardVisibility);
+    visObserver.observe(document.body, { childList: true, subtree: true, attributes: true });
+
+    // Live stream scroll preservation
+    window._liveStreamScroll = window._liveStreamScroll || {
+        userScrolledUp: false,
+        savedScrollTop: 0,
+        lastUserScrollTime: 0,
+        ignoreNextScroll: false
+    };
+    const state = window._liveStreamScroll;
+
+    function getScrollContainer() {
+        const liveBox = document.getElementById('live-stream-box');
+        if (!liveBox) return null;
+        return liveBox.querySelector('.live-output-content') ||
+               liveBox.querySelector('[data-testid="markdown"]') ||
+               liveBox;
+    }
+
+    function handleUserScroll(e) {
+        const container = e.target;
+        if (!container || state.ignoreNextScroll) {
+            state.ignoreNextScroll = false;
+            return;
+        }
+        const now = Date.now();
+        if (now - state.lastUserScrollTime < 50) return;
+        state.lastUserScrollTime = now;
+
+        const scrollBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+        const isAtBottom = scrollBottom < 50;
+
+        // User is NOT at bottom = they scrolled away from auto-scroll position
+        state.userScrolledUp = !isAtBottom;
+        state.savedScrollTop = container.scrollTop;
+    }
+
+    function restoreScrollPosition(container) {
+        if (!container) return;
+        state.ignoreNextScroll = true;
+        requestAnimationFrame(() => {
+            if (!state.userScrolledUp) {
+                container.scrollTop = container.scrollHeight;
+            } else if (state.savedScrollTop > 0) {
+                container.scrollTop = state.savedScrollTop;
+            }
+            setTimeout(() => { state.ignoreNextScroll = false; }, 100);
+        });
+    }
+
+    function attachScrollListener(container) {
+        if (!container || container._liveScrollAttached) return;
+        container._liveScrollAttached = true;
+        container.addEventListener('scroll', handleUserScroll, { passive: true });
+    }
+
+    function initScrollTracking() {
+        const liveBox = document.getElementById('live-stream-box');
+        if (!liveBox) {
+            setTimeout(initScrollTracking, 200);
+            return;
+        }
+
+        let lastContainer = null;
+        const observer = new MutationObserver((mutations) => {
+            const container = getScrollContainer();
+            if (!container) return;
+            if (container !== lastContainer) {
+                attachScrollListener(container);
+                lastContainer = container;
+            }
+            restoreScrollPosition(container);
+        });
+
+        observer.observe(liveBox, {
+            childList: true,
+            subtree: true,
+            characterData: true
+        });
+
+        const container = getScrollContainer();
+        if (container) {
+            attachScrollListener(container);
+            lastContainer = container;
+        }
+    }
+
+    setTimeout(initScrollTracking, 100);
+}
+"""
 
 
 def ansi_to_html(text: str) -> str:
@@ -316,11 +499,12 @@ def ansi_to_html(text: str) -> str:
     Preserves the terminal's native coloring instead of stripping it.
     """
     # ANSI color code to CSS color mapping
+    # Note: dim colors (90-97) are brightened to be readable on dark backgrounds
     colors = {
-        '30': '#000000', '31': '#e06c75', '32': '#98c379', '33': '#e5c07b',
-        '34': '#61afef', '35': '#c678dd', '36': '#56b6c2', '37': '#abb2bf',
-        '90': '#5c6370', '91': '#e06c75', '92': '#98c379', '93': '#e5c07b',
-        '94': '#61afef', '95': '#c678dd', '96': '#56b6c2', '97': '#ffffff',
+        '30': '#6b7280', '31': '#e06c75', '32': '#98c379', '33': '#e5c07b',
+        '34': '#61afef', '35': '#c678dd', '36': '#56b6c2', '37': '#d4d4d4',
+        '90': '#9ca3af', '91': '#f87171', '92': '#a3e635', '93': '#fbbf24',
+        '94': '#60a5fa', '95': '#e879f9', '96': '#22d3ee', '97': '#ffffff',
     }
     bg_colors = {
         '40': '#000000', '41': '#e06c75', '42': '#98c379', '43': '#e5c07b',
@@ -518,7 +702,9 @@ class ChadWebUI:
         return self.provider_ui.provider_state(self.provider_card_count, pending_delete=pending_delete)
 
     def _provider_action_response(self, feedback: str, pending_delete: str = None):
-        return self.provider_ui.provider_action_response(feedback, self.provider_card_count, pending_delete=pending_delete)
+        return self.provider_ui.provider_action_response(
+            feedback, self.provider_card_count, pending_delete=pending_delete
+        )
 
     def _provider_state_with_confirm(self, pending_delete: str) -> tuple:
         return self.provider_ui.provider_state_with_confirm(pending_delete, self.provider_card_count)
@@ -599,8 +785,8 @@ class ChadWebUI:
     def get_role_config_status(self) -> tuple[bool, str]:
         return self.provider_ui.get_role_config_status()
 
-    def format_role_status(self, session_log_path: Path | None = None) -> str:
-        return self.provider_ui.format_role_status(session_log_path)
+    def format_role_status(self) -> str:
+        return self.provider_ui.format_role_status()
 
     def assign_role(self, account_name: str, role: str):
         return self.provider_ui.assign_role(account_name, role, self.provider_card_count)
@@ -646,7 +832,14 @@ class ChadWebUI:
         message_queue = queue.Queue()
         self.cancel_requested = False
         session_log_path: Path | None = None
-        role_status_text = self.format_role_status(None)
+        current_phase_display = [""]  # Use list for mutability in nested functions
+
+        def format_role_status_with_phase(phase: str = "") -> str:
+            """Format role status with optional phase indicator."""
+            base_status = self.format_role_status()
+            if phase:
+                return f"{base_status} | **Phase:** {phase}"
+            return base_status
 
         def make_yield(
             history,
@@ -658,15 +851,24 @@ class ChadWebUI:
             """Format output tuple for Gradio with current UI state."""
             display_stream = live_stream
             is_error = '❌' in status
+            # Include phase in role status if we have one
+            display_role_status = format_role_status_with_phase(current_phase_display[0])
+            # Session log download button update
+            log_btn_update = gr.update(
+                label=f"📄 {session_log_path.name}" if session_log_path else "Session Log",
+                value=str(session_log_path) if session_log_path else None,
+                visible=session_log_path is not None
+            )
             return (
                 history,
                 display_stream,
-                gr.update(value=status if is_error else "", visible=is_error),  # task_status_header - errors only
+                gr.update(value=status if is_error else "", visible=is_error),
                 gr.update(value=project_path, interactive=interactive),
                 gr.update(value=task_description, interactive=interactive),
                 gr.update(interactive=interactive),
                 gr.update(interactive=not interactive),
-                gr.update(value=role_status_text)
+                gr.update(value=display_role_status),
+                log_btn_update
             )
 
         try:
@@ -720,8 +922,11 @@ class ChadWebUI:
             coding_timeout = get_coding_timeout(coding_provider)
             management_timeout = get_management_timeout(management_provider)
 
-            # Create session log at start
-            session_log_path = self.session_logger.create_log(
+            # Initialize the session log (pre-created when launching UI, or create on demand)
+            session_log_path = self.current_session_log_path or self.session_logger.precreate_log()
+            self.current_session_log_path = session_log_path
+            self.session_logger.initialize_log(
+                session_log_path,
                 task_description=task_description,
                 project_path=str(path),
                 coding_account=coding_account,
@@ -730,8 +935,6 @@ class ChadWebUI:
                 management_provider=management_provider,
                 managed_mode=managed_mode
             )
-            self.current_session_log_path = session_log_path
-            role_status_text = self.format_role_status(session_log_path)
 
             status_prefix = "**Starting Chad...**\n\n"
             status_prefix += f"• Project: {path}\n"
@@ -773,6 +976,8 @@ class ChadWebUI:
 
             # ==================== DIRECT MODE (default) ====================
             if not managed_mode:
+                # Set phase for direct mode
+                current_phase_display[0] = "🚀 EXECUTING"
                 yield make_yield([], f"{status_prefix}⏳ Starting coding AI...", summary=status_prefix)
 
                 from .providers import create_provider
@@ -877,6 +1082,8 @@ class ChadWebUI:
                             }
                             icon, name = phase_names[phase]
                             message_queue.put(('phase_divider', f"{icon} PHASE {phase.value}: {name}"))
+                            # Also update the phase indicator in the role status
+                            message_queue.put(('phase_update', f"{icon} {name}"))
 
                         investigation_system = INVESTIGATION_PROMPT.format(
                             task_description=task_description,
@@ -1287,6 +1494,12 @@ Create a better plan that addresses the issue."""
                         yield make_yield(chat_history, current_status, current_live_stream)
                         last_yield_time = time_module.time()
 
+                    elif msg_type == 'phase_update':
+                        # Update the phase display in the role status line
+                        current_phase_display[0] = msg[1]
+                        yield make_yield(chat_history, current_status, current_live_stream)
+                        last_yield_time = time_module.time()
+
                     elif msg_type == 'phase':
                         phase_msg = msg[1]
                         chat_history.append({"role": "user", "content": phase_msg})
@@ -1381,19 +1594,42 @@ Create a better plan that addresses the issue."""
                         break
 
             relay_thread.join(timeout=1)
+            # Clear the phase indicator when task finishes
+            current_phase_display[0] = ""
             if self.cancel_requested:
                 final_status = "🛑 Task cancelled by user"
+                # Add cancellation indicator to timeline
+                chat_history.append({
+                    "role": "user",
+                    "content": "───────────── 🛑 TASK CANCELLED ─────────────"
+                })
             elif task_success[0]:
                 if completion_reason[0]:
                     final_status = f"✓ Task completed!\n\n*{completion_reason[0]}*"
                 else:
                     final_status = "✓ Task completed!"
+                # Add completion indicator to timeline
+                completion_msg = "───────────── ✅ TASK COMPLETED ─────────────"
+                if completion_reason[0]:
+                    completion_msg += f"\n\n*{completion_reason[0]}*"
+                chat_history.append({
+                    "role": "user",
+                    "content": completion_msg
+                })
             else:
                 final_status = (
                     f"❌ Task did not complete successfully\n\n*{completion_reason[0]}*"
                     if completion_reason[0]
                     else "❌ Task did not complete successfully"
                 )
+                # Add failure indicator to timeline
+                failure_msg = "───────────── ❌ TASK FAILED ─────────────"
+                if completion_reason[0]:
+                    failure_msg += f"\n\n*{completion_reason[0]}*"
+                chat_history.append({
+                    "role": "user",
+                    "content": failure_msg
+                })
 
             self.session_logger.update_log(
                 session_log_path,
@@ -1415,9 +1651,15 @@ Create a better plan that addresses the issue."""
 
     def create_interface(self) -> gr.Blocks:
         """Create the Gradio interface."""
+        # Pre-create the session log so it's ready to display
+        self.current_session_log_path = self.session_logger.precreate_log()
+
         with gr.Blocks(title="Chad") as interface:
-            # Inject custom CSS and JavaScript
-            gr.HTML(f"<style>{PROVIDER_PANEL_CSS}</style>{LIVE_STREAM_JS}")
+            # Inject custom CSS
+            gr.HTML(f"<style>{PROVIDER_PANEL_CSS}</style>")
+
+            # Execute custom JavaScript on page load
+            interface.load(fn=None, js=CUSTOM_JS)
 
             with gr.Tabs():
                 # Run Task Tab (default)
@@ -1425,7 +1667,8 @@ Create a better plan that addresses the issue."""
                     gr.Markdown("## Start a New Task")
 
                     # Check initial role configuration
-                    is_ready, config_status = self.get_role_config_status()
+                    is_ready, _ = self.get_role_config_status()
+                    config_status = self.format_role_status()
 
                     with gr.Row():
                         with gr.Column():
@@ -1441,8 +1684,20 @@ Create a better plan that addresses the issue."""
                                 placeholder="Describe what you want done...",
                                 lines=5
                             )
-                            # Show role configuration status
-                            role_status = gr.Markdown(config_status, elem_id="role-config-status")
+                            # Show role configuration status with session log download
+                            with gr.Row():
+                                role_status = gr.Markdown(config_status, elem_id="role-config-status")
+                                log_path = self.current_session_log_path
+                                session_log_btn = gr.DownloadButton(
+                                    label=f"📄 {log_path.name}" if log_path else "Session Log",
+                                    value=str(log_path) if log_path else None,
+                                    visible=log_path is not None,
+                                    variant="secondary",
+                                    size="sm",
+                                    scale=0,
+                                    min_width=120,
+                                    elem_id="session-log-btn"
+                                )
                             with gr.Row():
                                 start_btn = gr.Button(
                                     "Start Task",
@@ -1500,7 +1755,10 @@ Create a better plan that addresses the issue."""
                             model_value = stored_model if stored_model in model_choices else model_choices[0]
                             reasoning_choices = self.get_reasoning_choices(provider_type, account_name)
                             stored_reasoning = self.security_mgr.get_account_reasoning(account_name)
-                            reasoning_value = stored_reasoning if stored_reasoning in reasoning_choices else reasoning_choices[0]
+                            reasoning_value = (
+                                stored_reasoning if stored_reasoning in reasoning_choices
+                                else reasoning_choices[0]
+                            )
                             usage_text = self.get_provider_usage(account_name)
                         else:
                             account_name = ""
@@ -1513,9 +1771,11 @@ Create a better plan that addresses the issue."""
                             reasoning_value = "default"
                             usage_text = ""
 
-                        # Wrap in Column for visibility control (Group doesn't support dynamic visibility)
-                        with gr.Column(visible=visible) as card_column:
-                            with gr.Group(elem_classes=["provider-card"]):
+                        # Always create columns visible - use CSS classes to show/hide
+                        # gr.Column(visible=False) prevents proper rendering updates
+                        card_group_classes = ["provider-card"] if visible else ["provider-card", "provider-card-empty"]
+                        with gr.Column(visible=True) as card_column:
+                            with gr.Group(elem_classes=card_group_classes) as card_group:
                                 with gr.Row(elem_classes=["provider-card__header-row"]):
                                     card_header = gr.Markdown(header_text, elem_classes=["provider-card__header"])
                                     delete_btn = gr.Button("🗑︎", variant="secondary", size="sm", min_width=0, scale=0, elem_classes=["provider-delete"])  # noqa: E501
@@ -1547,6 +1807,7 @@ Create a better plan that addresses the issue."""
 
                         provider_cards.append({
                             "column": card_column,
+                            "group": card_group,  # Use group for visibility control
                             "header": card_header,
                             "account_state": account_state,
                             "account_name": account_name,  # Store name for delete handler
@@ -1573,7 +1834,7 @@ Create a better plan that addresses the issue."""
                     provider_outputs = [provider_feedback, provider_list]
                     for card in provider_cards:
                         provider_outputs.extend([
-                            card["column"],
+                            card["group"],  # Use group for visibility control (Column visibility doesn't update)
                             card["header"],
                             card["account_state"],
                             card["role_dropdown"],
@@ -1586,7 +1847,11 @@ Create a better plan that addresses the issue."""
                     # Add role status and start button to outputs so they update when roles change
                     provider_outputs_with_task_status = provider_outputs + [role_status, start_btn]
 
-                    add_provider_outputs = provider_outputs + [new_provider_name, add_btn, add_provider_accordion]
+                    # Include task status in add_provider outputs so Run Task tab updates
+                    add_provider_outputs = (
+                        provider_outputs +
+                        [new_provider_name, add_btn, add_provider_accordion, role_status, start_btn]
+                    )
 
                     def refresh_with_task_status():
                         base = self._provider_action_response("")
@@ -1604,8 +1869,14 @@ Create a better plan that addresses the issue."""
                         outputs=[add_btn]
                     )
 
+                    def add_provider_with_task_status(provider_name, provider_type):
+                        """Add provider and also return updated task status."""
+                        base = self.add_provider(provider_name, provider_type)
+                        is_ready, config_msg = self.get_role_config_status()
+                        return (*base, config_msg, gr.update(interactive=is_ready))
+
                     add_btn.click(
-                        self.add_provider,
+                        add_provider_with_task_status,
                         inputs=[new_provider_name, new_provider_type],
                         outputs=add_provider_outputs
                     )
@@ -1667,7 +1938,7 @@ Create a better plan that addresses the issue."""
             start_btn.click(
                 self.start_chad_task,
                 inputs=[project_path, task_description],
-                outputs=[chatbot, live_stream_box, task_status_header, project_path, task_description, start_btn, cancel_btn, role_status]  # noqa: E501
+                outputs=[chatbot, live_stream_box, task_status_header, project_path, task_description, start_btn, cancel_btn, role_status, session_log_btn]  # noqa: E501
             )
 
             cancel_btn.click(

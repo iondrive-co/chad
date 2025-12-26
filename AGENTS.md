@@ -1,57 +1,19 @@
-# Chad 
-## Setup
+# Chad
 
-### Install for development
+## Before making changes
 
-```bash
-cd chad
-python3 -m venv venv
-source venv/bin/activate  # On Linux/Mac
-pip install -e ".[dev]"
-```
+If the request is to fix an issue, write a test which should fail until the issue is fixed.
 
-### Run tests
+## After making changes
 
-```bash
-PYTHONPATH=src python3 -m pytest -v
-PYTHONPATH=src python3 -m pytest tests/test_providers.py -v
-```
-
-### Linting
-
-Run flake8 before committing:
+1. Run flake8
 ```bash
 flake8 .
 ```
-
 The project is configured with max line length of 120 characters. C901 complexity warnings are ignored.
+Fix any issues regardless of whether your change was the one which caused them
 
-## Publishing to PyPI
-
-### Build the package
-
-```bash
-pip install build twine
-python3 -m build
-```
-
-### Upload to PyPI
-
-```bash
-# Test PyPI first
-python3 -m twine upload --repository testpypi dist/*
-
-# Real PyPI
-python3 -m twine upload dist/*
-```
-
-### Install from PyPI
-
-Once published:
-```bash
-pip install chad-ai
-chad --help
-```
+Run tests, including visual tests (see Visual Inspection).
 
 ## Providers
 
