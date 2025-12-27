@@ -50,12 +50,8 @@ class ProviderUIManager:
     def _get_account_role(self, account_name: str) -> str | None:
         """Return the role assigned to the account, if any."""
         role_assignments = self.security_mgr.list_role_assignments()
-        roles = [role for role, acct in role_assignments.items() if acct == account_name]
-        if len(roles) == 0:
-            return None
-        if "CODING" in roles and "MANAGEMENT" in roles:
-            return "BOTH"
-        return roles[0]
+        roles = [role for role, acct in role_assignments.items() if acct == account_name and role == "CODING"]
+        return roles[0] if roles else None
 
     def get_provider_usage(self, account_name: str) -> str:
         """Get usage text for a single provider."""
@@ -956,44 +952,31 @@ class ProviderUIManager:
         """Remove all role assignments for an account."""
         role_assignments = self.security_mgr.list_role_assignments()
         for role, acct in list(role_assignments.items()):
-            if acct == account_name:
+            if acct == account_name and role == "CODING":
                 self.security_mgr.clear_role(role)
 
     def get_role_config_status(self) -> tuple[bool, str]:
         """Check if roles are properly configured for running tasks."""
         role_assignments = self.security_mgr.list_role_assignments()
         coding_account = role_assignments.get("CODING")
-        management_account = role_assignments.get("MANAGEMENT")
-
-        missing: list[str] = []
-        if not coding_account:
-            missing.append("CODING")
-        if not management_account:
-            missing.append("MANAGEMENT")
-
-        if missing:
-            return False, f"⚠️ Missing role assignments: {', '.join(missing)}. Configure in Providers tab."
 
         accounts = self.security_mgr.list_accounts()
+        if not accounts:
+            return False, "⚠️ Add a provider to start tasks."
+
+        if not coding_account or coding_account not in accounts:
+            return False, "⚠️ Please select a Coding Agent in the Run Task tab."
+
         coding_provider = accounts.get(coding_account, "unknown")
         coding_model = self.security_mgr.get_account_model(coding_account)
         coding_model_str = coding_model if coding_model != "default" else ""
-
-        management_provider = accounts.get(management_account, "unknown")
-        management_model = self.security_mgr.get_account_model(management_account)
-        management_model_str = management_model if management_model != "default" else ""
 
         coding_info = f"{coding_account} ({coding_provider}"
         if coding_model_str:
             coding_info += f", {coding_model_str}"
         coding_info += ")"
 
-        mgmt_info = f"{management_account} ({management_provider}"
-        if management_model_str:
-            mgmt_info += f", {management_model_str}"
-        mgmt_info += ")"
-
-        return True, f"✓ Ready — **Coding:** {coding_info} | **Management:** {mgmt_info}"
+        return True, f"✓ Ready — **Coding:** {coding_info}"
 
     def format_role_status(self) -> str:
         """Return role status text."""
@@ -1016,17 +999,12 @@ class ProviderUIManager:
                 self._unassign_account_roles(account_name)
                 return self.provider_action_response(f"✓ Removed role assignments from {account_name}", card_slots)
 
+            if role.upper() != "CODING":
+                return self.provider_action_response("❌ Only the CODING role is supported", card_slots)
+
             self._unassign_account_roles(account_name)
-
-            if role.upper() == "BOTH":
-                self.security_mgr.assign_role(account_name, "CODING")
-                self.security_mgr.assign_role(account_name, "MANAGEMENT")
-                return self.provider_action_response(
-                    f"✓ Assigned CODING and MANAGEMENT roles to {account_name}", card_slots
-                )
-
-            self.security_mgr.assign_role(account_name, role.upper())
-            return self.provider_action_response(f"✓ Assigned {role.upper()} role to {account_name}", card_slots)
+            self.security_mgr.assign_role(account_name, "CODING")
+            return self.provider_action_response(f"✓ Assigned CODING role to {account_name}", card_slots)
         except Exception as exc:
             return self.provider_action_response(f"❌ Error assigning role: {str(exc)}", card_slots)
 
