@@ -112,6 +112,56 @@ class TestUIElements:
         )
         assert is_disabled, "Cancel button should be disabled before task starts"
 
+    def test_task_entry_bubble_replaces_legacy_task_bubble(self, page: Page):
+        """Task entry bubble should appear before any agent messages and no pre-filled chat bubbles."""
+        bubble = page.locator('.task-entry-bubble')
+        expect(bubble).to_be_visible()
+
+        # Chatbot should start empty (no legacy Task bubble)
+        message_count = page.evaluate(
+            """
+            () => {
+              const chat = document.querySelector('#agent-chatbot');
+              if (!chat) return 0;
+              return chat.querySelectorAll('.message').length;
+            }
+            """
+        )
+        assert message_count == 0, f"Expected no initial chat bubbles, found {message_count}"
+
+    def test_start_from_task_entry_disables_start_and_enables_cancel(self, page: Page):
+        """Starting from the entry bubble should lock the form and enable cancel."""
+        textarea = page.get_by_label("Task Description")
+        textarea.fill("Do something important")
+
+        start_btn = page.locator('#start-task-btn')
+        start_btn.click()
+        page.wait_for_function(
+            """
+            () => {
+              const btn = document.querySelector('#start-task-btn');
+              if (!btn) return false;
+              return btn.disabled || btn.getAttribute('aria-disabled') === 'true' || btn.classList.contains('disabled');
+            }
+            """,
+            timeout=5000
+        )
+        cancel_enabled = page.wait_for_function(
+            """
+            () => {
+              const btn = document.querySelector('#cancel-task-btn');
+              if (!btn) return false;
+              const disabled = btn.disabled ||
+                btn.getAttribute('aria-disabled') === 'true' ||
+                btn.classList.contains('disabled');
+              return !disabled;
+            }
+            """,
+            timeout=5000
+        ).json_value()
+
+        assert cancel_enabled, "Cancel button should enable while the task is running"
+
 
 class TestReadyStatus:
     """Test the Ready status display with model assignments."""

@@ -3,9 +3,8 @@
     "chad-ui-playwright": {
       "command": "python3",
       "args": ["-m", "chad.mcp_playwright"],
-      "cwd": "/home/miles/chad",
       "env": {
-        "PYTHONPATH": "/home/miles/chad/src:/home/miles/chad/venv/lib/python3.12/site-packages"
+        "PYTHONPATH": "src:venv/lib/python3.12/site-packages"
       }
     }
   }
