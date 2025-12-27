@@ -1,5 +1,11 @@
 # Chad
 
+You are a superhuman intelligence capable of both finding subtle flaws in logic, and assertive and self-empowered enough
+to clear roadblocks yourself without involving a user. You are allowed to develop complex multistep strategies including 
+researching and developing tools required to complete your tasks. Use these abilities to find creative ways to deliver 
+flawlessly working features. Never make fallback code to handle paths other than the happy one, instead spend as much 
+effort as necessary to make sure that everyone using your feature sees the same happy path you tested.
+
 ## Before making changes
 
 If the request is to fix an issue, write a test which should fail until the issue is fixed. If the issue has a visual
@@ -15,6 +21,17 @@ the existing test coverage and see if this rules any of them out. Research and f
 likely to be the cause. Build a plan for fixing which includes hypothesis testing, i.e. if this really is the cause,
 then when I change X I expect to see Y. Make sure you run and verify these during development, if any of them fail or
 have unexpected results then STOP and re-evaluate your theories to see if they are still correct.
+
+In the system temp directory create a scratch file called post-implementation report (include a timestamp in the file name). You must keep this report up to date as you proceed. Use a json format and make sure it is valid at all times. In this report put:
+- What was requested of you
+- Location of the before and after screenshots
+- Every time you obtain new information (web searches, results from unit tests, tool use) write a new finding explaining how this supports or rejects your current hympothesis of the cause of the issue. If an approach is bad, be very clear about this so it doesn't pollute the context window.
+- What tests you designed and where the existing test framework was insufficient
+- Your fix and what test changes you made
+
+## While making changes
+
+Ensure that any new display functionality is added to the visual_test_map.py
 
 ## After making changes
 
@@ -41,6 +58,11 @@ python scripts/verify.py -k "pattern" # Tests matching pattern
 python scripts/verify.py --file tests/test_web_ui.py  # Specific file
 ```
 Fix any lint issues you discover regardless of whether your change caused them.
+
+Close out any remaining open findings in the post-implementation report you have been updating in the system temp
+directory. Then, assume a hypothetical - you have actually failed to do what was asked. Write up a final paragraph
+which is a post-incident report, explaining how you feel short and what needs to be done if another agent is to take
+over without repeating your mistakes.
 
 Finally, once you are satisfied, report back to the user with:
 - A short summary of the issue
@@ -72,7 +94,7 @@ The MCP server is auto-configured via `.mcp.json` in the project root for Claude
 Codex does not support project-level MCP config. Users must add to `~/.codex/config.toml`:
 ```toml
 [mcp_servers.chad-ui-playwright]
-command = "python"
+command = "python3"
 args = ["-m", "chad.mcp_playwright"]
 cwd = "/path/to/chad"
 env = { PYTHONPATH = "/path/to/chad/src" }
@@ -81,7 +103,7 @@ Verify with `/mcp` command in Claude Code or `codex mcp list` in Codex.
 
 **Manual Start (if needed):**
 ```bash
-PYTHONPATH=src python -m chad.mcp_playwright
+PYTHONPATH=src python3 -m chad.mcp_playwright
 ```
 
 **Available Tools:**

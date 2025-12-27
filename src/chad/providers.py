@@ -434,6 +434,8 @@ class ClaudeCodeProvider(AIProvider):
 
     Uses streaming JSON input/output for multi-turn conversations.
     See: https://docs.anthropic.com/en/docs/claude-code/headless
+
+    Each account gets an isolated CLAUDE_CONFIG_DIR to support multiple accounts.
     """
 
     def __init__(self, config: ModelConfig):
@@ -441,6 +443,19 @@ class ClaudeCodeProvider(AIProvider):
         self.process: object | None = None
         self.project_path: str | None = None
         self.accumulated_text: list[str] = []
+
+    def _get_claude_config_dir(self) -> str:
+        """Get the isolated CLAUDE_CONFIG_DIR for this account."""
+        from pathlib import Path
+        if self.config.account_name:
+            return str(Path.home() / ".chad" / "claude-configs" / self.config.account_name)
+        return str(Path.home() / ".claude")
+
+    def _get_env(self) -> dict:
+        """Get environment with isolated CLAUDE_CONFIG_DIR for this account."""
+        env = os.environ.copy()
+        env["CLAUDE_CONFIG_DIR"] = self._get_claude_config_dir()
+        return env
 
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         import subprocess
@@ -460,6 +475,7 @@ class ClaudeCodeProvider(AIProvider):
             cmd.extend(['--model', self.config.model_name])
 
         try:
+            env = self._get_env()
             self.process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
@@ -467,7 +483,8 @@ class ClaudeCodeProvider(AIProvider):
                 stderr=subprocess.PIPE,
                 text=True,
                 cwd=project_path,
-                bufsize=1
+                bufsize=1,
+                env=env
             )
 
             if system_prompt:

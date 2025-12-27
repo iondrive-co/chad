@@ -71,7 +71,7 @@ class ProviderUIManager:
         if provider == "openai":
             status_text = self._get_codex_usage(account_name)
         elif provider == "anthropic":
-            status_text = self._get_claude_usage()
+            status_text = self._get_claude_usage(account_name)
         elif provider == "gemini":
             status_text = self._get_gemini_usage()
         elif provider == "mistral":
@@ -288,6 +288,14 @@ class ProviderUIManager:
         """Get the isolated HOME directory for a Codex account."""
         return Path.home() / ".chad" / "codex-homes" / account_name
 
+    def _get_claude_config_dir(self, account_name: str) -> Path:
+        """Get the isolated CLAUDE_CONFIG_DIR for a Claude account.
+
+        Each Claude account gets its own config directory to support
+        multiple Claude accounts with separate authentication.
+        """
+        return Path.home() / ".chad" / "claude-configs" / account_name
+
     def _get_codex_usage(self, account_name: str) -> str:
         """Get usage info from Codex by parsing JWT token and session files."""
         codex_home = self._get_codex_home(account_name)
@@ -426,13 +434,17 @@ class ProviderUIManager:
 
         return result if result else None
 
-    def _get_claude_usage(self) -> str:  # noqa: C901
+    def _get_claude_usage(self, account_name: str) -> str:  # noqa: C901
         """Get usage info from Claude via API."""
         import requests
 
-        creds_file = Path.home() / ".claude" / ".credentials.json"
+        config_dir = self._get_claude_config_dir(account_name)
+        creds_file = config_dir / ".credentials.json"
         if not creds_file.exists():
-            return "❌ **Not logged in**\n\nRun `claude` in terminal to authenticate."
+            return (
+                "❌ **Not logged in**\n\n"
+                "Click **Login** below to authenticate this account."
+            )
 
         try:
             with open(creds_file) as f:
@@ -440,10 +452,13 @@ class ProviderUIManager:
 
             oauth_data = creds.get("claudeAiOauth", {})
             access_token = oauth_data.get("accessToken", "")
-            subscription_type = oauth_data.get("subscriptionType", "unknown").upper()
+            subscription_type = (oauth_data.get("subscriptionType") or "unknown").upper()
 
             if not access_token:
-                return "❌ **Not logged in**\n\nRun `claude` in terminal to authenticate."
+                return (
+                    "❌ **Not logged in**\n\n"
+                    "Click **Login** below to authenticate this account."
+                )
 
             response = requests.get(
                 "https://api.anthropic.com/api/oauth/usage",
@@ -456,7 +471,10 @@ class ProviderUIManager:
                 timeout=10,
             )
 
-            if response.status_code != 200:
+            if response.status_code == 403:
+                # Token doesn't have user:profile scope - still logged in, just can't get usage
+                return "✅ **Logged in**\n\n*Usage stats not available with this token.*"
+            elif response.status_code != 200:
                 return f"⚠️ **Error fetching usage:** HTTP {response.status_code}"
 
             usage_data = response.json()
@@ -666,7 +684,8 @@ class ProviderUIManager:
                 return False, "Not logged in"
 
             if provider_type == "anthropic":
-                creds_file = Path.home() / ".claude" / ".credentials.json"
+                config_dir = self._get_claude_config_dir(account_name)
+                creds_file = config_dir / ".credentials.json"
                 if creds_file.exists():
                     return True, "Logged in"
                 return False, "Not logged in"
@@ -694,6 +713,12 @@ class ProviderUIManager:
         codex_dir = codex_home / ".codex"
         codex_dir.mkdir(parents=True, exist_ok=True)
         return str(codex_home)
+
+    def _setup_claude_account(self, account_name: str) -> str:
+        """Setup isolated config directory for a Claude account."""
+        config_dir = self._get_claude_config_dir(account_name)
+        config_dir.mkdir(parents=True, exist_ok=True)
+        return str(config_dir)
 
     def _ensure_provider_cli(self, provider_type: str) -> tuple[bool, str]:
         """Ensure the provider's CLI is present; install if missing."""
@@ -736,6 +761,7 @@ class ProviderUIManager:
                 counter += 1
 
             if provider_type == "openai":
+                import os
                 codex_home = self._setup_codex_account(account_name)
                 codex_cli = cli_detail or "codex"
 
@@ -768,6 +794,134 @@ class ProviderUIManager:
                     base_response = self.provider_action_response(result, card_slots)
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
 
+            elif provider_type == "anthropic":
+                # Create isolated config directory for this Claude account
+                config_dir = self._setup_claude_account(account_name)
+                claude_cli = cli_detail or "claude"
+
+                # Check if already logged in (user may have pre-authenticated)
+                login_success, login_msg = self._check_provider_login(provider_type, account_name)
+
+                if not login_success:
+                    # Not logged in - trigger full OAuth flow via browser
+                    # Uses pexpect to navigate Claude's TUI and trigger browser login
+                    # This gets all OAuth scopes (user:inference, user:profile, user:sessions)
+                    import time
+                    import os
+
+                    creds_file = Path(config_dir) / ".credentials.json"
+
+                    try:
+                        import pexpect
+
+                        # Set up environment for Claude
+                        env = os.environ.copy()
+                        env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+                        env["TERM"] = "xterm-256color"
+
+                        child = pexpect.spawn(
+                            claude_cli,
+                            timeout=120,
+                            encoding='utf-8',
+                            env=env
+                        )
+
+                        try:
+                            # Step 1: Theme selection
+                            child.expect("Choose the text style", timeout=20)
+                            time.sleep(1)
+                            child.send("\r")
+
+                            # Step 2: Login method selection
+                            child.expect("Select login method", timeout=15)
+                            time.sleep(1)
+                            child.send("\r")
+
+                            # Step 3: Wait for browser to open
+                            child.expect(["Opening browser", "browser"], timeout=15)
+
+                            # Poll for credentials file to appear (OAuth callback)
+                            start_time = time.time()
+                            timeout_secs = 120
+                            while time.time() - start_time < timeout_secs:
+                                if creds_file.exists():
+                                    try:
+                                        with open(creds_file) as f:
+                                            creds_data = json.load(f)
+                                        oauth = creds_data.get("claudeAiOauth", {})
+                                        if oauth.get("accessToken"):
+                                            login_success = True
+                                            break
+                                    except (json.JSONDecodeError, KeyError, OSError):
+                                        pass
+                                time.sleep(2)
+
+                        except pexpect.TIMEOUT:
+                            pass  # Will fall through to login_success check
+                        except pexpect.EOF:
+                            pass  # Process ended unexpectedly
+                        finally:
+                            try:
+                                child.close()
+                            except Exception:
+                                pass
+
+                    except ImportError:
+                        # pexpect not available, fall back to setup-token
+                        login_process = subprocess.Popen(
+                            ["script", "-q", "-c",
+                             f'CLAUDE_CONFIG_DIR="{config_dir}" "{claude_cli}" setup-token',
+                             "/dev/null"],
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            start_new_session=True,
+                        )
+
+                        start_time = time.time()
+                        timeout_secs = 120
+                        while time.time() - start_time < timeout_secs:
+                            if creds_file.exists():
+                                try:
+                                    with open(creds_file) as f:
+                                        creds_data = json.load(f)
+                                    oauth = creds_data.get("claudeAiOauth", {})
+                                    if oauth.get("accessToken"):
+                                        login_success = True
+                                        break
+                                except (json.JSONDecodeError, KeyError, OSError):
+                                    pass
+                            time.sleep(2)
+
+                        try:
+                            login_process.terminate()
+                            login_process.wait(timeout=5)
+                        except Exception:
+                            try:
+                                login_process.kill()
+                            except Exception:
+                                pass
+
+                    except Exception:
+                        pass  # Any other error, fall through to login_success check
+
+                if login_success:
+                    self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
+                    result = f"✅ Provider '{account_name}' added and logged in!"
+                    name_field_value = ""
+                    add_btn_state = gr.update(interactive=False)
+                    accordion_state = gr.update(open=False)
+                else:
+                    # Login failed/timed out - clean up
+                    import shutil
+                    config_path = Path(config_dir)
+                    if config_path.exists():
+                        shutil.rmtree(config_path, ignore_errors=True)
+
+                    result = f"❌ Login timed out for '{account_name}'. Please try again."
+                    base_response = self.provider_action_response(result, card_slots)
+                    return (*base_response, name_field_value, add_btn_state, accordion_state)
+
             else:
                 self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
                 result = f"✓ Provider '{account_name}' ({provider_type}) added."
@@ -779,7 +933,6 @@ class ProviderUIManager:
                 else:
                     result += f" ⚠️ {login_msg}"
                     auth_info = {
-                        "anthropic": ("claude", "Opens browser to authenticate with your Anthropic account"),
                         "gemini": ("gemini", "Opens browser to authenticate with your Google account"),
                         "mistral": ("vibe --setup", "Set up your Mistral API key"),
                     }
@@ -966,10 +1119,16 @@ class ProviderUIManager:
                 return self.provider_action_response("Deletion cancelled.", card_slots)
 
             accounts = self.security_mgr.list_accounts()
-            if accounts.get(account_name) == "openai":
+            provider = accounts.get(account_name)
+
+            if provider == "openai":
                 codex_home = self._get_codex_home(account_name)
                 if codex_home.exists():
                     shutil.rmtree(codex_home, ignore_errors=True)
+            elif provider == "anthropic":
+                claude_config = self._get_claude_config_dir(account_name)
+                if claude_config.exists():
+                    shutil.rmtree(claude_config, ignore_errors=True)
 
             self.security_mgr.delete_account(account_name)
             return self.provider_action_response(f"✓ Provider '{account_name}' deleted", card_slots)
