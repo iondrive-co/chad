@@ -1048,6 +1048,8 @@ class ChadWebUI:
         self,
         project_path: str,
         task_description: str,
+        coding_agent: str,
+        management_agent: str,
         managed_mode: bool = False
     ) -> Iterator[tuple[list, str, gr.Markdown, gr.Textbox, gr.TextArea, gr.Button, gr.Button, gr.Markdown]]:
         """Start Chad task and stream updates.
@@ -1115,18 +1117,29 @@ class ChadWebUI:
                 yield make_yield([], error_msg, summary=error_msg, interactive=True)
                 return
 
-            # Get role assignments
-            role_assignments = self.security_mgr.list_role_assignments()
-            coding_account = role_assignments.get('CODING')
-            management_account = role_assignments.get('MANAGEMENT')
+            # Get coding and management agents from parameters
+            coding_account = coding_agent
+            management_account = management_agent
 
             if not coding_account or not management_account:
-                msg = "❌ Please assign CODING and MANAGEMENT roles in the Provider Management tab first"
+                msg = "❌ Please select both Coding Agent and Management Agent above"
                 yield make_yield([], msg, summary=msg, interactive=True)
                 return
 
+            # Save the selections to role assignments for persistence
+            self.security_mgr.assign_role(coding_account, "CODING")
+            self.security_mgr.assign_role(management_account, "MANAGEMENT")
+
             # Get provider info
             accounts = self.security_mgr.list_accounts()
+            if coding_account not in accounts:
+                msg = f"❌ Coding agent '{coding_account}' not found"
+                yield make_yield([], msg, summary=msg, interactive=True)
+                return
+            if management_account not in accounts:
+                msg = f"❌ Management agent '{management_account}' not found"
+                yield make_yield([], msg, summary=msg, interactive=True)
+                return
             coding_provider = accounts[coding_account]
             management_provider = accounts[management_account]
 
@@ -1949,6 +1962,26 @@ Create a better plan that addresses the issue."""
                     # Task status header (shows selected task description and status)
                     task_status_header = gr.Markdown("", elem_id="task-status-header", visible=False)
 
+                    # Agent selection dropdowns
+                    account_choices = list(self.security_mgr.list_accounts().keys())
+                    role_assignments = self.security_mgr.list_role_assignments()
+                    initial_coding = role_assignments.get("CODING", "")
+                    initial_management = role_assignments.get("MANAGEMENT", "")
+
+                    with gr.Row():
+                        coding_agent_dropdown = gr.Dropdown(
+                            choices=account_choices,
+                            value=initial_coding if initial_coding in account_choices else None,
+                            label="Coding Agent",
+                            scale=1
+                        )
+                        management_agent_dropdown = gr.Dropdown(
+                            choices=account_choices,
+                            value=initial_management if initial_management in account_choices else None,
+                            label="Management Agent",
+                            scale=1
+                        )
+
                     # Agent communication view
                     with gr.Row():
                         with gr.Column():
@@ -2003,7 +2036,6 @@ Create a better plan that addresses the issue."""
                                 f'<span class="provider-card__header-text">'
                                 f'{account_name} ({provider_type})</span>'
                             )
-                            role_value = self._get_account_role(account_name) or "(none)"
                             model_choices = self.get_models_for_account(account_name)
                             stored_model = self.security_mgr.get_account_model(account_name)
                             model_value = stored_model if stored_model in model_choices else model_choices[0]
@@ -2018,7 +2050,6 @@ Create a better plan that addresses the issue."""
                             account_name = ""
                             visible = False
                             header_text = ""
-                            role_value = "(none)"
                             model_choices = ["default"]
                             model_value = "default"
                             reasoning_choices = ["default"]
@@ -2035,12 +2066,6 @@ Create a better plan that addresses the issue."""
                                     delete_btn = gr.Button("🗑︎", variant="secondary", size="sm", min_width=0, scale=0, elem_classes=["provider-delete"])  # noqa: E501
                                 account_state = gr.State(account_name)
                                 with gr.Row(elem_classes=["provider-controls"]):
-                                    role_dropdown = gr.Dropdown(
-                                        choices=["(none)", "CODING", "MANAGEMENT", "BOTH"],
-                                        label="Role",
-                                        value=role_value,
-                                        scale=1
-                                    )
                                     model_dropdown = gr.Dropdown(
                                         choices=model_choices,
                                         label="Preferred Model",
@@ -2065,7 +2090,6 @@ Create a better plan that addresses the issue."""
                             "header": card_header,
                             "account_state": account_state,
                             "account_name": account_name,  # Store name for delete handler
-                            "role_dropdown": role_dropdown,
                             "model_dropdown": model_dropdown,
                             "reasoning_dropdown": reasoning_dropdown,
                             "usage_box": usage_box,
@@ -2095,7 +2119,6 @@ Create a better plan that addresses the issue."""
                             card["group"],  # Use group for visibility control (Column visibility doesn't update)
                             card["header"],
                             card["account_state"],
-                            card["role_dropdown"],
                             card["model_dropdown"],
                             card["reasoning_dropdown"],
                             card["usage_box"],
@@ -2105,10 +2128,11 @@ Create a better plan that addresses the issue."""
                     # Add role status and start button to outputs so they update when roles change
                     provider_outputs_with_task_status = provider_outputs + [role_status, start_btn]
 
-                    # Include task status in add_provider outputs so Run Task tab updates
+                    # Include task status and agent dropdowns in add_provider outputs so Run Task tab updates
                     add_provider_outputs = (
                         provider_outputs +
-                        [new_provider_name, add_btn, add_provider_accordion, role_status, start_btn]
+                        [new_provider_name, add_btn, add_provider_accordion, role_status, start_btn,
+                         coding_agent_dropdown, management_agent_dropdown]
                     )
 
                     def refresh_with_task_status():
@@ -2128,10 +2152,18 @@ Create a better plan that addresses the issue."""
                     )
 
                     def add_provider_with_task_status(provider_name, provider_type):
-                        """Add provider and also return updated task status."""
+                        """Add provider and also return updated task status and agent dropdown choices."""
                         base = self.add_provider(provider_name, provider_type)
                         is_ready, config_msg = self.get_role_config_status()
-                        return (*base, config_msg, gr.update(interactive=is_ready))
+                        # Get updated account choices for agent dropdowns
+                        new_choices = list(self.security_mgr.list_accounts().keys())
+                        return (
+                            *base,
+                            config_msg,
+                            gr.update(interactive=is_ready),
+                            gr.update(choices=new_choices),
+                            gr.update(choices=new_choices)
+                        )
 
                     add_btn.click(
                         add_provider_with_task_status,
@@ -2139,18 +2171,7 @@ Create a better plan that addresses the issue."""
                         outputs=add_provider_outputs
                     )
 
-                    def assign_role_with_task_status(account_name, role):
-                        base = self.assign_role(account_name, role)
-                        is_ready, config_msg = self.get_role_config_status()
-                        return (*base, config_msg, gr.update(interactive=is_ready))
-
                     for card in provider_cards:
-                        card["role_dropdown"].change(
-                            assign_role_with_task_status,
-                            inputs=[card["account_state"], card["role_dropdown"]],
-                            outputs=provider_outputs_with_task_status
-                        )
-
                         card["model_dropdown"].change(
                             self.set_model,
                             inputs=[card["account_state"], card["model_dropdown"]],
@@ -2168,23 +2189,43 @@ Create a better plan that addresses the issue."""
                             def handler(pending_delete, current_account):
                                 # Skip if card has no account (empty slot)
                                 if not current_account:
-                                    return (pending_delete, *self._provider_action_response(""))
+                                    new_choices = list(self.security_mgr.list_accounts().keys())
+                                    return (
+                                        pending_delete,
+                                        *self._provider_action_response(""),
+                                        gr.update(choices=new_choices),
+                                        gr.update(choices=new_choices)
+                                    )
 
                                 if pending_delete == current_account:
                                     # Second click - actually delete
                                     result = self.delete_provider(current_account, confirmed=True)
-                                    return (None, *result)  # Reset pending state + provider outputs
+                                    new_choices = list(self.security_mgr.list_accounts().keys())
+                                    return (
+                                        None,
+                                        *result,
+                                        gr.update(choices=new_choices),
+                                        gr.update(choices=new_choices)
+                                    )
                                 else:
                                     # First click - show confirmation button (tick icon)
                                     result = self._provider_action_response(
                                         f"Click the ✓ icon in '{current_account}' titlebar to confirm deletion",
                                         pending_delete=current_account
                                     )
-                                    return (current_account, *result)  # Set pending state + provider outputs
+                                    new_choices = list(self.security_mgr.list_accounts().keys())
+                                    return (
+                                        current_account,
+                                        *result,
+                                        gr.update(choices=new_choices),
+                                        gr.update(choices=new_choices)
+                                    )
                             return handler
 
-                        # Outputs include pending_delete_state + all provider outputs
-                        delete_outputs = [pending_delete_state] + provider_outputs
+                        # Outputs include pending_delete_state + provider outputs + agent dropdowns
+                        delete_outputs = [pending_delete_state] + provider_outputs + [
+                            coding_agent_dropdown, management_agent_dropdown
+                        ]
 
                         card["delete_btn"].click(
                             fn=make_delete_handler(),
@@ -2195,13 +2236,52 @@ Create a better plan that addresses the issue."""
             # Connect task execution (outside tabs)
             start_btn.click(
                 self.start_chad_task,
-                inputs=[project_path, task_description],
+                inputs=[project_path, task_description, coding_agent_dropdown, management_agent_dropdown],
                 outputs=[chatbot, live_stream_box, task_status_header, project_path, task_description, start_btn, cancel_btn, role_status, session_log_btn]  # noqa: E501
             )
 
             cancel_btn.click(
                 self.cancel_task,
                 outputs=[live_stream_box]
+            )
+
+            # Update role status and start button when agent dropdowns change
+            def update_agent_selection(coding, management):
+                """Update role status based on current agent selections."""
+                accounts = self.security_mgr.list_accounts()
+                if coding and management and coding in accounts and management in accounts:
+                    coding_provider = accounts.get(coding, "unknown")
+                    management_provider = accounts.get(management, "unknown")
+                    coding_model = self.security_mgr.get_account_model(coding)
+                    mgmt_model = self.security_mgr.get_account_model(management)
+                    coding_info = f"{coding} ({coding_provider}"
+                    if coding_model != "default":
+                        coding_info += f", {coding_model}"
+                    coding_info += ")"
+                    mgmt_info = f"{management} ({management_provider}"
+                    if mgmt_model != "default":
+                        mgmt_info += f", {mgmt_model}"
+                    mgmt_info += ")"
+                    status = f"✓ Ready — **Coding:** {coding_info} | **Management:** {mgmt_info}"
+                    return status, gr.update(interactive=True)
+                else:
+                    missing = []
+                    if not coding:
+                        missing.append("Coding Agent")
+                    if not management:
+                        missing.append("Management Agent")
+                    status = f"⚠️ Please select: {', '.join(missing)}"
+                    return status, gr.update(interactive=False)
+
+            coding_agent_dropdown.change(
+                update_agent_selection,
+                inputs=[coding_agent_dropdown, management_agent_dropdown],
+                outputs=[role_status, start_btn]
+            )
+            management_agent_dropdown.change(
+                update_agent_selection,
+                inputs=[coding_agent_dropdown, management_agent_dropdown],
+                outputs=[role_status, start_btn]
             )
 
             return interface

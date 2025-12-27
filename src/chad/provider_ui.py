@@ -31,22 +31,19 @@ class ProviderUIManager:
         self.installer = installer or AIToolInstaller()
 
     def list_providers(self) -> str:
-        """Summarize all configured providers with role and model."""
+        """Summarize all configured providers with model settings."""
         accounts = self.security_mgr.list_accounts()
-        role_assignments = self.security_mgr.list_role_assignments()
 
         if not accounts:
             return "No providers configured yet. Add a provider with the ➕ below."
 
         rows = []
         for account_name, provider in accounts.items():
-            roles = [role for role, acct in role_assignments.items() if acct == account_name]
-            role_str = f" — roles: {', '.join(roles)}" if roles else ""
             model = self.security_mgr.get_account_model(account_name)
             model_str = f" | preferred model: `{model}`" if model != "default" else ""
             reasoning = self.security_mgr.get_account_reasoning(account_name)
             reasoning_str = f" | reasoning: `{reasoning}`" if reasoning != "default" else ""
-            rows.append(f"- **{account_name}** ({provider}){role_str}{model_str}{reasoning_str}")
+            rows.append(f"- **{account_name}** ({provider}){model_str}{reasoning_str}")
 
         return "\n".join(rows)
 
@@ -232,8 +229,6 @@ class ProviderUIManager:
             if idx < len(account_items):
                 account_name, provider = account_items[idx]
                 header = f'<span class="provider-card__header-text">{account_name} ({provider})</span>'
-                current_role = self._get_account_role(account_name)
-                role_value = current_role if current_role else "(none)"
                 model_choices = self.get_models_for_account(account_name)
                 stored_model = self.security_mgr.get_account_model(account_name)
                 model_value = stored_model if stored_model in model_choices else model_choices[0]
@@ -253,7 +248,6 @@ class ProviderUIManager:
                         gr.update(visible=True),  # Show card
                         header,
                         account_name,
-                        gr.update(value=role_value),
                         gr.update(choices=model_choices, value=model_value),
                         gr.update(choices=reasoning_choices, value=reasoning_value),
                         usage,
@@ -266,7 +260,6 @@ class ProviderUIManager:
                         gr.update(visible=False),  # Hide card
                         "",
                         "",
-                        gr.update(value="(none)"),
                         gr.update(choices=["default"], value="default"),
                         gr.update(choices=["default"], value="default"),
                         "",
