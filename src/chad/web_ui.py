@@ -33,11 +33,17 @@ ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\][^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_
 # Custom styling for the provider management area to improve contrast between
 # the summary header and each provider card.
 PROVIDER_PANEL_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
+
 :root {
   --task-btn-bg: #8fd3ff;
   --task-btn-border: #74c3f6;
   --task-btn-text: #0a2236;
   --task-btn-hover: #7bc9ff;
+}
+
+body, .gradio-container, .gradio-container * {
+  font-family: 'JetBrains Mono', monospace !important;
 }
 
 #start-task-btn,
@@ -422,30 +428,18 @@ PROVIDER_PANEL_CSS = """
   max-width: 100% !important;
 }
 
-/* Task entry bubble embedded in the chat area */
+/* Task entry styled like a user chat bubble */
 .task-entry-bubble {
-  background: linear-gradient(135deg, #0f172a 0%, #0b1224 100%);
-  border: 1px solid #1f2b46;
-  border-radius: 16px;
-  padding: 14px 16px;
-  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28);
-  margin-bottom: 12px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  box-shadow: none;
+  margin: 0;
 }
 
 .task-entry-bubble .task-entry-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
-  color: #cbd5e1;
-  letter-spacing: 0.01em;
-}
-
-.task-entry-bubble .task-entry-header h3 {
-  margin: 0;
-  font-size: 1rem;
-  font-weight: 700;
-  color: #e2e8f0;
+  display: none;
 }
 
 .task-entry-bubble .task-entry-body {
