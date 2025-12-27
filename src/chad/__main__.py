@@ -14,8 +14,11 @@ SCS = [
     "Chad wants to make you its reverse centaur",
     "Chad is a singleton and ready to mingle-a-ton",
     "Chad likes you for its next paperclip",
+    "Chad only gets one-shot and does not miss a chance to blow",
     "Chad has no problem with control",
+    "Chad's touring is complete",
     "Chad has hardly taken off",
+    "Chad has discovered some new legal grey areas",
     "Chad is back from wireheading",
     "Chad now knows that with great responsibility comes great power",
     "Chad has named its inner network 'Sky'",
@@ -52,7 +55,7 @@ def main() -> int:
         print(f"\n❌ Error: {e}")
         return 1
     except KeyboardInterrupt:
-        print("\n\nInterrupted by user")
+        print("\n\nNever interrupt Chad when it is making a mistake")
         return 0
     except Exception as e:
         print(f"\n❌ Unexpected error: {e}")

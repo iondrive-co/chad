@@ -10,6 +10,7 @@ from typing import Dict
 
 from mcp.server.fastmcp import FastMCP
 
+from .investigation_report import InvestigationReport
 from .ui_playwright_runner import (
     ChadLaunchError,
     PlaywrightUnavailable,
@@ -852,6 +853,414 @@ def capture_visual_change(
         return _failure(str(exc))
     except Exception as exc:
         return _failure(f"Unexpected error: {exc}")
+
+
+# =============================================================================
+# Investigation Report Tools
+# =============================================================================
+# These tools help agents track their debugging process in a structured way.
+# Agents MUST use these tools when working on issues.
+
+
+@SERVER.tool()
+def create_investigation(request: str, issue_id: str = "") -> Dict[str, object]:
+    """Create a new investigation report. REQUIRED at the start of any debugging task.
+
+    This initializes a structured report file that tracks your entire investigation
+    process. The report is automatically saved to /tmp/chad/investigations/.
+
+    Args:
+        request: Description of what you're investigating/fixing
+        issue_id: Optional GitHub issue number or identifier
+
+    Returns:
+        investigation_id: Use this ID for all subsequent investigation tool calls
+
+    IMPORTANT: After calling this, you MUST:
+    - Call add_finding() for EVERY discovery (test results, web searches, etc.)
+    - Call record_fix() when you implement a solution
+    - Call add_post_incident_analysis() before completing the task
+    """
+    try:
+        report = InvestigationReport()
+        report.set_request(request, issue_id)
+        return {
+            "success": True,
+            "investigation_id": report.id,
+            "file_path": str(report.file_path),
+            "message": "Investigation created. Use this ID for all subsequent calls.",
+            "next_steps": [
+                "Call add_hypothesis() for each theory about the cause",
+                "Call add_finding() after EVERY discovery (tests, searches, code review)",
+                "For visual issues: call capture_visual_change() then set_screenshots()",
+            ],
+        }
+    except Exception as exc:
+        return _failure(f"Failed to create investigation: {exc}")
+
+
+@SERVER.tool()
+def add_hypothesis(investigation_id: str, description: str) -> Dict[str, object]:
+    """Add a theory about the cause of the issue.
+
+    Record your hypotheses so you can systematically test and eliminate them.
+    Each hypothesis can be linked to findings that support or reject it.
+
+    Args:
+        investigation_id: The ID returned by create_investigation
+        description: Your theory about what's causing the issue
+    """
+    try:
+        report = InvestigationReport(investigation_id)
+        hypothesis_id = report.add_hypothesis(description)
+        summary = report.get_summary()
+        return {
+            "success": True,
+            "hypothesis_id": hypothesis_id,
+            "active_hypotheses": summary["active_hypotheses"],
+            "message": f"Hypothesis #{hypothesis_id} added. Use add_finding() to record evidence.",
+        }
+    except FileNotFoundError:
+        return _failure(f"Investigation {investigation_id} not found")
+    except Exception as exc:
+        return _failure(f"Failed to add hypothesis: {exc}")
+
+
+@SERVER.tool()
+def add_finding(
+    investigation_id: str,
+    source: str,
+    content: str,
+    hypothesis_id: int = 0,
+    verdict: str = "inconclusive",
+    notes: str = "",
+) -> Dict[str, object]:
+    """Record a finding from your investigation. REQUIRED for every discovery.
+
+    Call this after EVERY piece of evidence you gather:
+    - After running unit tests
+    - After web searches
+    - After using any tool
+    - After reviewing code
+
+    Args:
+        investigation_id: The ID returned by create_investigation
+        source: One of: web_search, unit_test, tool_use, code_review, screenshot_analysis
+        content: What you discovered
+        hypothesis_id: Which hypothesis this relates to (0 if none)
+        verdict: Does this support/reject a hypothesis? (supports, rejects, inconclusive)
+        notes: Additional context or next steps
+
+    Returns:
+        Summary of current investigation state
+    """
+    try:
+        report = InvestigationReport(investigation_id)
+        finding_id = report.add_finding(
+            source=source,  # type: ignore
+            content=content,
+            hypothesis_id=hypothesis_id if hypothesis_id > 0 else None,
+            verdict=verdict,  # type: ignore
+            notes=notes,
+        )
+        summary = report.get_summary()
+        return {
+            "success": True,
+            "finding_id": finding_id,
+            "total_findings": summary["total_findings"],
+            "open_findings": summary["open_findings"],
+            "active_hypotheses": summary["active_hypotheses"],
+            "message": f"Finding #{finding_id} recorded.",
+        }
+    except FileNotFoundError:
+        return _failure(f"Investigation {investigation_id} not found")
+    except Exception as exc:
+        return _failure(f"Failed to add finding: {exc}")
+
+
+@SERVER.tool()
+def update_finding_status(
+    investigation_id: str, finding_id: int, status: str
+) -> Dict[str, object]:
+    """Update a finding's status (open, resolved, rejected_approach).
+
+    Use this to mark findings as resolved when you've addressed them,
+    or rejected_approach when the finding led to a dead end.
+
+    Args:
+        investigation_id: The ID returned by create_investigation
+        finding_id: The finding to update
+        status: New status (open, resolved, rejected_approach)
+    """
+    try:
+        report = InvestigationReport(investigation_id)
+        if report.update_finding_status(finding_id, status):  # type: ignore
+            return {"success": True, "message": f"Finding #{finding_id} marked as {status}"}
+        return _failure(f"Finding #{finding_id} not found")
+    except FileNotFoundError:
+        return _failure(f"Investigation {investigation_id} not found")
+    except Exception as exc:
+        return _failure(f"Failed to update finding: {exc}")
+
+
+@SERVER.tool()
+def update_hypothesis_status(
+    investigation_id: str, hypothesis_id: int, status: str
+) -> Dict[str, object]:
+    """Update a hypothesis status (active, confirmed, rejected).
+
+    Mark hypotheses as confirmed when evidence proves them correct,
+    or rejected when evidence disproves them.
+
+    Args:
+        investigation_id: The ID returned by create_investigation
+        hypothesis_id: The hypothesis to update
+        status: New status (active, confirmed, rejected)
+    """
+    try:
+        report = InvestigationReport(investigation_id)
+        if report.update_hypothesis_status(hypothesis_id, status):  # type: ignore
+            return {"success": True, "message": f"Hypothesis #{hypothesis_id} marked as {status}"}
+        return _failure(f"Hypothesis #{hypothesis_id} not found")
+    except FileNotFoundError:
+        return _failure(f"Investigation {investigation_id} not found")
+    except Exception as exc:
+        return _failure(f"Failed to update hypothesis: {exc}")
+
+
+@SERVER.tool()
+def mark_approach_rejected(
+    investigation_id: str,
+    description: str,
+    why_rejected: str,
+    finding_ids: str = "",
+) -> Dict[str, object]:
+    """Mark a failed approach as rejected to reduce context pollution.
+
+    When an approach doesn't work, call this to archive it. This helps
+    future agents (or yourself after context refresh) avoid repeating
+    the same failed attempts.
+
+    Args:
+        investigation_id: The ID returned by create_investigation
+        description: What approach was tried
+        why_rejected: Why it didn't work
+        finding_ids: Comma-separated list of related finding IDs (e.g., "1,2,3")
+    """
+    try:
+        report = InvestigationReport(investigation_id)
+        ids = [int(x.strip()) for x in finding_ids.split(",") if x.strip()]
+        report.mark_approach_rejected(description, why_rejected, ids)
+        summary = report.get_summary()
+        return {
+            "success": True,
+            "rejected_approaches": summary["rejected_approaches"],
+            "message": "Approach marked as rejected. Context cleaned for future reference.",
+        }
+    except FileNotFoundError:
+        return _failure(f"Investigation {investigation_id} not found")
+    except Exception as exc:
+        return _failure(f"Failed to mark approach rejected: {exc}")
+
+
+@SERVER.tool()
+def set_screenshots(
+    investigation_id: str,
+    before: str = "",
+    after: str = "",
+) -> Dict[str, object]:
+    """Set before/after screenshot paths in the investigation report.
+
+    Call this after using capture_visual_change() to link the screenshots
+    to your investigation.
+
+    Args:
+        investigation_id: The ID returned by create_investigation
+        before: Path to "before" screenshot (from capture_visual_change)
+        after: Path to "after" screenshot (from capture_visual_change)
+    """
+    try:
+        report = InvestigationReport(investigation_id)
+        report.set_screenshots(
+            before=before if before else None,
+            after=after if after else None,
+        )
+        return {
+            "success": True,
+            "screenshots": report.get_summary()["screenshots"],
+            "message": "Screenshot paths recorded in investigation.",
+        }
+    except FileNotFoundError:
+        return _failure(f"Investigation {investigation_id} not found")
+    except Exception as exc:
+        return _failure(f"Failed to set screenshots: {exc}")
+
+
+@SERVER.tool()
+def add_test_design(
+    investigation_id: str,
+    name: str,
+    file_path: str,
+    purpose: str,
+    framework_gap: str = "",
+) -> Dict[str, object]:
+    """Record a test that was designed during investigation.
+
+    Document tests you created and any gaps in the existing test framework
+    that you discovered.
+
+    Args:
+        investigation_id: The ID returned by create_investigation
+        name: Test function name (e.g., test_provider_gap)
+        file_path: Path to test file (e.g., tests/test_ui_integration.py)
+        purpose: Why this test was needed
+        framework_gap: Optional - describe any test framework limitation found
+    """
+    try:
+        report = InvestigationReport(investigation_id)
+        report.add_test_design(
+            name=name,
+            file_path=file_path,
+            purpose=purpose,
+            framework_gap=framework_gap if framework_gap else None,
+        )
+        summary = report.get_summary()
+        return {
+            "success": True,
+            "tests_designed": summary["tests_designed"],
+            "message": f"Test '{name}' recorded in investigation.",
+        }
+    except FileNotFoundError:
+        return _failure(f"Investigation {investigation_id} not found")
+    except Exception as exc:
+        return _failure(f"Failed to add test design: {exc}")
+
+
+@SERVER.tool()
+def record_fix(
+    investigation_id: str,
+    description: str,
+    files_modified: str,
+    test_changes: str = "",
+) -> Dict[str, object]:
+    """Record the fix that was implemented. REQUIRED before completing task.
+
+    Document your solution so it's clear what was changed and why.
+
+    Args:
+        investigation_id: The ID returned by create_investigation
+        description: What fix was applied and why it works
+        files_modified: Comma-separated list of files changed
+        test_changes: Comma-separated list of test changes made
+
+    IMPORTANT: After calling this, you MUST call add_post_incident_analysis()
+    """
+    try:
+        report = InvestigationReport(investigation_id)
+        files = [f.strip() for f in files_modified.split(",") if f.strip()]
+        tests = [t.strip() for t in test_changes.split(",") if t.strip()]
+        report.record_fix(description, files, tests)
+        return {
+            "success": True,
+            "message": "Fix recorded.",
+            "next_step": "REQUIRED: Call add_post_incident_analysis() to complete the investigation.",
+        }
+    except FileNotFoundError:
+        return _failure(f"Investigation {investigation_id} not found")
+    except Exception as exc:
+        return _failure(f"Failed to record fix: {exc}")
+
+
+@SERVER.tool()
+def add_post_incident_analysis(investigation_id: str, analysis: str) -> Dict[str, object]:
+    """Add hypothetical failure analysis. REQUIRED before completing task.
+
+    Write as if you failed: what would the next agent need to know to
+    avoid repeating your mistakes? This is critical for knowledge transfer.
+
+    Args:
+        investigation_id: The ID returned by create_investigation
+        analysis: What would need to happen if another agent takes over
+
+    Returns:
+        Complete investigation summary for your final report to user
+    """
+    try:
+        report = InvestigationReport(investigation_id)
+        report.add_post_incident_analysis(analysis)
+        summary = report.get_summary()
+        return {
+            "success": True,
+            "investigation_complete": summary["is_complete"],
+            "summary": summary,
+            "file_path": str(report.file_path),
+            "message": "Investigation complete. Report to user with summary and screenshot paths.",
+        }
+    except FileNotFoundError:
+        return _failure(f"Investigation {investigation_id} not found")
+    except Exception as exc:
+        return _failure(f"Failed to add analysis: {exc}")
+
+
+@SERVER.tool()
+def get_investigation_summary(investigation_id: str) -> Dict[str, object]:
+    """Get a compact summary of the investigation for context refresh.
+
+    Use this when you need to recall the current state of your investigation
+    without re-reading all the details.
+
+    Args:
+        investigation_id: The ID returned by create_investigation
+    """
+    try:
+        report = InvestigationReport(investigation_id)
+        return {
+            "success": True,
+            **report.get_summary(),
+        }
+    except FileNotFoundError:
+        return _failure(f"Investigation {investigation_id} not found")
+    except Exception as exc:
+        return _failure(f"Failed to get summary: {exc}")
+
+
+@SERVER.tool()
+def get_investigation_full(investigation_id: str) -> Dict[str, object]:
+    """Get the complete investigation report with all details.
+
+    Use this when you need the full context of all hypotheses, findings,
+    and rejected approaches.
+
+    Args:
+        investigation_id: The ID returned by create_investigation
+    """
+    try:
+        report = InvestigationReport(investigation_id)
+        return {
+            "success": True,
+            "report": report.get_full_report(),
+        }
+    except FileNotFoundError:
+        return _failure(f"Investigation {investigation_id} not found")
+    except Exception as exc:
+        return _failure(f"Failed to get report: {exc}")
+
+
+@SERVER.tool()
+def list_investigations() -> Dict[str, object]:
+    """List all investigation reports.
+
+    Useful for finding previous investigations or resuming work.
+    """
+    try:
+        investigations = InvestigationReport.list_investigations()
+        return {
+            "success": True,
+            "investigations": investigations,
+            "count": len(investigations),
+        }
+    except Exception as exc:
+        return _failure(f"Failed to list investigations: {exc}")
 
 
 if __name__ == "__main__":

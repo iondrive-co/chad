@@ -6,6 +6,10 @@ without requiring Playwright or a browser.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from chad.investigation_report import InvestigationReport
+
 
 class TestVisualTestMap:
     """Test the visual test mapping system."""
@@ -268,3 +272,227 @@ class TestVerifyAllTestsPass:
 
         assert result["success"] is False
         assert result["failed_phase"] == "unit_tests"
+
+
+@pytest.fixture
+def temp_investigations(tmp_path, monkeypatch):
+    """Set up temp investigations directory for MCP tools."""
+    inv_dir = tmp_path / "investigations"
+    inv_dir.mkdir()
+    monkeypatch.setattr(InvestigationReport, "BASE_DIR", inv_dir)
+    return inv_dir
+
+
+class TestInvestigationMCPTools:
+    """Test the investigation tracking MCP tools."""
+
+    def test_create_investigation(self, temp_investigations):
+        from chad.mcp_playwright import create_investigation
+
+        result = create_investigation(request="Fix the gap issue", issue_id="GAP-123")
+
+        assert result["success"] is True
+        assert "investigation_id" in result
+        assert result["investigation_id"].startswith("inv_")
+        assert "next_steps" in result
+
+    def test_add_hypothesis(self, temp_investigations):
+        from chad.mcp_playwright import add_hypothesis, create_investigation
+
+        inv = create_investigation(request="Test")
+        result = add_hypothesis(
+            investigation_id=inv["investigation_id"],
+            description="CSS flex issue",
+        )
+
+        assert result["success"] is True
+        assert result["hypothesis_id"] == 1
+        assert result["active_hypotheses"] == 1
+
+    def test_add_finding(self, temp_investigations):
+        from chad.mcp_playwright import add_finding, create_investigation
+
+        inv = create_investigation(request="Test")
+        result = add_finding(
+            investigation_id=inv["investigation_id"],
+            source="unit_test",
+            content="Test passed but gap is 48px",
+            verdict="supports",
+        )
+
+        assert result["success"] is True
+        assert result["finding_id"] == 1
+        assert result["total_findings"] == 1
+
+    def test_add_finding_with_hypothesis(self, temp_investigations):
+        from chad.mcp_playwright import add_finding, add_hypothesis, create_investigation
+
+        inv = create_investigation(request="Test")
+        hyp = add_hypothesis(investigation_id=inv["investigation_id"], description="CSS issue")
+        result = add_finding(
+            investigation_id=inv["investigation_id"],
+            source="code_review",
+            content="Found the bug",
+            hypothesis_id=hyp["hypothesis_id"],
+            verdict="supports",
+        )
+
+        assert result["success"] is True
+        assert result["active_hypotheses"] == 1
+
+    def test_update_finding_status(self, temp_investigations):
+        from chad.mcp_playwright import add_finding, create_investigation, update_finding_status
+
+        inv = create_investigation(request="Test")
+        add_finding(investigation_id=inv["investigation_id"], source="tool_use", content="test")
+
+        result = update_finding_status(
+            investigation_id=inv["investigation_id"],
+            finding_id=1,
+            status="resolved",
+        )
+
+        assert result["success"] is True
+
+    def test_update_hypothesis_status(self, temp_investigations):
+        from chad.mcp_playwright import add_hypothesis, create_investigation, update_hypothesis_status
+
+        inv = create_investigation(request="Test")
+        add_hypothesis(investigation_id=inv["investigation_id"], description="Theory")
+
+        result = update_hypothesis_status(
+            investigation_id=inv["investigation_id"],
+            hypothesis_id=1,
+            status="confirmed",
+        )
+
+        assert result["success"] is True
+
+    def test_mark_approach_rejected(self, temp_investigations):
+        from chad.mcp_playwright import add_finding, create_investigation, mark_approach_rejected
+
+        inv = create_investigation(request="Test")
+        add_finding(investigation_id=inv["investigation_id"], source="tool_use", content="Try 1")
+        add_finding(investigation_id=inv["investigation_id"], source="tool_use", content="Try 2")
+
+        result = mark_approach_rejected(
+            investigation_id=inv["investigation_id"],
+            description="Tried margin: 0",
+            why_rejected="Didn't work",
+            finding_ids="1,2",
+        )
+
+        assert result["success"] is True
+        assert result["rejected_approaches"] == 1
+
+    def test_set_screenshots(self, temp_investigations):
+        from chad.mcp_playwright import create_investigation, set_screenshots
+
+        inv = create_investigation(request="Test")
+
+        result = set_screenshots(
+            investigation_id=inv["investigation_id"],
+            before="/tmp/before.png",
+            after="/tmp/after.png",
+        )
+
+        assert result["success"] is True
+        assert result["screenshots"]["before"] == "/tmp/before.png"
+        assert result["screenshots"]["after"] == "/tmp/after.png"
+
+    def test_add_test_design(self, temp_investigations):
+        from chad.mcp_playwright import add_test_design, create_investigation
+
+        inv = create_investigation(request="Test")
+
+        result = add_test_design(
+            investigation_id=inv["investigation_id"],
+            name="test_gap",
+            file_path="tests/test_ui.py",
+            purpose="Verify gap is correct",
+            framework_gap="No gap measurement existed",
+        )
+
+        assert result["success"] is True
+        assert result["tests_designed"] == 1
+
+    def test_record_fix(self, temp_investigations):
+        from chad.mcp_playwright import create_investigation, record_fix
+
+        inv = create_investigation(request="Test")
+
+        result = record_fix(
+            investigation_id=inv["investigation_id"],
+            description="Fixed the gap by adding flex-shrink",
+            files_modified="provider_ui.py",
+            test_changes="Added test_gap",
+        )
+
+        assert result["success"] is True
+        assert "next_step" in result
+
+    def test_add_post_incident_analysis(self, temp_investigations):
+        from chad.mcp_playwright import (
+            add_post_incident_analysis,
+            create_investigation,
+            record_fix,
+        )
+
+        inv = create_investigation(request="Test")
+        record_fix(
+            investigation_id=inv["investigation_id"],
+            description="Fix",
+            files_modified="file.py",
+        )
+
+        result = add_post_incident_analysis(
+            investigation_id=inv["investigation_id"],
+            analysis="If this fails, try checking Gradio version",
+        )
+
+        assert result["success"] is True
+        assert result["investigation_complete"] is True
+
+    def test_get_investigation_summary(self, temp_investigations):
+        from chad.mcp_playwright import create_investigation, get_investigation_summary
+
+        inv = create_investigation(request="Test request")
+
+        result = get_investigation_summary(investigation_id=inv["investigation_id"])
+
+        assert result["success"] is True
+        assert result["request"] == "Test request"
+        assert result["is_complete"] is False
+
+    def test_get_investigation_full(self, temp_investigations):
+        from chad.mcp_playwright import create_investigation, get_investigation_full
+
+        inv = create_investigation(request="Full test")
+
+        result = get_investigation_full(investigation_id=inv["investigation_id"])
+
+        assert result["success"] is True
+        assert "report" in result
+        assert result["report"]["request"]["description"] == "Full test"
+
+    def test_list_investigations(self, temp_investigations):
+        from chad.mcp_playwright import create_investigation, list_investigations
+
+        create_investigation(request="First")
+        create_investigation(request="Second")
+
+        result = list_investigations()
+
+        assert result["success"] is True
+        assert result["count"] == 2
+
+    def test_investigation_not_found(self, temp_investigations):
+        from chad.mcp_playwright import add_hypothesis
+
+        result = add_hypothesis(
+            investigation_id="inv_nonexistent",
+            description="Test",
+        )
+
+        assert result["success"] is False
+        assert "not found" in result["error"]

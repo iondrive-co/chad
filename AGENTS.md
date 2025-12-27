@@ -16,22 +16,101 @@ capture_visual_change(label="before", tab="providers", issue_id="your-issue-name
 This saves screenshots to `/tmp/chad/visual-changes/<timestamp>/` with descriptive filenames.
 See the Visual Inspection section for more details.
 
-Then, come up with as many theories as possible about potential causes of the issue, then examine your screenshot and 
+Then, come up with as many theories as possible about potential causes of the issue, then examine your screenshot and
 the existing test coverage and see if this rules any of them out. Research and find out which of your theories is most
 likely to be the cause. Build a plan for fixing which includes hypothesis testing, i.e. if this really is the cause,
 then when I change X I expect to see Y. Make sure you run and verify these during development, if any of them fail or
 have unexpected results then STOP and re-evaluate your theories to see if they are still correct.
 
-In the system temp directory create a scratch file called post-implementation report (include a timestamp in the file name). You must keep this report up to date as you proceed. Use a json format and make sure it is valid at all times. In this report put:
-- What was requested of you
-- Location of the before and after screenshots
-- Every time you obtain new information (web searches, results from unit tests, tool use) write a new finding explaining how this supports or rejects your current hympothesis of the cause of the issue. If an approach is bad, be very clear about this so it doesn't pollute the context window.
-- What tests you designed and where the existing test framework was insufficient
-- Your fix and what test changes you made
+When diagnosing a bug, first define the failure as a binary check that can be asserted (for example: “this request 
+returns HTTP 500 with stack trace X” or “field user_id in the response does not equal the authenticated user”). Second, 
+create a single command, test, or script that reproduces the failure reliably; if it is flaky, reduce concurrency, fix 
+seeds, pin inputs, or replay captured traffic until it fails consistently. Third, write a specific hypothesis of the 
+form “if I change X, the failure will stop,” where X is exactly one thing (for example: disable cache C, run with one 
+worker thread, pin library L to version 1.4, remove field F from the request, or revert commit abc123). Fourth, run the 
+experiment by changing only X and re-running the reproducer; if the failure still occurs, discard the hypothesis and try 
+another. Fifth, once a change predicts both failure and non-failure correctly, reduce it to the smallest possible cause 
+(for example: a missing cache key field, an unsafe shared object, or an incorrect boundary check) and add a regression 
+test that fails before the fix and passes after. A change without a reproducer, a falsified hypothesis, and a regression 
+test is unacceptable.
 
-## While making changes
+### During changes
 
-Ensure that any new display functionality is added to the visual_test_map.py
+You MUST use the investigation MCP tools to track your debugging process. These tools create a structured JSON report
+in `/tmp/chad/investigations/` that is automatically kept valid and up-to-date.
+
+At the start of the issue:
+
+```
+create_investigation(
+    request="Description of what you're fixing",
+    issue_id="github-issue-number-if-any"
+)
+```
+**Store the returned `investigation_id`** - you need it for all subsequent calls.
+
+Then record your hypotheses:
+```
+add_hypothesis(investigation_id="inv_...", description="Theory about the cause")
+```
+
+Call `add_finding()` after EVERY piece of evidence you gather:
+
+| Source | When to use |
+|--------|-------------|
+| `web_search` | After any web search |
+| `unit_test` | After running tests |
+| `tool_use` | After using any MCP tool |
+| `code_review` | After examining code |
+| `screenshot_analysis` | After reviewing screenshots |
+
+Example:
+```
+add_finding(
+    investigation_id="inv_...",
+    source="unit_test",
+    content="test_provider_gap passes but measures 48px gap",
+    hypothesis_id=1,
+    verdict="supports",
+    notes="Confirms the CSS gap issue"
+)
+```
+
+If an approach fails call `mark_approach_rejected()` to archive failed attempts and clean context:
+```
+mark_approach_rejected(
+    investigation_id="inv_...",
+    description="Tried adding margin: 0 to accordion",
+    why_rejected="Gap remained; issue is in parent container",
+    finding_ids="2,3"
+)
+```
+
+For visual issues, after taking screenshots, link them to your investigation:
+```
+capture_visual_change(label="before", tab="providers", issue_id="gap-fix")
+# Get the screenshot path from the result, then:
+set_screenshots(investigation_id="inv_...", before="/tmp/chad/visual-changes/.../before.png")
+```
+Here are the full list of tools available to record your investigation status:
+
+| Tool | Purpose | Required? |
+|------|---------|-----------|
+| `create_investigation` | Initialize report with the request | **Yes, at start** |
+| `add_hypothesis` | Record a theory about the cause | Recommended |
+| `add_finding` | Record evidence from tests/searches/tools | **Yes, for each discovery** |
+| `update_finding_status` | Mark finding as resolved/rejected | Recommended |
+| `update_hypothesis_status` | Mark hypothesis as confirmed/rejected | Recommended |
+| `mark_approach_rejected` | Archive failed approaches | When approach fails |
+| `set_screenshots` | Record before/after screenshot paths | **Yes, for visual issues** |
+| `add_test_design` | Document new tests and framework gaps | Recommended |
+| `record_fix` | Document the solution implemented | **Yes, at end** |
+| `add_post_incident_analysis` | Write hypothetical failure analysis | **Yes, at end** |
+| `get_investigation_summary` | Get compact summary for context refresh | Recommended |
+| `get_investigation_full` | Get complete report with all details | As needed |
+| `list_investigations` | List all investigation reports | As needed |
+
+While making changes, also ensure that any new display functionality is added to the visual_test_map.py
 
 ## After making changes
 
@@ -59,15 +138,29 @@ python scripts/verify.py --file tests/test_web_ui.py  # Specific file
 ```
 Fix any lint issues you discover regardless of whether your change caused them.
 
-Close out any remaining open findings in the post-implementation report you have been updating in the system temp
-directory. Then, assume a hypothetical - you have actually failed to do what was asked. Write up a final paragraph
-which is a post-incident report, explaining how you feel short and what needs to be done if another agent is to take
-over without repeating your mistakes.
-
-Finally, once you are satisfied, report back to the user with:
-- A short summary of the issue
+Close out any remaining open findings using `update_finding_status()`. 
+Then record your fix (to document your solution):
+```
+record_fix(
+    investigation_id="inv_...",
+    description="Added flex-shrink: 0 to provider cards container",
+    files_modified="src/chad/provider_ui.py",
+    test_changes="Added test_add_provider_accordion_gap"
+)
+```
+Write hypothetical failure analysis (what would the next agent need to know to avoid repeating your mistakes?):
+```
+add_post_incident_analysis(
+    investigation_id="inv_...",
+    analysis="If this fix doesn't work, the issue may be in Gradio's accordion component itself. Future agent should: 1) Check Gradio version, 2) Look for CSS overrides in browser devtools..."
+)
+```
+Finally, once you are satisfied, call `get_investigation_summary()` and report back to the user with:
+- A short summary of the issue. Make a summary as a bullet point list describing how to recreate the problem and how the 
+fix modifies this list.
 - How you proved that your fix worked and was the only explanation that made sense
-- Before and after screenshot paths (from `/tmp/chad/visual-changes/`)
+- Before and after screenshot paths (from the investigation summary)
+- The investigation report file path (for future reference)
 - Any remaining issues or failing tests
 
 ## Visual Inspection
@@ -110,6 +203,21 @@ PYTHONPATH=src python3 -m chad.mcp_playwright
 
 | Tool | Description |
 |------|-------------|
+| **Investigation Tracking** | |
+| `create_investigation` | **REQUIRED** - Initialize investigation report at start of any issue |
+| `add_hypothesis` | Record a theory about the cause |
+| `add_finding` | **REQUIRED** - Record evidence after every discovery |
+| `update_finding_status` | Mark finding as resolved/rejected |
+| `update_hypothesis_status` | Mark hypothesis as confirmed/rejected |
+| `mark_approach_rejected` | Archive failed approaches to clean context |
+| `set_screenshots` | Link before/after screenshots to investigation |
+| `add_test_design` | Document tests created and framework gaps |
+| `record_fix` | **REQUIRED** - Document the solution |
+| `add_post_incident_analysis` | **REQUIRED** - Write hypothetical failure analysis |
+| `get_investigation_summary` | Get compact summary for reporting |
+| `get_investigation_full` | Get complete investigation report |
+| `list_investigations` | List all investigation reports |
+| **Visual Testing** | |
 | `capture_visual_change` | **REQUIRED** for before/after screenshots - saves to `/tmp/chad/visual-changes/` |
 | `run_ui_smoke` | Full UI smoke test with screenshots of both tabs |
 | `screenshot` | Capture screenshot of a specific tab |
@@ -124,13 +232,14 @@ PYTHONPATH=src python3 -m chad.mcp_playwright
 | `test_delete_provider` | Test the delete flow end-to-end |
 
 **Workflow for UI Changes:**
-1. **BEFORE making changes**: `capture_visual_change(label="before", issue_id="issue-name")`
-2. Make code changes to fix the issue
-3. **AFTER making changes**: `capture_visual_change(label="after", issue_id="issue-name")`
-4. Run `run_tests_for_file` with the modified file path
-5. Review screenshots in `/tmp/chad/visual-changes/` and `/tmp/chad/mcp-playwright/`
-6. Before completing: run `verify_all_tests_pass`
-7. Report screenshot paths to user
+1. `create_investigation(request="...", issue_id="issue-name")` - save the investigation_id
+2. `capture_visual_change(label="before", issue_id="issue-name")` then `set_screenshots(before=path)`
+3. Make code changes to fix the issue, calling `add_finding()` for every discovery
+4. `capture_visual_change(label="after", issue_id="issue-name")` then `set_screenshots(after=path)`
+5. Run `run_tests_for_file` with the modified file path
+6. `record_fix()` and `add_post_incident_analysis()`
+7. Before completing: run `verify_all_tests_pass`
+8. `get_investigation_summary()` and report to user with screenshot paths and investigation file
 
 **Test Mappings:**
 Source files declare their visual tests in `src/chad/visual_test_map.py`.
