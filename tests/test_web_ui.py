@@ -47,8 +47,6 @@ class TestChadWebUI:
         assert 'anthropic' in result
         assert 'gpt' in result
         assert 'openai' in result
-        assert 'CODING' in result
-        assert 'MANAGEMENT' in result
 
     def test_list_providers_empty(self, mock_security_mgr):
         """Test listing providers when no accounts exist."""
@@ -267,7 +265,7 @@ class TestChadWebUITaskExecution:
 
     def test_start_task_missing_project(self, web_ui):
         """Test starting task without project path."""
-        results = list(web_ui.start_chad_task('', 'do something', False))
+        results = list(web_ui.start_chad_task('', 'do something', 'test-coding', 'test-mgmt'))
 
         assert len(results) > 0
         last_result = results[-1]
@@ -279,7 +277,7 @@ class TestChadWebUITaskExecution:
 
     def test_start_task_missing_description(self, web_ui):
         """Test starting task without task description."""
-        results = list(web_ui.start_chad_task('/tmp', '', False))
+        results = list(web_ui.start_chad_task('/tmp', '', 'test-coding', 'test-mgmt'))
 
         assert len(results) > 0
         last_result = results[-1]
@@ -290,7 +288,7 @@ class TestChadWebUITaskExecution:
 
     def test_start_task_invalid_path(self, web_ui):
         """Test starting task with invalid project path."""
-        results = list(web_ui.start_chad_task('/nonexistent/path/xyz', 'do something', False))
+        results = list(web_ui.start_chad_task('/nonexistent/path/xyz', 'do something', 'test-coding', 'test-mgmt'))
 
         assert len(results) > 0
         last_result = results[-1]
@@ -300,13 +298,13 @@ class TestChadWebUITaskExecution:
         assert '❌' in status_value
         assert 'Invalid project path' in status_value
 
-    def test_start_task_missing_roles(self, mock_security_mgr):
-        """Test starting task when roles are not assigned."""
+    def test_start_task_missing_agents(self, mock_security_mgr):
+        """Test starting task when agents are not selected."""
         from chad.web_ui import ChadWebUI
         mock_security_mgr.list_role_assignments.return_value = {}
 
         web_ui = ChadWebUI(mock_security_mgr, 'test-password')
-        results = list(web_ui.start_chad_task('/tmp', 'do something', False))
+        results = list(web_ui.start_chad_task('/tmp', 'do something', '', ''))
 
         assert len(results) > 0
         last_result = results[-1]
@@ -314,7 +312,7 @@ class TestChadWebUITaskExecution:
         status_header = last_result[2]
         status_value = status_header.get('value', '') if isinstance(status_header, dict) else str(status_header)
         assert '❌' in status_value
-        assert 'CODING' in status_value or 'MANAGEMENT' in status_value
+        assert 'Coding Agent' in status_value or 'Management Agent' in status_value
 
 
 class TestChadWebUIInterface:
@@ -1047,9 +1045,11 @@ class TestStateMachineIntegration:
         test_dir = tmp_path / "test_project"
         test_dir.mkdir()
 
-        # Run the task in managed mode (third param True)
+        # Run the task in managed mode
         results = []
-        for i, result in enumerate(web_ui.start_chad_task(str(test_dir), 'test task', True)):
+        for i, result in enumerate(web_ui.start_chad_task(
+            str(test_dir), 'test task', 'coding-ai', 'mgmt-ai', managed_mode=True
+        )):
             results.append(result)
             if i > 5:
                 web_ui.cancel_requested = True
@@ -1084,8 +1084,10 @@ class TestStateMachineIntegration:
         test_dir = tmp_path / "test_project"
         test_dir.mkdir()
 
-        # Run in managed mode (third param True)
-        list(web_ui.start_chad_task(str(test_dir), 'change header colors', True))
+        # Run in managed mode
+        list(web_ui.start_chad_task(
+            str(test_dir), 'change header colors', 'coding-ai', 'mgmt-ai', managed_mode=True
+        ))
 
         # Verify that coding AI was called for investigation
         coding_calls = mock_manager.send_to_coding.call_args_list
@@ -1178,8 +1180,8 @@ class TestSessionLogIncludesTask:
 
         task_description = "Fix the login bug"
 
-        # Run task in direct mode (third param False or omitted)
-        list(web_ui.start_chad_task(str(test_dir), task_description, False))
+        # Run task with agent selections
+        list(web_ui.start_chad_task(str(test_dir), task_description, 'coding-ai', 'mgmt-ai'))
 
         # Get the session log path
         session_log_path = web_ui.current_session_log_path
