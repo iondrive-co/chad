@@ -395,12 +395,12 @@ Each log contains:
 - `timestamp`: ISO format timestamp when session started
 - `task_description`: The original task
 - `project_path`: Working directory
-- `managed_mode`: Whether management AI supervision was enabled
-- `coding`/`management`: Account and provider info
+- `coding`: Account and provider info
 - `status`: Current status (`running`, `completed`, or `failed`)
 - `success`: Whether the task completed successfully (null while running)
 - `completion_reason`: Why the task ended
 - `conversation`: Full chat history (updated in real-time)
+- `streaming_transcript`: Full streamed output when available
 
 To find session logs:
 ```bash
@@ -416,7 +416,7 @@ src/chad/
 ├── __main__.py      # Entry point, password handling
 ├── providers.py     # AI provider implementations
 ├── security.py      # Password hashing, API key encryption
-├── session_manager.py # Multi-provider session orchestration
+├── session_logger.py # Session log management
 └── web_ui.py        # Gradio web interface
 ```
 

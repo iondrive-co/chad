@@ -208,7 +208,7 @@ def parse_codex_output(raw_output: str | None) -> str:  # noqa: C901
 def extract_final_codex_response(raw_output: str | None) -> str:
     """Extract only the final 'codex' response from Codex output.
 
-    This is useful for getting just the management AI's instruction
+    This is useful for isolating the final instruction text
     without all the context it was given.
     """
     if not raw_output:

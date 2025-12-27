@@ -441,7 +441,7 @@ class SecurityManager:
 
         Args:
             account_name: Account name to assign role to
-            role: Role name ('CODING', 'MANAGEMENT', etc.)
+            role: Role name ('CODING')
 
         Raises:
             ValueError: If account doesn't exist
@@ -465,6 +465,8 @@ class SecurityManager:
         Returns:
             Account name assigned to this role, or None if not assigned
         """
+        if role != 'CODING':
+            return None
         config = self.load_config()
         return config.get('role_assignments', {}).get(role)
 
@@ -475,7 +477,9 @@ class SecurityManager:
             Dict mapping role names to account names
         """
         config = self.load_config()
-        return config.get('role_assignments', {})
+        assignments = config.get('role_assignments', {}) or {}
+        # Only the CODING role is supported in simple mode
+        return {role: acct for role, acct in assignments.items() if role == 'CODING'}
 
     def clear_role(self, role: str) -> None:
         """Remove a role assignment.
