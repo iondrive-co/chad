@@ -736,7 +736,8 @@ class TestClaudeCodeProvider:
         # Check that Popen was called with env containing CLAUDE_CONFIG_DIR
         call_kwargs = mock_popen.call_args.kwargs
         assert "env" in call_kwargs
-        assert call_kwargs["env"]["CLAUDE_CONFIG_DIR"] == str(tmp_path / ".chad" / "claude-configs" / "isolated-account")
+        expected_dir = tmp_path / ".chad" / "claude-configs" / "isolated-account"
+        assert call_kwargs["env"]["CLAUDE_CONFIG_DIR"] == str(expected_dir)
 
 
 class TestOpenAICodexProvider:

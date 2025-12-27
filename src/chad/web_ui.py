@@ -421,6 +421,51 @@ PROVIDER_PANEL_CSS = """
   width: 100% !important;
   max-width: 100% !important;
 }
+
+/* Task entry bubble embedded in the chat area */
+.task-entry-bubble {
+  background: linear-gradient(135deg, #0f172a 0%, #0b1224 100%);
+  border: 1px solid #1f2b46;
+  border-radius: 16px;
+  padding: 14px 16px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28);
+  margin-bottom: 12px;
+}
+
+.task-entry-bubble .task-entry-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  color: #cbd5e1;
+  letter-spacing: 0.01em;
+}
+
+.task-entry-bubble .task-entry-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #e2e8f0;
+}
+
+.task-entry-bubble .task-entry-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.task-entry-bubble .task-entry-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.agent-panel {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  box-shadow: none;
+}
 """
 
 # JavaScript to fix Gradio visibility updates and maintain scroll position
@@ -1046,8 +1091,13 @@ class ChadWebUI:
                 value=str(session_log_path) if session_log_path else None,
                 visible=session_log_path is not None
             )
+            display_history = history
+            if history and isinstance(history[0], dict):
+                content = history[0].get("content", "")
+                if isinstance(content, str) and content.startswith("**Task**"):
+                    display_history = history[1:]
             return (
-                history,
+                display_history,
                 display_stream,
                 gr.update(value=status if is_error else "", visible=is_error),
                 gr.update(value=project_path, interactive=interactive),
@@ -1130,12 +1180,11 @@ class ChadWebUI:
                 status_prefix += f"• MANAGEMENT: {management_account} ({management_provider})\n"
             status_prefix += f"• Mode: {'Managed (AI supervision)' if managed_mode else 'Direct (coding AI only)'}\n\n"
 
-            # Add task description as the first message in chat history
+            # Seed chat history with the user's task for logging while keeping it hidden in the UI
             chat_history.append({
                 "role": "user",
                 "content": f"**Task**\n\n{task_description}"
             })
-            # Update session log with initial task message
             self.session_logger.update_log(session_log_path, chat_history)
 
             initial_status = f"{status_prefix}⏳ Initializing sessions..."
@@ -1868,27 +1917,20 @@ Create a better plan that addresses the issue."""
             with gr.Tabs():
                 # Run Task Tab (default)
                 with gr.Tab("🚀 Run Task"):
-                    gr.Markdown("## Start a New Task")
-
                     # Check initial role configuration
                     is_ready, _ = self.get_role_config_status()
                     config_status = self.format_role_status()
 
+                    # Allow override via env var (for screenshots)
+                    default_path = os.environ.get('CHAD_PROJECT_PATH', str(Path.cwd()))
+
                     with gr.Row():
-                        with gr.Column():
-                            # Allow override via env var (for screenshots)
-                            default_path = os.environ.get('CHAD_PROJECT_PATH', str(Path.cwd()))
-                            project_path = gr.Textbox(
-                                label="Project Path",
-                                placeholder="/path/to/project",
-                                value=default_path
-                            )
-                            task_description = gr.TextArea(
-                                label="Task Description",
-                                placeholder="Describe what you want done...",
-                                lines=5
-                            )
-                            # Show role configuration status with session log download
+                        project_path = gr.Textbox(
+                            label="Project Path",
+                            placeholder="/path/to/project",
+                            value=default_path
+                        )
+                        with gr.Column(scale=1, min_width=240):
                             with gr.Row(elem_id="role-status-row"):
                                 role_status = gr.Markdown(config_status, elem_id="role-config-status")
                                 log_path = self.current_session_log_path
@@ -1902,19 +1944,13 @@ Create a better plan that addresses the issue."""
                                     min_width=120,
                                     elem_id="session-log-btn"
                                 )
-                            with gr.Row():
-                                start_btn = gr.Button(
-                                    "Start Task",
-                                    variant="primary",
-                                    interactive=is_ready,
-                                    elem_id="start-task-btn"
-                                )
-                                cancel_btn = gr.Button(
-                                    "🛑 Cancel",
-                                    variant="stop",
-                                    interactive=False,
-                                    elem_id="cancel-task-btn"
-                                )
+                        cancel_btn = gr.Button(
+                            "🛑 Cancel",
+                            variant="stop",
+                            interactive=False,
+                            elem_id="cancel-task-btn",
+                            min_width=110
+                        )
 
                     # Task status header (shows selected task description and status)
                     task_status_header = gr.Markdown("", elem_id="task-status-header", visible=False)
@@ -1922,12 +1958,31 @@ Create a better plan that addresses the issue."""
                     # Agent communication view
                     with gr.Row():
                         with gr.Column():
-                            chatbot = gr.Chatbot(
-                                label="Agent Communication",
-                                height=400,
-                                elem_id="agent-chatbot",
-                                autoscroll=False
-                            )
+                            with gr.Column(elem_classes=["agent-panel"]):
+                                gr.Markdown("### Agent Communication")
+                                with gr.Column(elem_classes=["task-entry-bubble"]):
+                                    with gr.Row(elem_classes=["task-entry-header"]):
+                                        gr.Markdown("#### 🗒️ Enter Task")
+                                    with gr.Column(elem_classes=["task-entry-body"]):
+                                        task_description = gr.TextArea(
+                                            label="Task Description",
+                                            placeholder="Describe what you want done...",
+                                            lines=5
+                                        )
+                                        with gr.Row(elem_classes=["task-entry-actions"]):
+                                            start_btn = gr.Button(
+                                                "Start Task",
+                                                variant="primary",
+                                                interactive=is_ready,
+                                                elem_id="start-task-btn"
+                                            )
+                                chatbot = gr.Chatbot(
+                                    label="Agent Communication",
+                                    show_label=False,
+                                    height=400,
+                                    elem_id="agent-chatbot",
+                                    autoscroll=False
+                                )
 
                     # Live activity stream
                     live_stream_box = gr.Markdown("", elem_id="live-stream-box", sanitize_html=False)
