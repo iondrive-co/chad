@@ -1263,5 +1263,177 @@ def list_investigations() -> Dict[str, object]:
         return _failure(f"Failed to list investigations: {exc}")
 
 
+# =============================================================================
+# Test Running Tools
+# =============================================================================
+
+
+@SERVER.tool()
+def run_unit_tests(
+    test_path: str = "tests/",
+    pattern: str = "",
+    verbose: bool = True,
+    fail_fast: bool = False,
+) -> Dict[str, object]:
+    """Run unit tests with optional filtering.
+
+    Args:
+        test_path: Path to test file or directory (e.g., "tests/test_web_ui.py")
+        pattern: pytest -k filter pattern (e.g., "test_start_task")
+        verbose: Show verbose output
+        fail_fast: Stop on first failure (-x flag)
+
+    Returns:
+        Test results including pass/fail counts and output
+    """
+    try:
+        project_root = _project_root()
+        env = {**os.environ, "PYTHONPATH": str(project_root / "src")}
+
+        cmd = [sys.executable, "-m", "pytest", test_path]
+        if verbose:
+            cmd.append("-v")
+        cmd.append("--tb=short")
+        if pattern:
+            cmd.extend(["-k", pattern])
+        if fail_fast:
+            cmd.append("-x")
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+            env=env,
+            timeout=300,
+        )
+
+        # Parse summary line for counts
+        passed = failed = 0
+        for line in result.stdout.split("\n"):
+            if "passed" in line or "failed" in line:
+                import re
+                match = re.search(r"(\d+) passed", line)
+                if match:
+                    passed = int(match.group(1))
+                match = re.search(r"(\d+) failed", line)
+                if match:
+                    failed = int(match.group(1))
+
+        return {
+            "success": result.returncode == 0,
+            "test_path": test_path,
+            "pattern": pattern if pattern else None,
+            "passed": passed,
+            "failed": failed,
+            "stdout": result.stdout[-8000:] if len(result.stdout) > 8000 else result.stdout,
+            "stderr": result.stderr[-2000:] if len(result.stderr) > 2000 else result.stderr,
+            "return_code": result.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        return _failure("Tests timed out after 5 minutes")
+    except Exception as exc:
+        return _failure(f"Error running tests: {exc}")
+
+
+@SERVER.tool()
+def lint_files(
+    paths: str = "src/chad/",
+    max_line_length: int = 120,
+) -> Dict[str, object]:
+    """Run flake8 linting on specific files or directories.
+
+    Args:
+        paths: Comma-separated paths to lint (e.g., "src/chad/web_ui.py,src/chad/provider_ui.py")
+        max_line_length: Maximum line length (default 120)
+
+    Returns:
+        Linting results with any errors found
+    """
+    try:
+        project_root = _project_root()
+        path_list = [p.strip() for p in paths.split(",")]
+
+        cmd = [
+            sys.executable, "-m", "flake8",
+            f"--max-line-length={max_line_length}",
+            *path_list
+        ]
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+            timeout=60,
+        )
+
+        # Count issues
+        issues = [line for line in result.stdout.split("\n") if line.strip()]
+
+        return {
+            "success": result.returncode == 0,
+            "paths": path_list,
+            "issue_count": len(issues),
+            "issues": issues[:50],  # Limit to first 50 issues
+            "stdout": result.stdout[-4000:] if len(result.stdout) > 4000 else result.stdout,
+            "return_code": result.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        return _failure("Linting timed out after 60 seconds")
+    except Exception as exc:
+        return _failure(f"Error running linter: {exc}")
+
+
+@SERVER.tool()
+def test_summary() -> Dict[str, object]:
+    """Get a quick summary of test suite status.
+
+    Runs a fast test collection to count tests without executing them,
+    then provides status information.
+
+    Returns:
+        Summary with test counts and collection status
+    """
+    try:
+        project_root = _project_root()
+        env = {**os.environ, "PYTHONPATH": str(project_root / "src")}
+
+        # Collect tests without running them
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q"],
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+            env=env,
+            timeout=30,
+        )
+
+        # Parse the collection output
+        total_tests = 0
+        test_files = set()
+        for line in result.stdout.split("\n"):
+            if "::" in line and not line.startswith(" "):
+                total_tests += 1
+                file_path = line.split("::")[0]
+                test_files.add(file_path)
+
+        # Check for any syntax errors in test collection
+        collection_errors = "error" in result.stdout.lower() or result.returncode != 0
+
+        return {
+            "success": not collection_errors,
+            "total_tests": total_tests,
+            "test_files": len(test_files),
+            "collection_errors": collection_errors,
+            "files": sorted(test_files)[:20],  # First 20 test files
+            "stdout": result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout,
+        }
+    except subprocess.TimeoutExpired:
+        return _failure("Test collection timed out after 30 seconds")
+    except Exception as exc:
+        return _failure(f"Error collecting tests: {exc}")
+
+
 if __name__ == "__main__":
     SERVER.run()
