@@ -1,10 +1,9 @@
 # Chad: YOLO AI
 
-Coding agents need hand holding to implement complex features, but no one holds Chad's hand.
+Coding agents need hand holding to implement complex features, but no one holds Chad's hand. 
 
-- Installs and logs you in to Codex, Claude Code, Gemini, or Mistral Vibe coding agent sessions
-- Chad now runs tasks directly—your request goes straight to a coding agent with no management layer
-- When a coding agent starts equivocating or half-baking Chad can verify and reprompt until the task is complete
+Add one or more Codex, Claude Code, Gemini, or Mistral Vibe coding agent sessions, ask for a coding task, and Chad will 
+verify and reprompt to deliver a one-shot result.
 
 <p style="text-align: center;">
   <img src="docs/Chad.png" alt="Chad Code" width="80">

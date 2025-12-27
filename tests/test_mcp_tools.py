@@ -496,3 +496,149 @@ class TestInvestigationMCPTools:
 
         assert result["success"] is False
         assert "not found" in result["error"]
+
+
+class TestRunUnitTests:
+    """Test the run_unit_tests MCP tool."""
+
+    @patch("chad.mcp_playwright.subprocess.run")
+    def test_run_unit_tests_success(self, mock_run):
+        from chad.mcp_playwright import run_unit_tests
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="test_foo PASSED\n5 passed in 1.0s",
+            stderr="",
+        )
+
+        result = run_unit_tests(test_path="tests/test_web_ui.py")
+
+        assert result["success"] is True
+        assert result["passed"] == 5
+        assert result["test_path"] == "tests/test_web_ui.py"
+
+    @patch("chad.mcp_playwright.subprocess.run")
+    def test_run_unit_tests_with_pattern(self, mock_run):
+        from chad.mcp_playwright import run_unit_tests
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="2 passed",
+            stderr="",
+        )
+
+        result = run_unit_tests(test_path="tests/", pattern="test_start")
+
+        assert result["success"] is True
+        assert result["pattern"] == "test_start"
+        # Verify -k flag was passed
+        call_args = mock_run.call_args[0][0]
+        assert "-k" in call_args
+        assert "test_start" in call_args
+
+    @patch("chad.mcp_playwright.subprocess.run")
+    def test_run_unit_tests_failure(self, mock_run):
+        from chad.mcp_playwright import run_unit_tests
+
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="1 failed, 4 passed",
+            stderr="",
+        )
+
+        result = run_unit_tests()
+
+        assert result["success"] is False
+        assert result["failed"] == 1
+        assert result["passed"] == 4
+
+    @patch("chad.mcp_playwright.subprocess.run")
+    def test_run_unit_tests_fail_fast(self, mock_run):
+        from chad.mcp_playwright import run_unit_tests
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="1 passed", stderr="")
+
+        run_unit_tests(fail_fast=True)
+
+        call_args = mock_run.call_args[0][0]
+        assert "-x" in call_args
+
+
+class TestLintFiles:
+    """Test the lint_files MCP tool."""
+
+    @patch("chad.mcp_playwright.subprocess.run")
+    def test_lint_files_success(self, mock_run):
+        from chad.mcp_playwright import lint_files
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        result = lint_files(paths="src/chad/web_ui.py")
+
+        assert result["success"] is True
+        assert result["issue_count"] == 0
+        assert "src/chad/web_ui.py" in result["paths"]
+
+    @patch("chad.mcp_playwright.subprocess.run")
+    def test_lint_files_with_issues(self, mock_run):
+        from chad.mcp_playwright import lint_files
+
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="src/chad/web_ui.py:10:1: E302 expected 2 blank lines\nsrc/chad/web_ui.py:20:80: E501 line too long",
+            stderr="",
+        )
+
+        result = lint_files()
+
+        assert result["success"] is False
+        assert result["issue_count"] == 2
+        assert len(result["issues"]) == 2
+
+    @patch("chad.mcp_playwright.subprocess.run")
+    def test_lint_files_multiple_paths(self, mock_run):
+        from chad.mcp_playwright import lint_files
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        result = lint_files(paths="src/chad/web_ui.py, src/chad/provider_ui.py")
+
+        assert result["success"] is True
+        assert len(result["paths"]) == 2
+        assert "src/chad/web_ui.py" in result["paths"]
+        assert "src/chad/provider_ui.py" in result["paths"]
+
+
+class TestTestSummary:
+    """Test the test_summary MCP tool."""
+
+    @patch("chad.mcp_playwright.subprocess.run")
+    def test_test_summary_success(self, mock_run):
+        from chad.mcp_playwright import test_summary
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="tests/test_web_ui.py::test_foo\ntests/test_web_ui.py::test_bar\ntests/test_mcp.py::test_baz\n",
+            stderr="",
+        )
+
+        result = test_summary()
+
+        assert result["success"] is True
+        assert result["total_tests"] == 3
+        assert result["test_files"] == 2
+
+    @patch("chad.mcp_playwright.subprocess.run")
+    def test_test_summary_collection_error(self, mock_run):
+        from chad.mcp_playwright import test_summary
+
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="ERROR collecting tests",
+            stderr="",
+        )
+
+        result = test_summary()
+
+        assert result["success"] is False
+        assert result["collection_errors"] is True

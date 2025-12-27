@@ -126,15 +126,19 @@ Re-run your new test, ensure it passes and then:
 If there are major issues with either of the above then consider whether you should instead pursue another one of your
 theories and create some new ones. If there are only minor issues then you can just correct them here.
 
-Next, run the verification script with the --quick option, and also run visual tests on areas you changed. Here are
-some possible options for running verification:
-```bash
-python scripts/verify.py --quick      # Lint + unit tests only (fast)
-python scripts/verify.py --lint       # Lint only
-python scripts/verify.py --unit       # Unit tests only
-python scripts/verify.py --ui         # UI tests only
-python scripts/verify.py -k "pattern" # Tests matching pattern
-python scripts/verify.py --file tests/test_web_ui.py  # Specific file
+Next, run quick verification on modified files, for example:
+```
+lint_files(paths="src/chad/web_ui.py,src/chad/provider_ui.py")
+run_unit_tests(test_path="tests/test_web_ui.py", pattern="test_start")
+test_summary()
+```
+If there is a visual component check run the ui tests for the changed classes as well
+```
+run_tests_for_file(file_path="src/chad/provider_ui.py")
+```
+To run the full test suite:
+```
+verify_all_tests_pass()
 ```
 Fix any lint issues you discover regardless of whether your change caused them.
 
@@ -223,13 +227,17 @@ PYTHONPATH=src python3 -m chad.mcp_playwright
 | `screenshot` | Capture screenshot of a specific tab |
 | `run_tests_for_file` | Run visual tests covering a source file |
 | `run_tests_for_modified_files` | Run tests for all git-modified files |
-| `run_ci_tests` | Run full CI test suite (excludes visual by default) |
-| `verify_all_tests_pass` | Complete verification before issue completion |
 | `list_visual_test_mappings` | Show source file to test mappings |
 | `test_add_provider_accordion_gap` | Test gap between cards and Add Provider button |
 | `measure_provider_delete` | Verify delete button sizing |
 | `list_providers` | Get visible provider names |
 | `test_delete_provider` | Test the delete flow end-to-end |
+| **Test Running** | |
+| `run_unit_tests` | Run pytest with optional filtering (path, pattern, fail-fast) |
+| `lint_files` | Run flake8 on specific files or directories |
+| `test_summary` | Quick test collection count without executing |
+| `run_ci_tests` | Run full CI test suite (excludes visual by default) |
+| `verify_all_tests_pass` | Complete verification: lint + unit tests + visual tests for modified files |
 
 **Workflow for UI Changes:**
 1. `create_investigation(request="...", issue_id="issue-name")` - save the investigation_id
