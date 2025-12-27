@@ -3,12 +3,7 @@
   - Get rid of management AI. Once coding AI is done select a next step: Verify visually, further request (not implemented yet), etc
   - Manually add new task tabs for each new task
 - Continue session / further request
-- Verify standard approach:
-  - Before implementing describe the problem, then write a test to demonstrate the problem (visually with MCP browser if 
-  necessary), then modify your description of the problem based on what the test shows
-  - Make sure that there is a solid explanation for how it slipped through the existing tests and what will be improved in tests
-  - After fixing demonstrate that the test now passes and that no other tests are broken
-  - Make a screenshot / output and a code diff for the user to confirm you changed it
+- Prompt the agent with the verify standard approach described in AGENTS.md
 - Classes for 1 sentence summaries and splitting tasks, self-contained including prompt, tested first then integration
 - Load balance based on usage, user preference, context limits hit, etc - will need: 
   - task splitting to support session continuation per agent

@@ -61,18 +61,19 @@ class TestChadWebUI:
 
         assert 'No providers configured yet' in result
 
-    def test_add_provider_success(self, web_ui, mock_security_mgr):
-        """Test adding a new provider successfully."""
+    @patch('subprocess.run')
+    def test_add_provider_success(self, mock_run, web_ui, mock_security_mgr, tmp_path):
+        """Test adding a new provider successfully (OpenAI/Codex)."""
         mock_security_mgr.list_accounts.return_value = {}
+        mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
-        result = web_ui.add_provider('my-claude', 'anthropic')[0]
+        with patch.object(web_ui.provider_ui, '_setup_codex_account', return_value=str(tmp_path)):
+            result = web_ui.add_provider('my-codex', 'openai')[0]
 
-        assert '✓' in result
-        assert 'my-claude' in result
-        # Either shows authenticate instructions or confirms logged in
-        assert 'authenticate' in result.lower() or 'logged in' in result.lower()
+        assert '✅' in result or '✓' in result
+        assert 'my-codex' in result
         mock_security_mgr.store_account.assert_called_once_with(
-            'my-claude', 'anthropic', '', 'test-password'
+            'my-codex', 'openai', '', 'test-password'
         )
 
     @patch('subprocess.run')
@@ -90,27 +91,33 @@ class TestChadWebUI:
             'openai', 'openai', '', 'test-password'
         )
 
-    def test_add_provider_duplicate_name(self, web_ui, mock_security_mgr):
-        """Test adding provider when name already exists."""
-        mock_security_mgr.list_accounts.return_value = {'anthropic': 'anthropic'}
+    @patch('subprocess.run')
+    def test_add_provider_duplicate_name(self, mock_run, web_ui, mock_security_mgr, tmp_path):
+        """Test adding provider when name already exists (OpenAI/Codex)."""
+        mock_security_mgr.list_accounts.return_value = {'openai': 'openai'}
+        mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
-        result = web_ui.add_provider('', 'anthropic')[0]
+        with patch.object(web_ui.provider_ui, '_setup_codex_account', return_value=str(tmp_path)):
+            result = web_ui.add_provider('', 'openai')[0]
 
-        # Should create anthropic-1
-        assert '✓' in result
+        # Should create openai-1
+        assert '✅' in result or '✓' in result
         mock_security_mgr.store_account.assert_called_once_with(
-            'anthropic-1', 'anthropic', '', 'test-password'
+            'openai-1', 'openai', '', 'test-password'
         )
 
-    def test_add_provider_error(self, web_ui, mock_security_mgr):
-        """Test adding provider when error occurs."""
+    @patch('subprocess.run')
+    def test_add_provider_error(self, mock_run, web_ui, mock_security_mgr, tmp_path):
+        """Test adding provider when login fails (OpenAI/Codex)."""
         mock_security_mgr.list_accounts.return_value = {}
-        mock_security_mgr.store_account.side_effect = Exception("Storage error")
+        # Mock Codex login to fail
+        mock_run.return_value = Mock(returncode=1, stderr="Login cancelled", stdout="")
 
-        result = web_ui.add_provider('test', 'anthropic')[0]
+        with patch.object(web_ui.provider_ui, '_setup_codex_account', return_value=str(tmp_path)):
+            result = web_ui.add_provider('test', 'openai')[0]
 
         assert '❌' in result
-        assert 'Error' in result
+        assert 'Login failed' in result or 'cancelled' in result.lower()
 
     def test_assign_role_success(self, web_ui, mock_security_mgr):
         """Test assigning a role successfully."""
@@ -700,6 +707,215 @@ class TestRemainingUsage:
 
         result = web_ui._get_codex_remaining_usage('codex')
         assert result == 0.0
+
+
+class TestClaudeMultiAccount:
+    """Test cases for Claude multi-account support."""
+
+    @pytest.fixture
+    def mock_security_mgr(self):
+        """Create a mock security manager."""
+        mgr = Mock()
+        mgr.list_accounts.return_value = {'claude-1': 'anthropic', 'claude-2': 'anthropic'}
+        mgr.list_role_assignments.return_value = {}
+        mgr.get_account_model.return_value = 'default'
+        mgr.get_account_reasoning.return_value = 'default'
+        return mgr
+
+    @pytest.fixture
+    def web_ui(self, mock_security_mgr):
+        """Create a ChadWebUI instance with mocked dependencies."""
+        from chad.web_ui import ChadWebUI
+        ui = ChadWebUI(mock_security_mgr, 'test-password')
+        ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "claude"))
+        return ui
+
+    @patch('pathlib.Path.home')
+    def test_get_claude_config_dir_returns_isolated_path(self, mock_home, web_ui, tmp_path):
+        """Each Claude account gets its own config directory."""
+        mock_home.return_value = tmp_path
+
+        config_dir_1 = web_ui.provider_ui._get_claude_config_dir('claude-1')
+        config_dir_2 = web_ui.provider_ui._get_claude_config_dir('claude-2')
+
+        assert str(config_dir_1) == str(tmp_path / ".chad" / "claude-configs" / "claude-1")
+        assert str(config_dir_2) == str(tmp_path / ".chad" / "claude-configs" / "claude-2")
+        assert config_dir_1 != config_dir_2
+
+    @patch('pathlib.Path.home')
+    def test_setup_claude_account_creates_directory(self, mock_home, web_ui, tmp_path):
+        """Setup creates the isolated config directory."""
+        mock_home.return_value = tmp_path
+
+        result = web_ui.provider_ui._setup_claude_account('test-account')
+
+        assert result == str(tmp_path / ".chad" / "claude-configs" / "test-account")
+        assert (tmp_path / ".chad" / "claude-configs" / "test-account").exists()
+
+    @patch('pathlib.Path.home')
+    def test_claude_usage_reads_from_isolated_config(self, mock_home, web_ui, tmp_path):
+        """Claude usage reads credentials from account-specific config dir."""
+        import json
+        mock_home.return_value = tmp_path
+
+        # Setup isolated config directory for claude-1
+        config_dir = tmp_path / ".chad" / "claude-configs" / "claude-1"
+        config_dir.mkdir(parents=True)
+        creds = {'claudeAiOauth': {'accessToken': '', 'subscriptionType': 'PRO'}}
+        (config_dir / ".credentials.json").write_text(json.dumps(creds))
+
+        result = web_ui.provider_ui._get_claude_usage('claude-1')
+
+        # Should report not logged in due to empty access token
+        assert "Not logged in" in result
+
+    @patch('pathlib.Path.home')
+    @patch('requests.get')
+    def test_claude_usage_with_valid_credentials(self, mock_get, mock_home, web_ui, tmp_path):
+        """Claude usage fetches data when credentials are valid."""
+        import json
+        mock_home.return_value = tmp_path
+
+        # Setup isolated config directory with valid credentials
+        config_dir = tmp_path / ".chad" / "claude-configs" / "claude-1"
+        config_dir.mkdir(parents=True)
+        creds = {'claudeAiOauth': {'accessToken': 'test-token', 'subscriptionType': 'PRO'}}
+        (config_dir / ".credentials.json").write_text(json.dumps(creds))
+
+        # Mock API response
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {'five_hour': {'utilization': 25}}
+        mock_get.return_value = mock_response
+
+        result = web_ui.provider_ui._get_claude_usage('claude-1')
+
+        assert "Logged in" in result
+        assert "PRO" in result
+
+    @patch('pathlib.Path.home')
+    def test_check_provider_login_uses_isolated_config(self, mock_home, web_ui, tmp_path):
+        """Provider login check uses account-specific config directory."""
+        import json
+        mock_home.return_value = tmp_path
+
+        # claude-1 has credentials, claude-2 does not
+        config_dir_1 = tmp_path / ".chad" / "claude-configs" / "claude-1"
+        config_dir_1.mkdir(parents=True)
+        creds = {'claudeAiOauth': {'accessToken': 'test-token'}}
+        (config_dir_1 / ".credentials.json").write_text(json.dumps(creds))
+
+        # claude-2 has no credentials
+        config_dir_2 = tmp_path / ".chad" / "claude-configs" / "claude-2"
+        config_dir_2.mkdir(parents=True)
+
+        logged_in_1, _ = web_ui.provider_ui._check_provider_login('anthropic', 'claude-1')
+        logged_in_2, _ = web_ui.provider_ui._check_provider_login('anthropic', 'claude-2')
+
+        assert logged_in_1 is True
+        assert logged_in_2 is False
+
+    @patch('pathlib.Path.home')
+    def test_delete_provider_cleans_up_claude_config(self, mock_home, web_ui, mock_security_mgr, tmp_path):
+        """Deleting Claude provider removes its config directory."""
+        mock_home.return_value = tmp_path
+
+        # Setup config directory for claude-1
+        config_dir = tmp_path / ".chad" / "claude-configs" / "claude-1"
+        config_dir.mkdir(parents=True)
+        (config_dir / ".credentials.json").write_text('{}')
+
+        # Delete the provider
+        web_ui.provider_ui.delete_provider('claude-1', confirmed=True, card_slots=4)
+
+        # Config directory should be removed
+        assert not config_dir.exists()
+
+    @patch('pathlib.Path.home')
+    def test_add_provider_claude_login_timeout(
+        self, mock_home, web_ui, mock_security_mgr, tmp_path
+    ):
+        """Adding Claude provider times out if OAuth not completed."""
+        mock_home.return_value = tmp_path
+        mock_security_mgr.list_accounts.return_value = {}
+
+        # Mock pexpect to simulate timeout (no credentials created)
+        mock_child = Mock()
+        mock_child.expect = Mock(return_value=0)
+        mock_child.send = Mock()
+        mock_child.close = Mock()
+
+        with patch('pexpect.spawn', return_value=mock_child):
+            # Patch time to simulate timeout quickly
+            with patch('time.time', side_effect=[0, 0, 200]):  # Instant timeout
+                with patch('time.sleep'):
+                    result = web_ui.add_provider('my-claude', 'anthropic')[0]
+
+        # Provider should NOT be stored (login timed out)
+        mock_security_mgr.store_account.assert_not_called()
+
+        # Should show timeout error
+        assert '❌' in result
+        assert 'timed out' in result.lower()
+
+        # Config directory should be cleaned up
+        config_dir = tmp_path / ".chad" / "claude-configs" / "my-claude"
+        assert not config_dir.exists()
+
+    @patch('pathlib.Path.home')
+    def test_add_provider_claude_login_success(
+        self, mock_home, web_ui, mock_security_mgr, tmp_path
+    ):
+        """Adding Claude provider succeeds when OAuth completes."""
+        import json
+        mock_home.return_value = tmp_path
+        mock_security_mgr.list_accounts.return_value = {}
+
+        # Create the config directory and credentials file to simulate successful OAuth
+        config_dir = tmp_path / ".chad" / "claude-configs" / "my-claude"
+        config_dir.mkdir(parents=True)
+        creds = {'claudeAiOauth': {'accessToken': 'test-token', 'subscriptionType': 'pro'}}
+        (config_dir / ".credentials.json").write_text(json.dumps(creds))
+
+        # Mock pexpect - credentials already exist so pexpect won't be called
+        # (the login check passes before pexpect is used)
+        result = web_ui.add_provider('my-claude', 'anthropic')[0]
+
+        # Provider should be stored
+        mock_security_mgr.store_account.assert_called_once_with(
+            'my-claude', 'anthropic', '', 'test-password'
+        )
+
+        # Should show success
+        assert '✅' in result
+        assert 'logged in' in result.lower()
+
+    @patch('pathlib.Path.home')
+    @patch('requests.get')
+    def test_add_provider_claude_already_logged_in(self, mock_get, mock_home, web_ui, mock_security_mgr, tmp_path):
+        """Adding Claude provider when already logged in shows success."""
+        import json
+        mock_home.return_value = tmp_path
+        mock_security_mgr.list_accounts.return_value = {}
+
+        # Pre-create credentials file (user already logged in)
+        config_dir = tmp_path / ".chad" / "claude-configs" / "my-claude"
+        config_dir.mkdir(parents=True)
+        creds = {'claudeAiOauth': {'accessToken': 'test-token', 'subscriptionType': 'pro'}}
+        (config_dir / ".credentials.json").write_text(json.dumps(creds))
+
+        # Mock successful API call
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {'five_hour': {'utilization': 25}}
+        mock_get.return_value = mock_response
+
+        result = web_ui.add_provider('my-claude', 'anthropic')[0]
+
+        # Should show logged in status
+        assert '✅' in result
+        assert 'logged in' in result.lower()
+        mock_security_mgr.store_account.assert_called_once()
 
 
 class TestSessionLogging:

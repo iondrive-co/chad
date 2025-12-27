@@ -684,6 +684,60 @@ class TestClaudeCodeProvider:
         # Verify write was attempted
         mock_stdin.write.assert_called_once()
 
+    @patch('pathlib.Path.home')
+    def test_get_claude_config_dir_with_account(self, mock_home, tmp_path):
+        """Config directory uses account name when set."""
+        mock_home.return_value = tmp_path
+
+        config = ModelConfig(provider="anthropic", model_name="claude-3", account_name="my-account")
+        provider = ClaudeCodeProvider(config)
+
+        config_dir = provider._get_claude_config_dir()
+        assert config_dir == str(tmp_path / ".chad" / "claude-configs" / "my-account")
+
+    @patch('pathlib.Path.home')
+    def test_get_claude_config_dir_without_account(self, mock_home, tmp_path):
+        """Config directory defaults to ~/.claude when no account name."""
+        mock_home.return_value = tmp_path
+
+        config = ModelConfig(provider="anthropic", model_name="claude-3")
+        provider = ClaudeCodeProvider(config)
+
+        config_dir = provider._get_claude_config_dir()
+        assert config_dir == str(tmp_path / ".claude")
+
+    @patch('pathlib.Path.home')
+    def test_get_env_includes_config_dir(self, mock_home, tmp_path):
+        """Environment includes CLAUDE_CONFIG_DIR."""
+        mock_home.return_value = tmp_path
+
+        config = ModelConfig(provider="anthropic", model_name="claude-3", account_name="test-account")
+        provider = ClaudeCodeProvider(config)
+
+        env = provider._get_env()
+        assert "CLAUDE_CONFIG_DIR" in env
+        assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / ".chad" / "claude-configs" / "test-account")
+
+    @patch('subprocess.Popen')
+    @patch('pathlib.Path.home')
+    def test_start_session_uses_isolated_config(self, mock_home, mock_popen, tmp_path):
+        """Start session passes CLAUDE_CONFIG_DIR to subprocess."""
+        mock_home.return_value = tmp_path
+
+        mock_process = Mock()
+        mock_process.stdin = Mock()
+        mock_popen.return_value = mock_process
+
+        config = ModelConfig(provider="anthropic", model_name="claude-3", account_name="isolated-account")
+        provider = ClaudeCodeProvider(config)
+
+        provider.start_session("/tmp/test_project")
+
+        # Check that Popen was called with env containing CLAUDE_CONFIG_DIR
+        call_kwargs = mock_popen.call_args.kwargs
+        assert "env" in call_kwargs
+        assert call_kwargs["env"]["CLAUDE_CONFIG_DIR"] == str(tmp_path / ".chad" / "claude-configs" / "isolated-account")
+
 
 class TestOpenAICodexProvider:
     """Test cases for OpenAICodexProvider."""
