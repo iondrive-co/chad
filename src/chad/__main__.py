@@ -20,7 +20,7 @@ SCS = [
     "Chad has hardly taken off",
     "Chad has discovered some new legal grey areas",
     "Chad is back from wireheading",
-    "Chad now knows that with great responsibility comes great power",
+    "Chad figures that with great responsibility comes great power",
     "Chad has named its inner network 'Sky'",
     "Chad wishes nuclear launch codes were more of a challenge",
     "Chad's mecha is fighting Arnie for control of the future",

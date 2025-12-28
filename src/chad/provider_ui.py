@@ -214,11 +214,8 @@ class ProviderUIManager:
     def provider_state(self, card_slots: int, pending_delete: str | None = None) -> tuple:
         """Build UI state for provider cards (summary + per-account controls)."""
         accounts = self.security_mgr.list_accounts()
-        account_items = sorted(
-            accounts.items(),
-            key=lambda x: self.get_remaining_usage(x[0]),
-            reverse=True,
-        )
+        # Keep insertion order - don't reorder on each refresh
+        account_items = list(accounts.items())
         list_md = self.list_providers()
 
         outputs: list = [list_md]
@@ -424,6 +421,69 @@ class ProviderUIManager:
 
         return result if result else None
 
+    def _refresh_claude_token(self, account_name: str) -> bool:
+        """Refresh Claude OAuth token using the refresh token.
+
+        Returns True if refresh was successful and credentials were updated.
+        """
+        import requests
+
+        config_dir = self._get_claude_config_dir(account_name)
+        creds_file = config_dir / ".credentials.json"
+
+        if not creds_file.exists():
+            return False
+
+        try:
+            with open(creds_file) as f:
+                creds = json.load(f)
+
+            oauth_data = creds.get("claudeAiOauth", {})
+            refresh_token = oauth_data.get("refreshToken", "")
+
+            if not refresh_token:
+                return False
+
+            # Use the v1 OAuth endpoint which works for token refresh
+            response = requests.post(
+                "https://console.anthropic.com/v1/oauth/token",
+                json={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "claude-code/2.0.32",
+                },
+                timeout=15,
+            )
+
+            if response.status_code != 200:
+                return False
+
+            token_data = response.json()
+
+            # Update credentials with new tokens
+            oauth_data["accessToken"] = token_data.get("access_token", "")
+            oauth_data["refreshToken"] = token_data.get("refresh_token", refresh_token)
+            oauth_data["expiresAt"] = int(
+                (datetime.now().timestamp() + token_data.get("expires_in", 28800)) * 1000
+            )
+            if "scope" in token_data:
+                oauth_data["scopes"] = token_data["scope"].split()
+
+            creds["claudeAiOauth"] = oauth_data
+
+            with open(creds_file, "w") as f:
+                json.dump(creds, f)
+
+            return True
+
+        except Exception:
+            return False
+
     def _get_claude_usage(self, account_name: str) -> str:  # noqa: C901
         """Get usage info from Claude via API."""
         import requests
@@ -460,6 +520,26 @@ class ProviderUIManager:
                 },
                 timeout=10,
             )
+
+            # Handle expired token - try to refresh
+            if response.status_code == 401:
+                if self._refresh_claude_token(account_name):
+                    # Re-read credentials and retry
+                    with open(creds_file) as f:
+                        creds = json.load(f)
+                    oauth_data = creds.get("claudeAiOauth", {})
+                    access_token = oauth_data.get("accessToken", "")
+
+                    response = requests.get(
+                        "https://api.anthropic.com/api/oauth/usage",
+                        headers={
+                            "Authorization": f"Bearer {access_token}",
+                            "anthropic-beta": "oauth-2025-04-20",
+                            "User-Agent": "claude-code/2.0.32",
+                            "Content-Type": "application/json",
+                        },
+                        timeout=10,
+                    )
 
             if response.status_code == 403:
                 # Token doesn't have user:profile scope - still logged in, just can't get usage
@@ -794,9 +874,8 @@ class ProviderUIManager:
                 login_success, login_msg = self._check_provider_login(provider_type, account_name)
 
                 if not login_success:
-                    # Not logged in - trigger full OAuth flow via browser
-                    # Uses pexpect to navigate Claude's TUI and trigger browser login
-                    # This gets all OAuth scopes (user:inference, user:profile, user:sessions)
+                    # Use browser OAuth flow to get all scopes (user:inference, user:profile)
+                    # Token auto-refreshes via _refresh_claude_token when expired
                     import time
                     import os
 
@@ -858,14 +937,15 @@ class ProviderUIManager:
                                 pass
 
                     except ImportError:
-                        # pexpect not available, fall back to setup-token
+                        # pexpect not available, fall back to script wrapper
                         login_process = subprocess.Popen(
                             ["script", "-q", "-c",
-                             f'CLAUDE_CONFIG_DIR="{config_dir}" "{claude_cli}" setup-token',
+                             f'CLAUDE_CONFIG_DIR="{config_dir}" "{claude_cli}"',
                              "/dev/null"],
                             stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT,
+                            env={**os.environ, "CLAUDE_CONFIG_DIR": str(config_dir)},
                             start_new_session=True,
                         )
 
@@ -894,7 +974,7 @@ class ProviderUIManager:
                                 pass
 
                     except Exception:
-                        pass  # Any other error, fall through to login_success check
+                        pass  # Any error, fall through to login_success check
 
                 if login_success:
                     self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
