@@ -487,6 +487,26 @@ class ClaudeCodeProvider(AIProvider):
         env["CLAUDE_CONFIG_DIR"] = self._get_claude_config_dir()
         return env
 
+    def _ensure_mcp_permissions(self) -> None:
+        """Ensure Claude config has permissions to auto-approve project MCP servers."""
+        import json
+        config_dir = Path(self._get_claude_config_dir())
+        config_dir.mkdir(parents=True, exist_ok=True)
+        settings_path = config_dir / "settings.local.json"
+
+        # Load existing settings or create new
+        settings = {}
+        if settings_path.exists():
+            try:
+                settings = json.loads(settings_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                settings = {}
+
+        # Ensure MCP servers are auto-approved
+        if not settings.get("enableAllProjectMcpServers"):
+            settings["enableAllProjectMcpServers"] = True
+            settings_path.write_text(json.dumps(settings, indent=2))
+
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         import subprocess
 
@@ -494,6 +514,7 @@ class ClaudeCodeProvider(AIProvider):
         if not ok:
             return False
 
+        self._ensure_mcp_permissions()
         self.project_path = project_path
 
         cmd = [
@@ -733,15 +754,49 @@ class OpenAICodexProvider(AIProvider):
             # For resume: plain text output; for initial: JSON output
             json_events = []
 
-            def process_chunk(chunk: str) -> None:
-                # Stream raw output for live display
-                if chunk.strip():
-                    self._notify_activity('stream', chunk)
+            def format_json_event_as_text(event: dict) -> str | None:
+                """Convert a JSON event to human-readable text for streaming."""
+                event_type = event.get('type', '')
 
-                # Only parse JSON for initial requests (not resume)
+                if event_type == 'item.completed':
+                    item = event.get('item', {})
+                    item_type = item.get('type', '')
+
+                    if item_type == 'reasoning':
+                        text = item.get('text', '')
+                        if text:
+                            return f"*{text}*\n"
+                    elif item_type == 'agent_message':
+                        return item.get('text', '') + '\n'
+                    elif item_type == 'mcp_tool_call':
+                        tool = item.get('tool', 'tool')
+                        result = item.get('result', {})
+                        if result:
+                            content = result.get('content', [])
+                            if content and isinstance(content, list):
+                                text = content[0].get('text', '')[:200] if content else ''
+                                return f"[{tool}]: {text}...\n" if len(text) >= 200 else f"[{tool}]: {text}\n"
+                        return f"[{tool}]\n"
+                    elif item_type == 'command_execution':
+                        cmd = item.get('command', '')[:60]
+                        output = item.get('aggregated_output', '')
+                        # Show command and abbreviated output
+                        lines = output.strip().split('\n')
+                        preview = '\n'.join(lines[:3]) if lines else ''
+                        if len(lines) > 3:
+                            preview += f'\n... ({len(lines) - 3} more lines)'
+                        return f"$ {cmd}\n{preview}\n" if preview else f"$ {cmd}\n"
+
+                return None
+
+            def process_chunk(chunk: str) -> None:
+                # For resume mode, stream plain text directly
                 if is_resume:
+                    if chunk.strip():
+                        self._notify_activity('stream', chunk)
                     return
 
+                # For JSON mode, parse and convert to human-readable text
                 for line in chunk.split('\n'):
                     line = line.strip()
                     if not line:
@@ -751,21 +806,28 @@ class OpenAICodexProvider(AIProvider):
                         if not isinstance(event, dict):
                             continue
                         json_events.append(event)
+
                         # Extract thread_id from first event
                         if event.get('type') == 'thread.started' and 'thread_id' in event:
                             self.thread_id = event['thread_id']
-                        # Notify about activity based on event type
+
+                        # Convert to human-readable and stream
+                        readable = format_json_event_as_text(event)
+                        if readable:
+                            self._notify_activity('stream', readable)
+
+                        # Also send activity notifications for status bar
                         if event.get('type') == 'item.completed':
                             item = event.get('item', {})
                             if item.get('type') == 'reasoning':
                                 self._notify_activity('thinking', item.get('text', '')[:80])
                             elif item.get('type') == 'agent_message':
                                 self._notify_activity('text', item.get('text', '')[:80])
-                            elif item.get('type') == 'function_call':
-                                name = item.get('name', 'tool')
-                                args = item.get('arguments', '')[:50]
-                                self._notify_activity('tool', f"{name}: {args}")
+                            elif item.get('type') in ('mcp_tool_call', 'command_execution'):
+                                name = item.get('tool', item.get('command', 'tool'))[:50]
+                                self._notify_activity('tool', name)
                     except json.JSONDecodeError:
+                        # Non-JSON line in JSON mode - might be stderr, skip
                         pass
 
             output, timed_out = _stream_pty_output(

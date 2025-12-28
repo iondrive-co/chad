@@ -36,7 +36,15 @@ body, .gradio-container, .gradio-container * {
   font-family: 'JetBrains Mono', monospace !important;
 }
 
-#start-task-btn,
+#start-task-btn {
+  background: var(--task-btn-bg) !important;
+  border: 1px solid var(--task-btn-border) !important;
+  color: var(--task-btn-text) !important;
+  font-size: 0.85rem !important;
+  min-height: 32px !important;
+  padding: 6px 12px !important;
+}
+
 #cancel-task-btn {
   background: var(--task-btn-bg) !important;
   border: 1px solid var(--task-btn-border) !important;
@@ -976,6 +984,46 @@ class ChadWebUI:
     def _get_mistral_usage(self) -> str:
         return self.provider_ui._get_mistral_usage()
 
+    def _build_system_prompt(self, project_path: Path) -> str | None:
+        """Build a system prompt from project documentation.
+
+        Reads AGENTS.md, CLAUDE.md, or README.md from the project to give the agent
+        context about how to work on this project.
+        """
+        prompt_parts = []
+
+        # Check for various documentation files
+        doc_files = [
+            project_path / "AGENTS.md",
+            project_path / ".claude" / "CLAUDE.md",
+            project_path / "CLAUDE.md",
+        ]
+
+        for doc_file in doc_files:
+            if doc_file.exists():
+                try:
+                    content = doc_file.read_text(encoding='utf-8')
+                    # Limit content to avoid overwhelming the context
+                    if len(content) > 8000:
+                        content = content[:8000] + "\n\n[...truncated...]"
+                    prompt_parts.append(f"# Project Instructions ({doc_file.name})\n\n{content}")
+                    break  # Use first found file
+                except (OSError, UnicodeDecodeError):
+                    continue
+
+        # Add standard instructions for using project tools
+        prompt_parts.append("""
+# Working Instructions
+
+1. Check if the project has MCP tools available (use list_mcp_tools if available)
+2. Run lint and tests before completing any task
+3. For simple changes, just make the fix and verify with tests
+4. For complex bugs, document your investigation process
+5. Always verify your changes work before completing
+""")
+
+        return "\n\n".join(prompt_parts) if prompt_parts else None
+
     def get_account_choices(self) -> list[str]:
         return self.provider_ui.get_account_choices()
 
@@ -1210,7 +1258,10 @@ class ChadWebUI:
             self._active_coding_provider = coding_provider_instance
             coding_provider_instance.set_activity_callback(on_activity)
 
-            if not coding_provider_instance.start_session(str(path_obj)):
+            # Build system prompt from project documentation
+            system_prompt = self._build_system_prompt(path_obj)
+
+            if not coding_provider_instance.start_session(str(path_obj), system_prompt):
                 failure = f"{status_prefix}❌ Failed to start coding session"
                 yield make_yield([], failure, summary=failure, interactive=True)
                 return
