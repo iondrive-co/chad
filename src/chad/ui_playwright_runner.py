@@ -203,6 +203,59 @@ def screenshot_page(page: "Page", output_path: Path) -> Path:
     return output_path
 
 
+def run_screenshot_subprocess(
+    *,
+    tab: str = "run",
+    headless: bool = True,
+    viewport: Optional[Dict[str, int]] = None,
+    label: str | None = None,
+    issue_id: str = "",
+) -> Dict[str, object]:
+    """Run screenshot_ui.py in a subprocess to avoid event loop conflicts."""
+    viewport = viewport or {"width": 1280, "height": 900}
+    artifacts_dir = Path(tempfile.mkdtemp(prefix="chad_visual_"))
+    parts = []
+    if issue_id:
+        parts.append(issue_id.replace(" ", "-"))
+    if label:
+        parts.append(label.replace(" ", "-"))
+    parts.append(tab)
+    filename = "_".join(parts) + ".png"
+    output_path = artifacts_dir / filename
+
+    cmd = [
+        sys.executable,
+        os.fspath(PROJECT_ROOT / "scripts" / "screenshot_ui.py"),
+        "--tab",
+        tab,
+        "--output",
+        os.fspath(output_path),
+        "--width",
+        str(viewport.get("width", 1280)),
+        "--height",
+        str(viewport.get("height", 900)),
+    ]
+    if headless:
+        cmd.append("--headless")
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        cwd=os.fspath(PROJECT_ROOT),
+        env={**os.environ, "PYTHONPATH": os.fspath(PROJECT_ROOT / "src")},
+    )
+
+    return {
+        "success": result.returncode == 0 and output_path.exists(),
+        "screenshot": os.fspath(output_path),
+        "artifacts_dir": os.fspath(artifacts_dir),
+        "stdout": result.stdout[-3000:],
+        "stderr": result.stderr[-3000:],
+        "return_code": result.returncode,
+    }
+
+
 def measure_provider_delete_button(page: "Page") -> Dict[str, float]:
     """Measure the provider header row and delete button heights."""
     _select_tab(page, "providers")

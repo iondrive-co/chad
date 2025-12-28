@@ -11,6 +11,7 @@ from typing import Dict
 from mcp.server.fastmcp import FastMCP
 
 from .investigation_report import InvestigationReport
+from .ui_playwright_runner import run_screenshot_subprocess
 from .mcp_config import ensure_global_mcp_config
 from .ui_playwright_runner import (
     ChadLaunchError,
@@ -173,31 +174,23 @@ def screenshot(
     viewport_width: int = 1280,
     viewport_height: int = 900,
 ) -> Dict[str, object]:  # noqa: A002
-    """Capture a screenshot of the requested tab (run/providers)."""
+    """Capture a screenshot of the requested tab (run/providers) via subprocess to avoid loop conflicts."""
     normalized = tab.lower().strip()
     tab_name = "providers" if normalized.startswith("p") else "run"
 
-    try:
-        artifacts = _artifact_dir()
-        filename = f"{tab_name}_tab.png"
-        with chad_page_session(
-            tab=tab_name,
-            headless=headless,
-            viewport=_viewport(viewport_width, viewport_height),
-        ) as (page, _instance):
-            path = screenshot_page(page, artifacts / filename)
+    result = run_screenshot_subprocess(
+        tab=tab_name,
+        headless=headless,
+        viewport={"width": viewport_width, "height": viewport_height},
+    )
+    if result.get("success"):
         return {
             "success": True,
             "tab": tab_name,
-            "screenshot": str(path),
-            "artifacts_dir": str(artifacts),
+            "screenshot": result.get("screenshot"),
+            "artifacts_dir": result.get("artifacts_dir"),
         }
-    except PlaywrightUnavailable as exc:
-        return _failure(str(exc))
-    except ChadLaunchError as exc:
-        return _failure(str(exc))
-    except Exception as exc:  # pragma: no cover - defensive
-        return _failure(f"Unexpected error: {exc}")
+    return _failure(result.get("stderr") or result.get("stdout") or "Screenshot failed")
 
 
 @SERVER.tool()
@@ -896,45 +889,26 @@ def capture_visual_change(
         3. capture_visual_change(label="after", tab="providers", issue_id="gap-fix")
         4. Report both paths to user in summary
     """
-    try:
-        # Create directory structure: /tmp/chad/visual-changes/YYYYMMDD_HHMMSS/
-        base_dir = Path(tempfile.gettempdir()) / "chad" / "visual-changes"
-        run_dir = base_dir / datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        # Build filename: {issue_id}_{label}_{tab}.png or {label}_{tab}.png
-        parts = []
-        if issue_id:
-            parts.append(issue_id.replace(" ", "-").replace("/", "-"))
-        parts.append(label.replace(" ", "-"))
-        parts.append(tab)
-        filename = "_".join(parts) + ".png"
-
-        normalized_tab = "providers" if tab.lower().startswith("p") else "run"
-
-        with chad_page_session(
-            tab=normalized_tab,
-            headless=headless,
-            viewport=_viewport(viewport_width, viewport_height),
-        ) as (page, _instance):
-            screenshot_path = screenshot_page(page, run_dir / filename)
-
+    normalized_tab = "providers" if tab.lower().startswith("p") else "run"
+    result = run_screenshot_subprocess(
+        tab=normalized_tab,
+        headless=headless,
+        viewport={"width": viewport_width, "height": viewport_height},
+        label=label,
+        issue_id=issue_id,
+    )
+    if result.get("success"):
         return {
             "success": True,
             "label": label,
             "tab": normalized_tab,
             "issue_id": issue_id or "(none)",
-            "screenshot": str(screenshot_path),
-            "artifacts_dir": str(run_dir),
-            "message": f"Screenshot saved: {screenshot_path}",
+            "screenshot": result.get("screenshot"),
+            "artifacts_dir": result.get("artifacts_dir"),
+            "message": f"Screenshot saved: {result.get('screenshot')}",
             "reminder": "Remember to take both 'before' and 'after' screenshots and report paths to user!",
         }
-    except PlaywrightUnavailable as exc:
-        return _failure(str(exc))
-    except ChadLaunchError as exc:
-        return _failure(str(exc))
-    except Exception as exc:
-        return _failure(f"Unexpected error: {exc}")
+    return _failure(result.get("stderr") or result.get("stdout") or "Screenshot failed")
 
 
 # =============================================================================

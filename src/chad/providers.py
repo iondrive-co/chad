@@ -696,11 +696,12 @@ class OpenAICodexProvider(AIProvider):
 
         # Build command - use resume if we have a thread_id (multi-turn)
         # Note: codex exec resume has limited options - no --full-auto or --json
-        # The session inherits settings from the original execution
+        # We must pass sandbox permissions explicitly for resume to allow file writes
         if self.thread_id:
             cmd = [
                 codex_cli, 'exec', 'resume',
                 self.thread_id,
+                '-c', 'sandbox="workspace-write"',  # Match --full-auto sandbox mode
                 '-',  # Read prompt from stdin
             ]
         else:
