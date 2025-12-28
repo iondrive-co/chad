@@ -90,11 +90,9 @@ def create_temp_env() -> TempChadEnv:
     }
     security_mgr.save_config(config)
 
-    # Store mock accounts for automation
+    # Store mock account for automation
     security_mgr.store_account("mock-coding", "mock", "", password, "mock-model")
-    security_mgr.store_account("mock-mgmt", "mock", "", password, "mock-model")
     security_mgr.assign_role("mock-coding", "CODING")
-    security_mgr.assign_role("mock-mgmt", "MANAGEMENT")
 
     return TempChadEnv(config_path=config_path, project_dir=project_dir, temp_dir=temp_dir, password=password)
 

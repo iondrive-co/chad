@@ -340,7 +340,7 @@ def test_add_provider(
             new_provider_card = page.locator(f"text={test_name}")
             card_visible = new_provider_card.is_visible() if new_provider_card.count() > 0 else False
 
-            # Look for role dropdown in new card (should have CODING/MANAGEMENT options)
+            # Look for role dropdown in new card (should have CODING option)
             role_dropdowns = page.locator("label:has-text('Role') + div select, [aria-label='Role']")
             role_dropdown_count = role_dropdowns.count()
 
