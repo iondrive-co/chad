@@ -220,6 +220,37 @@ class TestCodingAgentLayout:
             "Status row should align with the main header content, not just the right column"
         )
 
+    def test_cancel_button_is_compact(self, page: Page):
+        """Cancel button should honor the compact padding and width overrides."""
+        metrics = page.evaluate(
+            """
+() => {
+  const container = document.querySelector('#cancel-task-btn');
+  const button = container?.tagName === 'BUTTON' ? container : container?.querySelector('button');
+  if (!button) return null;
+  const styles = window.getComputedStyle(button);
+  const rect = button.getBoundingClientRect();
+  const toNumber = (value) => {
+    if (!value) return NaN;
+    const match = /([\\d.]+)/.exec(String(value));
+    return match ? parseFloat(match[1]) : NaN;
+  };
+  return {
+    paddingLeft: toNumber(styles.paddingLeft),
+    paddingRight: toNumber(styles.paddingRight),
+    minWidth: toNumber(styles.minWidth),
+    height: rect.height
+  };
+}
+"""
+        )
+        assert metrics is not None, "Cancel button should be present"
+        assert metrics["paddingLeft"] <= 6 and metrics["paddingRight"] <= 6, (
+            f"Expected compact horizontal padding on cancel button, got "
+            f"{metrics['paddingLeft']}px/{metrics['paddingRight']}px"
+        )
+        assert metrics["minWidth"] <= 50, f"Cancel button min-width should be tight, got {metrics['minWidth']}px"
+
 
 class TestProvidersTab:
     """Test the Providers tab functionality."""

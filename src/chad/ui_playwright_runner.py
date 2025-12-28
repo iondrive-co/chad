@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import pwd
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterator, Optional, TYPE_CHECKING
@@ -21,6 +22,10 @@ if TYPE_CHECKING:
 
 # Repository root; used for locating scripts and setting PYTHONPATH.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SHARED_BROWSERS_PATH = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".cache" / "ms-playwright"
+
+# Ensure Playwright browsers are read from a shared cache even if HOME is overridden (e.g., Codex isolated homes).
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", os.fspath(SHARED_BROWSERS_PATH))
 
 
 class PlaywrightUnavailable(RuntimeError):
@@ -224,9 +229,12 @@ def run_screenshot_subprocess(
     parts.append(tab)
     filename = "_".join(parts) + ".png"
     output_path = artifacts_dir / filename
+    python_exec = PROJECT_ROOT / "venv" / "bin" / "python"
+    if not python_exec.exists():
+        python_exec = Path(sys.executable)
 
     cmd = [
-        sys.executable,
+        os.fspath(python_exec),
         os.fspath(PROJECT_ROOT / "scripts" / "screenshot_ui.py"),
         "--tab",
         tab,
@@ -245,7 +253,14 @@ def run_screenshot_subprocess(
         capture_output=True,
         text=True,
         cwd=os.fspath(PROJECT_ROOT),
-        env={**os.environ, "PYTHONPATH": os.fspath(PROJECT_ROOT / "src")},
+        env={
+            **os.environ,
+            "PYTHONPATH": os.fspath(PROJECT_ROOT / "src"),
+            "PLAYWRIGHT_BROWSERS_PATH": os.environ.get(
+                "PLAYWRIGHT_BROWSERS_PATH",
+                os.fspath(SHARED_BROWSERS_PATH),
+            ),
+        },
     )
 
     return {

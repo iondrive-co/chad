@@ -36,7 +36,8 @@ body, .gradio-container, .gradio-container * {
   font-family: 'JetBrains Mono', monospace !important;
 }
 
-#start-task-btn {
+#start-task-btn,
+#start-task-btn button {
   background: var(--task-btn-bg) !important;
   border: 1px solid var(--task-btn-border) !important;
   color: var(--task-btn-text) !important;
@@ -45,17 +46,35 @@ body, .gradio-container, .gradio-container * {
   padding: 6px 12px !important;
 }
 
-#cancel-task-btn {
+#cancel-task-btn,
+#cancel-task-btn button {
   background: var(--task-btn-bg) !important;
   border: 1px solid var(--task-btn-border) !important;
   color: var(--task-btn-text) !important;
   font-size: 0.85rem !important;
-  min-height: 32px !important;
-  padding: 6px 12px !important;
+  min-height: 28px !important;
+  min-width: 40px !important;
+  padding: 4px 6px !important;
+  line-height: 1.1 !important;
+}
+
+#cancel-task-btn button {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+}
+
+#cancel-task-btn button span,
+#cancel-task-btn span {
+  padding: 0 !important;
+  margin: 0 !important;
 }
 
 #start-task-btn:hover,
-#cancel-task-btn:hover {
+#start-task-btn button:hover,
+#cancel-task-btn:hover,
+#cancel-task-btn button:hover {
   background: var(--task-btn-hover) !important;
 }
 
@@ -1784,7 +1803,7 @@ class ChadWebUI:
                             variant="stop",
                             interactive=False,
                             elem_id="cancel-task-btn",
-                            min_width=110,
+                            min_width=40,
                             scale=0
                         )
 
