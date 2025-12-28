@@ -56,13 +56,13 @@ add_hypothesis(investigation_id="inv_...", description="Theory about the cause")
 
 Call `add_finding()` after EVERY piece of evidence you gather:
 
-| Source | When to use |
-|--------|-------------|
-| `web_search` | After any web search |
-| `unit_test` | After running tests |
-| `tool_use` | After using any MCP tool |
-| `code_review` | After examining code |
-| `screenshot_analysis` | After reviewing screenshots |
+| Source | When to use                               |
+|--------|-------------------------------------------|
+| `web_search` | After completing a series of web searches |
+| `unit_test` | After running tests                       |
+| `tool_use` | After using any MCP tool                  |
+| `code_review` | After examining code                      |
+| `screenshot_analysis` | After reviewing screenshots               |
 
 Example:
 ```
@@ -203,8 +203,8 @@ Verify with `/mcp` command in Claude Code or `codex mcp list` in Codex.
 PYTHONPATH=src python3 -m chad.mcp_playwright
 ```
 
-**Discovery guardrail:** If you need to check available tools, call `list_mcp_tools` (returns the catalog and the 
-resource URI), or read `resource://chad/mcp-tools` via `list_mcp_resources` → `read_resource`. An empty 
+**Discovery guardrail:** If you need to check available tools, call `list_mcp_tools` (returns the catalog and the
+resource URI), or read `resource://chad/mcp-tools` via `list_mcp_resources` → `read_resource`. An empty
 resource/template list is normal elsewhere—use the tool names directly.
 
 **Available Tools:**
@@ -225,6 +225,7 @@ resource/template list is normal elsewhere—use the tool names directly.
 | `get_investigation_summary` | Get compact summary for reporting |
 | `get_investigation_full` | Get complete investigation report |
 | `list_investigations` | List all investigation reports |
+| `list_mcp_tools` | Show tool catalog and MCP bootstrap resource |
 | **Visual Testing** | |
 | `capture_visual_change` | **REQUIRED** for before/after screenshots - saves to `/tmp/chad/visual-changes/` |
 | `run_ui_smoke` | Full UI smoke test with screenshots of both tabs |
@@ -236,6 +237,9 @@ resource/template list is normal elsewhere—use the tool names directly.
 | `measure_provider_delete` | Verify delete button sizing |
 | `list_providers` | Get visible provider names |
 | `test_delete_provider` | Test the delete flow end-to-end |
+| `test_add_provider` | Add a provider and verify details without refresh |
+| `test_live_stream_colors` | Inject ANSI-colored content to verify readability |
+| `test_scroll_preservation` | Ensure live-stream scroll position is stable while streaming |
 | **Test Running** | |
 | `run_unit_tests` | Run pytest with optional filtering (path, pattern, fail-fast) |
 | `lint_files` | Run flake8 on specific files or directories |
@@ -244,10 +248,10 @@ resource/template list is normal elsewhere—use the tool names directly.
 | `verify_all_tests_pass` | Complete verification: lint + unit tests + visual tests for modified files |
 
 **Workflow for UI Changes:**
-1. `create_investigation(request="...", issue_id="issue-name")` - save the investigation_id
-2. `capture_visual_change(label="before", issue_id="issue-name")` then `set_screenshots(before=path)`
+1. `create_investigation(request="...")` - save the investigation_id
+2. `capture_visual_change(label="before")` then `set_screenshots(before=path)`
 3. Make code changes to fix the issue, calling `add_finding()` for every discovery
-4. `capture_visual_change(label="after", issue_id="issue-name")` then `set_screenshots(after=path)`
+4. `capture_visual_change(label="after")` then `set_screenshots(after=path)`
 5. Run `run_tests_for_file` with the modified file path
 6. `record_fix()` and `add_post_incident_analysis()`
 7. Before completing: run `verify_all_tests_pass`
