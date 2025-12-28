@@ -376,8 +376,10 @@ class TestClaudeCodeProvider:
         assert provider.process is None
         assert provider.project_path is None
 
+    @patch('chad.providers.ClaudeCodeProvider._ensure_mcp_permissions')
+    @patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/claude'))
     @patch('subprocess.Popen')
-    def test_start_session_success(self, mock_popen):
+    def test_start_session_success(self, mock_popen, mock_ensure, mock_permissions):
         mock_process = Mock()
         mock_process.stdin = Mock()
         mock_popen.return_value = mock_process
@@ -388,10 +390,16 @@ class TestClaudeCodeProvider:
         result = provider.start_session("/tmp/test_project")
         assert result is True
         assert provider.process is not None
+        mock_ensure.assert_called_once_with("claude", provider._notify_activity)
+        mock_permissions.assert_called_once()
         mock_popen.assert_called_once()
+        called_cmd = mock_popen.call_args.args[0]
+        assert called_cmd[0] == "/bin/claude"
 
+    @patch('chad.providers.ClaudeCodeProvider._ensure_mcp_permissions')
+    @patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/claude'))
     @patch('subprocess.Popen')
-    def test_start_session_failure(self, mock_popen):
+    def test_start_session_failure(self, mock_popen, mock_ensure, mock_permissions):
         mock_popen.side_effect = FileNotFoundError("command not found")
 
         config = ModelConfig(provider="anthropic", model_name="claude-3")
@@ -399,6 +407,8 @@ class TestClaudeCodeProvider:
 
         result = provider.start_session("/tmp/test_project")
         assert result is False
+        mock_ensure.assert_called_once_with("claude", provider._notify_activity)
+        mock_permissions.assert_called_once()
 
     def test_send_message(self):
         import json
@@ -478,17 +488,21 @@ class TestClaudeCodeProvider:
         config = ModelConfig(provider="anthropic", model_name="claude-3")
         provider = ClaudeCodeProvider(config)
 
-        with patch('subprocess.Popen') as mock_popen:
-            mock_process = Mock()
-            mock_process.stdin = Mock()
-            mock_popen.return_value = mock_process
+        with patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/claude')) as mock_ensure:
+            with patch('chad.providers.ClaudeCodeProvider._ensure_mcp_permissions') as mock_permissions:
+                with patch('subprocess.Popen') as mock_popen:
+                    mock_process = Mock()
+                    mock_process.stdin = Mock()
+                    mock_popen.return_value = mock_process
 
-            # Mock provider.send_message to verify system prompt is sent
-            with patch.object(provider, 'send_message') as mock_send:
-                result = provider.start_session("/tmp/test_project", "System prompt here")
+                    # Mock provider.send_message to verify system prompt is sent
+                    with patch.object(provider, 'send_message') as mock_send:
+                        result = provider.start_session("/tmp/test_project", "System prompt here")
 
-                assert result is True
-                mock_send.assert_called_once_with("System prompt here")
+                        assert result is True
+                        mock_send.assert_called_once_with("System prompt here")
+                        mock_ensure.assert_called_once_with("claude", provider._notify_activity)
+                        mock_permissions.assert_called_once()
 
     @patch('select.select')
     @patch('time.time')
@@ -749,9 +763,10 @@ class TestClaudeCodeProvider:
         assert "CLAUDE_CONFIG_DIR" in env
         assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / ".chad" / "claude-configs" / "test-account")
 
+    @patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/claude'))
     @patch('subprocess.Popen')
     @patch('pathlib.Path.home')
-    def test_start_session_uses_isolated_config(self, mock_home, mock_popen, tmp_path):
+    def test_start_session_uses_isolated_config(self, mock_home, mock_popen, mock_ensure, tmp_path):
         """Start session passes CLAUDE_CONFIG_DIR to subprocess."""
         mock_home.return_value = tmp_path
 
@@ -769,20 +784,25 @@ class TestClaudeCodeProvider:
         assert "env" in call_kwargs
         expected_dir = tmp_path / ".chad" / "claude-configs" / "isolated-account"
         assert call_kwargs["env"]["CLAUDE_CONFIG_DIR"] == str(expected_dir)
+        mock_ensure.assert_called_once_with("claude", provider._notify_activity)
 
 
 class TestOpenAICodexProvider:
     """Test cases for OpenAICodexProvider."""
 
-    def test_start_session_success(self):
+    @patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/codex'))
+    def test_start_session_success(self, mock_ensure):
         config = ModelConfig(provider="openai", model_name="codex")
         provider = OpenAICodexProvider(config)
 
         result = provider.start_session("/tmp/test_project")
         assert result is True
         assert provider.project_path == "/tmp/test_project"
+        assert provider.cli_path == "/bin/codex"
+        mock_ensure.assert_called_once_with("codex", provider._notify_activity)
 
-    def test_start_session_with_system_prompt(self):
+    @patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/codex'))
+    def test_start_session_with_system_prompt(self, mock_ensure):
         config = ModelConfig(provider="openai", model_name="codex")
         provider = OpenAICodexProvider(config)
 
@@ -793,6 +813,8 @@ class TestOpenAICodexProvider:
         provider.send_message("Test message")
         assert "Initial prompt" in provider.current_message
         assert "Test message" in provider.current_message
+        assert provider.cli_path == "/bin/codex"
+        mock_ensure.assert_called_once_with("codex", provider._notify_activity)
 
     def test_send_message(self):
         config = ModelConfig(provider="openai", model_name="gpt-4")

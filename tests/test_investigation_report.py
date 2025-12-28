@@ -1,365 +1,230 @@
-"""Tests for the investigation report module."""
+"""Tests for the HypothesisTracker class."""
 
 import json
-
 import pytest
 
-from chad.investigation_report import InvestigationReport
+from chad.investigation_report import HypothesisTracker
 
 
 @pytest.fixture
-def temp_investigations_dir(tmp_path):
-    """Create a temporary investigations directory."""
-    investigations_dir = tmp_path / "investigations"
-    investigations_dir.mkdir()
-    return investigations_dir
+def tracker(tmp_path, monkeypatch):
+    """Create a tracker with a temporary directory."""
+    monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
+    return HypothesisTracker()
 
 
-@pytest.fixture
-def report(temp_investigations_dir, monkeypatch):
-    """Create an investigation report in a temp directory."""
-    monkeypatch.setattr(InvestigationReport, "BASE_DIR", temp_investigations_dir)
-    return InvestigationReport()
+class TestTrackerCreation:
+    """Tests for tracker creation and loading."""
 
+    def test_creates_tracker_file(self, tracker):
+        assert tracker.file_path.exists()
 
-class TestInvestigationReportCreation:
-    """Tests for report creation and loading."""
+    def test_generates_unique_id(self, tracker):
+        assert tracker.id.startswith("hyp_")
 
-    def test_creates_report_file(self, report, temp_investigations_dir):
-        assert report.file_path.exists()
-        assert report.file_path.parent == temp_investigations_dir
-
-    def test_generates_unique_id(self, report):
-        assert report.id.startswith("inv_")
-        assert len(report.id) > 10
-
-    def test_initial_report_structure(self, report):
-        data = report.get_full_report()
-        assert data["id"] == report.id
-        assert data["request"] == {"description": "", "issue_id": ""}
-        assert data["screenshots"] == {"before": None, "after": None}
+    def test_initial_tracker_structure(self, tracker):
+        data = json.loads(tracker.file_path.read_text())
+        assert "hypotheses" in data
+        assert "screenshots" in data
         assert data["hypotheses"] == []
-        assert data["findings"] == []
-        assert data["rejected_approaches"] == []
-        assert data["tests_designed"] == []
-        assert data["test_framework_gaps"] == []
-        assert data["fix"] is None
-        assert data["post_incident_analysis"] is None
 
-    def test_loads_existing_report(self, report, temp_investigations_dir, monkeypatch):
-        monkeypatch.setattr(InvestigationReport, "BASE_DIR", temp_investigations_dir)
-        report.set_request("Test request", "ISSUE-123")
+    def test_loads_existing_tracker(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
+        t1 = HypothesisTracker()
+        t1.add_hypothesis("Test hypothesis", ["Check 1"])
+        t2 = HypothesisTracker(t1.id)
+        assert len(t2._data["hypotheses"]) == 1
 
-        loaded = InvestigationReport(report.id)
-
-        assert loaded.id == report.id
-        assert loaded.get_full_report()["request"]["description"] == "Test request"
-
-    def test_load_nonexistent_raises(self, temp_investigations_dir, monkeypatch):
-        monkeypatch.setattr(InvestigationReport, "BASE_DIR", temp_investigations_dir)
+    def test_load_nonexistent_raises(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
         with pytest.raises(FileNotFoundError):
-            InvestigationReport("inv_nonexistent")
-
-
-class TestRequestHandling:
-    """Tests for setting the request/task description."""
-
-    def test_set_request(self, report):
-        report.set_request("Fix the gap issue", "GAP-42")
-
-        data = report.get_full_report()
-        assert data["request"]["description"] == "Fix the gap issue"
-        assert data["request"]["issue_id"] == "GAP-42"
-
-    def test_set_request_without_issue_id(self, report):
-        report.set_request("General fix")
-
-        data = report.get_full_report()
-        assert data["request"]["description"] == "General fix"
-        assert data["request"]["issue_id"] == ""
+            HypothesisTracker("nonexistent_id")
 
 
 class TestHypotheses:
-    """Tests for hypothesis tracking."""
+    """Tests for hypothesis management."""
 
-    def test_add_hypothesis(self, report):
-        h_id = report.add_hypothesis("CSS gap property not applied")
+    def test_add_hypothesis(self, tracker):
+        hypothesis_id = tracker.add_hypothesis(
+            "The CSS is not being applied",
+            ["Element has correct class", "Stylesheet is loaded"]
+        )
+        assert hypothesis_id == 1
+        assert len(tracker._data["hypotheses"]) == 1
+        assert tracker._data["hypotheses"][0]["description"] == "The CSS is not being applied"
+        assert len(tracker._data["hypotheses"][0]["checks"]) == 2
 
-        assert h_id == 1
-        data = report.get_full_report()
-        assert len(data["hypotheses"]) == 1
-        assert data["hypotheses"][0]["description"] == "CSS gap property not applied"
-        assert data["hypotheses"][0]["status"] == "active"
+    def test_add_multiple_hypotheses(self, tracker):
+        id1 = tracker.add_hypothesis("First theory", ["Check A"])
+        id2 = tracker.add_hypothesis("Second theory", ["Check B"])
+        assert id1 == 1
+        assert id2 == 2
+        assert len(tracker._data["hypotheses"]) == 2
 
-    def test_add_multiple_hypotheses(self, report):
-        h1 = report.add_hypothesis("First theory")
-        h2 = report.add_hypothesis("Second theory")
-
-        assert h1 == 1
-        assert h2 == 2
-        data = report.get_full_report()
-        assert len(data["hypotheses"]) == 2
-
-    def test_update_hypothesis_status(self, report):
-        h_id = report.add_hypothesis("Test theory")
-
-        result = report.update_hypothesis_status(h_id, "confirmed")
-
+    def test_update_hypothesis(self, tracker):
+        tracker.add_hypothesis("Original", ["Check 1"])
+        result = tracker.update_hypothesis(1, description="Updated")
         assert result is True
-        data = report.get_full_report()
-        assert data["hypotheses"][0]["status"] == "confirmed"
+        assert tracker._data["hypotheses"][0]["description"] == "Updated"
 
-    def test_update_nonexistent_hypothesis(self, report):
-        result = report.update_hypothesis_status(999, "confirmed")
+    def test_update_hypothesis_add_checks(self, tracker):
+        tracker.add_hypothesis("Theory", ["Check 1"])
+        tracker.update_hypothesis(1, add_checks=["Check 2", "Check 3"])
+        assert len(tracker._data["hypotheses"][0]["checks"]) == 3
+
+    def test_update_nonexistent_hypothesis(self, tracker):
+        result = tracker.update_hypothesis(999, description="New")
         assert result is False
 
 
-class TestFindings:
-    """Tests for finding tracking."""
+class TestCheckResults:
+    """Tests for filing check results."""
 
-    def test_add_finding(self, report):
-        f_id = report.add_finding(
-            source="unit_test",
-            content="Test passes but gap is 48px",
-            hypothesis_id=None,
-            verdict="inconclusive",
-        )
+    def test_file_check_result_pass(self, tracker):
+        tracker.add_hypothesis("Theory", ["Check 1", "Check 2"])
+        result = tracker.file_check_result(1, 0, passed=True, notes="Verified OK")
+        assert result["hypothesis_status"] == "pending"
+        assert result["checks_complete"] == 1
+        assert result["checks_total"] == 2
+        assert tracker._data["hypotheses"][0]["checks"][0]["passed"] is True
 
-        assert f_id == 1
-        data = report.get_full_report()
-        assert len(data["findings"]) == 1
-        assert data["findings"][0]["source"] == "unit_test"
-        assert data["findings"][0]["status"] == "open"
+    def test_file_check_result_fail_rejects_hypothesis(self, tracker):
+        tracker.add_hypothesis("Theory", ["Check 1"])
+        result = tracker.file_check_result(1, 0, passed=False, notes="Failed")
+        assert result["hypothesis_status"] == "rejected"
+        assert tracker._data["hypotheses"][0]["status"] == "rejected"
 
-    def test_add_finding_with_hypothesis(self, report):
-        h_id = report.add_hypothesis("CSS issue")
-        report.add_finding(
-            source="code_review",
-            content="Found missing flex-shrink",
-            hypothesis_id=h_id,
-            verdict="supports",
-            notes="Need to verify in browser",
-        )
+    def test_all_checks_pass_confirms_hypothesis(self, tracker):
+        tracker.add_hypothesis("Theory", ["Check 1", "Check 2"])
+        tracker.file_check_result(1, 0, passed=True)
+        result = tracker.file_check_result(1, 1, passed=True)
+        assert result["hypothesis_status"] == "confirmed"
 
-        data = report.get_full_report()
-        assert data["findings"][0]["hypothesis_id"] == h_id
-        assert data["findings"][0]["verdict"] == "supports"
-        assert data["findings"][0]["notes"] == "Need to verify in browser"
+    def test_file_check_invalid_hypothesis(self, tracker):
+        tracker.add_hypothesis("Theory", ["Check 1"])
+        result = tracker.file_check_result(999, 0, passed=True)
+        assert "error" in result
 
-    def test_update_finding_status(self, report):
-        f_id = report.add_finding(source="tool_use", content="Test content")
-
-        result = report.update_finding_status(f_id, "resolved")
-
-        assert result is True
-        data = report.get_full_report()
-        assert data["findings"][0]["status"] == "resolved"
-
-    def test_update_nonexistent_finding(self, report):
-        result = report.update_finding_status(999, "resolved")
-        assert result is False
-
-
-class TestRejectedApproaches:
-    """Tests for marking approaches as rejected."""
-
-    def test_mark_approach_rejected(self, report):
-        f1 = report.add_finding(source="tool_use", content="Tried margin: 0")
-        f2 = report.add_finding(source="tool_use", content="Still has gap")
-
-        report.mark_approach_rejected(
-            description="Adding margin: 0 to accordion",
-            why_rejected="Gap remained unchanged",
-            finding_ids=[f1, f2],
-        )
-
-        data = report.get_full_report()
-        assert len(data["rejected_approaches"]) == 1
-        assert data["rejected_approaches"][0]["description"] == "Adding margin: 0 to accordion"
-        assert data["rejected_approaches"][0]["finding_ids"] == [f1, f2]
-        # Associated findings should be marked as rejected_approach
-        assert data["findings"][0]["status"] == "rejected_approach"
-        assert data["findings"][1]["status"] == "rejected_approach"
+    def test_file_check_invalid_index(self, tracker):
+        tracker.add_hypothesis("Theory", ["Check 1"])
+        result = tracker.file_check_result(1, 999, passed=True)
+        assert "error" in result
 
 
 class TestScreenshots:
-    """Tests for screenshot path tracking."""
+    """Tests for screenshot management."""
 
-    def test_set_before_screenshot(self, report):
-        report.set_screenshots(before="/tmp/before.png")
+    def test_set_before_screenshot(self, tracker):
+        tracker.set_screenshot("before", "/path/to/before.png")
+        assert tracker._data["screenshots"]["before"] == "/path/to/before.png"
 
-        data = report.get_full_report()
-        assert data["screenshots"]["before"] == "/tmp/before.png"
-        assert data["screenshots"]["after"] is None
+    def test_set_after_screenshot(self, tracker):
+        tracker.set_screenshot("after", "/path/to/after.png")
+        assert tracker._data["screenshots"]["after"] == "/path/to/after.png"
 
-    def test_set_after_screenshot(self, report):
-        report.set_screenshots(after="/tmp/after.png")
+    def test_set_both_screenshots(self, tracker):
+        tracker.set_screenshot("before", "/path/before.png")
+        tracker.set_screenshot("after", "/path/after.png")
+        assert tracker._data["screenshots"]["before"] == "/path/before.png"
+        assert tracker._data["screenshots"]["after"] == "/path/after.png"
 
-        data = report.get_full_report()
-        assert data["screenshots"]["before"] is None
-        assert data["screenshots"]["after"] == "/tmp/after.png"
-
-    def test_set_both_screenshots(self, report):
-        report.set_screenshots(before="/tmp/before.png", after="/tmp/after.png")
-
-        data = report.get_full_report()
-        assert data["screenshots"]["before"] == "/tmp/before.png"
-        assert data["screenshots"]["after"] == "/tmp/after.png"
+    def test_invalid_label_ignored(self, tracker):
+        tracker.set_screenshot("invalid", "/path/to/file.png")
+        assert tracker._data["screenshots"]["before"] is None
+        assert tracker._data["screenshots"]["after"] is None
 
 
-class TestTestDesign:
-    """Tests for test design tracking."""
+class TestReport:
+    """Tests for report generation."""
 
-    def test_add_test_design(self, report):
-        report.add_test_design(
-            name="test_provider_gap",
-            file_path="tests/test_ui_integration.py",
-            purpose="Verify gap is <= 16px",
-        )
+    def test_empty_report(self, tracker):
+        report = tracker.get_report()
+        assert report["summary"]["total_hypotheses"] == 0
+        assert report["all_checks_complete"] is True
 
-        data = report.get_full_report()
-        assert len(data["tests_designed"]) == 1
-        assert data["tests_designed"][0]["name"] == "test_provider_gap"
+    def test_report_with_content(self, tracker):
+        tracker.add_hypothesis("Theory 1", ["Check A", "Check B"])
+        tracker.file_check_result(1, 0, passed=True, notes="OK")
+        report = tracker.get_report()
+        assert report["summary"]["total_hypotheses"] == 1
+        assert report["summary"]["pending"] == 1
+        assert len(report["incomplete_checks"]) == 1
 
-    def test_add_test_design_with_framework_gap(self, report):
-        report.add_test_design(
-            name="test_accordion_spacing",
-            file_path="tests/test_ui_integration.py",
-            purpose="Test accordion layout",
-            framework_gap="No existing test for accordion measurements",
-        )
+    def test_report_with_confirmed_hypothesis(self, tracker):
+        tracker.add_hypothesis("Theory 1", ["Check A"])
+        tracker.file_check_result(1, 0, passed=True)
+        report = tracker.get_report()
+        assert report["summary"]["confirmed"] == 1
+        assert "Theory 1" in report["confirmed_hypotheses"]
 
-        data = report.get_full_report()
-        assert "No existing test for accordion measurements" in data["test_framework_gaps"]
-
-    def test_framework_gaps_are_deduplicated(self, report):
-        gap = "Missing measurement utility"
-        report.add_test_design(name="test1", file_path="test.py", purpose="p1", framework_gap=gap)
-        report.add_test_design(name="test2", file_path="test.py", purpose="p2", framework_gap=gap)
-
-        data = report.get_full_report()
-        assert data["test_framework_gaps"].count(gap) == 1
+    def test_report_with_rejected_hypothesis(self, tracker):
+        tracker.add_hypothesis("Bad theory", ["Check fails"])
+        tracker.file_check_result(1, 0, passed=False)
+        report = tracker.get_report()
+        assert report["summary"]["rejected"] == 1
+        assert "Bad theory" in report["rejected_hypotheses"]
 
 
-class TestFix:
-    """Tests for fix recording."""
+class TestPendingChecks:
+    """Tests for getting pending checks."""
 
-    def test_record_fix(self, report):
-        report.record_fix(
-            description="Added flex-shrink: 0 to container",
-            files_modified=["src/chad/provider_ui.py"],
-            test_changes=["Added test_accordion_gap"],
-        )
+    def test_get_pending_checks_empty(self, tracker):
+        pending = tracker.get_pending_checks()
+        assert pending == []
 
-        data = report.get_full_report()
-        assert data["fix"]["description"] == "Added flex-shrink: 0 to container"
-        assert "src/chad/provider_ui.py" in data["fix"]["files_modified"]
-        assert "Added test_accordion_gap" in data["fix"]["test_changes"]
+    def test_get_pending_checks_with_hypotheses(self, tracker):
+        tracker.add_hypothesis("Theory 1", ["Check A", "Check B"])
+        pending = tracker.get_pending_checks()
+        assert len(pending) == 2
+        assert pending[0]["check"] == "Check A"
 
-
-class TestPostIncidentAnalysis:
-    """Tests for post-incident analysis."""
-
-    def test_add_post_incident_analysis(self, report):
-        report.add_post_incident_analysis("If this fails, check Gradio version")
-
-        data = report.get_full_report()
-        assert data["post_incident_analysis"] == "If this fails, check Gradio version"
+    def test_pending_checks_updates_after_filing(self, tracker):
+        tracker.add_hypothesis("Theory 1", ["Check A", "Check B"])
+        tracker.file_check_result(1, 0, passed=True)
+        pending = tracker.get_pending_checks()
+        assert len(pending) == 1
+        assert pending[0]["check"] == "Check B"
 
 
-class TestSummary:
-    """Tests for the summary functionality."""
+class TestListTrackers:
+    """Tests for listing trackers."""
 
-    def test_empty_summary(self, report):
-        summary = report.get_summary()
+    def test_list_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
+        trackers = HypothesisTracker.list_trackers()
+        assert trackers == []
 
-        assert summary["investigation_id"] == report.id
-        assert summary["active_hypotheses"] == 0
-        assert summary["open_findings"] == 0
-        assert summary["is_complete"] is False
-
-    def test_summary_with_content(self, report):
-        report.set_request("Fix gap", "GAP-1")
-        report.add_hypothesis("CSS issue")
-        report.add_finding(source="unit_test", content="Found issue")
-        report.set_screenshots(before="/tmp/before.png")
-
-        summary = report.get_summary()
-
-        assert summary["request"] == "Fix gap"
-        assert summary["issue_id"] == "GAP-1"
-        assert summary["active_hypotheses"] == 1
-        assert summary["open_findings"] == 1
-        assert summary["screenshots"]["before"] == "/tmp/before.png"
-
-    def test_summary_is_complete(self, report):
-        report.record_fix("Fixed it", ["file.py"], [])
-        report.add_post_incident_analysis("Analysis here")
-
-        summary = report.get_summary()
-
-        assert summary["is_complete"] is True
-        assert summary["has_fix"] is True
-        assert summary["has_post_incident_analysis"] is True
-
-
-class TestListInvestigations:
-    """Tests for listing investigations."""
-
-    def test_list_empty(self, temp_investigations_dir, monkeypatch):
-        monkeypatch.setattr(InvestigationReport, "BASE_DIR", temp_investigations_dir)
-        investigations = InvestigationReport.list_investigations()
-        assert investigations == []
-
-    def test_list_investigations(self, temp_investigations_dir, monkeypatch):
-        monkeypatch.setattr(InvestigationReport, "BASE_DIR", temp_investigations_dir)
-
-        r1 = InvestigationReport()
-        r1.set_request("First investigation")
-        r2 = InvestigationReport()
-        r2.set_request("Second investigation")
-
-        investigations = InvestigationReport.list_investigations()
-
-        assert len(investigations) == 2
-        requests = [inv["request"] for inv in investigations]
-        assert "First investigation" in requests
-        assert "Second investigation" in requests
+    def test_list_trackers(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
+        t1 = HypothesisTracker()
+        t1.add_hypothesis("Theory", ["Check"])
+        t1.file_check_result(1, 0, passed=True)
+        t2 = HypothesisTracker()
+        trackers = HypothesisTracker.list_trackers()
+        assert {t["id"] for t in trackers} == {t1.id, t2.id}
 
 
 class TestPersistence:
-    """Tests for file persistence."""
+    """Tests for data persistence."""
 
-    def test_changes_are_persisted(self, report):
-        report.set_request("Persistent test")
+    def test_changes_are_persisted(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
+        t1 = HypothesisTracker()
+        t1.add_hypothesis("Persisted", ["Check"])
+        t2 = HypothesisTracker(t1.id)
+        assert t2._data["hypotheses"][0]["description"] == "Persisted"
 
-        # Read file directly
-        with open(report.file_path) as f:
-            data = json.load(f)
-
-        assert data["request"]["description"] == "Persistent test"
-
-    def test_updated_at_changes(self, report):
+    def test_updated_at_changes(self, tracker):
         import time
-
-        initial_updated = report.get_full_report()["updated_at"]
+        original = tracker._data["updated_at"]
         time.sleep(0.01)
-        report.add_hypothesis("New hypothesis")
-        new_updated = report.get_full_report()["updated_at"]
+        tracker.add_hypothesis("New", ["Check"])
+        assert tracker._data["updated_at"] != original
 
-        assert new_updated > initial_updated
-
-    def test_json_is_always_valid(self, report):
-        # Perform various operations
-        report.set_request("Test")
-        report.add_hypothesis("H1")
-        report.add_finding(source="unit_test", content="F1")
-        report.mark_approach_rejected("A1", "Why", [1])
-
-        # File should be valid JSON at each point
-        with open(report.file_path) as f:
-            data = json.load(f)
-
-        assert data["request"]["description"] == "Test"
-        assert len(data["hypotheses"]) == 1
-        assert len(data["rejected_approaches"]) == 1
+    def test_json_is_always_valid(self, tracker):
+        tracker.add_hypothesis("Theory", ["Check 1", "Check 2"])
+        tracker.file_check_result(1, 0, passed=True)
+        tracker.set_screenshot("before", "/path/file.png")
+        # Should not raise
+        data = json.loads(tracker.file_path.read_text())
+        assert data is not None
