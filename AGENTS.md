@@ -10,8 +10,8 @@ effort as necessary to make sure that everyone using your feature sees the same 
 
 If the request is to fix an issue, write a test which should fail until the issue is fixed. For any UI-affecting work,
 take the required "before" screenshot with the MCP `screenshot(tab="<target>", label="before")` call so you understand
-the current behaviour before editing code. This saves screenshots to `/tmp/chad/visual-changes/<timestamp>/` with 
-descriptive filenames. See the Visual Inspection section for more details.
+the current behaviour before editing code. MCP screenshots are saved to a temp directory like `/tmp/chad_visual_xxxxx/`
+with filenames derived from the label/tab (e.g., `before_run.png`). See the Visual Inspection section for more details.
 
 Then, come up with as many theories as possible about potential causes of the issue, then examine your screenshot and
 the existing test coverage and see if this rules any of them out. Research and find out which of your theories is most
@@ -49,9 +49,10 @@ Follow this MCP workflow for every task (mandatory):
 ## MCP Tools
 
 Use these MCP tools for every task:
-- `verify`: run lint + all unit/integration/visual tests in a single call (required before handoff).
-- `screenshot(tab, label)`: capture a specific UI tab; labels "before"/"after" are mandatory whenever UI changes.
-- `hypothesis(description, checks, tracker_id?)`: method1 to record or update hypotheses with binary rejection checks.
+- `list_tools()`: enumerate available MCP tools and the workflow steps if you need a quick sanity check.
+- `verify()`: run lint + all unit/integration/visual tests in one call (flake8 --max-line-length=120, then `pytest -v --tb=short`; required once per task).
+- `screenshot(tab, label)`: capture the run/providers tab headlessly; labels "before"/"after" are mandatory whenever UI changes, and outputs go under `/tmp/chad_visual_*`.
+- `hypothesis(description, checks, tracker_id?)`: record or update hypotheses with comma-separated binary rejection checks.
 - `check_result(tracker_id, hypothesis_id, check_index, passed, notes?)`: to file pass/fail for each check.
 - `report(tracker_id, screenshot_before?, screenshot_after?)`: to collect the final hypothesis/check summary for reporting.
 

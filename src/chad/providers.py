@@ -722,7 +722,8 @@ class OpenAICodexProvider(AIProvider):
             cmd = [
                 codex_cli, 'exec', 'resume',
                 self.thread_id,
-                '-c', 'sandbox="workspace-write"',  # Match --full-auto sandbox mode
+                '-c', 'sandbox_mode="workspace-write"',  # Match --full-auto sandbox mode
+                '-c', 'approval_policy="on-request"',   # Match --full-auto approval policy
                 '-',  # Read prompt from stdin
             ]
         else:
