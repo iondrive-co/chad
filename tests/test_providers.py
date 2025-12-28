@@ -913,6 +913,45 @@ class TestOpenAICodexProvider:
         response = provider.get_response()
         assert response == ""
 
+    @patch('chad.providers._stream_pty_output', return_value=("", False))
+    @patch('chad.providers._start_pty_process')
+    def test_get_response_exec_includes_network_access(self, mock_start, mock_stream):
+        mock_process = Mock()
+        mock_process.stdin = Mock()
+        mock_start.return_value = (mock_process, 11)
+
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+        provider.project_path = "/tmp/test_project"
+        provider.current_message = "Hello"
+        provider.cli_path = "/bin/codex"
+
+        provider.get_response(timeout=1.0)
+
+        cmd = mock_start.call_args.args[0]
+        assert '-c' in cmd
+        assert 'network_access="enabled"' in cmd
+
+    @patch('chad.providers._stream_pty_output', return_value=("", False))
+    @patch('chad.providers._start_pty_process')
+    def test_get_response_resume_includes_network_access(self, mock_start, mock_stream):
+        mock_process = Mock()
+        mock_process.stdin = Mock()
+        mock_start.return_value = (mock_process, 11)
+
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+        provider.project_path = "/tmp/test_project"
+        provider.current_message = "Hello"
+        provider.thread_id = "thread-123"
+        provider.cli_path = "/bin/codex"
+
+        provider.get_response(timeout=1.0)
+
+        cmd = mock_start.call_args.args[0]
+        assert '-c' in cmd
+        assert 'network_access="enabled"' in cmd
+
 
 class TestCodexJsonEventParsing:
     """Test cases for Codex JSON event to human-readable text conversion."""
