@@ -46,7 +46,20 @@ body, .gradio-container, .gradio-container * {
   padding: 6px 12px !important;
 }
 
-#cancel-task-btn,
+#cancel-task-btn {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: fit-content !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  flex: 0 0 auto !important;
+}
+
 #cancel-task-btn button {
   background: var(--task-btn-bg) !important;
   border: 1px solid var(--task-btn-border) !important;
@@ -56,9 +69,8 @@ body, .gradio-container, .gradio-container * {
   min-width: 40px !important;
   padding: 4px 6px !important;
   line-height: 1.1 !important;
-}
-
-#cancel-task-btn button {
+  width: auto !important;
+  max-width: none !important;
   display: inline-flex !important;
   align-items: center !important;
   justify-content: center !important;

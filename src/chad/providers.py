@@ -716,14 +716,15 @@ class OpenAICodexProvider(AIProvider):
         codex_cli = getattr(self, "cli_path", None) or find_cli_executable('codex')
 
         # Build command - use resume if we have a thread_id (multi-turn)
-        # Note: codex exec resume has limited options - no --full-auto or --json
-        # We must pass sandbox permissions explicitly for resume to allow file writes
+        # Flags like --json must come BEFORE the resume subcommand
         if self.thread_id:
             cmd = [
-                codex_cli, 'exec', 'resume',
-                self.thread_id,
+                codex_cli, 'exec',
+                '--json',  # Must be before 'resume' subcommand
                 '-c', 'sandbox_mode="workspace-write"',  # Match --full-auto sandbox mode
                 '-c', 'approval_policy="on-request"',   # Match --full-auto approval policy
+                '-c', 'network_access="enabled"',
+                'resume', self.thread_id,
                 '-',  # Read prompt from stdin
             ]
         else:
@@ -732,6 +733,7 @@ class OpenAICodexProvider(AIProvider):
                 '--full-auto',
                 '--skip-git-repo-check',
                 '--json',
+                '-c', 'network_access="enabled"',
                 '-C', self.project_path,
                 '-',  # Read from stdin
             ]
@@ -742,8 +744,6 @@ class OpenAICodexProvider(AIProvider):
             if self.config.reasoning_effort and self.config.reasoning_effort != 'default':
                 cmd.extend(['-c', f'model_reasoning_effort="{self.config.reasoning_effort}"'])
 
-        is_resume = self.thread_id is not None
-
         try:
             env = self._get_env()
             self.process, self.master_fd = _start_pty_process(cmd, cwd=self.project_path, env=env)
@@ -752,7 +752,7 @@ class OpenAICodexProvider(AIProvider):
                 self.process.stdin.write(self.current_message.encode())
                 self.process.stdin.close()
 
-            # For resume: plain text output; for initial: JSON output
+            # Both initial and resume use JSON output
             json_events = []
 
             def format_json_event_as_text(event: dict) -> str | None:
@@ -791,13 +791,7 @@ class OpenAICodexProvider(AIProvider):
                 return None
 
             def process_chunk(chunk: str) -> None:
-                # For resume mode, stream plain text directly
-                if is_resume:
-                    if chunk.strip():
-                        self._notify_activity('stream', chunk)
-                    return
-
-                # For JSON mode, parse and convert to human-readable text
+                # Parse JSON events and convert to human-readable text
                 for line in chunk.split('\n'):
                     line = line.strip()
                     if not line:
@@ -845,12 +839,7 @@ class OpenAICodexProvider(AIProvider):
             if timed_out:
                 return f"Error: Codex execution timed out ({int(timeout / 60)} minutes)"
 
-            # For resume commands, just return the plain text output
-            if is_resume:
-                output = _strip_ansi_codes(output)
-                return output.strip() if output else "No response from Codex"
-
-            # For initial requests, extract response from JSON events
+            # Extract response from JSON events
             response_parts = []
             for event in json_events:
                 if event.get('type') == 'item.completed':
