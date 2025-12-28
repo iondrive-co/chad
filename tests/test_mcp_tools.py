@@ -88,6 +88,26 @@ class TestMCPHelpers:
         assert (root / "src" / "chad").exists()
 
 
+class TestMCPDiscovery:
+    """Ensure agents can discover tools via bootstrap helpers."""
+
+    def test_list_mcp_tools_catalog(self):
+        from chad.mcp_playwright import list_mcp_tools
+
+        result = list_mcp_tools()
+        assert result["success"] is True
+        assert "create_investigation" in result["tool_catalog"]["investigation"]
+        assert result["resource_uri"] == "resource://chad/mcp-tools"
+
+    def test_bootstrap_resource_registered(self):
+        import asyncio
+        from chad.mcp_playwright import SERVER
+
+        resources = asyncio.run(SERVER.list_resources())
+        uris = [str(res.uri) for res in resources]
+        assert "resource://chad/mcp-tools" in uris
+
+
 class TestMCPToolsWithMocks:
     """Test MCP tools with mocked subprocess/playwright."""
 

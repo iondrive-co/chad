@@ -10,6 +10,7 @@ import gradio as gr
 
 from .model_catalog import ModelCatalog
 from .installer import AIToolInstaller
+from .mcp_config import ensure_global_mcp_config
 
 
 class ProviderUIManager:
@@ -701,6 +702,7 @@ class ProviderUIManager:
         codex_home = self._get_codex_home(account_name)
         codex_dir = codex_home / ".codex"
         codex_dir.mkdir(parents=True, exist_ok=True)
+        ensure_global_mcp_config(home=codex_home)
         return str(codex_home)
 
     def _setup_claude_account(self, account_name: str) -> str:

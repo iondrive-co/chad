@@ -19,6 +19,7 @@ VISUAL_TEST_MAP: dict[str, list[str]] = {
     "chad/web_ui.py": [
         "TestUIElements",
         "TestReadyStatus",
+        "TestCodingAgentLayout",
         "TestProvidersTab",
         "TestLiveActivityFormat",
         "TestTaskStatusHeader",

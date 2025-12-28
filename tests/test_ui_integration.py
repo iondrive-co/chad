@@ -177,6 +177,50 @@ class TestReadyStatus:
         assert "Ready" in text or "Missing" in text
 
 
+class TestCodingAgentLayout:
+    """Ensure the coding agent selector sits inside the top controls bar."""
+
+    def test_status_row_spans_top_bar(self, page: Page):
+        """Status row should span nearly the full top bar (minus cancel button)."""
+        top_row = page.locator("#run-top-row")
+        inputs_row = page.locator("#run-top-inputs")
+        status_row = page.locator("#role-status-row")
+        cancel_btn = page.locator("#cancel-task-btn")
+        expect(top_row).to_be_visible()
+
+        project_path = top_row.get_by_label("Project Path")
+        coding_agent = top_row.get_by_label("Coding Agent")
+        expect(inputs_row).to_be_visible()
+        expect(status_row).to_be_visible()
+
+        expect(project_path).to_be_visible()
+        expect(coding_agent).to_be_visible()
+
+        inputs_box = inputs_row.bounding_box()
+        status_box = status_row.bounding_box()
+        row_box = top_row.bounding_box()
+        cancel_box = cancel_btn.bounding_box()
+
+        assert inputs_box and status_box and row_box and cancel_box, "Missing bounding box data for layout assertions"
+
+        # Inputs should sit above the status row in the combined header area
+        assert inputs_box["y"] + inputs_box["height"] <= status_box["y"] + 6, (
+            "Status row should appear below the project path / coding agent inputs"
+        )
+
+        available_width = row_box["width"] - cancel_box["width"] - 16
+
+        assert status_box["width"] >= available_width * 0.8, (
+            f"Status row should use most of the top bar width (got {status_box['width']}, "
+            f"expected >= {available_width * 0.8})"
+        )
+
+        # Ensure the status row starts near the left edge of the main content
+        assert status_box["x"] <= row_box["x"] + 40, (
+            "Status row should align with the main header content, not just the right column"
+        )
+
+
 class TestProvidersTab:
     """Test the Providers tab functionality."""
 
