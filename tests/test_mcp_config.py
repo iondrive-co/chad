@@ -1,6 +1,3 @@
-from pathlib import Path
-
-
 def test_ensure_global_mcp_config_creates_file(tmp_path, monkeypatch):
     from chad.mcp_config import ensure_global_mcp_config, _config_path
 

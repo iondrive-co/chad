@@ -19,7 +19,8 @@ from .security import SecurityManager
 if TYPE_CHECKING:
     from playwright.sync_api import Page
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# Repository root; used for locating scripts and setting PYTHONPATH.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class PlaywrightUnavailable(RuntimeError):
@@ -141,6 +142,7 @@ def start_chad(env: TempChadEnv) -> ChadInstance:
             "CHAD_CONFIG": os.fspath(env.config_path),
             "CHAD_PASSWORD": env.password,
             "CHAD_PROJECT_PATH": os.fspath(env.project_dir),
+            "PYTHONPATH": os.fspath(PROJECT_ROOT / "src"),
         },
         cwd=os.fspath(PROJECT_ROOT),
     )

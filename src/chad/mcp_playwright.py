@@ -97,7 +97,10 @@ def list_mcp_tools() -> Dict[str, object]:
     return {
         "success": True,
         "resource_uri": BOOTSTRAP_RESOURCE_URI,
-        "instructions": "Start with create_investigation, record every discovery with add_finding, and finish with record_fix then add_post_incident_analysis.",
+        "instructions": (
+            "Start with create_investigation, record every discovery with add_finding, "
+            "and finish with record_fix then add_post_incident_analysis."
+        ),
         "tool_catalog": TOOL_BOOTSTRAP,
     }
 
