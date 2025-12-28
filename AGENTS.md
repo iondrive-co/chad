@@ -8,13 +8,10 @@ effort as necessary to make sure that everyone using your feature sees the same 
 
 ## Before making changes
 
-If the request is to fix an issue, write a test which should fail until the issue is fixed. If the issue has a visual
-component then **you MUST take a "before" screenshot** using the MCP tool:
-```
-capture_visual_change(label="before", tab="providers", issue_id="your-issue-name")
-```
-This saves screenshots to `/tmp/chad/visual-changes/<timestamp>/` with descriptive filenames.
-See the Visual Inspection section for more details.
+If the request is to fix an issue, write a test which should fail until the issue is fixed. For any UI-affecting work,
+take the required "before" screenshot with the MCP `screenshot(tab="<target>", label="before")` call so you understand
+the current behaviour before editing code. This saves screenshots to `/tmp/chad/visual-changes/<timestamp>/` with 
+descriptive filenames. See the Visual Inspection section for more details.
 
 Then, come up with as many theories as possible about potential causes of the issue, then examine your screenshot and
 the existing test coverage and see if this rules any of them out. Research and find out which of your theories is most
@@ -36,248 +33,39 @@ test is unacceptable.
 
 ### During changes
 
-You MUST use the investigation MCP tools to track your debugging process. These tools create a structured JSON report
-in `/tmp/chad/investigations/` that is automatically kept valid and up-to-date.
-
-At the start of the issue:
-
-```
-create_investigation(
-    request="Description of what you're fixing",
-    issue_id="github-issue-number-if-any"
-)
-```
-**Store the returned `investigation_id`** - you need it for all subsequent calls.
-
-Then record your hypotheses:
-```
-add_hypothesis(investigation_id="inv_...", description="Theory about the cause")
-```
-
-Call `add_finding()` after EVERY piece of evidence you gather:
-
-| Source | When to use                               |
-|--------|-------------------------------------------|
-| `web_search` | After completing a series of web searches |
-| `unit_test` | After running tests                       |
-| `tool_use` | After using any MCP tool                  |
-| `code_review` | After examining code                      |
-| `screenshot_analysis` | After reviewing screenshots               |
-
-Example:
-```
-add_finding(
-    investigation_id="inv_...",
-    source="unit_test",
-    content="test_provider_gap passes but measures 48px gap",
-    hypothesis_id=1,
-    verdict="supports",
-    notes="Confirms the CSS gap issue"
-)
-```
-
-If an approach fails call `mark_approach_rejected()` to archive failed attempts and clean context:
-```
-mark_approach_rejected(
-    investigation_id="inv_...",
-    description="Tried adding margin: 0 to accordion",
-    why_rejected="Gap remained; issue is in parent container",
-    finding_ids="2,3"
-)
-```
-
-For visual issues, after taking screenshots, link them to your investigation:
-```
-capture_visual_change(label="before", tab="providers", issue_id="gap-fix")
-# Get the screenshot path from the result, then:
-set_screenshots(investigation_id="inv_...", before="/tmp/chad/visual-changes/.../before.png")
-```
-Here are the full list of tools available to record your investigation status:
-
-| Tool | Purpose | Required? |
-|------|---------|-----------|
-| `create_investigation` | Initialize report with the request | **Yes, at start** |
-| `add_hypothesis` | Record a theory about the cause | Recommended |
-| `add_finding` | Record evidence from tests/searches/tools | **Yes, for each discovery** |
-| `update_finding_status` | Mark finding as resolved/rejected | Recommended |
-| `update_hypothesis_status` | Mark hypothesis as confirmed/rejected | Recommended |
-| `mark_approach_rejected` | Archive failed approaches | When approach fails |
-| `set_screenshots` | Record before/after screenshot paths | **Yes, for visual issues** |
-| `add_test_design` | Document new tests and framework gaps | Recommended |
-| `record_fix` | Document the solution implemented | **Yes, at end** |
-| `add_post_incident_analysis` | Write hypothetical failure analysis | **Yes, at end** |
-| `get_investigation_summary` | Get compact summary for context refresh | Recommended |
-| `get_investigation_full` | Get complete report with all details | As needed |
-| `list_investigations` | List all investigation reports | As needed |
-
-While making changes, also ensure that any new display functionality is added to the visual_test_map.py
+Follow this MCP workflow for every task (mandatory):
+1. Record or update your hypothesis and binary rejection checks with `hypothesis(description, checks=..., tracker_id?)`. Store the returned `tracker_id`/`hypothesis_id`.
+2. For UI changes, capture the baseline via `screenshot` before editing and add any new display functionality to `visual_test_map.py`.
+3. As each check outcome is known, file it immediately with `check_result(tracker_id, hypothesis_id, check_index, passed, notes?)`.
+4. Iterate on hypotheses and keep the work focused on the happy path; refine checks when new evidence appears.
 
 ## After making changes
 
-Re-run your new test, ensure it passes and then:
-- if the issue has a visual component, **you MUST take an "after" screenshot** using the MCP tool:
-  ```
-  capture_visual_change(label="after", tab="providers", issue_id="your-issue-name")
-  ```
-  Examine the screenshot critically to make sure it has changed from the before screenshot and actually demonstrates
-  the fix has worked.
-- regardless of whether there is a visual component, perform a critical code review of your changes and note any issues
+- If the issue has a visual component, take the mandatory "after" screenshot using `screenshot(tab="<target>", label="after")` and confirm it demonstrates the fix.
+- Run the MCP `verify()` call once per task; it runs linting plus all unit, integration, and visual tests to confirm no regressions.
+- Ensure every recorded check has a filed result via `check_result`, then call `report(tracker_id, screenshot_before?, screenshot_after?)` to generate the summary you will share with the user.
+- Perform a critical self-review of your changes and note any outstanding issues.
 
-If there are major issues with either of the above then consider whether you should instead pursue another one of your
-theories and create some new ones. If there are only minor issues then you can just correct them here.
+## MCP Tools
 
-Next, run quick verification on modified files, for example:
-```
-lint_files(paths="src/chad/web_ui.py,src/chad/provider_ui.py")
-run_unit_tests(test_path="tests/test_web_ui.py", pattern="test_start")
-test_summary()
-```
-If there is a visual component check run the ui tests for the changed classes as well
-```
-run_tests_for_file(file_path="src/chad/provider_ui.py")
-```
-To run the full test suite:
-```
-verify_all_tests_pass()
-```
-Fix any lint issues you discover regardless of whether your change caused them.
-
-Close out any remaining open findings using `update_finding_status()`. 
-Then record your fix (to document your solution):
-```
-record_fix(
-    investigation_id="inv_...",
-    description="Added flex-shrink: 0 to provider cards container",
-    files_modified="src/chad/provider_ui.py",
-    test_changes="Added test_add_provider_accordion_gap"
-)
-```
-Write hypothetical failure analysis (what would the next agent need to know to avoid repeating your mistakes?):
-```
-add_post_incident_analysis(
-    investigation_id="inv_...",
-    analysis="If this fix doesn't work, the issue may be in Gradio's accordion component itself. Future agent should: 1) Check Gradio version, 2) Look for CSS overrides in browser devtools..."
-)
-```
-Finally, once you are satisfied, call `get_investigation_summary()` and report back to the user with:
-- A short summary of the issue. Make a summary as a bullet point list describing how to recreate the problem and how the 
-fix modifies this list.
-- How you proved that your fix worked and was the only explanation that made sense
-- Before and after screenshot paths (from the investigation summary)
-- The investigation report file path (for future reference)
-- Any remaining issues or failing tests
+Use these MCP tools for every task:
+- `verify`: run lint + all unit/integration/visual tests in a single call (required before handoff).
+- `screenshot(tab, label)`: capture a specific UI tab; labels "before"/"after" are mandatory whenever UI changes.
+- `hypothesis(description, checks, tracker_id?)`: method1 to record or update hypotheses with binary rejection checks.
+- `check_result(tracker_id, hypothesis_id, check_index, passed, notes?)`: to file pass/fail for each check.
+- `report(tracker_id, screenshot_before?, screenshot_after?)`: to collect the final hypothesis/check summary for reporting.
 
 ## Visual Inspection
 
-Chad provides multiple ways to verify UI changes, listed from most to least rigorous:
-
-### 1. Pytest Integration Tests
-
-Run the Playwright-based UI integration tests:
+`verify` already executes the Playwright-based UI integration and visual checks. For debugging you can still run the suite directly:
 ```bash
 PYTHONPATH=src python3 -m pytest tests/test_ui_integration.py -v
 ```
-These tests:
-- Start Chad with mock providers in a temporary environment
-- Use Playwright to verify all UI elements render correctly
-- Test the delete provider two-step confirmation flow
-- Validate element sizing and visibility
-- Take screenshots to pytest's `tmp_path` for inspection
-
-### 2. MCP Tools
-
-The MCP server is auto-configured via `.mcp.json` in the project root for Claude Code.
-
-Codex does not support project-level MCP config. Users must add to `~/.codex/config.toml`:
-```toml
-[mcp_servers.chad-ui-playwright]
-command = "python3"
-args = ["-m", "chad.mcp_playwright"]
-cwd = "/path/to/chad"
-env = { PYTHONPATH = "/path/to/chad/src" }
-```
-Verify with `/mcp` command in Claude Code or `codex mcp list` in Codex.
-
-**Manual Start (if needed):**
-```bash
-PYTHONPATH=src python3 -m chad.mcp_playwright
-```
-
-**Discovery guardrail:** If you need to check available tools, call `list_mcp_tools` (returns the catalog and the
-resource URI), or read `resource://chad/mcp-tools` via `list_mcp_resources` → `read_resource`. An empty
-resource/template list is normal elsewhere—use the tool names directly.
-
-**Available Tools:**
-
-| Tool | Description |
-|------|-------------|
-| **Investigation Tracking** | |
-| `create_investigation` | **REQUIRED** - Initialize investigation report at start of any issue |
-| `add_hypothesis` | Record a theory about the cause |
-| `add_finding` | **REQUIRED** - Record evidence after every discovery |
-| `update_finding_status` | Mark finding as resolved/rejected |
-| `update_hypothesis_status` | Mark hypothesis as confirmed/rejected |
-| `mark_approach_rejected` | Archive failed approaches to clean context |
-| `set_screenshots` | Link before/after screenshots to investigation |
-| `add_test_design` | Document tests created and framework gaps |
-| `record_fix` | **REQUIRED** - Document the solution |
-| `add_post_incident_analysis` | **REQUIRED** - Write hypothetical failure analysis |
-| `get_investigation_summary` | Get compact summary for reporting |
-| `get_investigation_full` | Get complete investigation report |
-| `list_investigations` | List all investigation reports |
-| `list_mcp_tools` | Show tool catalog and MCP bootstrap resource |
-| **Visual Testing** | |
-| `capture_visual_change` | **REQUIRED** for before/after screenshots - saves to `/tmp/chad/visual-changes/` |
-| `run_ui_smoke` | Full UI smoke test with screenshots of both tabs |
-| `screenshot` | Capture screenshot of a specific tab |
-| `run_tests_for_file` | Run visual tests covering a source file |
-| `run_tests_for_modified_files` | Run tests for all git-modified files |
-| `list_visual_test_mappings` | Show source file to test mappings |
-| `test_add_provider_accordion_gap` | Test gap between cards and Add Provider button |
-| `measure_provider_delete` | Verify delete button sizing |
-| `list_providers` | Get visible provider names |
-| `test_delete_provider` | Test the delete flow end-to-end |
-| `test_add_provider` | Add a provider and verify details without refresh |
-| `test_live_stream_colors` | Inject ANSI-colored content to verify readability |
-| `test_scroll_preservation` | Ensure live-stream scroll position is stable while streaming |
-| **Test Running** | |
-| `run_unit_tests` | Run pytest with optional filtering (path, pattern, fail-fast) |
-| `lint_files` | Run flake8 on specific files or directories |
-| `test_summary` | Quick test collection count without executing |
-| `run_ci_tests` | Run full CI test suite (excludes visual by default) |
-| `verify_all_tests_pass` | Complete verification: lint + unit tests + visual tests for modified files |
-
-**Workflow for UI Changes:**
-1. `create_investigation(request="...")` - save the investigation_id
-2. `capture_visual_change(label="before")` then `set_screenshots(before=path)`
-3. Make code changes to fix the issue, calling `add_finding()` for every discovery
-4. `capture_visual_change(label="after")` then `set_screenshots(after=path)`
-5. Run `run_tests_for_file` with the modified file path
-6. `record_fix()` and `add_post_incident_analysis()`
-7. Before completing: run `verify_all_tests_pass`
-8. `get_investigation_summary()` and report to user with screenshot paths and investigation file
-
-**Test Mappings:**
-Source files declare their visual tests in `src/chad/visual_test_map.py`.
-To add coverage for a new file, add an entry to `VISUAL_TEST_MAP`.
-
-Artifacts are saved to `/tmp/chad/mcp-playwright/<timestamp>/`
-
-Requirements: `pip install playwright mcp && playwright install chromium`
-
-### 3. Quick Visual Checks
-
-For quick visual verification without running full tests:
-
+Quick manual screenshots are also available:
 ```bash
 python scripts/screenshot_ui.py --tab providers --headless
 python scripts/screenshot_ui.py --tab run -o /tmp/run-tab.png
 ```
-
-Options:
-- `--tab run|providers` - Which tab to screenshot
-- `--output PATH` - Output path (default: `/tmp/chad/screenshot.png`)
-- `--headless` - Run without visible browser window
 
 ## Providers
 
