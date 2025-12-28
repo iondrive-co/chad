@@ -203,6 +203,10 @@ Verify with `/mcp` command in Claude Code or `codex mcp list` in Codex.
 PYTHONPATH=src python3 -m chad.mcp_playwright
 ```
 
+**Discovery guardrail:** If you need to check available tools, call `list_mcp_tools` (returns the catalog and the 
+resource URI), or read `resource://chad/mcp-tools` via `list_mcp_resources` → `read_resource`. An empty 
+resource/template list is normal elsewhere—use the tool names directly.
+
 **Available Tools:**
 
 | Tool | Description |

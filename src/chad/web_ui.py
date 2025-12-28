@@ -451,31 +451,40 @@ body, .gradio-container, .gradio-container * {
   box-shadow: none;
 }
 
-/* Follow-up input styling */
+/* Follow-up input - styled as a compact chat continuation */
 #followup-row {
-  margin-top: 12px;
-  padding: 12px;
-  background: linear-gradient(135deg, #0c1424 0%, #0a1a32 100%);
-  border: 1px solid #1f2b46;
-  border-radius: 12px;
+  margin-top: 8px;
+  padding: 0;
+  background: transparent;
+  border: none;
 }
 
-#followup-row .followup-label {
-  color: #a8d4ff;
-  font-size: 0.9rem;
-  margin-bottom: 8px;
+#followup-row > div {
+  gap: 8px !important;
+}
+
+#followup-row .followup-header {
+  color: #888;
+  font-size: 0.85rem;
+  margin-bottom: 4px;
+  font-style: italic;
+}
+
+#followup-input {
+  flex: 1;
 }
 
 #followup-input textarea {
-  background: #1e1e2e !important;
-  color: #e2e8f0 !important;
-  border: 1px solid #555 !important;
+  background: var(--neutral-50) !important;
+  border: 1px solid var(--border-color-primary) !important;
+  border-radius: 8px !important;
+  min-height: 60px !important;
+  resize: vertical !important;
 }
 
 #send-followup-btn {
-  background: var(--task-btn-bg) !important;
-  border: 1px solid var(--task-btn-border) !important;
-  color: var(--task-btn-text) !important;
+  align-self: flex-end;
+  margin-bottom: 4px;
 }
 """
 
@@ -1686,13 +1695,26 @@ class ChadWebUI:
                     # Allow override via env var (for screenshots)
                     default_path = os.environ.get('CHAD_PROJECT_PATH', str(Path.cwd()))
 
-                    with gr.Row():
-                        project_path = gr.Textbox(
-                            label="Project Path",
-                            placeholder="/path/to/project",
-                            value=default_path
-                        )
-                        with gr.Column(scale=1, min_width=240):
+                    account_choices = list(self.security_mgr.list_accounts().keys())
+                    role_assignments = self.security_mgr.list_role_assignments()
+                    initial_coding = role_assignments.get("CODING", "")
+
+                    with gr.Row(elem_id="run-top-row", equal_height=True):
+                        with gr.Column(elem_id="run-top-main", scale=1):
+                            with gr.Row(elem_id="run-top-inputs", equal_height=True):
+                                project_path = gr.Textbox(
+                                    label="Project Path",
+                                    placeholder="/path/to/project",
+                                    value=default_path,
+                                    scale=3
+                                )
+                                coding_agent_dropdown = gr.Dropdown(
+                                    choices=account_choices,
+                                    value=initial_coding if initial_coding in account_choices else None,
+                                    label="Coding Agent",
+                                    scale=1,
+                                    min_width=260
+                                )
                             with gr.Row(elem_id="role-status-row"):
                                 role_status = gr.Markdown(config_status, elem_id="role-config-status")
                                 log_path = self.current_session_log_path
@@ -1703,7 +1725,7 @@ class ChadWebUI:
                                     variant="secondary",
                                     size="sm",
                                     scale=0,
-                                    min_width=120,
+                                    min_width=140,
                                     elem_id="session-log-btn"
                                 )
                         cancel_btn = gr.Button(
@@ -1711,24 +1733,12 @@ class ChadWebUI:
                             variant="stop",
                             interactive=False,
                             elem_id="cancel-task-btn",
-                            min_width=110
+                            min_width=110,
+                            scale=0
                         )
 
                     # Task status header (shows selected task description and status)
                     task_status_header = gr.Markdown("", elem_id="task-status-header", visible=False)
-
-                    # Agent selection dropdown
-                    account_choices = list(self.security_mgr.list_accounts().keys())
-                    role_assignments = self.security_mgr.list_role_assignments()
-                    initial_coding = role_assignments.get("CODING", "")
-
-                    with gr.Row():
-                        coding_agent_dropdown = gr.Dropdown(
-                            choices=account_choices,
-                            value=initial_coding if initial_coding in account_choices else None,
-                            label="Coding Agent",
-                            scale=1
-                        )
 
                     # Agent communication view
                     with gr.Row():
@@ -1761,22 +1771,21 @@ class ChadWebUI:
 
                                 # Follow-up input (hidden initially, shown after task completion)
                                 with gr.Row(visible=False, elem_id="followup-row") as followup_row:
-                                    with gr.Column(scale=4):
-                                        gr.Markdown("**Continue the conversation:**", elem_classes=["followup-label"])
-                                        followup_input = gr.TextArea(
-                                            label="Follow-up Message",
-                                            placeholder="Ask for changes, clarifications, or additional work...",
-                                            lines=3,
-                                            elem_id="followup-input",
-                                            show_label=False
-                                        )
-                                    with gr.Column(scale=1, min_width=100):
-                                        send_followup_btn = gr.Button(
-                                            "Send",
-                                            variant="primary",
-                                            elem_id="send-followup-btn",
-                                            interactive=False
-                                        )
+                                    followup_input = gr.TextArea(
+                                        label="Continue conversation...",
+                                        placeholder="Ask for changes or additional work...",
+                                        lines=2,
+                                        elem_id="followup-input",
+                                        scale=5
+                                    )
+                                    send_followup_btn = gr.Button(
+                                        "Send ➤",
+                                        variant="primary",
+                                        elem_id="send-followup-btn",
+                                        interactive=False,
+                                        scale=1,
+                                        min_width=80
+                                    )
 
                     # Live activity stream
                     live_stream_box = gr.Markdown("", elem_id="live-stream-box", sanitize_html=False)

@@ -11,6 +11,7 @@ from typing import Dict
 from mcp.server.fastmcp import FastMCP
 
 from .investigation_report import InvestigationReport
+from .mcp_config import ensure_global_mcp_config
 from .ui_playwright_runner import (
     ChadLaunchError,
     PlaywrightUnavailable,
@@ -25,6 +26,46 @@ from .visual_test_map import VISUAL_TEST_MAP, get_tests_for_file, get_tests_for_
 
 SERVER = FastMCP("chad-ui-playwright")
 ARTIFACT_ROOT = Path(tempfile.gettempdir()) / "chad" / "mcp-playwright"
+BOOTSTRAP_RESOURCE_URI = "resource://chad/mcp-tools"
+TOOL_BOOTSTRAP = {
+    "investigation": [
+        "create_investigation",
+        "add_hypothesis",
+        "add_finding",
+        "update_finding_status",
+        "update_hypothesis_status",
+        "mark_approach_rejected",
+        "set_screenshots",
+        "add_test_design",
+        "record_fix",
+        "add_post_incident_analysis",
+        "get_investigation_summary",
+        "get_investigation_full",
+        "list_investigations",
+    ],
+    "visual": [
+        "capture_visual_change",
+        "run_ui_smoke",
+        "screenshot",
+        "run_tests_for_file",
+        "run_tests_for_modified_files",
+        "list_visual_test_mappings",
+        "test_add_provider_accordion_gap",
+        "measure_provider_delete",
+        "list_providers",
+        "test_delete_provider",
+        "test_add_provider",
+        "test_live_stream_colors",
+        "test_scroll_preservation",
+    ],
+    "testing": [
+        "run_unit_tests",
+        "lint_files",
+        "test_summary",
+        "run_ci_tests",
+        "verify_all_tests_pass",
+    ],
+}
 
 
 def _artifact_dir() -> Path:
@@ -39,6 +80,47 @@ def _viewport(width: int, height: int) -> Dict[str, int]:
 
 def _failure(message: str) -> Dict[str, object]:
     return {"success": False, "error": message}
+
+
+# Ensure Codex global config has this MCP server, so list_mcp_tools works in any CWD.
+ensure_global_mcp_config()
+
+
+@SERVER.tool()
+def list_mcp_tools() -> Dict[str, object]:
+    """Quick-start discovery of available MCP tools for agents.
+
+    Use this instead of list_mcp_resources; start every task with
+    create_investigation(request=..., issue_id=...).
+    """
+    return {
+        "success": True,
+        "resource_uri": BOOTSTRAP_RESOURCE_URI,
+        "instructions": "Start with create_investigation, record every discovery with add_finding, and finish with record_fix then add_post_incident_analysis.",
+        "tool_catalog": TOOL_BOOTSTRAP,
+    }
+
+
+@SERVER.resource(
+    BOOTSTRAP_RESOURCE_URI,
+    name="Chad MCP tool bootstrap",
+    title="Chad MCP investigation tools quickstart",
+    description="Entry point for agents to see required MCP tools even if discovery APIs look empty.",
+    mime_type="application/json",
+)
+def mcp_tool_bootstrap() -> Dict[str, object]:
+    """Resource surfaced via list_mcp_resources to advertise investigation tools."""
+    return {
+        "message": "Use these tool names directly; ignore empty resource/template listings.",
+        "resource_uri": BOOTSTRAP_RESOURCE_URI,
+        "startup": [
+            "Call create_investigation(request, issue_id) immediately.",
+            "Log every discovery with add_finding and keep hypotheses updated.",
+            "For visual fixes, capture_visual_change before/after then set_screenshots.",
+            "Close with record_fix and add_post_incident_analysis.",
+        ],
+        "tool_catalog": TOOL_BOOTSTRAP,
+    }
 
 
 @SERVER.tool()
