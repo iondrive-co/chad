@@ -450,6 +450,33 @@ body, .gradio-container, .gradio-container * {
   padding: 0;
   box-shadow: none;
 }
+
+/* Follow-up input styling */
+#followup-row {
+  margin-top: 12px;
+  padding: 12px;
+  background: linear-gradient(135deg, #0c1424 0%, #0a1a32 100%);
+  border: 1px solid #1f2b46;
+  border-radius: 12px;
+}
+
+#followup-row .followup-label {
+  color: #a8d4ff;
+  font-size: 0.9rem;
+  margin-bottom: 8px;
+}
+
+#followup-input textarea {
+  background: #1e1e2e !important;
+  color: #e2e8f0 !important;
+  border: 1px solid #555 !important;
+}
+
+#send-followup-btn {
+  background: var(--task-btn-bg) !important;
+  border: 1px solid var(--task-btn-border) !important;
+  color: var(--task-btn-text) !important;
+}
 """
 
 # JavaScript to fix Gradio visibility updates and maintain scroll position
@@ -844,14 +871,12 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
     """Create a Gradio 6.x compatible chat message.
 
     Args:
-        speaker: The speaker name (e.g., "MANAGEMENT AI", "CODING AI")
+        speaker: The speaker name (e.g., "CODING AI")
         content: The message content
         collapsible: Whether to make long messages collapsible with a summary
     """
-    # Map speakers to roles
-    # MANAGEMENT AI messages are 'user' (outgoing instructions)
-    # CODING AI messages are 'assistant' (incoming responses)
-    role = "user" if "MANAGEMENT" in speaker else "assistant"
+    # All AI messages are assistant role
+    role = "assistant"
 
     # For long content, make it collapsible with a summary
     if collapsible and len(content) > 300:
@@ -877,6 +902,11 @@ class ChadWebUI:
         self.provider_ui = ProviderUIManager(security_mgr, main_password, self.model_catalog)
         self.session_logger = SessionLogger()
         self.current_session_log_path: Path | None = None
+        # Session continuation state
+        self._current_chat_history: list = []
+        self._current_project_path: str | None = None
+        self._session_active: bool = False
+        self._current_coding_account: str | None = None
 
     SUPPORTED_PROVIDERS = ProviderUIManager.SUPPORTED_PROVIDERS
     OPENAI_REASONING_LEVELS = ProviderUIManager.OPENAI_REASONING_LEVELS
@@ -1035,7 +1065,10 @@ class ChadWebUI:
         project_path: str,
         task_description: str,
         coding_agent: str,
-    ) -> Iterator[tuple[list, str, gr.Markdown, gr.Textbox, gr.TextArea, gr.Button, gr.Button, gr.Markdown]]:
+    ) -> Iterator[tuple[
+        list, str, gr.Markdown, gr.Textbox, gr.TextArea, gr.Button, gr.Button, gr.Markdown,
+        gr.update, gr.Row, gr.Button
+    ]]:
         """Start Chad task and stream updates in single-agent mode."""
         chat_history = []
         message_queue = queue.Queue()
@@ -1047,7 +1080,8 @@ class ChadWebUI:
             status: str,
             live_stream: str = "",
             summary: str | None = None,
-            interactive: bool = False
+            interactive: bool = False,
+            show_followup: bool = False
         ):
             """Format output tuple for Gradio with current UI state."""
             display_stream = live_stream
@@ -1072,7 +1106,10 @@ class ChadWebUI:
                 gr.update(interactive=interactive),
                 gr.update(interactive=not interactive),
                 gr.update(value=display_role_status),
-                log_btn_update
+                log_btn_update,
+                gr.update(value=""),  # Clear followup input
+                gr.update(visible=show_followup),  # Show/hide followup row
+                gr.update(interactive=show_followup)  # Enable/disable send button
             )
 
         try:
@@ -1194,9 +1231,20 @@ class ChadWebUI:
                 except Exception as exc:  # pragma: no cover - runtime safety
                     message_queue.put(('status', f"❌ Error: {str(exc)}"))
                     completion_reason[0] = str(exc)
-                finally:
+                    # Stop session on error
                     coding_provider_instance.stop_session()
                     self._active_coding_provider = None
+                    self._session_active = False
+                finally:
+                    # Keep session alive for follow-ups if provider supports multi-turn
+                    # and task succeeded
+                    if not coding_provider_instance.supports_multi_turn() or not task_success[0]:
+                        coding_provider_instance.stop_session()
+                        self._active_coding_provider = None
+                        self._session_active = False
+                    else:
+                        # Keep session alive for follow-ups
+                        self._session_active = True
                     relay_complete.set()
 
             relay_thread = threading.Thread(target=direct_loop, daemon=True)
@@ -1290,7 +1338,7 @@ class ChadWebUI:
                     elif msg_type == 'ai_switch':
                         current_ai = msg[1]
                         streaming_buffer = ""
-                        full_history.append((current_ai, "Investigating request\n"))
+                        full_history.append((current_ai, "Processing request\n"))
 
                     elif msg_type == 'stream':
                         chunk = msg[1]
@@ -1349,7 +1397,8 @@ class ChadWebUI:
                             "content": "**CODING AI**\n\n🛑 *Cancelled*"
                         }
                         break
-                yield make_yield(chat_history, "🛑 Task cancelled", "", summary="🛑 Task cancelled")
+                self._session_active = False
+                yield make_yield(chat_history, "🛑 Task cancelled", "", summary="🛑 Task cancelled", show_followup=False)
             else:
                 while True:
                     try:
@@ -1412,12 +1461,208 @@ class ChadWebUI:
                 final_status += f"\n\n*Session log: {session_log_path}*"
             final_summary = f"{status_prefix}{final_status}"
 
-            yield make_yield(chat_history, final_summary, "", summary=final_summary, interactive=True)
+            # Store session state for follow-up messages
+            self._current_chat_history = chat_history
+            self._current_project_path = project_path
+            self._current_coding_account = coding_account
+
+            # Show follow-up input if session can continue (Claude with successful task)
+            can_continue = self._session_active and task_success[0]
+            if can_continue:
+                final_status += "\n\n*Session active - you can send follow-up messages*"
+                final_summary = f"{status_prefix}{final_status}"
+
+            yield make_yield(
+                chat_history, final_summary, "", summary=final_summary,
+                interactive=True, show_followup=can_continue
+            )
 
         except Exception as e:  # pragma: no cover - defensive
             import traceback
             error_msg = f"❌ Error: {str(e)}\n\n```\n{traceback.format_exc()}\n```"
-            yield make_yield(chat_history, error_msg, summary=error_msg, interactive=True)
+            self._session_active = False
+            yield make_yield(chat_history, error_msg, summary=error_msg, interactive=True, show_followup=False)
+
+    def send_followup(  # noqa: C901
+        self,
+        followup_message: str,
+        current_history: list
+    ) -> Iterator[tuple[list, str, gr.update, gr.update, gr.update]]:
+        """Send a follow-up message to the active session.
+
+        Args:
+            followup_message: The follow-up message to send
+            current_history: Current chat history from the UI
+
+        Yields:
+            Tuples of (chat_history, live_stream, followup_input, followup_row, send_btn)
+        """
+        message_queue = queue.Queue()
+        self.cancel_requested = False
+
+        # Use stored history as base, but prefer current_history if it has more messages
+        chat_history = current_history if len(current_history) >= len(self._current_chat_history) else self._current_chat_history.copy()  # noqa: E501
+
+        def make_followup_yield(history, live_stream: str = "", show_followup: bool = True, working: bool = False):
+            """Format output for follow-up responses."""
+            return (
+                history,
+                live_stream,
+                gr.update(value="" if not working else followup_message),  # Clear input when not working
+                gr.update(visible=show_followup),  # Follow-up row visibility
+                gr.update(interactive=not working)  # Send button interactivity
+            )
+
+        if not followup_message or not followup_message.strip():
+            yield make_followup_yield(chat_history, "", show_followup=True)
+            return
+
+        if not self._session_active or not self._active_coding_provider:
+            chat_history.append({
+                "role": "user",
+                "content": f"**Follow-up**\n\n{followup_message}"
+            })
+            chat_history.append({
+                "role": "assistant",
+                "content": "**CODING AI**\n\n❌ *Session expired. Please start a new task.*"
+            })
+            self._session_active = False
+            yield make_followup_yield(chat_history, "", show_followup=False)
+            return
+
+        # Add user's follow-up message to history
+        chat_history.append({
+            "role": "user",
+            "content": f"**Follow-up**\n\n{followup_message}"
+        })
+
+        # Add placeholder for AI response
+        chat_history.append({
+            "role": "assistant",
+            "content": "**CODING AI**\n\n⏳ *Working...*"
+        })
+        pending_idx = len(chat_history) - 1
+
+        yield make_followup_yield(chat_history, "⏳ Processing follow-up...", working=True)
+
+        # Set up activity callback
+        def on_activity(activity_type: str, detail: str):
+            if activity_type == 'stream':
+                message_queue.put(('stream', detail))
+            elif activity_type == 'tool':
+                message_queue.put(('activity', f"● {detail}"))
+            elif activity_type == 'text' and detail:
+                message_queue.put(('activity', f"  ⎿ {detail[:80]}"))
+
+        coding_provider = self._active_coding_provider
+        coding_provider.set_activity_callback(on_activity)
+
+        # Send message and wait for response in background
+        relay_complete = threading.Event()
+        response_holder = [None]
+        error_holder = [None]
+
+        def relay_loop():
+            try:
+                coding_provider.send_message(followup_message)
+                response = coding_provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
+                response_holder[0] = response
+            except Exception as e:
+                error_holder[0] = str(e)
+            finally:
+                relay_complete.set()
+
+        relay_thread = threading.Thread(target=relay_loop, daemon=True)
+        relay_thread.start()
+
+        # Stream updates while waiting
+        import time as time_module
+        full_history = []
+        last_yield_time = 0.0
+        min_yield_interval = 0.05
+
+        def format_live_output(content: str) -> str:
+            if not content.strip():
+                return ""
+            html_content = ansi_to_html(content)
+            html_content = highlight_diffs(html_content)
+            header = '<div class="live-output-header">▶ CODING AI (Live Stream)</div>'
+            body = f'<div class="live-output-content">{html_content}</div>'
+            return f'{header}\\n{body}'
+
+        while not relay_complete.is_set() and not self.cancel_requested:
+            try:
+                msg = message_queue.get(timeout=0.02)
+                msg_type = msg[0]
+
+                if msg_type == 'stream':
+                    chunk = msg[1]
+                    if chunk.strip():
+                        full_history.append(chunk)
+                        now = time_module.time()
+                        if now - last_yield_time >= min_yield_interval:
+                            display_content = ''.join(full_history)
+                            if len(display_content) > 50000:
+                                display_content = display_content[-50000:]
+                            live_stream = format_live_output(display_content)
+                            yield make_followup_yield(chat_history, live_stream, working=True)
+                            last_yield_time = now
+
+                elif msg_type == 'activity':
+                    now = time_module.time()
+                    if now - last_yield_time >= min_yield_interval:
+                        display_content = ''.join(full_history)
+                        if display_content:
+                            content = display_content + f"\n\n{msg[1]}"
+                            live_stream = format_live_output(content)
+                        else:
+                            live_stream = f"**Live:** {msg[1]}"
+                        yield make_followup_yield(chat_history, live_stream, working=True)
+                        last_yield_time = now
+
+            except queue.Empty:
+                now = time_module.time()
+                if now - last_yield_time >= 0.3:
+                    display_content = ''.join(full_history)
+                    if display_content:
+                        live_stream = format_live_output(display_content)
+                        yield make_followup_yield(chat_history, live_stream, working=True)
+                        last_yield_time = now
+
+        relay_thread.join(timeout=1)
+
+        # Update chat history with final response
+        if error_holder[0]:
+            chat_history[pending_idx] = {
+                "role": "assistant",
+                "content": f"**CODING AI**\n\n❌ *Error: {error_holder[0]}*"
+            }
+            self._session_active = False
+            yield make_followup_yield(chat_history, "", show_followup=False)
+        elif response_holder[0]:
+            parsed = parse_codex_output(response_holder[0])
+            chat_history[pending_idx] = make_chat_message("CODING AI", parsed)
+
+            # Update stored history
+            self._current_chat_history = chat_history
+
+            # Update session log
+            if self.current_session_log_path:
+                streaming_transcript = ''.join(full_history) if full_history else None
+                self.session_logger.update_log(
+                    self.current_session_log_path,
+                    chat_history,
+                    streaming_transcript=streaming_transcript,
+                    status="continued"
+                )
+
+            yield make_followup_yield(chat_history, "", show_followup=True)
+        else:
+            chat_history[pending_idx] = {
+                "role": "assistant",
+                "content": "**CODING AI**\n\n❌ *No response received*"
+            }
+            yield make_followup_yield(chat_history, "", show_followup=True)
 
     def create_interface(self) -> gr.Blocks:
         """Create the Gradio interface."""
@@ -1513,6 +1758,25 @@ class ChadWebUI:
                                     elem_id="agent-chatbot",
                                     autoscroll=False
                                 )
+
+                                # Follow-up input (hidden initially, shown after task completion)
+                                with gr.Row(visible=False, elem_id="followup-row") as followup_row:
+                                    with gr.Column(scale=4):
+                                        gr.Markdown("**Continue the conversation:**", elem_classes=["followup-label"])
+                                        followup_input = gr.TextArea(
+                                            label="Follow-up Message",
+                                            placeholder="Ask for changes, clarifications, or additional work...",
+                                            lines=3,
+                                            elem_id="followup-input",
+                                            show_label=False
+                                        )
+                                    with gr.Column(scale=1, min_width=100):
+                                        send_followup_btn = gr.Button(
+                                            "Send",
+                                            variant="primary",
+                                            elem_id="send-followup-btn",
+                                            interactive=False
+                                        )
 
                     # Live activity stream
                     live_stream_box = gr.Markdown("", elem_id="live-stream-box", sanitize_html=False)
@@ -1734,12 +1998,19 @@ class ChadWebUI:
             start_btn.click(
                 self.start_chad_task,
                 inputs=[project_path, task_description, coding_agent_dropdown],
-                outputs=[chatbot, live_stream_box, task_status_header, project_path, task_description, start_btn, cancel_btn, role_status, session_log_btn]  # noqa: E501
+                outputs=[chatbot, live_stream_box, task_status_header, project_path, task_description, start_btn, cancel_btn, role_status, session_log_btn, followup_input, followup_row, send_followup_btn]  # noqa: E501
             )
 
             cancel_btn.click(
                 self.cancel_task,
                 outputs=[live_stream_box]
+            )
+
+            # Connect follow-up message handling
+            send_followup_btn.click(
+                self.send_followup,
+                inputs=[followup_input, chatbot],
+                outputs=[chatbot, live_stream_box, followup_input, followup_row, send_followup_btn]
             )
 
             # Update role status and start button when agent dropdowns change
