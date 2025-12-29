@@ -28,6 +28,18 @@ SHARED_BROWSERS_PATH = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".cache" / "ms-p
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", os.fspath(SHARED_BROWSERS_PATH))
 
 
+# Shared helper to keep screenshot naming consistent between the runner and the CLI script.
+def resolve_screenshot_output(base: Path, scheme: str, multi: bool = False) -> Path:
+    """Return the screenshot path for a given color scheme.
+
+    If multiple screenshots are being captured, suffix the stem with the scheme name
+    (e.g., screenshot_light.png) while keeping the provided path for the first scheme.
+    """
+    if not multi or scheme == "dark":
+        return base
+    return base.with_name(f"{base.stem}_{scheme}{base.suffix}")
+
+
 class PlaywrightUnavailable(RuntimeError):
     """Raised when Playwright or Chromium are missing."""
 
@@ -173,6 +185,7 @@ def open_playwright_page(
     tab: Optional[str] = None,
     headless: bool = True,
     viewport: Optional[Dict[str, int]] = None,
+    color_scheme: str | None = "dark",
     render_delay: float = 1.0,
 ) -> Iterator["Page"]:
     """Open a Playwright page for the given Chad server port."""
@@ -182,7 +195,7 @@ def open_playwright_page(
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
-        context = browser.new_context(viewport=viewport, color_scheme="dark")
+        context = browser.new_context(viewport=viewport, color_scheme=color_scheme)
         page = context.new_page()
         try:
             page.goto(f"http://127.0.0.1:{port}", wait_until="domcontentloaded", timeout=30000)
@@ -233,6 +246,9 @@ def run_screenshot_subprocess(
     if not python_exec.exists():
         python_exec = Path(sys.executable)
 
+    schemes = ["dark", "light"]
+    expected_paths = [resolve_screenshot_output(output_path, scheme, True) for scheme in schemes]
+
     cmd = [
         os.fspath(python_exec),
         os.fspath(PROJECT_ROOT / "scripts" / "screenshot_ui.py"),
@@ -263,9 +279,11 @@ def run_screenshot_subprocess(
         },
     )
 
+    all_exist = all(path.exists() for path in expected_paths)
     return {
-        "success": result.returncode == 0 and output_path.exists(),
-        "screenshot": os.fspath(output_path),
+        "success": result.returncode == 0 and all_exist,
+        "screenshot": os.fspath(expected_paths[0]),
+        "screenshots": [os.fspath(p) for p in expected_paths],
         "artifacts_dir": os.fspath(artifacts_dir),
         "stdout": result.stdout[-3000:],
         "stderr": result.stderr[-3000:],

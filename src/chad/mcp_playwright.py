@@ -154,12 +154,14 @@ def screenshot(
     )
 
     if result.get("success"):
+        screenshots = result.get("screenshots") or [result.get("screenshot")]
         return {
             "success": True,
             "tab": tab_name,
             "label": label or "(none)",
             "screenshot": result.get("screenshot"),
-            "message": f"Screenshot saved: {result.get('screenshot')}",
+            "screenshots": screenshots,
+            "message": f"Screenshots saved: {', '.join(screenshots)}",
         }
     return _failure(result.get("stderr") or result.get("stdout") or "Screenshot failed")
 

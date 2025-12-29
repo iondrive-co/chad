@@ -30,6 +30,28 @@ PROVIDER_PANEL_CSS = """
   --task-btn-border: #74c3f6;
   --task-btn-text: #0a2236;
   --task-btn-hover: #7bc9ff;
+  --cancel-btn-bg: #f74a4a;
+  --cancel-btn-border: #cf2f2f;
+  --cancel-btn-text: #ffffff;
+  --cancel-btn-hover: #ff6a6a;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --cancel-btn-bg: #e53935;
+    --cancel-btn-border: #c62828;
+    --cancel-btn-hover: #f25b55;
+    --cancel-btn-text: #ffffff;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --cancel-btn-bg: #ff5c5c;
+    --cancel-btn-border: #ff8686;
+    --cancel-btn-hover: #ff7c7c;
+    --cancel-btn-text: #ffffff;
+  }
 }
 
 body, .gradio-container, .gradio-container * {
@@ -61,13 +83,14 @@ body, .gradio-container, .gradio-container * {
 }
 
 #cancel-task-btn button {
-  background: var(--task-btn-bg) !important;
-  border: 1px solid var(--task-btn-border) !important;
-  color: var(--task-btn-text) !important;
+  background: var(--cancel-btn-bg) !important;
+  border: 1px solid var(--cancel-btn-border) !important;
+  color: var(--cancel-btn-text) !important;
+  -webkit-text-fill-color: var(--cancel-btn-text) !important;
   font-size: 0.85rem !important;
   min-height: 28px !important;
-  min-width: 40px !important;
-  padding: 4px 6px !important;
+  min-width: 110px !important;
+  padding: 6px 12px !important;
   line-height: 1.1 !important;
   width: auto !important;
   max-width: none !important;
@@ -75,19 +98,67 @@ body, .gradio-container, .gradio-container * {
   align-items: center !important;
   justify-content: center !important;
   gap: 6px !important;
+  opacity: 1 !important;
+}
+
+#cancel-task-btn:is(button) {
+  background: var(--cancel-btn-bg) !important;
+  border: 1px solid var(--cancel-btn-border) !important;
+  color: var(--cancel-btn-text) !important;
+  -webkit-text-fill-color: var(--cancel-btn-text) !important;
+  font-size: 0.85rem !important;
+  min-height: 28px !important;
+  min-width: 110px !important;
+  padding: 6px 12px !important;
+  line-height: 1.1 !important;
+  width: auto !important;
+  max-width: none !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  opacity: 1 !important;
 }
 
 #cancel-task-btn button span,
 #cancel-task-btn span {
+  color: inherit !important;
+  -webkit-text-fill-color: inherit !important;
+  opacity: 1 !important;
   padding: 0 !important;
   margin: 0 !important;
 }
 
+#cancel-task-btn button span *,
+#cancel-task-btn span * {
+  color: inherit !important;
+  -webkit-text-fill-color: inherit !important;
+  opacity: 1 !important;
+}
+
+#cancel-task-btn button:disabled,
+#cancel-task-btn button[disabled],
+#cancel-task-btn button[aria-disabled="true"],
+#cancel-task-btn button.disabled,
+#cancel-task-btn:disabled,
+#cancel-task-btn[disabled],
+#cancel-task-btn[aria-disabled="true"],
+#cancel-task-btn.disabled {
+  background: var(--cancel-btn-bg) !important;
+  border: 1px solid var(--cancel-btn-border) !important;
+  color: var(--cancel-btn-text) !important;
+  opacity: 1 !important;
+  filter: none !important;
+}
+
 #start-task-btn:hover,
-#start-task-btn button:hover,
+#start-task-btn button:hover {
+  background: var(--task-btn-hover) !important;
+}
+
 #cancel-task-btn:hover,
 #cancel-task-btn button:hover {
-  background: var(--task-btn-hover) !important;
+  background: var(--cancel-btn-hover) !important;
 }
 
 .provider-section-title {
