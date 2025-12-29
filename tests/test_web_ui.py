@@ -1,5 +1,6 @@
 """Tests for web UI module."""
 
+import re
 from unittest.mock import Mock, patch, MagicMock
 import pytest
 
@@ -240,6 +241,37 @@ class TestChadWebUI:
 
         assert '🛑' in result
         assert web_ui.cancel_requested is True
+
+
+class TestLiveStreamPresentation:
+    """Formatting and styling tests for the live activity stream."""
+
+    def test_live_stream_spacing_collapses_extra_blank_lines(self):
+        """Live stream should not render double blank gaps between entries."""
+        from chad import web_ui
+
+        raw = "first line\n\n\nsecond block\n\n\n\nthird"
+        normalized = web_ui.normalize_live_stream_spacing(raw)
+
+        assert normalized == "first line\n\nsecond block\n\nthird"
+        rendered = web_ui.build_live_stream_html(raw, "AI")
+
+        assert "first line\n\nsecond block\n\nthird" in rendered
+        assert "\n\n\n" not in rendered
+
+    def test_live_stream_inline_code_is_color_only(self):
+        """Inline code should be colored text without a background box."""
+        from chad import web_ui
+
+        code_css_match = re.search(
+            r"#live-stream-box\s+code[^}]*\{([^}]*)\}",
+            web_ui.PROVIDER_PANEL_CSS,
+        )
+        assert code_css_match, "Expected live stream code style block"
+
+        code_block = code_css_match.group(1)
+        assert "background: none" in code_block or "background: transparent" in code_block
+        assert "padding: 0" in code_block
 
 
 class TestChadWebUITaskExecution:

@@ -56,6 +56,11 @@ class ProviderUIManager:
 
     def get_provider_usage(self, account_name: str) -> str:
         """Get usage text for a single provider."""
+        # Check for screenshot mode - return synthetic data
+        if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
+            from .screenshot_fixtures import get_mock_usage
+            return get_mock_usage(account_name)
+
         accounts = self.security_mgr.list_accounts()
         provider = accounts.get(account_name)
 
@@ -273,6 +278,10 @@ class ProviderUIManager:
 
     def _get_codex_home(self, account_name: str) -> Path:
         """Get the isolated HOME directory for a Codex account."""
+        # Use temp home in screenshot mode
+        temp_home = os.environ.get("CHAD_TEMP_HOME")
+        if temp_home:
+            return Path(temp_home) / ".chad" / "codex-homes" / account_name
         return Path.home() / ".chad" / "codex-homes" / account_name
 
     def _get_claude_config_dir(self, account_name: str) -> Path:
@@ -281,6 +290,10 @@ class ProviderUIManager:
         Each Claude account gets its own config directory to support
         multiple Claude accounts with separate authentication.
         """
+        # Use temp home in screenshot mode
+        temp_home = os.environ.get("CHAD_TEMP_HOME")
+        if temp_home:
+            return Path(temp_home) / ".chad" / "claude-configs" / account_name
         return Path.home() / ".chad" / "claude-configs" / account_name
 
     def _get_codex_usage(self, account_name: str) -> str:

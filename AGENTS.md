@@ -104,6 +104,27 @@ List available MCP tools and their purposes.
 mcp__chad-ui-playwright__list_tools()
 ```
 
+## Screenshot Fixtures
+
+MCP screenshots automatically use synthetic data for realistic UI captures. The test environment
+includes:
+
+**Provider Accounts (8 total):**
+- `codex-work` (openai) - TEAM plan, o3 model, 15% session / 42% weekly usage
+- `codex-personal` (openai) - PLUS plan, o3-mini model, 67% session / 78% weekly usage
+- `codex-free` (openai) - FREE plan, gpt-4.1 model, 95% session usage
+- `claude-pro` (anthropic) - PRO plan, claude-sonnet-4, 23% session / 55% weekly
+- `claude-max` (anthropic) - MAX plan, claude-opus-4, 8% session + extra credits
+- `claude-team` (anthropic) - TEAM plan, 100% session (exhausted)
+- `gemini-advanced` (gemini) - gemini-2.5-pro with usage stats
+- `vibe-pro` (mistral) - codestral-25.01 with token/cost tracking
+
+**Pre-populated Content:**
+- Chat history with sample user request and AI response
+- Live view with colored output showing file reads, edits, test runs, and progress
+
+See `src/chad/screenshot_fixtures.py` for the full fixture definitions.
+
 ## Providers
 
 ### Anthropic (Claude Code)
