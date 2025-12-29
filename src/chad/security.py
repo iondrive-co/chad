@@ -554,3 +554,37 @@ class SecurityManager:
         """
         config = self.load_config()
         return config.get('preferences')
+
+    def set_verification_agent(self, account_name: str | None) -> None:
+        """Set the verification agent account.
+
+        The verification agent defaults to the coding agent's provider until
+        explicitly set. Once set, it persists even if the coding agent changes.
+
+        Args:
+            account_name: Account name to use for verification, or None to reset to default
+        """
+        config = self.load_config()
+        if account_name is None:
+            # Remove the setting to revert to default behavior
+            if 'verification_agent' in config:
+                del config['verification_agent']
+        else:
+            if not self.has_account(account_name):
+                raise ValueError(f"Account '{account_name}' does not exist")
+            config['verification_agent'] = account_name
+        self.save_config(config)
+
+    def get_verification_agent(self) -> str | None:
+        """Get the verification agent account.
+
+        Returns:
+            Account name for verification agent, or None if not explicitly set
+            (meaning it should default to the coding agent's provider)
+        """
+        config = self.load_config()
+        account = config.get('verification_agent')
+        # Verify the account still exists
+        if account and not self.has_account(account):
+            return None
+        return account

@@ -12,8 +12,9 @@ import gradio as gr
 from .provider_ui import ProviderUIManager
 from .security import SecurityManager
 from .session_logger import SessionLogger
-from .providers import ModelConfig, parse_codex_output
+from .providers import ModelConfig, parse_codex_output, create_provider
 from .model_catalog import ModelCatalog
+from .prompts import build_coding_prompt, get_verification_prompt, parse_verification_response, VerificationParseError
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\][^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")
 
@@ -1010,6 +1011,9 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
 class ChadWebUI:
     """Web interface for Chad using Gradio."""
 
+    # Constant for verification agent dropdown default
+    SAME_AS_CODING = "(Same as Coding Agent)"
+
     def __init__(self, security_mgr: SecurityManager, main_password: str):
         self.security_mgr = security_mgr
         self.main_password = main_password
@@ -1086,15 +1090,12 @@ class ChadWebUI:
     def _get_mistral_usage(self) -> str:
         return self.provider_ui._get_mistral_usage()
 
-    def _build_system_prompt(self, project_path: Path) -> str | None:
-        """Build a system prompt from project documentation.
+    def _read_project_docs(self, project_path: Path) -> str | None:
+        """Read project documentation if present.
 
-        Reads AGENTS.md, CLAUDE.md, or README.md from the project to give the agent
-        context about how to work on this project.
+        Reads AGENTS.md, .claude/CLAUDE.md, or CLAUDE.md from the project.
+        Returns the first file found, or None if no documentation exists.
         """
-        prompt_parts = []
-
-        # Check for various documentation files
         doc_files = [
             project_path / "AGENTS.md",
             project_path / ".claude" / "CLAUDE.md",
@@ -1108,23 +1109,101 @@ class ChadWebUI:
                     # Limit content to avoid overwhelming the context
                     if len(content) > 8000:
                         content = content[:8000] + "\n\n[...truncated...]"
-                    prompt_parts.append(f"# Project Instructions ({doc_file.name})\n\n{content}")
-                    break  # Use first found file
+                    return content
                 except (OSError, UnicodeDecodeError):
                     continue
 
-        # Add standard instructions for using project tools
-        prompt_parts.append("""
-# Working Instructions
+        return None
 
-1. Check if the project has MCP tools available (use list_mcp_tools if available)
-2. Run lint and tests before completing any task
-3. For simple changes, just make the fix and verify with tests
-4. For complex bugs, document your investigation process
-5. Always verify your changes work before completing
-""")
+    def _run_verification(
+        self,
+        project_path: str,
+        coding_output: str,
+        verification_account: str,
+        on_activity: callable = None,
+        timeout: float = 300.0
+    ) -> tuple[bool, str]:
+        """Run the verification agent to review the coding agent's work.
 
-        return "\n\n".join(prompt_parts) if prompt_parts else None
+        Args:
+            project_path: Path to the project directory
+            coding_output: The output from the coding agent
+            verification_account: Account name to use for verification
+            on_activity: Optional callback for activity updates
+            timeout: Timeout for verification (default 5 minutes)
+
+        Returns:
+            Tuple of (verified: bool, feedback: str)
+            - verified=True means the work passed verification
+            - verified=False means revisions are needed, feedback contains issues
+        """
+        accounts = self.security_mgr.list_accounts()
+        if verification_account not in accounts:
+            return True, "Verification skipped: account not found"
+
+        verification_provider = accounts[verification_account]
+        verification_model = self.security_mgr.get_account_model(verification_account)
+        verification_reasoning = self.security_mgr.get_account_reasoning(verification_account)
+
+        verification_config = ModelConfig(
+            provider=verification_provider,
+            model_name=verification_model,
+            account_name=verification_account,
+            reasoning_effort=None if verification_reasoning == 'default' else verification_reasoning
+        )
+
+        verification_prompt = get_verification_prompt(coding_output)
+
+        try:
+            verifier = create_provider(verification_config)
+            if on_activity:
+                verifier.set_activity_callback(on_activity)
+
+            if not verifier.start_session(project_path, None):
+                return True, "Verification skipped: failed to start session"
+
+            max_parse_attempts = 2
+            last_error = None
+
+            for attempt in range(max_parse_attempts):
+                verifier.send_message(verification_prompt)
+                response = verifier.get_response(timeout=timeout)
+
+                if not response:
+                    last_error = "No response from verification agent"
+                    continue
+
+                try:
+                    passed, summary, issues = parse_verification_response(response)
+
+                    verifier.stop_session()
+
+                    if passed:
+                        return True, summary
+                    else:
+                        feedback = summary
+                        if issues:
+                            feedback += "\n\nIssues:\n" + "\n".join(f"- {issue}" for issue in issues)
+                        return False, feedback
+
+                except VerificationParseError as e:
+                    last_error = str(e)
+                    if attempt < max_parse_attempts - 1:
+                        # Retry with a reminder to use JSON format
+                        verification_prompt = (
+                            "Your previous response was not valid JSON. "
+                            "You MUST respond with ONLY a JSON object like:\n"
+                            '```json\n{"passed": true, "summary": "explanation"}\n```\n\n'
+                            "Try again."
+                        )
+                    continue
+
+            verifier.stop_session()
+            # All attempts failed - return error
+            return None, f"Verification failed: {last_error}"
+
+        except Exception as e:
+            return None, f"Verification error: {str(e)}"
 
     def get_account_choices(self) -> list[str]:
         return self.provider_ui.get_account_choices()
@@ -1224,11 +1303,12 @@ class ChadWebUI:
         project_path: str,
         task_description: str,
         coding_agent: str,
+        verification_agent: str = "(Same as Coding Agent)",
     ) -> Iterator[tuple[
         list, str, gr.Markdown, gr.Textbox, gr.TextArea, gr.Button, gr.Button, gr.Markdown,
         gr.update, gr.Row, gr.Button
     ]]:
-        """Start Chad task and stream updates in single-agent mode."""
+        """Start Chad task and stream updates with optional verification."""
         chat_history = []
         message_queue = queue.Queue()
         self.cancel_requested = False
@@ -1355,15 +1435,14 @@ class ChadWebUI:
                 elif activity_type == 'text' and detail:
                     message_queue.put(('activity', f"  ⎿ {detail[:80]}"))
 
-            from .providers import create_provider
             coding_provider_instance = create_provider(coding_config)
             self._active_coding_provider = coding_provider_instance
             coding_provider_instance.set_activity_callback(on_activity)
 
-            # Build system prompt from project documentation
-            system_prompt = self._build_system_prompt(path_obj)
+            # Read project documentation (AGENTS.md, CLAUDE.md, etc.)
+            project_docs = self._read_project_docs(path_obj)
 
-            if not coding_provider_instance.start_session(str(path_obj), system_prompt):
+            if not coding_provider_instance.start_session(str(path_obj), None):
                 failure = f"{status_prefix}❌ Failed to start coding session"
                 yield make_yield([], failure, summary=failure, interactive=True)
                 return
@@ -1371,7 +1450,9 @@ class ChadWebUI:
             status_msg = f"{status_prefix}✓ Coding AI started\n\n⏳ Processing task..."
             yield make_yield([], status_msg, summary=status_msg, interactive=False)
 
-            coding_provider_instance.send_message(task_description)
+            # Build the complete prompt with project docs + workflow + task
+            full_prompt = build_coding_prompt(task_description, project_docs)
+            coding_provider_instance.send_message(full_prompt)
 
             relay_complete = threading.Event()
             task_success = [False]
@@ -1578,6 +1659,12 @@ class ChadWebUI:
                         break
 
             relay_thread.join(timeout=1)
+
+            # Determine the verification account to use
+            actual_verification_account = (
+                coding_account if verification_agent == self.SAME_AS_CODING else verification_agent
+            )
+
             if self.cancel_requested:
                 final_status = "🛑 Task cancelled by user"
                 chat_history.append({
@@ -1585,16 +1672,149 @@ class ChadWebUI:
                     "content": "───────────── 🛑 TASK CANCELLED ─────────────"
                 })
             elif task_success[0]:
-                final_status = "✓ Task completed!"
-                if completion_reason[0]:
-                    final_status += f"\n\n*{completion_reason[0]}*"
-                completion_msg = "───────────── ✅ TASK COMPLETED ─────────────"
-                if completion_reason[0]:
-                    completion_msg += f"\n\n*{completion_reason[0]}*"
-                chat_history.append({
-                    "role": "user",
-                    "content": completion_msg
-                })
+                # Get the last coding output for verification
+                last_coding_output = completion_reason[0] or ""
+                # Also get any accumulated text from the coding agent
+                if full_history:
+                    last_coding_output = ''.join(chunk for _, chunk in full_history[-50:])
+
+                # Run verification loop
+                max_verification_attempts = 3
+                verification_attempt = 0
+                verified = False
+                verification_feedback = ""
+
+                while not verified and verification_attempt < max_verification_attempts and not self.cancel_requested:
+                    verification_attempt += 1
+
+                    # Show verification status
+                    verify_status = (
+                        f"{status_prefix}🔍 Running verification "
+                        f"(attempt {verification_attempt}/{max_verification_attempts})..."
+                    )
+                    yield make_yield(chat_history, verify_status, "")
+
+                    # Add verification message to chat
+                    chat_history.append({
+                        "role": "user",
+                        "content": f"───────────── 🔍 VERIFICATION (Attempt {verification_attempt}) ─────────────"
+                    })
+
+                    # Run verification
+                    def verification_activity(activity_type: str, detail: str):
+                        content = detail if activity_type == 'stream' else f"[{activity_type}] {detail}\n"
+                        message_queue.put(('stream', content))
+
+                    verified, verification_feedback = self._run_verification(
+                        str(path_obj),
+                        last_coding_output,
+                        actual_verification_account,
+                        on_activity=verification_activity,
+                        timeout=300.0
+                    )
+
+                    # Add verification result to chat
+                    if verified is None:
+                        # Verification error - show error and stop
+                        chat_history.append({
+                            "role": "assistant",
+                            "content": f"**VERIFICATION AI**\n\n❌ {verification_feedback}"
+                        })
+                        chat_history.append({
+                            "role": "user",
+                            "content": "───────────── ❌ VERIFICATION ERROR ─────────────"
+                        })
+                        break
+                    elif verified:
+                        chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
+                        chat_history.append({
+                            "role": "user",
+                            "content": "───────────── ✅ VERIFICATION PASSED ─────────────"
+                        })
+                    else:
+                        chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
+
+                        # If not verified and session is still active, send feedback to coding agent
+                        can_revise = (
+                            self._session_active
+                            and coding_provider_instance.is_alive()
+                            and verification_attempt < max_verification_attempts
+                        )
+                        if can_revise:
+                            revision_content = (
+                                "───────────── 🔄 REVISION REQUESTED ─────────────\n\n"
+                                "*Sending verification feedback to coding agent...*"
+                            )
+                            chat_history.append({
+                                "role": "user",
+                                "content": revision_content
+                            })
+                            revision_status = f"{status_prefix}🔄 Sending revision request to coding agent..."
+                            yield make_yield(chat_history, revision_status, "")
+
+                            # Send feedback to coding agent via session continuation
+                            revision_request = (
+                                "The verification agent found issues with your work. "
+                                "Please address them:\n\n"
+                                f"{verification_feedback}\n\n"
+                                "Please fix these issues and confirm when done."
+                            )
+
+                            # Add placeholder for coding agent response
+                            chat_history.append({
+                                "role": "assistant",
+                                "content": "**CODING AI**\n\n⏳ *Working on revisions...*"
+                            })
+                            revision_pending_idx = len(chat_history) - 1
+                            yield make_yield(chat_history, f"{status_prefix}⏳ Coding agent working on revisions...", "")
+
+                            # Send the revision request
+                            coding_provider_instance.send_message(revision_request)
+                            revision_response = coding_provider_instance.get_response(timeout=coding_timeout)
+
+                            if revision_response:
+                                parsed_revision = parse_codex_output(revision_response)
+                                chat_history[revision_pending_idx] = make_chat_message("CODING AI", parsed_revision)
+                                last_coding_output = parsed_revision
+                            else:
+                                chat_history[revision_pending_idx] = {
+                                    "role": "assistant",
+                                    "content": "**CODING AI**\n\n❌ *No response to revision request*"
+                                }
+                                break
+
+                            yield make_yield(chat_history, f"{status_prefix}✓ Revision complete, re-verifying...", "")
+                        else:
+                            # Can't continue - session not active or max attempts reached
+                            break
+
+                    self.session_logger.update_log(session_log_path, chat_history)
+
+                if verified is True:
+                    final_status = "✓ Task completed and verified!"
+                    completion_msg = "───────────── ✅ TASK COMPLETED (VERIFIED) ─────────────"
+                    chat_history.append({
+                        "role": "user",
+                        "content": completion_msg
+                    })
+                elif verified is None:
+                    # Verification errored - already added error message above
+                    final_status = "❌ Task completed but verification errored"
+                else:
+                    final_status = (
+                        f"⚠️ Task completed but verification failed "
+                        f"after {verification_attempt} attempt(s)"
+                    )
+                    completion_msg = "───────────── ⚠️ TASK COMPLETED (UNVERIFIED) ─────────────"
+                    if verification_feedback:
+                        if len(verification_feedback) > 200:
+                            completion_msg += f"\n\n*{verification_feedback[:200]}...*"
+                        else:
+                            completion_msg += f"\n\n*{verification_feedback}*"
+                    chat_history.append({
+                        "role": "user",
+                        "content": completion_msg
+                    })
             else:
                 final_status = (
                     f"❌ Task did not complete successfully\n\n*{completion_reason[0]}*"
@@ -1852,6 +2072,13 @@ class ChadWebUI:
                     role_assignments = self.security_mgr.list_role_assignments()
                     initial_coding = role_assignments.get("CODING", "")
 
+                    # Verification agent dropdown choices: "(Same as Coding Agent)" + all accounts
+                    verification_choices = [self.SAME_AS_CODING] + account_choices
+                    stored_verification = self.security_mgr.get_verification_agent()
+                    initial_verification = (
+                        stored_verification if stored_verification in account_choices else self.SAME_AS_CODING
+                    )
+
                     with gr.Row(elem_id="run-top-row", equal_height=True):
                         with gr.Column(elem_id="run-top-main", scale=1):
                             with gr.Row(elem_id="run-top-inputs", equal_height=True):
@@ -1866,7 +2093,14 @@ class ChadWebUI:
                                     value=initial_coding if initial_coding in account_choices else None,
                                     label="Coding Agent",
                                     scale=1,
-                                    min_width=260
+                                    min_width=200
+                                )
+                                verification_agent_dropdown = gr.Dropdown(
+                                    choices=verification_choices,
+                                    value=initial_verification,
+                                    label="Verification Agent",
+                                    scale=1,
+                                    min_width=200
                                 )
                             with gr.Row(elem_id="role-status-row"):
                                 role_status = gr.Markdown(config_status, elem_id="role-config-status")
@@ -2057,11 +2291,11 @@ class ChadWebUI:
                     # Add role status and start button to outputs so they update when roles change
                     provider_outputs_with_task_status = provider_outputs + [role_status, start_btn]
 
-                    # Include task status and agent dropdown in add_provider outputs so Run Task tab updates
+                    # Include task status and agent dropdowns in add_provider outputs so Run Task tab updates
                     add_provider_outputs = (
                         provider_outputs +
                         [new_provider_name, add_btn, add_provider_accordion, role_status, start_btn,
-                         coding_agent_dropdown]
+                         coding_agent_dropdown, verification_agent_dropdown]
                     )
 
                     def refresh_with_task_status():
@@ -2086,11 +2320,13 @@ class ChadWebUI:
                         is_ready, config_msg = self.get_role_config_status()
                         # Get updated account choices for agent dropdowns
                         new_choices = list(self.security_mgr.list_accounts().keys())
+                        new_verification_choices = [self.SAME_AS_CODING] + new_choices
                         return (
                             *base,
                             config_msg,
                             gr.update(interactive=is_ready),
-                            gr.update(choices=new_choices)
+                            gr.update(choices=new_choices),
+                            gr.update(choices=new_verification_choices)
                         )
 
                     add_btn.click(
@@ -2118,20 +2354,24 @@ class ChadWebUI:
                                 # Skip if card has no account (empty slot)
                                 if not current_account:
                                     new_choices = list(self.security_mgr.list_accounts().keys())
+                                    new_verification_choices = [self.SAME_AS_CODING] + new_choices
                                     return (
                                         pending_delete,
                                         *self._provider_action_response(""),
-                                        gr.update(choices=new_choices)
+                                        gr.update(choices=new_choices),
+                                        gr.update(choices=new_verification_choices)
                                     )
 
                                 if pending_delete == current_account:
                                     # Second click - actually delete
                                     result = self.delete_provider(current_account, confirmed=True)
                                     new_choices = list(self.security_mgr.list_accounts().keys())
+                                    new_verification_choices = [self.SAME_AS_CODING] + new_choices
                                     return (
                                         None,
                                         *result,
-                                        gr.update(choices=new_choices)
+                                        gr.update(choices=new_choices),
+                                        gr.update(choices=new_verification_choices)
                                     )
                                 else:
                                     # First click - show confirmation button (tick icon)
@@ -2140,15 +2380,21 @@ class ChadWebUI:
                                         pending_delete=current_account
                                     )
                                     new_choices = list(self.security_mgr.list_accounts().keys())
+                                    new_verification_choices = [self.SAME_AS_CODING] + new_choices
                                     return (
                                         current_account,
                                         *result,
-                                        gr.update(choices=new_choices)
+                                        gr.update(choices=new_choices),
+                                        gr.update(choices=new_verification_choices)
                                     )
                             return handler
 
-                        # Outputs include pending_delete_state + provider outputs + agent dropdown
-                        delete_outputs = [pending_delete_state] + provider_outputs + [coding_agent_dropdown]
+                        # Outputs include pending_delete_state + provider outputs + agent dropdowns
+                        delete_outputs = (
+                            [pending_delete_state]
+                            + provider_outputs
+                            + [coding_agent_dropdown, verification_agent_dropdown]
+                        )
 
                         card["delete_btn"].click(
                             fn=make_delete_handler(),
@@ -2159,7 +2405,7 @@ class ChadWebUI:
             # Connect task execution (outside tabs)
             start_btn.click(
                 self.start_chad_task,
-                inputs=[project_path, task_description, coding_agent_dropdown],
+                inputs=[project_path, task_description, coding_agent_dropdown, verification_agent_dropdown],
                 outputs=[chatbot, live_stream_box, task_status_header, project_path, task_description, start_btn, cancel_btn, role_status, session_log_btn, followup_input, followup_row, send_followup_btn]  # noqa: E501
             )
 
@@ -2195,6 +2441,24 @@ class ChadWebUI:
                 update_agent_selection,
                 inputs=[coding_agent_dropdown],
                 outputs=[role_status, start_btn]
+            )
+
+            # Handle verification agent dropdown changes
+            def update_verification_selection(verification):
+                """Persist verification agent selection when changed."""
+                if verification == self.SAME_AS_CODING:
+                    # Reset to default (use coding agent)
+                    self.security_mgr.set_verification_agent(None)
+                else:
+                    # Persist the explicit selection
+                    try:
+                        self.security_mgr.set_verification_agent(verification)
+                    except ValueError:
+                        pass  # Account doesn't exist, ignore
+
+            verification_agent_dropdown.change(
+                update_verification_selection,
+                inputs=[verification_agent_dropdown]
             )
 
             return interface
