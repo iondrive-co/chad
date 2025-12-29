@@ -1,8 +1,7 @@
-"""Investigation report management for structured debugging workflows.
+"""Hypothesis tracking for debugging workflows.
 
-This module provides tools for agents to track their investigation process
-when debugging issues. Reports are stored as JSON files in /tmp/chad/investigations/
-and are automatically kept valid through schema enforcement.
+Agents record hypotheses with binary checks that would reject them.
+Checks must be completed and results filed. A report is generated at completion.
 """
 
 from __future__ import annotations
@@ -11,60 +10,42 @@ import json
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
-
-# Type aliases
-FindingSource = Literal["web_search", "unit_test", "tool_use", "code_review", "screenshot_analysis"]
-FindingVerdict = Literal["supports", "rejects", "inconclusive"]
-HypothesisStatus = Literal["active", "confirmed", "rejected"]
-FindingStatus = Literal["open", "resolved", "rejected_approach"]
+from typing import Any
 
 
-class InvestigationReport:
-    """Manages a structured investigation report with auto-persistence."""
+class HypothesisTracker:
+    """Tracks hypotheses with binary rejection checks."""
 
-    BASE_DIR = Path(tempfile.gettempdir()) / "chad" / "investigations"
+    BASE_DIR = Path(tempfile.gettempdir()) / "chad" / "hypotheses"
 
-    def __init__(self, investigation_id: str | None = None) -> None:
-        """Create a new report or load an existing one.
-
-        Args:
-            investigation_id: If provided, loads existing report. Otherwise creates new.
-        """
+    def __init__(self, tracker_id: str | None = None) -> None:
+        """Create a new tracker or load an existing one."""
         self.BASE_DIR.mkdir(parents=True, exist_ok=True)
 
-        if investigation_id:
-            self._id = investigation_id
-            self._file_path = self.BASE_DIR / f"{investigation_id}.json"
+        if tracker_id:
+            self._id = tracker_id
+            self._file_path = self.BASE_DIR / f"{tracker_id}.json"
             self._load()
         else:
-            # Include microseconds to avoid collisions in rapid succession
-            self._id = f"inv_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}"
+            self._id = f"hyp_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}"
             self._file_path = self.BASE_DIR / f"{self._id}.json"
-            self._data = self._empty_report()
+            self._data = self._empty_tracker()
             self._save()
 
-    def _empty_report(self) -> dict[str, Any]:
+    def _empty_tracker(self) -> dict[str, Any]:
         now = datetime.now(timezone.utc).isoformat()
         return {
             "id": self._id,
             "file_path": str(self._file_path),
             "created_at": now,
             "updated_at": now,
-            "request": {"description": "", "issue_id": ""},
-            "screenshots": {"before": None, "after": None},
             "hypotheses": [],
-            "findings": [],
-            "rejected_approaches": [],
-            "tests_designed": [],
-            "test_framework_gaps": [],
-            "fix": None,
-            "post_incident_analysis": None,
+            "screenshots": {"before": None, "after": None},
         }
 
     def _load(self) -> None:
         if not self._file_path.exists():
-            raise FileNotFoundError(f"Investigation {self._id} not found at {self._file_path}")
+            raise FileNotFoundError(f"Tracker {self._id} not found")
         with open(self._file_path) as f:
             self._data = json.load(f)
 
@@ -81,165 +62,170 @@ class InvestigationReport:
     def file_path(self) -> Path:
         return self._file_path
 
-    def set_request(self, description: str, issue_id: str = "") -> None:
-        """Set the original request/task description."""
-        self._data["request"] = {"description": description, "issue_id": issue_id}
-        self._save()
+    def add_hypothesis(self, description: str, checks: list[str]) -> int:
+        """Add a hypothesis with binary rejection checks.
 
-    def add_hypothesis(self, description: str) -> int:
-        """Add a theory about the cause. Returns the hypothesis ID."""
+        Args:
+            description: What you think is causing the issue
+            checks: List of binary checks that would REJECT this hypothesis if they fail
+
+        Returns:
+            hypothesis_id (1-indexed)
+        """
         hypothesis_id = len(self._data["hypotheses"]) + 1
         self._data["hypotheses"].append({
             "id": hypothesis_id,
             "description": description,
-            "status": "active",
+            "checks": [
+                {"description": check, "passed": None, "notes": None}
+                for check in checks
+            ],
+            "status": "pending",  # pending, confirmed, rejected
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
         self._save()
         return hypothesis_id
 
-    def update_hypothesis_status(self, hypothesis_id: int, status: HypothesisStatus) -> bool:
-        """Update a hypothesis status. Returns True if found."""
+    def update_hypothesis(self, hypothesis_id: int, description: str | None = None,
+                          add_checks: list[str] | None = None) -> bool:
+        """Update an existing hypothesis description or add more checks."""
         for h in self._data["hypotheses"]:
             if h["id"] == hypothesis_id:
-                h["status"] = status
+                if description:
+                    h["description"] = description
+                if add_checks:
+                    for check in add_checks:
+                        h["checks"].append({"description": check, "passed": None, "notes": None})
                 self._save()
                 return True
         return False
 
-    def add_finding(
-        self,
-        source: FindingSource,
-        content: str,
-        hypothesis_id: int | None = None,
-        verdict: FindingVerdict = "inconclusive",
-        notes: str = "",
-    ) -> int:
-        """Add a finding from investigation. Returns the finding ID."""
-        finding_id = len(self._data["findings"]) + 1
-        self._data["findings"].append({
-            "id": finding_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "source": source,
-            "content": content,
-            "hypothesis_id": hypothesis_id,
-            "verdict": verdict,
-            "status": "open",
-            "notes": notes,
-        })
-        self._save()
-        return finding_id
+    def file_check_result(self, hypothesis_id: int, check_index: int,
+                          passed: bool, notes: str = "") -> dict[str, Any]:
+        """File the result of a binary check.
 
-    def update_finding_status(self, finding_id: int, status: FindingStatus) -> bool:
-        """Update a finding's status. Returns True if found."""
-        for f in self._data["findings"]:
-            if f["id"] == finding_id:
-                f["status"] = status
-                self._save()
-                return True
-        return False
+        Args:
+            hypothesis_id: Which hypothesis (1-indexed)
+            check_index: Which check (0-indexed)
+            passed: True if the check passed (hypothesis survives), False if rejected
+            notes: Optional notes about the result
 
-    def mark_approach_rejected(
-        self, description: str, why_rejected: str, finding_ids: list[int]
-    ) -> None:
-        """Move a failed approach to rejected_approaches to reduce context pollution."""
-        self._data["rejected_approaches"].append({
-            "description": description,
-            "why_rejected": why_rejected,
-            "finding_ids": finding_ids,
-            "rejected_at": datetime.now(timezone.utc).isoformat(),
-        })
-        # Mark associated findings as rejected_approach
-        for f in self._data["findings"]:
-            if f["id"] in finding_ids:
-                f["status"] = "rejected_approach"
-        self._save()
+        Returns:
+            Status of the hypothesis after this check
+        """
+        for h in self._data["hypotheses"]:
+            if h["id"] == hypothesis_id:
+                if 0 <= check_index < len(h["checks"]):
+                    h["checks"][check_index]["passed"] = passed
+                    h["checks"][check_index]["notes"] = notes
 
-    def set_screenshots(self, before: str | None = None, after: str | None = None) -> None:
-        """Set before/after screenshot paths."""
-        if before is not None:
-            self._data["screenshots"]["before"] = before
-        if after is not None:
-            self._data["screenshots"]["after"] = after
-        self._save()
+                    # Update hypothesis status based on all checks
+                    all_complete = all(c["passed"] is not None for c in h["checks"])
+                    any_failed = any(c["passed"] is False for c in h["checks"])
 
-    def add_test_design(
-        self, name: str, file_path: str, purpose: str, framework_gap: str | None = None
-    ) -> None:
-        """Record a test that was designed during investigation."""
-        self._data["tests_designed"].append({
-            "name": name,
-            "file_path": file_path,
-            "purpose": purpose,
-        })
-        if framework_gap and framework_gap not in self._data["test_framework_gaps"]:
-            self._data["test_framework_gaps"].append(framework_gap)
-        self._save()
+                    if any_failed:
+                        h["status"] = "rejected"
+                    elif all_complete:
+                        h["status"] = "confirmed"
 
-    def record_fix(
-        self, description: str, files_modified: list[str], test_changes: list[str]
-    ) -> None:
-        """Record the fix that was implemented."""
-        self._data["fix"] = {
-            "description": description,
-            "files_modified": files_modified,
-            "test_changes": test_changes,
-            "recorded_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self._save()
+                    self._save()
+                    return {
+                        "hypothesis_id": hypothesis_id,
+                        "check_index": check_index,
+                        "hypothesis_status": h["status"],
+                        "checks_complete": sum(1 for c in h["checks"] if c["passed"] is not None),
+                        "checks_total": len(h["checks"]),
+                    }
+        return {"error": f"Hypothesis {hypothesis_id} or check {check_index} not found"}
 
-    def add_post_incident_analysis(self, analysis: str) -> None:
-        """Add the hypothetical failure analysis."""
-        self._data["post_incident_analysis"] = analysis
-        self._save()
+    def set_screenshot(self, label: str, path: str) -> None:
+        """Set a screenshot path (before or after)."""
+        if label in ("before", "after"):
+            self._data["screenshots"][label] = path
+            self._save()
 
-    def get_summary(self) -> dict[str, Any]:
-        """Get a compact summary for context refresh."""
-        active_hypotheses = [h for h in self._data["hypotheses"] if h["status"] == "active"]
-        open_findings = [f for f in self._data["findings"] if f["status"] == "open"]
-        confirmed_hypotheses = [h for h in self._data["hypotheses"] if h["status"] == "confirmed"]
+    def get_report(self) -> dict[str, Any]:
+        """Get the final report for the user."""
+        hypotheses_summary = []
+        for h in self._data["hypotheses"]:
+            checks_summary = []
+            for i, c in enumerate(h["checks"]):
+                status = "✓" if c["passed"] else ("✗" if c["passed"] is False else "?")
+                checks_summary.append(f"  [{status}] {c['description']}")
+                if c["notes"]:
+                    checks_summary.append(f"      → {c['notes']}")
+
+            status_icon = {"pending": "⏳", "confirmed": "✓", "rejected": "✗"}.get(h["status"], "?")
+            hypotheses_summary.append({
+                "id": h["id"],
+                "status": h["status"],
+                "status_icon": status_icon,
+                "description": h["description"],
+                "checks": checks_summary,
+            })
+
+        pending = [h for h in self._data["hypotheses"] if h["status"] == "pending"]
+        confirmed = [h for h in self._data["hypotheses"] if h["status"] == "confirmed"]
+        rejected = [h for h in self._data["hypotheses"] if h["status"] == "rejected"]
+
+        incomplete_checks = []
+        for h in self._data["hypotheses"]:
+            for i, c in enumerate(h["checks"]):
+                if c["passed"] is None:
+                    incomplete_checks.append(f"H{h['id']}.{i}: {c['description']}")
 
         return {
-            "investigation_id": self._id,
+            "tracker_id": self._id,
             "file_path": str(self._file_path),
-            "request": self._data["request"]["description"],
-            "issue_id": self._data["request"]["issue_id"],
             "screenshots": self._data["screenshots"],
-            "active_hypotheses": len(active_hypotheses),
-            "active_hypothesis_descriptions": [h["description"] for h in active_hypotheses],
-            "confirmed_hypotheses": [h["description"] for h in confirmed_hypotheses],
-            "open_findings": len(open_findings),
-            "total_findings": len(self._data["findings"]),
-            "rejected_approaches": len(self._data["rejected_approaches"]),
-            "tests_designed": len(self._data["tests_designed"]),
-            "has_fix": self._data["fix"] is not None,
-            "has_post_incident_analysis": self._data["post_incident_analysis"] is not None,
-            "is_complete": (
-                self._data["fix"] is not None
-                and self._data["post_incident_analysis"] is not None
-            ),
+            "summary": {
+                "total_hypotheses": len(self._data["hypotheses"]),
+                "pending": len(pending),
+                "confirmed": len(confirmed),
+                "rejected": len(rejected),
+            },
+            "confirmed_hypotheses": [h["description"] for h in confirmed],
+            "rejected_hypotheses": [h["description"] for h in rejected],
+            "incomplete_checks": incomplete_checks,
+            "all_checks_complete": len(incomplete_checks) == 0,
+            "hypotheses": hypotheses_summary,
         }
 
-    def get_full_report(self) -> dict[str, Any]:
-        """Get the complete report data."""
-        return self._data.copy()
+    def get_pending_checks(self) -> list[dict[str, Any]]:
+        """Get list of checks that still need results."""
+        pending = []
+        for h in self._data["hypotheses"]:
+            for i, c in enumerate(h["checks"]):
+                if c["passed"] is None:
+                    pending.append({
+                        "hypothesis_id": h["id"],
+                        "hypothesis": h["description"],
+                        "check_index": i,
+                        "check": c["description"],
+                    })
+        return pending
 
     @classmethod
-    def list_investigations(cls) -> list[dict[str, str]]:
-        """List all investigation reports."""
+    def list_trackers(cls) -> list[dict[str, str]]:
+        """List all hypothesis trackers."""
         cls.BASE_DIR.mkdir(parents=True, exist_ok=True)
-        investigations = []
-        for f in sorted(cls.BASE_DIR.glob("inv_*.json"), reverse=True):
+        trackers = []
+        for f in sorted(cls.BASE_DIR.glob("hyp_*.json"), reverse=True):
             try:
                 with open(f) as fp:
                     data = json.load(fp)
-                investigations.append({
+                confirmed = len([h for h in data["hypotheses"] if h["status"] == "confirmed"])
+                trackers.append({
                     "id": data["id"],
                     "file_path": str(f),
                     "created_at": data["created_at"],
-                    "request": data["request"]["description"][:100],
-                    "is_complete": data["fix"] is not None and data["post_incident_analysis"] is not None,
+                    "hypotheses": len(data["hypotheses"]),
+                    "confirmed": confirmed,
                 })
             except (json.JSONDecodeError, KeyError):
                 continue
-        return investigations
+        return trackers[:10]  # Last 10
+
+
+# Keep old class for backward compatibility during transition
+InvestigationReport = HypothesisTracker

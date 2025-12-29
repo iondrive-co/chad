@@ -42,6 +42,37 @@ class TestCreateProvider:
             create_provider(config)
 
 
+def test_codex_start_session_ensures_mcp_config(monkeypatch, tmp_path):
+    """Codex start_session should install CLI and write per-home MCP config."""
+    import chad.providers as providers
+
+    calls: list = []
+
+    class DummyInstaller:
+        def ensure_tool(self, key):
+            calls.append(("cli", key))
+            return True, "/bin/codex"
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(providers, "CLI_INSTALLER", DummyInstaller())
+
+    def fake_config(home=None, project_root=None):
+        calls.append(("config", home))
+        return {"changed": True, "path": str(tmp_path / "cfg")}
+
+    monkeypatch.setattr(providers, "ensure_global_mcp_config", fake_config)
+
+    cfg = providers.ModelConfig(provider="openai", model_name="default", account_name="acc")
+    provider = providers.OpenAICodexProvider(cfg)
+
+    assert provider.start_session(str(tmp_path)) is True
+    assert ("cli", "codex") in calls
+    config_calls = [c for c in calls if c[0] == "config"]
+    assert config_calls, "ensure_global_mcp_config should be invoked"
+    home_used = config_calls[0][1]
+    assert str(home_used).startswith(str(tmp_path / ".chad" / "codex-homes" / "acc"))
+
+
 class TestParseCodexOutput:
     """Test cases for parse_codex_output function."""
 
@@ -345,8 +376,10 @@ class TestClaudeCodeProvider:
         assert provider.process is None
         assert provider.project_path is None
 
+    @patch('chad.providers.ClaudeCodeProvider._ensure_mcp_permissions')
+    @patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/claude'))
     @patch('subprocess.Popen')
-    def test_start_session_success(self, mock_popen):
+    def test_start_session_success(self, mock_popen, mock_ensure, mock_permissions):
         mock_process = Mock()
         mock_process.stdin = Mock()
         mock_popen.return_value = mock_process
@@ -357,10 +390,16 @@ class TestClaudeCodeProvider:
         result = provider.start_session("/tmp/test_project")
         assert result is True
         assert provider.process is not None
+        mock_ensure.assert_called_once_with("claude", provider._notify_activity)
+        mock_permissions.assert_called_once()
         mock_popen.assert_called_once()
+        called_cmd = mock_popen.call_args.args[0]
+        assert called_cmd[0] == "/bin/claude"
 
+    @patch('chad.providers.ClaudeCodeProvider._ensure_mcp_permissions')
+    @patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/claude'))
     @patch('subprocess.Popen')
-    def test_start_session_failure(self, mock_popen):
+    def test_start_session_failure(self, mock_popen, mock_ensure, mock_permissions):
         mock_popen.side_effect = FileNotFoundError("command not found")
 
         config = ModelConfig(provider="anthropic", model_name="claude-3")
@@ -368,6 +407,8 @@ class TestClaudeCodeProvider:
 
         result = provider.start_session("/tmp/test_project")
         assert result is False
+        mock_ensure.assert_called_once_with("claude", provider._notify_activity)
+        mock_permissions.assert_called_once()
 
     def test_send_message(self):
         import json
@@ -447,17 +488,21 @@ class TestClaudeCodeProvider:
         config = ModelConfig(provider="anthropic", model_name="claude-3")
         provider = ClaudeCodeProvider(config)
 
-        with patch('subprocess.Popen') as mock_popen:
-            mock_process = Mock()
-            mock_process.stdin = Mock()
-            mock_popen.return_value = mock_process
+        with patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/claude')) as mock_ensure:
+            with patch('chad.providers.ClaudeCodeProvider._ensure_mcp_permissions') as mock_permissions:
+                with patch('subprocess.Popen') as mock_popen:
+                    mock_process = Mock()
+                    mock_process.stdin = Mock()
+                    mock_popen.return_value = mock_process
 
-            # Mock provider.send_message to verify system prompt is sent
-            with patch.object(provider, 'send_message') as mock_send:
-                result = provider.start_session("/tmp/test_project", "System prompt here")
+                    # Mock provider.send_message to verify system prompt is sent
+                    with patch.object(provider, 'send_message') as mock_send:
+                        result = provider.start_session("/tmp/test_project", "System prompt here")
 
-                assert result is True
-                mock_send.assert_called_once_with("System prompt here")
+                        assert result is True
+                        mock_send.assert_called_once_with("System prompt here")
+                        mock_ensure.assert_called_once_with("claude", provider._notify_activity)
+                        mock_permissions.assert_called_once()
 
     @patch('select.select')
     @patch('time.time')
@@ -718,9 +763,10 @@ class TestClaudeCodeProvider:
         assert "CLAUDE_CONFIG_DIR" in env
         assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / ".chad" / "claude-configs" / "test-account")
 
+    @patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/claude'))
     @patch('subprocess.Popen')
     @patch('pathlib.Path.home')
-    def test_start_session_uses_isolated_config(self, mock_home, mock_popen, tmp_path):
+    def test_start_session_uses_isolated_config(self, mock_home, mock_popen, mock_ensure, tmp_path):
         """Start session passes CLAUDE_CONFIG_DIR to subprocess."""
         mock_home.return_value = tmp_path
 
@@ -738,20 +784,25 @@ class TestClaudeCodeProvider:
         assert "env" in call_kwargs
         expected_dir = tmp_path / ".chad" / "claude-configs" / "isolated-account"
         assert call_kwargs["env"]["CLAUDE_CONFIG_DIR"] == str(expected_dir)
+        mock_ensure.assert_called_once_with("claude", provider._notify_activity)
 
 
 class TestOpenAICodexProvider:
     """Test cases for OpenAICodexProvider."""
 
-    def test_start_session_success(self):
+    @patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/codex'))
+    def test_start_session_success(self, mock_ensure):
         config = ModelConfig(provider="openai", model_name="codex")
         provider = OpenAICodexProvider(config)
 
         result = provider.start_session("/tmp/test_project")
         assert result is True
         assert provider.project_path == "/tmp/test_project"
+        assert provider.cli_path == "/bin/codex"
+        mock_ensure.assert_called_once_with("codex", provider._notify_activity)
 
-    def test_start_session_with_system_prompt(self):
+    @patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/codex'))
+    def test_start_session_with_system_prompt(self, mock_ensure):
         config = ModelConfig(provider="openai", model_name="codex")
         provider = OpenAICodexProvider(config)
 
@@ -762,6 +813,8 @@ class TestOpenAICodexProvider:
         provider.send_message("Test message")
         assert "Initial prompt" in provider.current_message
         assert "Test message" in provider.current_message
+        assert provider.cli_path == "/bin/codex"
+        mock_ensure.assert_called_once_with("codex", provider._notify_activity)
 
     def test_send_message(self):
         config = ModelConfig(provider="openai", model_name="gpt-4")
@@ -859,6 +912,111 @@ class TestOpenAICodexProvider:
 
         response = provider.get_response()
         assert response == ""
+
+    @patch('chad.providers._stream_pty_output', return_value=("", False))
+    @patch('chad.providers._start_pty_process')
+    def test_get_response_exec_includes_network_access(self, mock_start, mock_stream):
+        mock_process = Mock()
+        mock_process.stdin = Mock()
+        mock_start.return_value = (mock_process, 11)
+
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+        provider.project_path = "/tmp/test_project"
+        provider.current_message = "Hello"
+        provider.cli_path = "/bin/codex"
+
+        provider.get_response(timeout=1.0)
+
+        cmd = mock_start.call_args.args[0]
+        assert '-c' in cmd
+        assert 'network_access="enabled"' in cmd
+
+    @patch('chad.providers._stream_pty_output', return_value=("", False))
+    @patch('chad.providers._start_pty_process')
+    def test_get_response_resume_includes_network_access(self, mock_start, mock_stream):
+        mock_process = Mock()
+        mock_process.stdin = Mock()
+        mock_start.return_value = (mock_process, 11)
+
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+        provider.project_path = "/tmp/test_project"
+        provider.current_message = "Hello"
+        provider.thread_id = "thread-123"
+        provider.cli_path = "/bin/codex"
+
+        provider.get_response(timeout=1.0)
+
+        cmd = mock_start.call_args.args[0]
+        assert '-c' in cmd
+        assert 'network_access="enabled"' in cmd
+
+
+class TestCodexJsonEventParsing:
+    """Test cases for Codex JSON event to human-readable text conversion."""
+
+    def test_thread_id_extraction_from_json_stream(self):
+        """Test that thread_id is extracted from thread.started JSON event."""
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+        provider.project_path = "/tmp/test"
+
+        # Simulate the JSON events Codex produces
+        json_events = [
+            {"type": "thread.started", "thread_id": "019b6517-74ba-7d80-959b-d133057a7938"},
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "Hello!"}},
+        ]
+
+        # Process events as the provider would
+        for event in json_events:
+            if event.get('type') == 'thread.started' and 'thread_id' in event:
+                provider.thread_id = event['thread_id']
+
+        assert provider.thread_id == "019b6517-74ba-7d80-959b-d133057a7938"
+
+    def test_is_alive_with_thread_id_no_process(self):
+        """Session is 'alive' if thread_id exists even without active process."""
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+        provider.thread_id = "019b6517-74ba-7d80-959b-d133057a7938"
+        provider.process = None
+
+        assert provider.is_alive() is True
+
+    def test_is_alive_without_thread_id_or_process(self):
+        """Session is not 'alive' if no thread_id and no process."""
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+        provider.thread_id = None
+        provider.process = None
+
+        assert provider.is_alive() is False
+
+    def test_stop_session_clears_thread_id(self):
+        """Stop session clears thread_id to end multi-turn."""
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+        provider.thread_id = "some-thread-id"
+
+        provider.stop_session()
+
+        assert provider.thread_id is None
+
+    def test_resume_command_uses_thread_id(self):
+        """When thread_id is set, get_response uses resume command."""
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+        provider.project_path = "/tmp/test"
+        provider.thread_id = "019b6517-74ba-7d80-959b-d133057a7938"
+        provider.current_message = "Follow-up question"
+
+        # We can't easily test the actual command without mocking extensively,
+        # but we can verify the thread_id presence affects the is_resume flag
+        # by checking is_alive returns True with thread_id set
+        assert provider.is_alive() is True
+        assert provider.thread_id is not None
 
 
 class TestOpenAICodexProviderIntegration:

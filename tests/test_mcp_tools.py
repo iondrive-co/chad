@@ -1,14 +1,14 @@
-"""Unit tests for MCP tools - runs in CI without browser.
+"""Unit tests for simplified MCP tools.
 
-These tests verify the MCP tool infrastructure works correctly
-without requiring Playwright or a browser.
+Tests verify the 3 core MCP tools work correctly:
+1. verify() - lint + all tests
+2. screenshot() - capture UI
+3. hypothesis/check_result/report - hypothesis tracking
 """
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from chad.investigation_report import InvestigationReport
+from chad.investigation_report import HypothesisTracker
 
 
 class TestVisualTestMap:
@@ -41,7 +41,6 @@ class TestVisualTestMap:
             "src/chad/provider_ui.py",
             "src/chad/web_ui.py",
         ])
-        # Should combine tests from both files (deduplicated)
         assert "TestProvidersTab" in tests
         assert "TestUIElements" in tests
 
@@ -60,439 +59,320 @@ class TestVisualTestMap:
     def test_path_normalization_chad_prefix(self):
         from chad.visual_test_map import get_tests_for_file
 
-        tests = get_tests_for_file("chad/provider_ui.py")
+        tests = get_tests_for_file("chad/src/chad/provider_ui.py")
         assert "TestProvidersTab" in tests
 
 
 class TestMCPHelpers:
-    """Test MCP tool helper functions."""
-
-    def test_viewport_helper(self):
-        from chad.mcp_playwright import _viewport
-
-        vp = _viewport(1920, 1080)
-        assert vp == {"width": 1920, "height": 1080}
+    """Test MCP helper functions."""
 
     def test_failure_helper(self):
         from chad.mcp_playwright import _failure
-
-        result = _failure("Test error message")
+        result = _failure("Test error")
         assert result["success"] is False
-        assert result["error"] == "Test error message"
+        assert result["error"] == "Test error"
 
     def test_project_root(self):
         from chad.mcp_playwright import _project_root
-
         root = _project_root()
         assert root.exists()
         assert (root / "src" / "chad").exists()
 
 
-class TestMCPToolsWithMocks:
-    """Test MCP tools with mocked subprocess/playwright."""
+class TestListTools:
+    """Test the list_tools discovery function."""
 
-    @patch("chad.mcp_playwright.subprocess.run")
-    def test_run_ci_tests_success(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="All tests passed",
-            stderr="",
-        )
-
-        from chad.mcp_playwright import run_ci_tests
-
-        result = run_ci_tests(include_visual=False)
-
+    def test_list_tools_returns_all_tools(self):
+        from chad.mcp_playwright import list_tools
+        result = list_tools()
         assert result["success"] is True
-        assert result["include_visual"] is False
-        # Verify -m "not visual" was passed
-        call_args = mock_run.call_args[0][0]
-        assert "-m" in call_args
-        assert "not visual" in call_args
+        assert "verify" in result["tools"]
+        assert "screenshot" in result["tools"]
+        assert "hypothesis" in result["tools"]
+        assert "check_result" in result["tools"]
+        assert "report" in result["tools"]
 
-    @patch("chad.mcp_playwright.subprocess.run")
-    def test_run_ci_tests_failure(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=1,
-            stdout="FAILED test_something",
-            stderr="",
-        )
-
-        from chad.mcp_playwright import run_ci_tests
-
-        result = run_ci_tests(include_visual=False)
-
-        assert result["success"] is False
-        assert result["return_code"] == 1
-
-    @patch("chad.mcp_playwright.subprocess.run")
-    def test_run_ci_tests_with_visual(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="passed",
-            stderr="",
-        )
-
-        from chad.mcp_playwright import run_ci_tests
-
-        result = run_ci_tests(include_visual=True)
-
-        assert result["success"] is True
-        assert result["include_visual"] is True
-        # Verify -m "not visual" was NOT passed
-        call_args = mock_run.call_args[0][0]
-        assert "not visual" not in " ".join(call_args)
-
-    def test_run_tests_for_file_no_mappings(self):
-        from chad.mcp_playwright import run_tests_for_file
-
-        result = run_tests_for_file("src/chad/nonexistent.py")
-
-        assert result["success"] is True
-        assert "No visual tests mapped" in result["message"]
-        assert result["tests_run"] == []
-
-    @patch("chad.mcp_playwright.subprocess.run")
-    def test_run_tests_for_file_with_mappings(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="tests passed",
-            stderr="",
-        )
-
-        from chad.mcp_playwright import run_tests_for_file
-
-        result = run_tests_for_file("src/chad/provider_ui.py")
-
-        assert result["success"] is True
-        assert "TestProvidersTab" in result["tests_run"]
-        assert mock_run.called
-
-    @patch("chad.mcp_playwright.subprocess.run")
-    def test_run_tests_for_modified_files_no_changes(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="",  # No modified files
-            stderr="",
-        )
-
-        from chad.mcp_playwright import run_tests_for_modified_files
-
-        result = run_tests_for_modified_files()
-
-        assert result["success"] is True
-        assert result["modified_files"] == []
-
-    @patch("chad.mcp_playwright.subprocess.run")
-    def test_run_tests_for_modified_files_with_changes(self, mock_run):
-        # First call is git status, second is pytest
-        mock_run.side_effect = [
-            MagicMock(returncode=0, stdout=" M src/chad/provider_ui.py\n", stderr=""),
-            MagicMock(returncode=0, stdout="tests passed", stderr=""),
-        ]
-
-        from chad.mcp_playwright import run_tests_for_modified_files
-
-        result = run_tests_for_modified_files()
-
-        assert result["success"] is True
-        assert "src/chad/provider_ui.py" in result["modified_files"]
-        assert "TestProvidersTab" in result["tests_run"]
+    def test_list_tools_includes_workflow(self):
+        from chad.mcp_playwright import list_tools
+        result = list_tools()
+        assert "workflow" in result
+        assert len(result["workflow"]) > 0
 
 
-class TestListMappings:
-    """Test the list_visual_test_mappings tool."""
+class TestVerify:
+    """Test the unified verify() tool."""
 
-    def test_list_mappings_returns_dict(self):
-        from chad.mcp_playwright import list_visual_test_mappings
+    def test_verify_lint_success(self):
+        from chad.mcp_playwright import verify
 
-        result = list_visual_test_mappings()
+        with patch("subprocess.run") as mock_run:
+            # Mock lint success, test success
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="", stderr=""),  # lint
+                MagicMock(returncode=0, stdout="10 passed", stderr=""),  # tests
+            ]
+            result = verify()
+            assert result["success"] is True
+            assert "phases" in result
 
-        assert result["success"] is True
-        assert "mappings" in result
-        assert isinstance(result["mappings"], dict)
-        assert result["total_mappings"] > 0
+    def test_verify_lint_failure(self):
+        from chad.mcp_playwright import verify
 
-    def test_list_mappings_contains_expected_files(self):
-        from chad.mcp_playwright import list_visual_test_mappings
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=1,
+                stdout="src/file.py:1:1: E501 line too long",
+                stderr=""
+            )
+            result = verify()
+            assert result["success"] is False
+            assert result["failed_phase"] == "lint"
 
-        result = list_visual_test_mappings()
+    def test_verify_test_failure(self):
+        from chad.mcp_playwright import verify
 
-        mappings = result["mappings"]
-        assert "chad/provider_ui.py" in mappings
-        assert "chad/web_ui.py" in mappings
-
-
-class TestVerifyAllTestsPass:
-    """Test the verify_all_tests_pass tool."""
-
-    @patch("chad.mcp_playwright.subprocess.run")
-    @patch("chad.mcp_playwright.run_tests_for_modified_files")
-    def test_verify_all_pass(self, mock_visual, mock_run):
-        # Lint and unit tests pass
-        mock_run.side_effect = [
-            MagicMock(returncode=0, stdout="", stderr=""),  # lint
-            MagicMock(returncode=0, stdout="tests passed", stderr=""),  # unit tests
-        ]
-        # Visual tests pass
-        mock_visual.return_value = {"success": True, "tests_run": []}
-
-        from chad.mcp_playwright import verify_all_tests_pass
-
-        result = verify_all_tests_pass()
-
-        assert result["success"] is True
-        assert result["message"] == "All verification phases passed"
-
-    @patch("chad.mcp_playwright.subprocess.run")
-    def test_verify_lint_fails(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=1,
-            stdout="E501 line too long",
-            stderr="",
-        )
-
-        from chad.mcp_playwright import verify_all_tests_pass
-
-        result = verify_all_tests_pass()
-
-        assert result["success"] is False
-        assert result["failed_phase"] == "lint"
-
-    @patch("chad.mcp_playwright.subprocess.run")
-    def test_verify_unit_tests_fail(self, mock_run):
-        mock_run.side_effect = [
-            MagicMock(returncode=0, stdout="", stderr=""),  # lint passes
-            MagicMock(returncode=1, stdout="FAILED", stderr=""),  # unit tests fail
-        ]
-
-        from chad.mcp_playwright import verify_all_tests_pass
-
-        result = verify_all_tests_pass()
-
-        assert result["success"] is False
-        assert result["failed_phase"] == "unit_tests"
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="", stderr=""),  # lint passes
+                MagicMock(returncode=1, stdout="5 passed, 2 failed", stderr=""),  # tests fail
+            ]
+            result = verify()
+            assert result["success"] is False
+            assert result["failed_phase"] == "tests"
 
 
-@pytest.fixture
-def temp_investigations(tmp_path, monkeypatch):
-    """Set up temp investigations directory for MCP tools."""
-    inv_dir = tmp_path / "investigations"
-    inv_dir.mkdir()
-    monkeypatch.setattr(InvestigationReport, "BASE_DIR", inv_dir)
-    return inv_dir
+class TestScreenshot:
+    """Test the screenshot() tool."""
+
+    def test_screenshot_run_tab(self):
+        from chad.mcp_playwright import screenshot
+
+        with patch("chad.mcp_playwright.run_screenshot_subprocess") as mock:
+            mock.return_value = {
+                "success": True,
+                "screenshot": "/tmp/run.png",
+            }
+            result = screenshot(tab="run", label="test")
+            assert result["success"] is True
+            assert result["tab"] == "run"
+            mock.assert_called_once()
+
+    def test_screenshot_providers_tab(self):
+        from chad.mcp_playwright import screenshot
+
+        with patch("chad.mcp_playwright.run_screenshot_subprocess") as mock:
+            mock.return_value = {
+                "success": True,
+                "screenshot": "/tmp/providers.png",
+            }
+            result = screenshot(tab="providers", label="before")
+            assert result["success"] is True
+            assert result["tab"] == "providers"
+
+    def test_screenshot_failure(self):
+        from chad.mcp_playwright import screenshot
+
+        with patch("chad.mcp_playwright.run_screenshot_subprocess") as mock:
+            mock.return_value = {
+                "success": False,
+                "stderr": "Browser failed to start",
+            }
+            result = screenshot()
+            assert result["success"] is False
+            assert "Browser failed" in result["error"]
 
 
-class TestInvestigationMCPTools:
-    """Test the investigation tracking MCP tools."""
+class TestHypothesisMCPTools:
+    """Test the hypothesis tracking MCP tools."""
 
-    def test_create_investigation(self, temp_investigations):
-        from chad.mcp_playwright import create_investigation
+    def test_hypothesis_creates_tracker(self, tmp_path, monkeypatch):
+        from chad.mcp_playwright import hypothesis
+        import chad.mcp_playwright as mcp_module
 
-        result = create_investigation(request="Fix the gap issue", issue_id="GAP-123")
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
+        mcp_module._current_tracker = None  # Reset global
 
-        assert result["success"] is True
-        assert "investigation_id" in result
-        assert result["investigation_id"].startswith("inv_")
-        assert "next_steps" in result
-
-    def test_add_hypothesis(self, temp_investigations):
-        from chad.mcp_playwright import add_hypothesis, create_investigation
-
-        inv = create_investigation(request="Test")
-        result = add_hypothesis(
-            investigation_id=inv["investigation_id"],
-            description="CSS flex issue",
+        result = hypothesis(
+            description="CSS is not being applied",
+            checks="Element has class,Stylesheet loaded"
         )
 
         assert result["success"] is True
+        assert "tracker_id" in result
         assert result["hypothesis_id"] == 1
-        assert result["active_hypotheses"] == 1
+        assert len(result["checks_to_verify"]) == 2
 
-    def test_add_finding(self, temp_investigations):
-        from chad.mcp_playwright import add_finding, create_investigation
+    def test_hypothesis_with_existing_tracker(self, tmp_path, monkeypatch):
+        from chad.mcp_playwright import hypothesis
+        import chad.mcp_playwright as mcp_module
 
-        inv = create_investigation(request="Test")
-        result = add_finding(
-            investigation_id=inv["investigation_id"],
-            source="unit_test",
-            content="Test passed but gap is 48px",
-            verdict="supports",
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
+        mcp_module._current_tracker = None
+
+        # Create first hypothesis
+        result1 = hypothesis(description="First theory", checks="Check A")
+        tracker_id = result1["tracker_id"]
+
+        # Add second hypothesis to same tracker
+        result2 = hypothesis(
+            description="Second theory",
+            checks="Check B",
+            tracker_id=tracker_id
         )
 
-        assert result["success"] is True
-        assert result["finding_id"] == 1
-        assert result["total_findings"] == 1
+        assert result2["success"] is True
+        assert result2["hypothesis_id"] == 2
 
-    def test_add_finding_with_hypothesis(self, temp_investigations):
-        from chad.mcp_playwright import add_finding, add_hypothesis, create_investigation
+    def test_hypothesis_requires_checks(self, tmp_path, monkeypatch):
+        from chad.mcp_playwright import hypothesis
+        import chad.mcp_playwright as mcp_module
 
-        inv = create_investigation(request="Test")
-        hyp = add_hypothesis(investigation_id=inv["investigation_id"], description="CSS issue")
-        result = add_finding(
-            investigation_id=inv["investigation_id"],
-            source="code_review",
-            content="Found the bug",
-            hypothesis_id=hyp["hypothesis_id"],
-            verdict="supports",
-        )
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
+        mcp_module._current_tracker = None
 
-        assert result["success"] is True
-        assert result["active_hypotheses"] == 1
+        result = hypothesis(description="No checks", checks="")
+        assert result["success"] is False
+        assert "At least one check" in result["error"]
 
-    def test_update_finding_status(self, temp_investigations):
-        from chad.mcp_playwright import add_finding, create_investigation, update_finding_status
 
-        inv = create_investigation(request="Test")
-        add_finding(investigation_id=inv["investigation_id"], source="tool_use", content="test")
+class TestCheckResult:
+    """Test the check_result() tool."""
 
-        result = update_finding_status(
-            investigation_id=inv["investigation_id"],
-            finding_id=1,
-            status="resolved",
-        )
+    def test_check_result_pass(self, tmp_path, monkeypatch):
+        from chad.mcp_playwright import hypothesis, check_result
+        import chad.mcp_playwright as mcp_module
 
-        assert result["success"] is True
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
+        mcp_module._current_tracker = None
 
-    def test_update_hypothesis_status(self, temp_investigations):
-        from chad.mcp_playwright import add_hypothesis, create_investigation, update_hypothesis_status
+        hyp_result = hypothesis(description="Theory", checks="Check A,Check B")
+        tracker_id = hyp_result["tracker_id"]
 
-        inv = create_investigation(request="Test")
-        add_hypothesis(investigation_id=inv["investigation_id"], description="Theory")
-
-        result = update_hypothesis_status(
-            investigation_id=inv["investigation_id"],
+        result = check_result(
+            tracker_id=tracker_id,
             hypothesis_id=1,
-            status="confirmed",
+            check_index=0,
+            passed=True,
+            notes="Verified OK"
         )
 
         assert result["success"] is True
+        assert result["passed"] is True
+        assert result["hypothesis_status"] == "pending"  # Still pending, one check left
 
-    def test_mark_approach_rejected(self, temp_investigations):
-        from chad.mcp_playwright import add_finding, create_investigation, mark_approach_rejected
+    def test_check_result_fail_rejects(self, tmp_path, monkeypatch):
+        from chad.mcp_playwright import hypothesis, check_result
+        import chad.mcp_playwright as mcp_module
 
-        inv = create_investigation(request="Test")
-        add_finding(investigation_id=inv["investigation_id"], source="tool_use", content="Try 1")
-        add_finding(investigation_id=inv["investigation_id"], source="tool_use", content="Try 2")
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
+        mcp_module._current_tracker = None
 
-        result = mark_approach_rejected(
-            investigation_id=inv["investigation_id"],
-            description="Tried margin: 0",
-            why_rejected="Didn't work",
-            finding_ids="1,2",
+        hyp_result = hypothesis(description="Bad theory", checks="Will fail")
+        tracker_id = hyp_result["tracker_id"]
+
+        result = check_result(
+            tracker_id=tracker_id,
+            hypothesis_id=1,
+            check_index=0,
+            passed=False,
+            notes="Check failed"
         )
 
         assert result["success"] is True
-        assert result["rejected_approaches"] == 1
+        assert result["hypothesis_status"] == "rejected"
 
-    def test_set_screenshots(self, temp_investigations):
-        from chad.mcp_playwright import create_investigation, set_screenshots
+    def test_check_result_all_pass_confirms(self, tmp_path, monkeypatch):
+        from chad.mcp_playwright import hypothesis, check_result
+        import chad.mcp_playwright as mcp_module
 
-        inv = create_investigation(request="Test")
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
+        mcp_module._current_tracker = None
 
-        result = set_screenshots(
-            investigation_id=inv["investigation_id"],
-            before="/tmp/before.png",
-            after="/tmp/after.png",
+        hyp_result = hypothesis(description="Good theory", checks="Check A,Check B")
+        tracker_id = hyp_result["tracker_id"]
+
+        check_result(tracker_id, 1, 0, passed=True)
+        result = check_result(tracker_id, 1, 1, passed=True)
+
+        assert result["hypothesis_status"] == "confirmed"
+
+    def test_check_result_invalid_tracker(self, tmp_path, monkeypatch):
+        from chad.mcp_playwright import check_result
+
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
+
+        result = check_result(
+            tracker_id="nonexistent",
+            hypothesis_id=1,
+            check_index=0,
+            passed=True
+        )
+
+        assert result["success"] is False
+        assert "not found" in result["error"]
+
+
+class TestReport:
+    """Test the report() tool."""
+
+    def test_report_empty_tracker(self, tmp_path, monkeypatch):
+        from chad.mcp_playwright import hypothesis, report
+        import chad.mcp_playwright as mcp_module
+
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
+        mcp_module._current_tracker = None
+
+        # Create tracker with no hypotheses
+        hyp_result = hypothesis(description="Theory", checks="Check")
+        tracker_id = hyp_result["tracker_id"]
+
+        result = report(tracker_id)
+
+        assert result["success"] is True
+        assert result["summary"]["total_hypotheses"] == 1
+
+    def test_report_with_screenshots(self, tmp_path, monkeypatch):
+        from chad.mcp_playwright import hypothesis, check_result, report
+        import chad.mcp_playwright as mcp_module
+
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
+        mcp_module._current_tracker = None
+
+        hyp_result = hypothesis(description="UI bug", checks="Visual check")
+        tracker_id = hyp_result["tracker_id"]
+        check_result(tracker_id, 1, 0, passed=True)
+
+        result = report(
+            tracker_id,
+            screenshot_before="/tmp/before.png",
+            screenshot_after="/tmp/after.png"
         )
 
         assert result["success"] is True
         assert result["screenshots"]["before"] == "/tmp/before.png"
         assert result["screenshots"]["after"] == "/tmp/after.png"
 
-    def test_add_test_design(self, temp_investigations):
-        from chad.mcp_playwright import add_test_design, create_investigation
+    def test_report_shows_incomplete_checks(self, tmp_path, monkeypatch):
+        from chad.mcp_playwright import hypothesis, report
+        import chad.mcp_playwright as mcp_module
 
-        inv = create_investigation(request="Test")
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
+        mcp_module._current_tracker = None
 
-        result = add_test_design(
-            investigation_id=inv["investigation_id"],
-            name="test_gap",
-            file_path="tests/test_ui.py",
-            purpose="Verify gap is correct",
-            framework_gap="No gap measurement existed",
-        )
+        hyp_result = hypothesis(description="Theory", checks="Unfiled check")
+        tracker_id = hyp_result["tracker_id"]
 
-        assert result["success"] is True
-        assert result["tests_designed"] == 1
+        result = report(tracker_id)
 
-    def test_record_fix(self, temp_investigations):
-        from chad.mcp_playwright import create_investigation, record_fix
+        assert result["all_checks_complete"] is False
+        assert len(result["incomplete_checks"]) == 1
 
-        inv = create_investigation(request="Test")
+    def test_report_invalid_tracker(self, tmp_path, monkeypatch):
+        from chad.mcp_playwright import report
 
-        result = record_fix(
-            investigation_id=inv["investigation_id"],
-            description="Fixed the gap by adding flex-shrink",
-            files_modified="provider_ui.py",
-            test_changes="Added test_gap",
-        )
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
 
-        assert result["success"] is True
-        assert "next_step" in result
-
-    def test_add_post_incident_analysis(self, temp_investigations):
-        from chad.mcp_playwright import (
-            add_post_incident_analysis,
-            create_investigation,
-            record_fix,
-        )
-
-        inv = create_investigation(request="Test")
-        record_fix(
-            investigation_id=inv["investigation_id"],
-            description="Fix",
-            files_modified="file.py",
-        )
-
-        result = add_post_incident_analysis(
-            investigation_id=inv["investigation_id"],
-            analysis="If this fails, try checking Gradio version",
-        )
-
-        assert result["success"] is True
-        assert result["investigation_complete"] is True
-
-    def test_get_investigation_summary(self, temp_investigations):
-        from chad.mcp_playwright import create_investigation, get_investigation_summary
-
-        inv = create_investigation(request="Test request")
-
-        result = get_investigation_summary(investigation_id=inv["investigation_id"])
-
-        assert result["success"] is True
-        assert result["request"] == "Test request"
-        assert result["is_complete"] is False
-
-    def test_get_investigation_full(self, temp_investigations):
-        from chad.mcp_playwright import create_investigation, get_investigation_full
-
-        inv = create_investigation(request="Full test")
-
-        result = get_investigation_full(investigation_id=inv["investigation_id"])
-
-        assert result["success"] is True
-        assert "report" in result
-        assert result["report"]["request"]["description"] == "Full test"
-
-    def test_list_investigations(self, temp_investigations):
-        from chad.mcp_playwright import create_investigation, list_investigations
-
-        create_investigation(request="First")
-        create_investigation(request="Second")
-
-        result = list_investigations()
-
-        assert result["success"] is True
-        assert result["count"] == 2
-
-    def test_investigation_not_found(self, temp_investigations):
-        from chad.mcp_playwright import add_hypothesis
-
-        result = add_hypothesis(
-            investigation_id="inv_nonexistent",
-            description="Test",
-        )
+        result = report("nonexistent")
 
         assert result["success"] is False
         assert "not found" in result["error"]

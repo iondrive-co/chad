@@ -44,23 +44,15 @@ class SessionLogger:
         project_path: str,
         coding_account: str,
         coding_provider: str,
-        management_account: str,
-        management_provider: str,
-        managed_mode: bool = False,
     ) -> None:
         """Initialize a pre-created log file with task details."""
         session_data = {
             "timestamp": datetime.now().isoformat(),
             "task_description": task_description,
             "project_path": project_path,
-            "managed_mode": managed_mode,
             "coding": {
                 "account": coding_account,
                 "provider": coding_provider,
-            },
-            "management": {
-                "account": management_account,
-                "provider": management_provider,
             },
             "status": "running",
             "success": None,
@@ -78,9 +70,6 @@ class SessionLogger:
         project_path: str,
         coding_account: str,
         coding_provider: str,
-        management_account: str,
-        management_provider: str,
-        managed_mode: bool = False,
     ) -> Path:
         """Create a new session log and return its path."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -91,14 +80,9 @@ class SessionLogger:
             "timestamp": datetime.now().isoformat(),
             "task_description": task_description,
             "project_path": project_path,
-            "managed_mode": managed_mode,
             "coding": {
                 "account": coding_account,
                 "provider": coding_provider,
-            },
-            "management": {
-                "account": management_account,
-                "provider": management_provider,
             },
             "status": "running",
             "success": None,

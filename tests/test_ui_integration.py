@@ -177,6 +177,120 @@ class TestReadyStatus:
         assert "Ready" in text or "Missing" in text
 
 
+class TestCodingAgentLayout:
+    """Ensure the coding agent selector sits inside the top controls bar."""
+
+    def test_status_row_spans_top_bar(self, page: Page):
+        """Status row should span nearly the full top bar (minus cancel button)."""
+        top_row = page.locator("#run-top-row")
+        inputs_row = page.locator("#run-top-inputs")
+        status_row = page.locator("#role-status-row")
+        cancel_btn = page.locator("#cancel-task-btn")
+        expect(top_row).to_be_visible()
+
+        project_path = top_row.get_by_label("Project Path")
+        coding_agent = top_row.get_by_label("Coding Agent")
+        expect(inputs_row).to_be_visible()
+        expect(status_row).to_be_visible()
+
+        expect(project_path).to_be_visible()
+        expect(coding_agent).to_be_visible()
+
+        inputs_box = inputs_row.bounding_box()
+        status_box = status_row.bounding_box()
+        row_box = top_row.bounding_box()
+        cancel_box = cancel_btn.bounding_box()
+
+        assert inputs_box and status_box and row_box and cancel_box, "Missing bounding box data for layout assertions"
+
+        # Inputs should sit above the status row in the combined header area
+        assert inputs_box["y"] + inputs_box["height"] <= status_box["y"] + 6, (
+            "Status row should appear below the project path / coding agent inputs"
+        )
+
+        available_width = row_box["width"] - cancel_box["width"] - 16
+
+        assert status_box["width"] >= available_width * 0.8, (
+            f"Status row should use most of the top bar width (got {status_box['width']}, "
+            f"expected >= {available_width * 0.8})"
+        )
+
+        # Ensure the status row starts near the left edge of the main content
+        assert status_box["x"] <= row_box["x"] + 40, (
+            "Status row should align with the main header content, not just the right column"
+        )
+
+    def test_cancel_button_visible_light_and_dark(self, page: Page):
+        """Cancel button should stay visible in both color schemes and be a bit wider on large layouts."""
+        measurements = {}
+        for scheme in ("light", "dark"):
+            page.emulate_media(color_scheme=scheme)
+            measurements[scheme] = page.evaluate(
+                """
+() => {
+  const button = document.querySelector('#cancel-task-btn button') || document.querySelector('#cancel-task-btn');
+  if (!button) return null;
+  const styles = window.getComputedStyle(button);
+  const bodyStyles = window.getComputedStyle(document.body);
+  const rect = button.getBoundingClientRect();
+  const toNumber = (value) => {
+    if (!value) return NaN;
+    const match = /([\\d.]+)/.exec(String(value));
+    return match ? parseFloat(match[1]) : NaN;
+  };
+  const parseColor = (color) => {
+    const match = /rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)(?:,\\s*([\\d.]+))?\\)/i.exec(color);
+    if (!match) return { r: 0, g: 0, b: 0, a: 1 };
+    const [r, g, b] = match.slice(1, 4).map(Number);
+    const a = match[4] === undefined ? 1 : parseFloat(match[4]);
+    return { r, g, b, a };
+  };
+  const brightness = (color) => {
+    const { r, g, b } = parseColor(color);
+    return 0.299 * r + 0.587 * g + 0.114 * b;
+  };
+  const bgColor = parseColor(styles.backgroundColor);
+  const bodyColor = parseColor(bodyStyles.backgroundColor || "rgb(255,255,255)");
+  const effectiveBg = bgColor.a < 0.1 ? bodyColor : bgColor;
+  const textColor = parseColor(styles.color);
+  const effectiveTextAlpha = textColor.a * (parseFloat(styles.opacity) || 1);
+  const bgBrightness = brightness(`rgb(${effectiveBg.r}, ${effectiveBg.g}, ${effectiveBg.b})`);
+  const bodyBrightness = brightness(`rgb(${bodyColor.r}, ${bodyColor.g}, ${bodyColor.b})`);
+  const textBrightness = brightness(`rgb(${textColor.r}, ${textColor.g}, ${textColor.b})`);
+  return {
+    paddingLeft: toNumber(styles.paddingLeft),
+    paddingRight: toNumber(styles.paddingRight),
+    minWidth: toNumber(styles.minWidth),
+    height: rect.height,
+    bgBrightness,
+    bodyBrightness,
+    textBrightness,
+    effectiveTextAlpha,
+    bgAlpha: bgColor.a,
+  };
+}
+"""
+            )
+
+        for metrics in measurements.values():
+            assert metrics is not None, "Cancel button should be present"
+            assert metrics["minWidth"] >= 90, (
+                f"Cancel button should be wider for visibility, got {metrics['minWidth']}px"
+            )
+            assert metrics["minWidth"] <= 160, f"Cancel button should still be compact, got {metrics['minWidth']}px"
+            assert metrics["paddingLeft"] <= 12 and metrics["paddingRight"] <= 12, (
+                f"Expected compact horizontal padding on cancel button, got "
+                f"{metrics['paddingLeft']}px/{metrics['paddingRight']}px"
+            )
+            assert metrics["effectiveTextAlpha"] >= 0.85, "Cancel button text should be opaque enough to read"
+            assert abs(metrics["bgBrightness"] - metrics["bodyBrightness"]) >= 40, (
+                "Cancel button background should contrast with the surrounding area"
+            )
+            assert abs(metrics["bgBrightness"] - metrics["textBrightness"]) >= 60, (
+                "Cancel button text should contrast with its background"
+            )
+
+
 class TestProvidersTab:
     """Test the Providers tab functionality."""
 
