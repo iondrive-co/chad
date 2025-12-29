@@ -13,7 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .installer import AIToolInstaller
 from .installer import DEFAULT_TOOLS_DIR
+from .mcp_config import ensure_global_mcp_config
 
 
 def find_cli_executable(name: str) -> str:
@@ -208,7 +210,7 @@ def parse_codex_output(raw_output: str | None) -> str:  # noqa: C901
 def extract_final_codex_response(raw_output: str | None) -> str:
     """Extract only the final 'codex' response from Codex output.
 
-    This is useful for getting just the management AI's instruction
+    This is useful for isolating the final instruction text
     without all the context it was given.
     """
     if not raw_output:
@@ -264,6 +266,15 @@ ActivityCallback = Callable[[str, str], None] | None
 
 
 _ANSI_ESCAPE = re.compile(r'[\x1b\u241b]\[[0-9;]*[a-zA-Z]?')
+CLI_INSTALLER = AIToolInstaller()
+
+
+def _ensure_cli_tool(tool_key: str, activity_cb: ActivityCallback = None) -> tuple[bool, str]:
+    """Ensure a provider CLI is installed; optionally notify activity on failure."""
+    ok, detail = CLI_INSTALLER.ensure_tool(tool_key)
+    if not ok and activity_cb:
+        activity_cb('text', detail)
+    return ok, detail
 
 
 def _strip_ansi_codes(text: str) -> str:
@@ -428,6 +439,25 @@ class AIProvider(ABC):
         """Check if the session is still running."""
         pass
 
+    @abstractmethod
+    def supports_multi_turn(self) -> bool:
+        """Check if this provider supports multi-turn conversations.
+
+        Returns:
+            True if the provider can continue a session after the initial task.
+            Providers that support this should preserve session state for follow-ups.
+        """
+        pass
+
+    def can_continue_session(self) -> bool:
+        """Check if the current session can accept follow-up messages.
+
+        Returns:
+            True if session is active and can process more messages.
+            Default implementation returns is_alive() for multi-turn providers.
+        """
+        return self.supports_multi_turn() and self.is_alive()
+
 
 class ClaudeCodeProvider(AIProvider):
     """Provider for Anthropic Claude Code CLI.
@@ -457,13 +487,38 @@ class ClaudeCodeProvider(AIProvider):
         env["CLAUDE_CONFIG_DIR"] = self._get_claude_config_dir()
         return env
 
+    def _ensure_mcp_permissions(self) -> None:
+        """Ensure Claude config has permissions to auto-approve project MCP servers."""
+        import json
+        config_dir = Path(self._get_claude_config_dir())
+        config_dir.mkdir(parents=True, exist_ok=True)
+        settings_path = config_dir / "settings.local.json"
+
+        # Load existing settings or create new
+        settings = {}
+        if settings_path.exists():
+            try:
+                settings = json.loads(settings_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                settings = {}
+
+        # Ensure MCP servers are auto-approved
+        if not settings.get("enableAllProjectMcpServers"):
+            settings["enableAllProjectMcpServers"] = True
+            settings_path.write_text(json.dumps(settings, indent=2))
+
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         import subprocess
 
+        ok, detail = _ensure_cli_tool("claude", self._notify_activity)
+        if not ok:
+            return False
+
+        self._ensure_mcp_permissions()
         self.project_path = project_path
 
         cmd = [
-            find_cli_executable('claude'),
+            detail or find_cli_executable('claude'),
             '-p',
             '--input-format', 'stream-json',
             '--output-format', 'stream-json',
@@ -597,6 +652,9 @@ class ClaudeCodeProvider(AIProvider):
     def is_alive(self) -> bool:
         return self.process is not None and self.process.poll() is None
 
+    def supports_multi_turn(self) -> bool:
+        return True
+
 
 class OpenAICodexProvider(AIProvider):
     """Provider for OpenAI Codex CLI.
@@ -604,6 +662,7 @@ class OpenAICodexProvider(AIProvider):
     Uses browser-based authentication like Claude Code.
     Run 'codex' to authenticate via browser if not already logged in.
     Uses 'codex exec' for non-interactive execution with PTY for real-time streaming.
+    Supports multi-turn via 'codex exec resume [thread_id]'.
 
     Each account gets an isolated HOME directory to support multiple accounts.
     """
@@ -615,6 +674,7 @@ class OpenAICodexProvider(AIProvider):
         self.current_message: str | None = None
         self.system_prompt: str | None = None
         self.master_fd: int | None = None
+        self.thread_id: str | None = None  # For multi-turn conversation support
 
     def _get_isolated_home(self) -> str:
         """Get the isolated HOME directory for this account."""
@@ -632,8 +692,14 @@ class OpenAICodexProvider(AIProvider):
         return env
 
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
+        ok, detail = _ensure_cli_tool("codex", self._notify_activity)
+        if not ok:
+            return False
+
+        ensure_global_mcp_config(home=Path(self._get_isolated_home()))
         self.project_path = project_path
         self.system_prompt = system_prompt
+        self.cli_path = detail
         return True
 
     def send_message(self, message: str) -> None:
@@ -643,23 +709,40 @@ class OpenAICodexProvider(AIProvider):
             self.current_message = message
 
     def get_response(self, timeout: float = 1800.0) -> str:  # noqa: C901
+        import json
         if not self.current_message:
             return ""
 
-        cmd = [
-            find_cli_executable('codex'),
-            'exec',
-            '--full-auto',
-            '--skip-git-repo-check',
-            '-C', self.project_path,
-            '-',  # Read from stdin
-        ]
+        codex_cli = getattr(self, "cli_path", None) or find_cli_executable('codex')
 
-        if self.config.model_name and self.config.model_name != 'default':
-            cmd.extend(['-m', self.config.model_name])
+        # Build command - use resume if we have a thread_id (multi-turn)
+        # Flags like --json must come BEFORE the resume subcommand
+        if self.thread_id:
+            cmd = [
+                codex_cli, 'exec',
+                '--json',  # Must be before 'resume' subcommand
+                '-c', 'sandbox_mode="workspace-write"',  # Match --full-auto sandbox mode
+                '-c', 'approval_policy="on-request"',   # Match --full-auto approval policy
+                '-c', 'network_access="enabled"',
+                'resume', self.thread_id,
+                '-',  # Read prompt from stdin
+            ]
+        else:
+            cmd = [
+                codex_cli, 'exec',
+                '--full-auto',
+                '--skip-git-repo-check',
+                '--json',
+                '-c', 'network_access="enabled"',
+                '-C', self.project_path,
+                '-',  # Read from stdin
+            ]
 
-        if self.config.reasoning_effort and self.config.reasoning_effort != 'default':
-            cmd.extend(['-c', f'model_reasoning_effort="{self.config.reasoning_effort}"'])
+            if self.config.model_name and self.config.model_name != 'default':
+                cmd.extend(['-m', self.config.model_name])
+
+            if self.config.reasoning_effort and self.config.reasoning_effort != 'default':
+                cmd.extend(['-c', f'model_reasoning_effort="{self.config.reasoning_effort}"'])
 
         try:
             env = self._get_env()
@@ -669,10 +752,83 @@ class OpenAICodexProvider(AIProvider):
                 self.process.stdin.write(self.current_message.encode())
                 self.process.stdin.close()
 
+            # Both initial and resume use JSON output
+            json_events = []
+
+            def format_json_event_as_text(event: dict) -> str | None:
+                """Convert a JSON event to human-readable text for streaming."""
+                event_type = event.get('type', '')
+
+                if event_type == 'item.completed':
+                    item = event.get('item', {})
+                    item_type = item.get('type', '')
+
+                    if item_type == 'reasoning':
+                        text = item.get('text', '')
+                        if text:
+                            return f"*{text}*\n"
+                    elif item_type == 'agent_message':
+                        return item.get('text', '') + '\n'
+                    elif item_type == 'mcp_tool_call':
+                        tool = item.get('tool', 'tool')
+                        result = item.get('result', {})
+                        if result:
+                            content = result.get('content', [])
+                            if content and isinstance(content, list):
+                                text = content[0].get('text', '')[:200] if content else ''
+                                return f"[{tool}]: {text}...\n" if len(text) >= 200 else f"[{tool}]: {text}\n"
+                        return f"[{tool}]\n"
+                    elif item_type == 'command_execution':
+                        cmd = item.get('command', '')[:60]
+                        output = item.get('aggregated_output', '')
+                        # Show command and abbreviated output
+                        lines = output.strip().split('\n')
+                        preview = '\n'.join(lines[:3]) if lines else ''
+                        if len(lines) > 3:
+                            preview += f'\n... ({len(lines) - 3} more lines)'
+                        return f"$ {cmd}\n{preview}\n" if preview else f"$ {cmd}\n"
+
+                return None
+
+            def process_chunk(chunk: str) -> None:
+                # Parse JSON events and convert to human-readable text
+                for line in chunk.split('\n'):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        if not isinstance(event, dict):
+                            continue
+                        json_events.append(event)
+
+                        # Extract thread_id from first event
+                        if event.get('type') == 'thread.started' and 'thread_id' in event:
+                            self.thread_id = event['thread_id']
+
+                        # Convert to human-readable and stream
+                        readable = format_json_event_as_text(event)
+                        if readable:
+                            self._notify_activity('stream', readable)
+
+                        # Also send activity notifications for status bar
+                        if event.get('type') == 'item.completed':
+                            item = event.get('item', {})
+                            if item.get('type') == 'reasoning':
+                                self._notify_activity('thinking', item.get('text', '')[:80])
+                            elif item.get('type') == 'agent_message':
+                                self._notify_activity('text', item.get('text', '')[:80])
+                            elif item.get('type') in ('mcp_tool_call', 'command_execution'):
+                                name = item.get('tool', item.get('command', 'tool'))[:50]
+                                self._notify_activity('tool', name)
+                    except json.JSONDecodeError:
+                        # Non-JSON line in JSON mode - might be stderr, skip
+                        pass
+
             output, timed_out = _stream_pty_output(
                 self.process,
                 self.master_fd,
-                self._process_streaming_chunk,
+                process_chunk,
                 timeout
             )
 
@@ -683,6 +839,22 @@ class OpenAICodexProvider(AIProvider):
             if timed_out:
                 return f"Error: Codex execution timed out ({int(timeout / 60)} minutes)"
 
+            # Extract response from JSON events
+            response_parts = []
+            for event in json_events:
+                if event.get('type') == 'item.completed':
+                    item = event.get('item', {})
+                    if item.get('type') == 'agent_message':
+                        response_parts.append(item.get('text', ''))
+                    elif item.get('type') == 'reasoning':
+                        text = item.get('text', '')
+                        if text:
+                            response_parts.insert(0, f"*Thinking: {text}*\n\n")
+
+            if response_parts:
+                return ''.join(response_parts).strip()
+
+            # Fallback to raw output if no JSON events parsed
             output = _strip_ansi_codes(output)
             return output.strip() if output else "No response from Codex"
 
@@ -721,6 +893,7 @@ class OpenAICodexProvider(AIProvider):
 
     def stop_session(self) -> None:
         self.current_message = None
+        self.thread_id = None  # Clear thread_id to end multi-turn session
         _close_master_fd(self.master_fd)
         self.master_fd = None
         if self.process:
@@ -738,14 +911,20 @@ class OpenAICodexProvider(AIProvider):
             self.process = None
 
     def is_alive(self) -> bool:
-        return self.process is None or self.process.poll() is None
+        # Session is "alive" if we have a thread_id for resuming
+        # (even if no process is currently running)
+        return self.thread_id is not None or (self.process is not None and self.process.poll() is None)
+
+    def supports_multi_turn(self) -> bool:
+        return True
 
 
 class GeminiCodeAssistProvider(AIProvider):
-    """Provider for Gemini Code Assist (one-shot per prompt).
+    """Provider for Gemini Code Assist with multi-turn support.
 
     Uses the `gemini` command-line interface in "YOLO" mode for
     non-interactive, programmatic calls with PTY for real-time streaming.
+    Supports multi-turn via `--resume <session_id>`.
     """
 
     def __init__(self, config: ModelConfig):
@@ -755,39 +934,75 @@ class GeminiCodeAssistProvider(AIProvider):
         self.current_message: str | None = None
         self.process: object | None = None
         self.master_fd: int | None = None
+        self.session_id: str | None = None  # For multi-turn support
 
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
+        ok, detail = _ensure_cli_tool("gemini", self._notify_activity)
+        if not ok:
+            return False
+
         self.project_path = project_path
         self.system_prompt = system_prompt
+        self.cli_path = detail
         return True
 
     def send_message(self, message: str) -> None:
-        if self.system_prompt:
+        # Only prepend system prompt on first message (no session_id yet)
+        if self.system_prompt and not self.session_id:
             self.current_message = f"{self.system_prompt}\n\n---\n\n{message}"
         else:
             self.current_message = message
 
-    def get_response(self, timeout: float = 1800.0) -> str:
+    def get_response(self, timeout: float = 1800.0) -> str:  # noqa: C901
+        import json
         if not self.current_message:
             return ""
 
-        cmd = [find_cli_executable('gemini'), '-y', '--output-format', 'text']
+        gemini_cli = getattr(self, "cli_path", None) or find_cli_executable('gemini')
 
-        if self.config.model_name and self.config.model_name != 'default':
-            cmd.extend(['-m', self.config.model_name])
-
-        cmd.extend(['-p', self.current_message])
+        # Build command - use resume if we have a session_id (multi-turn)
+        if self.session_id:
+            cmd = [gemini_cli, '-y', '--output-format', 'stream-json',
+                   '--resume', self.session_id, self.current_message]
+        else:
+            cmd = [gemini_cli, '-y', '--output-format', 'stream-json']
+            if self.config.model_name and self.config.model_name != 'default':
+                cmd.extend(['-m', self.config.model_name])
+            cmd.append(self.current_message)
 
         try:
             env = os.environ.copy()
             env['TERM'] = 'xterm-256color'
 
+            json_events = []
+            response_parts = []
+
             def handle_chunk(decoded: str) -> None:
+                # Stream raw output for live display
                 self._notify_activity('stream', decoded)
+                # Parse JSON lines
                 for line in decoded.split('\n'):
-                    stripped = line.strip()
-                    if stripped and len(stripped) > 10:
-                        self._notify_activity('text', stripped[:80])
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        if not isinstance(event, dict):
+                            continue
+                        json_events.append(event)
+                        # Extract session_id from init event
+                        if event.get('type') == 'init' and 'session_id' in event:
+                            self.session_id = event['session_id']
+                        # Collect response content
+                        if event.get('type') == 'message' and event.get('role') == 'assistant':
+                            content = event.get('content', '')
+                            if content:
+                                response_parts.append(content)
+                                self._notify_activity('text', content[:80])
+                    except json.JSONDecodeError:
+                        # Non-JSON line (warnings, etc.) - just notify
+                        if line and len(line) > 10:
+                            self._notify_activity('text', line[:80])
 
             self.process, self.master_fd = _start_pty_process(
                 cmd,
@@ -812,6 +1027,11 @@ class GeminiCodeAssistProvider(AIProvider):
             if timed_out:
                 return f"Error: Gemini execution timed out ({int(timeout / 60)} minutes)"
 
+            # Return collected response parts if any
+            if response_parts:
+                return ''.join(response_parts).strip()
+
+            # Fallback to raw output
             output = _strip_ansi_codes(output)
             return output.strip() if output else "No response from Gemini"
 
@@ -830,6 +1050,7 @@ class GeminiCodeAssistProvider(AIProvider):
 
     def stop_session(self) -> None:
         self.current_message = None
+        self.session_id = None  # Clear session_id to end multi-turn
         _close_master_fd(self.master_fd)
         self.master_fd = None
         if self.process:
@@ -841,14 +1062,19 @@ class GeminiCodeAssistProvider(AIProvider):
             self.process = None
 
     def is_alive(self) -> bool:
-        return self.process is None or self.process.poll() is None
+        # Session is "alive" if we have a session_id for resuming
+        return self.session_id is not None or (self.process is not None and self.process.poll() is None)
+
+    def supports_multi_turn(self) -> bool:
+        return True
 
 
 class MistralVibeProvider(AIProvider):
-    """Provider for Mistral Vibe CLI.
+    """Provider for Mistral Vibe CLI with multi-turn support.
 
     Uses the `vibe` command-line interface in programmatic mode (-p)
     with PTY for real-time streaming output.
+    Supports multi-turn via `--continue` flag.
     """
 
     def __init__(self, config: ModelConfig):
@@ -858,14 +1084,21 @@ class MistralVibeProvider(AIProvider):
         self.current_message: str | None = None
         self.system_prompt: str | None = None
         self.master_fd: int | None = None
+        self.session_active: bool = False  # For multi-turn support
 
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
+        ok, detail = _ensure_cli_tool("vibe", self._notify_activity)
+        if not ok:
+            return False
+
         self.project_path = project_path
         self.system_prompt = system_prompt
+        self.cli_path = detail
         return True
 
     def send_message(self, message: str) -> None:
-        if self.system_prompt:
+        # Only prepend system prompt on first message
+        if self.system_prompt and not self.session_active:
             self.current_message = f"{self.system_prompt}\n\n---\n\n{message}"
         else:
             self.current_message = message
@@ -874,11 +1107,13 @@ class MistralVibeProvider(AIProvider):
         if not self.current_message:
             return ""
 
-        cmd = [
-            find_cli_executable('vibe'),
-            '-p', self.current_message,
-            '--output', 'text',
-        ]
+        vibe_cli = getattr(self, "cli_path", None) or find_cli_executable('vibe')
+
+        # Build command - use --continue if we have an active session
+        if self.session_active:
+            cmd = [vibe_cli, '-p', self.current_message, '--output', 'text', '--continue']
+        else:
+            cmd = [vibe_cli, '-p', self.current_message, '--output', 'text']
 
         try:
             self._notify_activity('text', 'Starting Vibe...')
@@ -917,6 +1152,9 @@ class MistralVibeProvider(AIProvider):
                 return f"Error: Vibe execution timed out ({int(timeout / 60)} minutes)"
 
             output = _strip_ansi_codes(output)
+            if output.strip():
+                # Mark session as active after first successful response
+                self.session_active = True
             return output.strip() if output else "No response from Vibe"
 
         except FileNotFoundError:
@@ -938,6 +1176,7 @@ class MistralVibeProvider(AIProvider):
 
     def stop_session(self) -> None:
         self.current_message = None
+        self.session_active = False  # Clear session state
         _close_master_fd(self.master_fd)
         self.master_fd = None
         if self.process:
@@ -949,7 +1188,11 @@ class MistralVibeProvider(AIProvider):
             self.process = None
 
     def is_alive(self) -> bool:
-        return self.process is None or self.process.poll() is None
+        # Session is "alive" if we have an active session for continuing
+        return self.session_active or (self.process is not None and self.process.poll() is None)
+
+    def supports_multi_turn(self) -> bool:
+        return True
 
 
 class MockProvider(AIProvider):
@@ -995,6 +1238,9 @@ class MockProvider(AIProvider):
 
     def is_alive(self) -> bool:
         return self._alive
+
+    def supports_multi_turn(self) -> bool:
+        return True  # Mock provider supports multi-turn for testing
 
 
 def create_provider(config: ModelConfig) -> AIProvider:

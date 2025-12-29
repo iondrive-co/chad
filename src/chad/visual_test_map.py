@@ -19,6 +19,7 @@ VISUAL_TEST_MAP: dict[str, list[str]] = {
     "chad/web_ui.py": [
         "TestUIElements",
         "TestReadyStatus",
+        "TestCodingAgentLayout",
         "TestProvidersTab",
         "TestLiveActivityFormat",
         "TestTaskStatusHeader",
@@ -31,11 +32,6 @@ VISUAL_TEST_MAP: dict[str, list[str]] = {
     # Security manager - affects provider authentication display
     "chad/security.py": [
         "TestProvidersTab",
-    ],
-    # Session manager - affects task status display
-    "chad/session_manager.py": [
-        "TestTaskStatusHeader",
-        "TestSubtaskTabs",
     ],
     # MCP playwright server - screenshot tools and UI automation
     "chad/mcp_playwright.py": [

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import pwd
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterator, Optional, TYPE_CHECKING
@@ -19,7 +20,24 @@ from .security import SecurityManager
 if TYPE_CHECKING:
     from playwright.sync_api import Page
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# Repository root; used for locating scripts and setting PYTHONPATH.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SHARED_BROWSERS_PATH = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".cache" / "ms-playwright"
+
+# Ensure Playwright browsers are read from a shared cache even if HOME is overridden (e.g., Codex isolated homes).
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", os.fspath(SHARED_BROWSERS_PATH))
+
+
+# Shared helper to keep screenshot naming consistent between the runner and the CLI script.
+def resolve_screenshot_output(base: Path, scheme: str, multi: bool = False) -> Path:
+    """Return the screenshot path for a given color scheme.
+
+    If multiple screenshots are being captured, suffix the stem with the scheme name
+    (e.g., screenshot_light.png) while keeping the provided path for the first scheme.
+    """
+    if not multi or scheme == "dark":
+        return base
+    return base.with_name(f"{base.stem}_{scheme}{base.suffix}")
 
 
 class PlaywrightUnavailable(RuntimeError):
@@ -90,11 +108,9 @@ def create_temp_env() -> TempChadEnv:
     }
     security_mgr.save_config(config)
 
-    # Store mock accounts for automation
+    # Store mock account for automation
     security_mgr.store_account("mock-coding", "mock", "", password, "mock-model")
-    security_mgr.store_account("mock-mgmt", "mock", "", password, "mock-model")
     security_mgr.assign_role("mock-coding", "CODING")
-    security_mgr.assign_role("mock-mgmt", "MANAGEMENT")
 
     return TempChadEnv(config_path=config_path, project_dir=project_dir, temp_dir=temp_dir, password=password)
 
@@ -143,6 +159,7 @@ def start_chad(env: TempChadEnv) -> ChadInstance:
             "CHAD_CONFIG": os.fspath(env.config_path),
             "CHAD_PASSWORD": env.password,
             "CHAD_PROJECT_PATH": os.fspath(env.project_dir),
+            "PYTHONPATH": os.fspath(PROJECT_ROOT / "src"),
         },
         cwd=os.fspath(PROJECT_ROOT),
     )
@@ -168,6 +185,7 @@ def open_playwright_page(
     tab: Optional[str] = None,
     headless: bool = True,
     viewport: Optional[Dict[str, int]] = None,
+    color_scheme: str | None = "dark",
     render_delay: float = 1.0,
 ) -> Iterator["Page"]:
     """Open a Playwright page for the given Chad server port."""
@@ -177,7 +195,7 @@ def open_playwright_page(
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
-        context = browser.new_context(viewport=viewport, color_scheme="dark")
+        context = browser.new_context(viewport=viewport, color_scheme=color_scheme)
         page = context.new_page()
         try:
             page.goto(f"http://127.0.0.1:{port}", wait_until="domcontentloaded", timeout=30000)
@@ -203,6 +221,74 @@ def screenshot_page(page: "Page", output_path: Path) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=os.fspath(output_path))
     return output_path
+
+
+def run_screenshot_subprocess(
+    *,
+    tab: str = "run",
+    headless: bool = True,
+    viewport: Optional[Dict[str, int]] = None,
+    label: str | None = None,
+    issue_id: str = "",
+) -> Dict[str, object]:
+    """Run screenshot_ui.py in a subprocess to avoid event loop conflicts."""
+    viewport = viewport or {"width": 1280, "height": 900}
+    artifacts_dir = Path(tempfile.mkdtemp(prefix="chad_visual_"))
+    parts = []
+    if issue_id:
+        parts.append(issue_id.replace(" ", "-"))
+    if label:
+        parts.append(label.replace(" ", "-"))
+    parts.append(tab)
+    filename = "_".join(parts) + ".png"
+    output_path = artifacts_dir / filename
+    python_exec = PROJECT_ROOT / "venv" / "bin" / "python"
+    if not python_exec.exists():
+        python_exec = Path(sys.executable)
+
+    schemes = ["dark", "light"]
+    expected_paths = [resolve_screenshot_output(output_path, scheme, True) for scheme in schemes]
+
+    cmd = [
+        os.fspath(python_exec),
+        os.fspath(PROJECT_ROOT / "scripts" / "screenshot_ui.py"),
+        "--tab",
+        tab,
+        "--output",
+        os.fspath(output_path),
+        "--width",
+        str(viewport.get("width", 1280)),
+        "--height",
+        str(viewport.get("height", 900)),
+    ]
+    if headless:
+        cmd.append("--headless")
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        cwd=os.fspath(PROJECT_ROOT),
+        env={
+            **os.environ,
+            "PYTHONPATH": os.fspath(PROJECT_ROOT / "src"),
+            "PLAYWRIGHT_BROWSERS_PATH": os.environ.get(
+                "PLAYWRIGHT_BROWSERS_PATH",
+                os.fspath(SHARED_BROWSERS_PATH),
+            ),
+        },
+    )
+
+    all_exist = all(path.exists() for path in expected_paths)
+    return {
+        "success": result.returncode == 0 and all_exist,
+        "screenshot": os.fspath(expected_paths[0]),
+        "screenshots": [os.fspath(p) for p in expected_paths],
+        "artifacts_dir": os.fspath(artifacts_dir),
+        "stdout": result.stdout[-3000:],
+        "stderr": result.stderr[-3000:],
+        "return_code": result.returncode,
+    }
 
 
 def measure_provider_delete_button(page: "Page") -> Dict[str, float]:

@@ -1,10 +1,9 @@
 # Chad: YOLO AI
 
-Coding agents need hand holding to implement complex features, but no one holds Chad's hand.
+Coding agents need hand holding to implement complex features, but no one holds Chad's hand. 
 
-- Installs and logs you in to Codex, Claude Code, Gemini, or Mistral Vibe coding agent sessions
-- Chad can break your tasks down in a management session, and prompt the coding agent running in a separate session
-- When a coding agent starts equivocating or half-baking Chad can verify and reprompt until the task is complete
+Add one or more Codex, Claude Code, Gemini, or Mistral Vibe coding agent sessions, ask for a coding task, and Chad will 
+verify and reprompt to deliver a one-shot result.
 
 <p style="text-align: center;">
   <img src="docs/Chad.png" alt="Chad Code" width="80">
@@ -26,7 +25,7 @@ chad
 
 ### How is this better than $Grug?
 
-- Gradio ui to make it easy to add and remove agents, assign them to roles, change their preferred model, and view their usage
+- Gradio ui to make it easy to add and remove agents, pick a default coding account, change preferred models, and view usage
 - Provider tokens encrypted with a master password you create and supply every session, which can be wiped by specifying a new password at login
 
 <p style="text-align: center;">

@@ -12,22 +12,12 @@ import gradio as gr
 from .provider_ui import ProviderUIManager
 from .security import SecurityManager
 from .session_logger import SessionLogger
-from .session_manager import (
-    CODING_IMPLEMENTATION_CONTEXT,
-    CODING_INVESTIGATION_CONTEXT,
-    IMPLEMENTATION_PROMPT,
-    INVESTIGATION_PROMPT,
-    SAFETY_CONSTRAINTS,
-    SessionManager,
-    TaskPhase,
-    VERIFICATION_PROMPT,
-    get_coding_timeout,
-    get_management_timeout,
-)
-from .providers import ModelConfig, parse_codex_output, extract_final_codex_response
+from .providers import ModelConfig, parse_codex_output
 from .model_catalog import ModelCatalog
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\][^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")
+
+DEFAULT_CODING_TIMEOUT = 1800.0
 
 
 # Custom styling for the provider management area to improve contrast between
@@ -40,6 +30,28 @@ PROVIDER_PANEL_CSS = """
   --task-btn-border: #74c3f6;
   --task-btn-text: #0a2236;
   --task-btn-hover: #7bc9ff;
+  --cancel-btn-bg: #f74a4a;
+  --cancel-btn-border: #cf2f2f;
+  --cancel-btn-text: #ffffff;
+  --cancel-btn-hover: #ff6a6a;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --cancel-btn-bg: #e53935;
+    --cancel-btn-border: #c62828;
+    --cancel-btn-hover: #f25b55;
+    --cancel-btn-text: #ffffff;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --cancel-btn-bg: #ff5c5c;
+    --cancel-btn-border: #ff8686;
+    --cancel-btn-hover: #ff7c7c;
+    --cancel-btn-text: #ffffff;
+  }
 }
 
 body, .gradio-container, .gradio-container * {
@@ -47,7 +59,7 @@ body, .gradio-container, .gradio-container * {
 }
 
 #start-task-btn,
-#cancel-task-btn {
+#start-task-btn button {
   background: var(--task-btn-bg) !important;
   border: 1px solid var(--task-btn-border) !important;
   color: var(--task-btn-text) !important;
@@ -56,9 +68,97 @@ body, .gradio-container, .gradio-container * {
   padding: 6px 12px !important;
 }
 
+#cancel-task-btn {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: fit-content !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  flex: 0 0 auto !important;
+}
+
+#cancel-task-btn button {
+  background: var(--cancel-btn-bg) !important;
+  border: 1px solid var(--cancel-btn-border) !important;
+  color: var(--cancel-btn-text) !important;
+  -webkit-text-fill-color: var(--cancel-btn-text) !important;
+  font-size: 0.85rem !important;
+  min-height: 28px !important;
+  min-width: 110px !important;
+  padding: 6px 12px !important;
+  line-height: 1.1 !important;
+  width: auto !important;
+  max-width: none !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  opacity: 1 !important;
+}
+
+#cancel-task-btn:is(button) {
+  background: var(--cancel-btn-bg) !important;
+  border: 1px solid var(--cancel-btn-border) !important;
+  color: var(--cancel-btn-text) !important;
+  -webkit-text-fill-color: var(--cancel-btn-text) !important;
+  font-size: 0.85rem !important;
+  min-height: 28px !important;
+  min-width: 110px !important;
+  padding: 6px 12px !important;
+  line-height: 1.1 !important;
+  width: auto !important;
+  max-width: none !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  opacity: 1 !important;
+}
+
+#cancel-task-btn button span,
+#cancel-task-btn span {
+  color: inherit !important;
+  -webkit-text-fill-color: inherit !important;
+  opacity: 1 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+#cancel-task-btn button span *,
+#cancel-task-btn span * {
+  color: inherit !important;
+  -webkit-text-fill-color: inherit !important;
+  opacity: 1 !important;
+}
+
+#cancel-task-btn button:disabled,
+#cancel-task-btn button[disabled],
+#cancel-task-btn button[aria-disabled="true"],
+#cancel-task-btn button.disabled,
+#cancel-task-btn:disabled,
+#cancel-task-btn[disabled],
+#cancel-task-btn[aria-disabled="true"],
+#cancel-task-btn.disabled {
+  background: var(--cancel-btn-bg) !important;
+  border: 1px solid var(--cancel-btn-border) !important;
+  color: var(--cancel-btn-text) !important;
+  opacity: 1 !important;
+  filter: none !important;
+}
+
 #start-task-btn:hover,
-#cancel-task-btn:hover {
+#start-task-btn button:hover {
   background: var(--task-btn-hover) !important;
+}
+
+#cancel-task-btn:hover,
+#cancel-task-btn button:hover {
+  background: var(--cancel-btn-hover) !important;
 }
 
 .provider-section-title {
@@ -460,6 +560,42 @@ body, .gradio-container, .gradio-container * {
   padding: 0;
   box-shadow: none;
 }
+
+/* Follow-up input - styled as a compact chat continuation */
+#followup-row {
+  margin-top: 8px;
+  padding: 0;
+  background: transparent;
+  border: none;
+}
+
+#followup-row > div {
+  gap: 8px !important;
+}
+
+#followup-row .followup-header {
+  color: #888;
+  font-size: 0.85rem;
+  margin-bottom: 4px;
+  font-style: italic;
+}
+
+#followup-input {
+  flex: 1;
+}
+
+#followup-input textarea {
+  background: var(--neutral-50) !important;
+  border: 1px solid var(--border-color-primary) !important;
+  border-radius: 8px !important;
+  min-height: 60px !important;
+  resize: vertical !important;
+}
+
+#send-followup-btn {
+  align-self: flex-end;
+  margin-bottom: 4px;
+}
 """
 
 # JavaScript to fix Gradio visibility updates and maintain scroll position
@@ -854,14 +990,12 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
     """Create a Gradio 6.x compatible chat message.
 
     Args:
-        speaker: The speaker name (e.g., "MANAGEMENT AI", "CODING AI")
+        speaker: The speaker name (e.g., "CODING AI")
         content: The message content
         collapsible: Whether to make long messages collapsible with a summary
     """
-    # Map speakers to roles
-    # MANAGEMENT AI messages are 'user' (outgoing instructions)
-    # CODING AI messages are 'assistant' (incoming responses)
-    role = "user" if "MANAGEMENT" in speaker else "assistant"
+    # All AI messages are assistant role
+    role = "assistant"
 
     # For long content, make it collapsible with a summary
     if collapsible and len(content) > 300:
@@ -879,7 +1013,6 @@ class ChadWebUI:
     def __init__(self, security_mgr: SecurityManager, main_password: str):
         self.security_mgr = security_mgr
         self.main_password = main_password
-        self.session_manager = None
         self.active_sessions = {}
         self.cancel_requested = False
         self._active_coding_provider = None
@@ -888,6 +1021,11 @@ class ChadWebUI:
         self.provider_ui = ProviderUIManager(security_mgr, main_password, self.model_catalog)
         self.session_logger = SessionLogger()
         self.current_session_log_path: Path | None = None
+        # Session continuation state
+        self._current_chat_history: list = []
+        self._current_project_path: str | None = None
+        self._session_active: bool = False
+        self._current_coding_account: str | None = None
 
     SUPPORTED_PROVIDERS = ProviderUIManager.SUPPORTED_PROVIDERS
     OPENAI_REASONING_LEVELS = ProviderUIManager.OPENAI_REASONING_LEVELS
@@ -947,6 +1085,46 @@ class ChadWebUI:
 
     def _get_mistral_usage(self) -> str:
         return self.provider_ui._get_mistral_usage()
+
+    def _build_system_prompt(self, project_path: Path) -> str | None:
+        """Build a system prompt from project documentation.
+
+        Reads AGENTS.md, CLAUDE.md, or README.md from the project to give the agent
+        context about how to work on this project.
+        """
+        prompt_parts = []
+
+        # Check for various documentation files
+        doc_files = [
+            project_path / "AGENTS.md",
+            project_path / ".claude" / "CLAUDE.md",
+            project_path / "CLAUDE.md",
+        ]
+
+        for doc_file in doc_files:
+            if doc_file.exists():
+                try:
+                    content = doc_file.read_text(encoding='utf-8')
+                    # Limit content to avoid overwhelming the context
+                    if len(content) > 8000:
+                        content = content[:8000] + "\n\n[...truncated...]"
+                    prompt_parts.append(f"# Project Instructions ({doc_file.name})\n\n{content}")
+                    break  # Use first found file
+                except (OSError, UnicodeDecodeError):
+                    continue
+
+        # Add standard instructions for using project tools
+        prompt_parts.append("""
+# Working Instructions
+
+1. Check if the project has MCP tools available (use list_mcp_tools if available)
+2. Run lint and tests before completing any task
+3. For simple changes, just make the fix and verify with tests
+4. For complex bugs, document your investigation process
+5. Always verify your changes work before completing
+""")
+
+        return "\n\n".join(prompt_parts) if prompt_parts else None
 
     def get_account_choices(self) -> list[str]:
         return self.provider_ui.get_account_choices()
@@ -1036,9 +1214,6 @@ class ChadWebUI:
     def cancel_task(self) -> str:
         """Cancel the running task."""
         self.cancel_requested = True
-        if self.session_manager:
-            self.session_manager.stop_all()
-            self.session_manager = None
         if self._active_coding_provider:
             self._active_coding_provider.stop_session()
             self._active_coding_provider = None
@@ -1048,38 +1223,29 @@ class ChadWebUI:
         self,
         project_path: str,
         task_description: str,
-        managed_mode: bool = False
-    ) -> Iterator[tuple[list, str, gr.Markdown, gr.Textbox, gr.TextArea, gr.Button, gr.Button, gr.Markdown]]:
-        """Start Chad task and stream updates.
-
-        Flow: Management AI plans first, then coding AI executes.
-        """
+        coding_agent: str,
+    ) -> Iterator[tuple[
+        list, str, gr.Markdown, gr.Textbox, gr.TextArea, gr.Button, gr.Button, gr.Markdown,
+        gr.update, gr.Row, gr.Button
+    ]]:
+        """Start Chad task and stream updates in single-agent mode."""
         chat_history = []
         message_queue = queue.Queue()
         self.cancel_requested = False
         session_log_path: Path | None = None
-        current_phase_display = [""]  # Use list for mutability in nested functions
-
-        def format_role_status_with_phase(phase: str = "") -> str:
-            """Format role status with optional phase indicator."""
-            base_status = self.format_role_status()
-            if phase:
-                return f"{base_status} | **Phase:** {phase}"
-            return base_status
 
         def make_yield(
             history,
             status: str,
             live_stream: str = "",
             summary: str | None = None,
-            interactive: bool = False
+            interactive: bool = False,
+            show_followup: bool = False
         ):
             """Format output tuple for Gradio with current UI state."""
             display_stream = live_stream
             is_error = '❌' in status
-            # Include phase in role status if we have one
-            display_role_status = format_role_status_with_phase(current_phase_display[0])
-            # Session log download button update
+            display_role_status = self.format_role_status()
             log_btn_update = gr.update(
                 label=f"📄 {session_log_path.name}" if session_log_path else "Session Log",
                 value=str(session_log_path) if session_log_path else None,
@@ -1099,42 +1265,41 @@ class ChadWebUI:
                 gr.update(interactive=interactive),
                 gr.update(interactive=not interactive),
                 gr.update(value=display_role_status),
-                log_btn_update
+                log_btn_update,
+                gr.update(value=""),  # Clear followup input
+                gr.update(visible=show_followup),  # Show/hide followup row
+                gr.update(interactive=show_followup)  # Enable/disable send button
             )
 
         try:
-            # Validate inputs
             if not project_path or not task_description:
                 error_msg = "❌ Please provide both project path and task description"
                 yield make_yield([], error_msg, summary=error_msg, interactive=True)
                 return
 
-            path = Path(project_path).expanduser().resolve()
-            if not path.exists() or not path.is_dir():
+            path_obj = Path(project_path).expanduser().resolve()
+            if not path_obj.exists() or not path_obj.is_dir():
                 error_msg = f"❌ Invalid project path: {project_path}"
                 yield make_yield([], error_msg, summary=error_msg, interactive=True)
                 return
 
-            # Get role assignments
-            role_assignments = self.security_mgr.list_role_assignments()
-            coding_account = role_assignments.get('CODING')
-            management_account = role_assignments.get('MANAGEMENT')
-
-            if not coding_account or not management_account:
-                msg = "❌ Please assign CODING and MANAGEMENT roles in the Provider Management tab first"
+            if not coding_agent:
+                msg = "❌ Please select a Coding Agent above"
                 yield make_yield([], msg, summary=msg, interactive=True)
                 return
 
-            # Get provider info
             accounts = self.security_mgr.list_accounts()
-            coding_provider = accounts[coding_account]
-            management_provider = accounts[management_account]
+            if coding_agent not in accounts:
+                msg = f"❌ Coding agent '{coding_agent}' not found"
+                yield make_yield([], msg, summary=msg, interactive=True)
+                return
 
-            # Create configs with stored models
+            coding_account = coding_agent
+            coding_provider = accounts[coding_account]
+            self.security_mgr.assign_role(coding_account, "CODING")
+
             coding_model = self.security_mgr.get_account_model(coding_account)
-            management_model = self.security_mgr.get_account_model(management_account)
             coding_reasoning = self.security_mgr.get_account_reasoning(coding_account)
-            management_reasoning = self.security_mgr.get_account_reasoning(management_account)
 
             coding_config = ModelConfig(
                 provider=coding_provider,
@@ -1143,56 +1308,38 @@ class ChadWebUI:
                 reasoning_effort=None if coding_reasoning == 'default' else coding_reasoning
             )
 
-            management_config = ModelConfig(
-                provider=management_provider,
-                model_name=management_model,
-                account_name=management_account,
-                reasoning_effort=None if management_reasoning == 'default' else management_reasoning
-            )
+            coding_timeout = DEFAULT_CODING_TIMEOUT
 
-            coding_timeout = get_coding_timeout(coding_provider)
-            management_timeout = get_management_timeout(management_provider)
-
-            # Initialize the session log (pre-created when launching UI, or create on demand)
             session_log_path = self.current_session_log_path or self.session_logger.precreate_log()
             self.current_session_log_path = session_log_path
             self.session_logger.initialize_log(
                 session_log_path,
                 task_description=task_description,
-                project_path=str(path),
+                project_path=str(path_obj),
                 coding_account=coding_account,
                 coding_provider=coding_provider,
-                management_account=management_account,
-                management_provider=management_provider,
-                managed_mode=managed_mode
             )
 
             status_prefix = "**Starting Chad...**\n\n"
-            status_prefix += f"• Project: {path}\n"
+            status_prefix += f"• Project: {path_obj}\n"
             status_prefix += f"• CODING: {coding_account} ({coding_provider})\n"
-            if managed_mode:
-                status_prefix += f"• MANAGEMENT: {management_account} ({management_provider})\n"
-            status_prefix += f"• Mode: {'Managed (AI supervision)' if managed_mode else 'Direct (coding AI only)'}\n\n"
+            if coding_model and coding_model != "default":
+                status_prefix += f"• Model: {coding_model}\n"
+            status_prefix += "• Mode: Direct (coding AI only)\n\n"
 
-            # Seed chat history with the user's task for logging while keeping it hidden in the UI
             chat_history.append({
                 "role": "user",
                 "content": f"**Task**\n\n{task_description}"
             })
             self.session_logger.update_log(session_log_path, chat_history)
 
-            initial_status = f"{status_prefix}⏳ Initializing sessions..."
+            initial_status = f"{status_prefix}⏳ Initializing session..."
             yield make_yield(chat_history, initial_status, summary=initial_status, interactive=False)
 
-            # Activity callback to capture live updates
-            # Format in Claude Code style: ● ToolName(params) with ⎿ for results
             def format_tool_activity(detail: str) -> str:
-                """Format tool activity in Claude Code style."""
-                # Handle Claude format: "ToolName: args"
                 if ': ' in detail:
                     tool_name, args = detail.split(': ', 1)
                     return f"● {tool_name}({args})"
-                # Handle Codex format: "Running: description"
                 if detail.startswith('Running: '):
                     return f"● {detail[9:]}"
                 return f"● {detail}"
@@ -1208,434 +1355,65 @@ class ChadWebUI:
                 elif activity_type == 'text' and detail:
                     message_queue.put(('activity', f"  ⎿ {detail[:80]}"))
 
-            # Create session manager with silent mode enabled
-            session_manager = SessionManager(coding_config, management_config, insane_mode=False, silent=True)
-            self.session_manager = session_manager
+            from .providers import create_provider
+            coding_provider_instance = create_provider(coding_config)
+            self._active_coding_provider = coding_provider_instance
+            coding_provider_instance.set_activity_callback(on_activity)
 
-            # ==================== DIRECT MODE (default) ====================
-            if not managed_mode:
-                # Set phase for direct mode
-                current_phase_display[0] = "🚀 EXECUTING"
-                yield make_yield([], f"{status_prefix}⏳ Starting coding AI...", summary=status_prefix)
+            # Build system prompt from project documentation
+            system_prompt = self._build_system_prompt(path_obj)
 
-                from .providers import create_provider
-                coding_provider_instance = create_provider(coding_config)
-                self._active_coding_provider = coding_provider_instance
-                coding_provider_instance.set_activity_callback(on_activity)
+            if not coding_provider_instance.start_session(str(path_obj), system_prompt):
+                failure = f"{status_prefix}❌ Failed to start coding session"
+                yield make_yield([], failure, summary=failure, interactive=True)
+                return
 
-                if not coding_provider_instance.start_session(str(path)):
-                    failure = f"{status_prefix}❌ Failed to start coding session"
-                    yield make_yield([], failure, summary=failure, interactive=True)
-                    return
+            status_msg = f"{status_prefix}✓ Coding AI started\n\n⏳ Processing task..."
+            yield make_yield([], status_msg, summary=status_msg, interactive=False)
 
-                status_msg = f"{status_prefix}✓ Coding AI started\n\n⏳ Processing task..."
-                yield make_yield([], status_msg, summary=status_msg, interactive=False)
+            coding_provider_instance.send_message(task_description)
 
-                coding_provider_instance.send_message(task_description)
+            relay_complete = threading.Event()
+            task_success = [False]
+            completion_reason = [""]
 
-                relay_complete = threading.Event()
-                task_success = [False]
-                completion_reason = [""]
-
-                def direct_loop():
-                    try:
-                        message_queue.put(('ai_switch', 'CODING AI'))
-                        message_queue.put(('message_start', 'CODING AI'))
-                        response = coding_provider_instance.get_response(timeout=coding_timeout)
-                        if response:
-                            parsed = parse_codex_output(response)
-                            message_queue.put(('message_complete', 'CODING AI', parsed))
-                            task_success[0] = True
-                            completion_reason[0] = "Coding AI completed task"
-                        else:
-                            message_queue.put(('status', "❌ No response from coding AI"))
-                            completion_reason[0] = "No response from coding AI"
-                    except Exception as e:
-                        message_queue.put(('status', f"❌ Error: {str(e)}"))
-                        completion_reason[0] = str(e)
-                    finally:
+            def direct_loop():
+                try:
+                    message_queue.put(('ai_switch', 'CODING AI'))
+                    message_queue.put(('message_start', 'CODING AI'))
+                    response = coding_provider_instance.get_response(timeout=coding_timeout)
+                    if response:
+                        parsed = parse_codex_output(response)
+                        message_queue.put(('message_complete', 'CODING AI', parsed))
+                        task_success[0] = True
+                        completion_reason[0] = "Coding AI completed task"
+                    else:
+                        message_queue.put(('status', "❌ No response from coding AI"))
+                        completion_reason[0] = "No response from coding AI"
+                except Exception as exc:  # pragma: no cover - runtime safety
+                    message_queue.put(('status', f"❌ Error: {str(exc)}"))
+                    completion_reason[0] = str(exc)
+                    # Stop session on error
+                    coding_provider_instance.stop_session()
+                    self._active_coding_provider = None
+                    self._session_active = False
+                finally:
+                    # Keep session alive for follow-ups if provider supports multi-turn
+                    # and task succeeded
+                    if not coding_provider_instance.supports_multi_turn() or not task_success[0]:
                         coding_provider_instance.stop_session()
                         self._active_coding_provider = None
-                        relay_complete.set()
-
-                relay_thread = threading.Thread(target=direct_loop, daemon=True)
-                relay_thread.start()
-
-                self.session_manager = None  # No session manager in direct mode
-
-            # ==================== MANAGED MODE ====================
-            else:
-                if not session_manager.start_sessions(str(path), task_description):
-                    failure = f"{status_prefix}❌ Failed to start sessions"
-                    yield make_yield([], failure, summary=failure, interactive=True)
-                    return
-
-                planning_status = f"{status_prefix}✓ Sessions started\n\n⏳ Management AI is planning..."
-                yield make_yield([], planning_status, summary=planning_status, interactive=False)
-
-                session_manager.set_activity_callback(on_activity)
-
-                relay_complete = threading.Event()
-                task_success = [False]
-                completion_reason = [""]
-
-                def relay_loop():  # noqa: C901
-                    """Run the state machine: Investigation -> Implementation -> Verification."""
-                    try:
-                        phase = TaskPhase.INVESTIGATION
-                        plan = None
-                        impl_notes = []
-                        investigation_revisits = 0
-                        max_investigation_revisits = 2
-
-                        max_investigation_iters = 10
-                        max_implementation_iters = 30
-                        max_verification_iters = 5
-
-                        investigation_iter = 0
-                        implementation_iter = 0
-                        verification_iter = 0
-
-                        def check_cancelled():
-                            if self.cancel_requested:
-                                message_queue.put(('status', "🛑 Task cancelled by user"))
-                                return True
-                            return False
-
-                        def get_phase_status(p: TaskPhase) -> str:
-                            phase_names = {
-                                TaskPhase.INVESTIGATION: ("📋", "Investigate"),
-                                TaskPhase.IMPLEMENTATION: ("🔨", "Implement"),
-                                TaskPhase.VERIFICATION: ("✅", "Verify")
-                            }
-                            icon, name = phase_names[p]
-                            return f"{icon} Phase {p.value}: {name}"
-
-                        def add_phase_divider(phase: TaskPhase):
-                            """Add a visual divider when entering a new phase."""
-                            phase_names = {
-                                TaskPhase.INVESTIGATION: ("📋", "INVESTIGATE"),
-                                TaskPhase.IMPLEMENTATION: ("🔨", "IMPLEMENT"),
-                                TaskPhase.VERIFICATION: ("✅", "VERIFY")
-                            }
-                            icon, name = phase_names[phase]
-                            message_queue.put(('phase_divider', f"{icon} PHASE {phase.value}: {name}"))
-                            # Also update the phase indicator in the role status
-                            message_queue.put(('phase_update', f"{icon} {name}"))
-
-                        investigation_system = INVESTIGATION_PROMPT.format(
-                            task_description=task_description,
-                            project_path=str(path)
-                        )
-                        investigation_system += "\n\n" + SAFETY_CONSTRAINTS
-
-                        add_phase_divider(phase)
-
-                        message_queue.put(('status', f"{get_phase_status(phase)} - Starting..."))
-                        message_queue.put(('ai_switch', 'MANAGEMENT AI'))
-                        message_queue.put(('message_start', 'MANAGEMENT AI'))
-                        session_manager.send_to_management(investigation_system)
-                        mgmt_response = session_manager.get_management_response(timeout=management_timeout)
-
-                        if check_cancelled() or not mgmt_response:
-                            if not mgmt_response:
-                                message_queue.put(('status', "❌ No response from MANAGEMENT AI"))
-                            return
-
-                        mgmt_text = extract_final_codex_response(mgmt_response)
-                        parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
-                        message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
-
-                        while session_manager.are_sessions_alive() and not self.cancel_requested:
-
-                            if phase == TaskPhase.INVESTIGATION:
-                                investigation_iter += 1
-
-                                if investigation_iter > max_investigation_iters:
-                                    message_queue.put(('status', "⚠️ Investigation taking too long, forcing plan"))
-                                    plan = f"1. Implement the task: {task_description}"
-                                    phase = TaskPhase.IMPLEMENTATION
-                                    continue
-
-                                plan_match = re.search(r'PLAN:\s*(.+)', mgmt_text, re.IGNORECASE | re.DOTALL)
-
-                                if plan_match:
-                                    plan = plan_match.group(1).strip()
-                                    phase = TaskPhase.IMPLEMENTATION
-                                    implementation_iter = 0
-
-                                    add_phase_divider(phase)
-                                    message_queue.put(('phase', f"📝 **Plan:**\n{plan}"))
-
-                                    impl_system = IMPLEMENTATION_PROMPT.format(
-                                        task_description=task_description,
-                                        project_path=str(path),
-                                        plan=plan
-                                    )
-                                    impl_system += "\n\n" + SAFETY_CONSTRAINTS
-
-                                    message_queue.put(
-                                        ('status', f"{get_phase_status(phase)} - Coding AI executing...")
-                                    )
-                                    coding_instruction = (
-                                        f"{CODING_IMPLEMENTATION_CONTEXT}\n\n"
-                                        f"ORIGINAL TASK: {task_description}\n\n"
-                                        f"PLAN TO EXECUTE:\n{plan}\n\n"
-                                        "Execute this plan to accomplish the task. Report back when complete."
-                                    )
-                                    session_manager.send_to_coding(coding_instruction)
-                                    continue
-
-                                message_queue.put(('status', f"{get_phase_status(phase)} - Coding AI investigating..."))
-                                message_queue.put(('ai_switch', 'CODING AI'))
-                                message_queue.put(('message_start', 'CODING AI'))
-                                session_manager.send_to_coding(f"{CODING_INVESTIGATION_CONTEXT}\n\n{mgmt_text}")
-
-                                coding_response = session_manager.get_coding_response(timeout=coding_timeout)
-                                if check_cancelled() or not coding_response:
-                                    if not coding_response:
-                                        message_queue.put(('status', "❌ No response from CODING AI"))
-                                    break
-
-                                parsed_coding = parse_codex_output(coding_response)
-                                message_queue.put(('message_complete', "CODING AI", parsed_coding))
-
-                                status_msg = f"{get_phase_status(phase)} - Management reviewing findings..."
-                                message_queue.put(('status', status_msg))
-                                message_queue.put(('ai_switch', 'MANAGEMENT AI'))
-                                message_queue.put(('message_start', 'MANAGEMENT AI'))
-                                findings_msg = (
-                                    f"CODING AI FINDINGS:\n{parsed_coding}\n\n"
-                                    "If you have enough info, output PLAN: with implementation steps. "
-                                    "If not, ask for MORE info in ONE batched request "
-                                    "(multiple files/searches at once)."
-                                )
-                                session_manager.send_to_management(findings_msg)
-                                mgmt_response = session_manager.get_management_response(
-                                    timeout=management_timeout
-                                )
-
-                                if check_cancelled() or not mgmt_response:
-                                    if not mgmt_response:
-                                        message_queue.put(('status', "❌ No response from MANAGEMENT AI"))
-                                    break
-
-                                mgmt_text = extract_final_codex_response(mgmt_response)
-                                parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
-                                message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
-
-                            elif phase == TaskPhase.IMPLEMENTATION:
-                                implementation_iter += 1
-
-                                if implementation_iter > max_implementation_iters:
-                                    completion_reason[0] = "Reached maximum implementation iterations."
-                                    message_queue.put(('status', "⚠️ Implementation taking too long"))
-                                    break
-
-                                message_queue.put(('status', f"{get_phase_status(phase)} - Coding AI working..."))
-                                message_queue.put(('ai_switch', 'CODING AI'))
-                                message_queue.put(('message_start', 'CODING AI'))
-                                coding_response = session_manager.get_coding_response(timeout=coding_timeout)
-
-                                if check_cancelled() or not coding_response:
-                                    if not coding_response:
-                                        message_queue.put(('status', "❌ No response from CODING AI"))
-                                    break
-
-                                parsed_coding = parse_codex_output(coding_response)
-                                message_queue.put(('message_complete', "CODING AI", parsed_coding))
-                                impl_notes.append(parsed_coding[:10000])
-
-                                status_msg = f"{get_phase_status(phase)} - Management supervising..."
-                                message_queue.put(('status', status_msg))
-                                message_queue.put(('ai_switch', 'MANAGEMENT AI'))
-                                message_queue.put(('message_start', 'MANAGEMENT AI'))
-                                supervision_msg = (
-                                    f"CODING AI OUTPUT:\n{parsed_coding}\n\n"
-                                    "Respond with CONTINUE: <guidance for remaining steps> or VERIFY "
-                                    "if complete. Be direct - give ALL remaining instructions at once, "
-                                    "not one step at a time."
-                                )
-                                session_manager.send_to_management(supervision_msg)
-                                mgmt_response = session_manager.get_management_response(
-                                    timeout=management_timeout
-                                )
-
-                                if check_cancelled() or not mgmt_response:
-                                    if not mgmt_response:
-                                        message_queue.put(('status', "❌ No response from MANAGEMENT AI"))
-                                    break
-
-                                mgmt_text = extract_final_codex_response(mgmt_response)
-                                parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
-                                message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
-
-                                mgmt_upper = mgmt_text.upper()
-                                if "VERIFY" in mgmt_upper:
-                                    phase = TaskPhase.VERIFICATION
-                                    verification_iter = 0
-
-                                    add_phase_divider(phase)
-
-                                    impl_summary = "\n".join(impl_notes[-5:])
-                                    verify_system = VERIFICATION_PROMPT.format(
-                                        task_description=task_description,
-                                        project_path=str(path),
-                                        plan=plan,
-                                        impl_notes=impl_summary
-                                    )
-                                    verify_system += "\n\n" + SAFETY_CONSTRAINTS
-
-                                    status_msg = f"{get_phase_status(phase)} - Management verifying..."
-                                    message_queue.put(('status', status_msg))
-                                    message_queue.put(('message_start', 'MANAGEMENT AI'))
-                                    session_manager.send_to_management(verify_system)
-                                    mgmt_response = session_manager.get_management_response(
-                                        timeout=management_timeout
-                                    )
-
-                                    if check_cancelled() or not mgmt_response:
-                                        if not mgmt_response:
-                                            message_queue.put(('status', "❌ No response from MANAGEMENT AI"))
-                                        break
-
-                                    mgmt_text = extract_final_codex_response(mgmt_response)
-                                    parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
-                                    message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
-                                    continue
-
-                                message_queue.put(('ai_switch', 'CODING AI'))
-                                continue_match = re.search(r'CONTINUE:\s*(.+)', mgmt_text, re.IGNORECASE | re.DOTALL)
-                                if continue_match:
-                                    guidance = continue_match.group(1).strip()
-                                    session_manager.send_to_coding(f"{CODING_IMPLEMENTATION_CONTEXT}\n\n{guidance}")
-                                else:
-                                    session_manager.send_to_coding(f"{CODING_IMPLEMENTATION_CONTEXT}\n\n{mgmt_text}")
-
-                            elif phase == TaskPhase.VERIFICATION:
-                                verification_iter += 1
-
-                                if verification_iter > max_verification_iters:
-                                    completion_reason[0] = "Verification inconclusive after maximum attempts."
-                                    message_queue.put(('status', "⚠️ Verification inconclusive"))
-                                    break
-
-                                mgmt_upper = mgmt_text.upper()
-                                is_complete = ("COMPLETE" in mgmt_upper and
-                                               "PLAN_ISSUE" not in mgmt_upper and
-                                               "IMPL_ISSUE" not in mgmt_upper)
-                                if is_complete:
-                                    completion_reason[0] = "Management AI verified task completion."
-                                    message_queue.put(('status', "✓ Task verified complete!"))
-                                    task_success[0] = True
-                                    break
-
-                                plan_issue_match = re.search(
-                                    r'PLAN_ISSUE:\s*(.+)', mgmt_text, re.IGNORECASE | re.DOTALL)
-                                if plan_issue_match:
-                                    investigation_revisits += 1
-                                    if investigation_revisits > max_investigation_revisits:
-                                        completion_reason[0] = "Too many plan revisions needed."
-                                        message_queue.put(('status', "⚠️ Too many plan issues"))
-                                        break
-
-                                    issue = plan_issue_match.group(1).strip().split('\n')[0]
-                                    phase = TaskPhase.INVESTIGATION
-                                    investigation_iter = 0
-
-                                    add_phase_divider(phase)
-                                    message_queue.put(('phase', f"⚠️ Plan issue: {issue}"))
-
-                                    reinvestigate_prompt = f"""The previous plan had issues: {issue}
-
-{investigation_system}
-
-Previous plan that failed:
-{plan}
-
-Create a better plan that addresses the issue."""
-                                    message_queue.put(('message_start', 'MANAGEMENT AI'))
-                                    session_manager.send_to_management(reinvestigate_prompt)
-                                    mgmt_response = session_manager.get_management_response(timeout=management_timeout)
-
-                                    if check_cancelled() or not mgmt_response:
-                                        break
-
-                                    mgmt_text = extract_final_codex_response(mgmt_response)
-                                    parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
-                                    message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
-                                    continue
-
-                                impl_issue_match = re.search(
-                                    r'IMPL_ISSUE:\s*(.+)', mgmt_text, re.IGNORECASE | re.DOTALL)
-                                if impl_issue_match:
-                                    issue = impl_issue_match.group(1).strip()
-                                    phase = TaskPhase.IMPLEMENTATION
-
-                                    add_phase_divider(phase)
-                                    phase_msg = f"⚠️ Implementation issue: {issue[:100]}..."
-                                    message_queue.put(('phase', phase_msg))
-
-                                    message_queue.put(('ai_switch', 'CODING AI'))
-                                    fix_instruction = (
-                                        f"{CODING_IMPLEMENTATION_CONTEXT}\n\n"
-                                        f"VERIFICATION FOUND AN ISSUE:\n{issue}\n\n"
-                                        "Please fix this and report back."
-                                    )
-                                    session_manager.send_to_coding(fix_instruction)
-                                    continue
-
-                                completion_phrases = [
-                                    'task is complete', 'task completed', 'successfully completed',
-                                    'has been completed', 'is done', 'task done', 'confirmed complete',
-                                    'yes, complete', 'verified complete', 'fulfills the requirement',
-                                    'fulfill the original task', 'satisfies the requirement'
-                                ]
-                                if any(phrase in mgmt_text.lower() for phrase in completion_phrases):
-                                    completion_reason[0] = "Management AI confirmed task completion."
-                                    message_queue.put(('status', "✓ Task verified complete!"))
-                                    task_success[0] = True
-                                    break
-
-                                if verification_iter >= 3:
-                                    completion_reason[0] = "Task appears complete (verification loop limit reached)."
-                                    message_queue.put(('status', "✓ Task complete (auto-verified)"))
-                                    task_success[0] = True
-                                    break
-
-                                message_queue.put(('message_start', 'MANAGEMENT AI'))
-                                verdict_prompt = (
-                                    "Output your verdict: COMPLETE, PLAN_ISSUE: <reason>, "
-                                    "or IMPL_ISSUE: <reason>"
-                                )
-                                session_manager.send_to_management(verdict_prompt)
-                                mgmt_response = session_manager.get_management_response(
-                                    timeout=management_timeout
-                                )
-
-                                if check_cancelled() or not mgmt_response:
-                                    break
-
-                                mgmt_text = extract_final_codex_response(mgmt_response)
-                                parsed_mgmt = parse_codex_output(mgmt_response) or mgmt_text
-                                message_queue.put(('message_complete', "MANAGEMENT AI", parsed_mgmt))
-
-                    except Exception as e:
-                        message_queue.put(('status', f"❌ Error: {str(e)}"))
-                    finally:
-                        session_manager.stop_all()
-                        relay_complete.set()
-
-                relay_thread = threading.Thread(target=relay_loop, daemon=True)
-                relay_thread.start()
-
-            # Stream updates with live activity
-            if managed_mode:
-                current_status = f"{status_prefix}⏳ Management AI is planning..."
-                current_ai = "MANAGEMENT AI"
-            else:
-                current_status = f"{status_prefix}⏳ Coding AI is working..."
-                current_ai = "CODING AI"
+                        self._session_active = False
+                    else:
+                        # Keep session alive for follow-ups
+                        self._session_active = True
+                    relay_complete.set()
+
+            relay_thread = threading.Thread(target=direct_loop, daemon=True)
+            relay_thread.start()
+
+            current_status = f"{status_prefix}⏳ Coding AI is working..."
+            current_ai = "CODING AI"
             current_live_stream = ""
             yield make_yield(
                 chat_history, current_status, current_live_stream, summary=current_status, interactive=False
@@ -1647,34 +1425,27 @@ Create a better plan that addresses the issue."""
             full_history = []  # Infinite history - list of (ai_name, content) tuples
             last_yield_time = 0.0
             min_yield_interval = 0.05
+            pending_message_idx = None
 
             def format_live_output(ai_name: str, content: str) -> str:
-                """Format live output with header showing active AI."""
                 if not content.strip():
                     return ""
-                # Convert ANSI codes to HTML for native terminal colors
                 html_content = ansi_to_html(content)
-                # Add diff highlighting for unified diff format
                 html_content = highlight_diffs(html_content)
                 header = f'<div class="live-output-header">▶ {ai_name} (Live Stream)</div>'
                 body = f'<div class="live-output-content">{html_content}</div>'
-                return f'{header}\n{body}'
+                return f'{header}\\n{body}'
 
             def get_display_content() -> str:
-                """Build display content from full history, showing last portion."""
                 if not full_history:
                     return ""
-                # Combine all history entries
                 combined = []
-                for ai_name, chunk in full_history:
+                for _, chunk in full_history:
                     combined.append(chunk)
                 full_content = ''.join(combined)
-                # Show last portion for display performance (but history is preserved)
                 if len(full_content) > 50000:
                     return full_content[-50000:]
                 return full_content
-
-            pending_message_idx = None
 
             while not relay_complete.is_set() and not self.cancel_requested:
                 try:
@@ -1692,8 +1463,10 @@ Create a better plan that addresses the issue."""
 
                     elif msg_type == 'message_start':
                         speaker = msg[1]
-                        placeholder = {"role": "user" if "MANAGEMENT" in speaker else "assistant",
-                                       "content": f"**{speaker}**\n\n⏳ *Working...*"}
+                        placeholder = {
+                            "role": "assistant",
+                            "content": f"**{speaker}**\n\n⏳ *Working...*"
+                        }
                         chat_history.append(placeholder)
                         pending_message_idx = len(chat_history) - 1
                         streaming_buffer = ""
@@ -1724,48 +1497,18 @@ Create a better plan that addresses the issue."""
                         yield make_yield(chat_history, current_status, current_live_stream, summary=summary_text)
                         last_yield_time = time_module.time()
 
-                    elif msg_type == 'phase_divider':
-                        phase_name = msg[1]
-                        divider = f"───────────── {phase_name} ─────────────"
-                        chat_history.append({"role": "user", "content": divider})
-                        streaming_buffer = ""
-                        current_live_stream = ""
-                        self.session_logger.update_log(session_log_path, chat_history)
-                        yield make_yield(chat_history, current_status, current_live_stream)
-                        last_yield_time = time_module.time()
-
-                    elif msg_type == 'phase_update':
-                        # Update the phase display in the role status line
-                        current_phase_display[0] = msg[1]
-                        yield make_yield(chat_history, current_status, current_live_stream)
-                        last_yield_time = time_module.time()
-
-                    elif msg_type == 'phase':
-                        phase_msg = msg[1]
-                        chat_history.append({"role": "user", "content": phase_msg})
-                        streaming_buffer = ""
-                        current_live_stream = ""
-                        summary_text = f"{status_prefix}{phase_msg}"
-                        self.session_logger.update_log(session_log_path, chat_history)
-                        yield make_yield(chat_history, current_status, current_live_stream, summary=summary_text)
-                        last_yield_time = time_module.time()
-
                     elif msg_type == 'ai_switch':
                         current_ai = msg[1]
                         streaming_buffer = ""
-                        # Add brief status to history for AI switch
-                        full_history.append((current_ai, "Investigating request\n"))
+                        full_history.append((current_ai, "Processing request\n"))
 
                     elif msg_type == 'stream':
                         chunk = msg[1]
-                        # Filter out empty/whitespace-only chunks
                         if chunk.strip():
                             streaming_buffer += chunk
-                            # Add to infinite history (no truncation)
                             full_history.append((current_ai, chunk))
                             now = time_module.time()
                             if now - last_yield_time >= min_yield_interval:
-                                # Get display content from full history
                                 display_content = get_display_content()
                                 current_live_stream = format_live_output(
                                     current_ai, display_content
@@ -1807,9 +1550,7 @@ Create a better plan that addresses the issue."""
                         )
                         last_yield_time = now
 
-            # If cancelled, don't process remaining messages - just mark as cancelled
             if self.cancel_requested:
-                # Find the last assistant message and mark it as cancelled
                 for idx in range(len(chat_history) - 1, -1, -1):
                     msg = chat_history[idx]
                     if isinstance(msg, dict) and msg.get("role") == "assistant":
@@ -1818,9 +1559,9 @@ Create a better plan that addresses the issue."""
                             "content": "**CODING AI**\n\n🛑 *Cancelled*"
                         }
                         break
-                yield make_yield(chat_history, "🛑 Task cancelled", "", summary="🛑 Task cancelled")
+                self._session_active = False
+                yield make_yield(chat_history, "🛑 Task cancelled", "", summary="🛑 Task cancelled", show_followup=False)
             else:
-                # Process any remaining message_complete messages
                 while True:
                     try:
                         msg = message_queue.get_nowait()
@@ -1837,21 +1578,16 @@ Create a better plan that addresses the issue."""
                         break
 
             relay_thread.join(timeout=1)
-            # Clear the phase indicator when task finishes
-            current_phase_display[0] = ""
             if self.cancel_requested:
                 final_status = "🛑 Task cancelled by user"
-                # Add cancellation indicator to timeline
                 chat_history.append({
                     "role": "user",
                     "content": "───────────── 🛑 TASK CANCELLED ─────────────"
                 })
             elif task_success[0]:
+                final_status = "✓ Task completed!"
                 if completion_reason[0]:
-                    final_status = f"✓ Task completed!\n\n*{completion_reason[0]}*"
-                else:
-                    final_status = "✓ Task completed!"
-                # Add completion indicator to timeline
+                    final_status += f"\n\n*{completion_reason[0]}*"
                 completion_msg = "───────────── ✅ TASK COMPLETED ─────────────"
                 if completion_reason[0]:
                     completion_msg += f"\n\n*{completion_reason[0]}*"
@@ -1865,7 +1601,6 @@ Create a better plan that addresses the issue."""
                     if completion_reason[0]
                     else "❌ Task did not complete successfully"
                 )
-                # Add failure indicator to timeline
                 failure_msg = "───────────── ❌ TASK FAILED ─────────────"
                 if completion_reason[0]:
                     failure_msg += f"\n\n*{completion_reason[0]}*"
@@ -1874,7 +1609,6 @@ Create a better plan that addresses the issue."""
                     "content": failure_msg
                 })
 
-            # Build streaming transcript from full_history
             streaming_transcript = ''.join(chunk for _, chunk in full_history) if full_history else None
 
             self.session_logger.update_log(
@@ -1889,12 +1623,208 @@ Create a better plan that addresses the issue."""
                 final_status += f"\n\n*Session log: {session_log_path}*"
             final_summary = f"{status_prefix}{final_status}"
 
-            yield make_yield(chat_history, final_summary, "", summary=final_summary, interactive=True)
+            # Store session state for follow-up messages
+            self._current_chat_history = chat_history
+            self._current_project_path = project_path
+            self._current_coding_account = coding_account
 
-        except Exception as e:
+            # Show follow-up input if session can continue (Claude with successful task)
+            can_continue = self._session_active and task_success[0]
+            if can_continue:
+                final_status += "\n\n*Session active - you can send follow-up messages*"
+                final_summary = f"{status_prefix}{final_status}"
+
+            yield make_yield(
+                chat_history, final_summary, "", summary=final_summary,
+                interactive=True, show_followup=can_continue
+            )
+
+        except Exception as e:  # pragma: no cover - defensive
             import traceback
             error_msg = f"❌ Error: {str(e)}\n\n```\n{traceback.format_exc()}\n```"
-            yield make_yield(chat_history, error_msg, summary=error_msg, interactive=True)
+            self._session_active = False
+            yield make_yield(chat_history, error_msg, summary=error_msg, interactive=True, show_followup=False)
+
+    def send_followup(  # noqa: C901
+        self,
+        followup_message: str,
+        current_history: list
+    ) -> Iterator[tuple[list, str, gr.update, gr.update, gr.update]]:
+        """Send a follow-up message to the active session.
+
+        Args:
+            followup_message: The follow-up message to send
+            current_history: Current chat history from the UI
+
+        Yields:
+            Tuples of (chat_history, live_stream, followup_input, followup_row, send_btn)
+        """
+        message_queue = queue.Queue()
+        self.cancel_requested = False
+
+        # Use stored history as base, but prefer current_history if it has more messages
+        chat_history = current_history if len(current_history) >= len(self._current_chat_history) else self._current_chat_history.copy()  # noqa: E501
+
+        def make_followup_yield(history, live_stream: str = "", show_followup: bool = True, working: bool = False):
+            """Format output for follow-up responses."""
+            return (
+                history,
+                live_stream,
+                gr.update(value="" if not working else followup_message),  # Clear input when not working
+                gr.update(visible=show_followup),  # Follow-up row visibility
+                gr.update(interactive=not working)  # Send button interactivity
+            )
+
+        if not followup_message or not followup_message.strip():
+            yield make_followup_yield(chat_history, "", show_followup=True)
+            return
+
+        if not self._session_active or not self._active_coding_provider:
+            chat_history.append({
+                "role": "user",
+                "content": f"**Follow-up**\n\n{followup_message}"
+            })
+            chat_history.append({
+                "role": "assistant",
+                "content": "**CODING AI**\n\n❌ *Session expired. Please start a new task.*"
+            })
+            self._session_active = False
+            yield make_followup_yield(chat_history, "", show_followup=False)
+            return
+
+        # Add user's follow-up message to history
+        chat_history.append({
+            "role": "user",
+            "content": f"**Follow-up**\n\n{followup_message}"
+        })
+
+        # Add placeholder for AI response
+        chat_history.append({
+            "role": "assistant",
+            "content": "**CODING AI**\n\n⏳ *Working...*"
+        })
+        pending_idx = len(chat_history) - 1
+
+        yield make_followup_yield(chat_history, "⏳ Processing follow-up...", working=True)
+
+        # Set up activity callback
+        def on_activity(activity_type: str, detail: str):
+            if activity_type == 'stream':
+                message_queue.put(('stream', detail))
+            elif activity_type == 'tool':
+                message_queue.put(('activity', f"● {detail}"))
+            elif activity_type == 'text' and detail:
+                message_queue.put(('activity', f"  ⎿ {detail[:80]}"))
+
+        coding_provider = self._active_coding_provider
+        coding_provider.set_activity_callback(on_activity)
+
+        # Send message and wait for response in background
+        relay_complete = threading.Event()
+        response_holder = [None]
+        error_holder = [None]
+
+        def relay_loop():
+            try:
+                coding_provider.send_message(followup_message)
+                response = coding_provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
+                response_holder[0] = response
+            except Exception as e:
+                error_holder[0] = str(e)
+            finally:
+                relay_complete.set()
+
+        relay_thread = threading.Thread(target=relay_loop, daemon=True)
+        relay_thread.start()
+
+        # Stream updates while waiting
+        import time as time_module
+        full_history = []
+        last_yield_time = 0.0
+        min_yield_interval = 0.05
+
+        def format_live_output(content: str) -> str:
+            if not content.strip():
+                return ""
+            html_content = ansi_to_html(content)
+            html_content = highlight_diffs(html_content)
+            header = '<div class="live-output-header">▶ CODING AI (Live Stream)</div>'
+            body = f'<div class="live-output-content">{html_content}</div>'
+            return f'{header}\\n{body}'
+
+        while not relay_complete.is_set() and not self.cancel_requested:
+            try:
+                msg = message_queue.get(timeout=0.02)
+                msg_type = msg[0]
+
+                if msg_type == 'stream':
+                    chunk = msg[1]
+                    if chunk.strip():
+                        full_history.append(chunk)
+                        now = time_module.time()
+                        if now - last_yield_time >= min_yield_interval:
+                            display_content = ''.join(full_history)
+                            if len(display_content) > 50000:
+                                display_content = display_content[-50000:]
+                            live_stream = format_live_output(display_content)
+                            yield make_followup_yield(chat_history, live_stream, working=True)
+                            last_yield_time = now
+
+                elif msg_type == 'activity':
+                    now = time_module.time()
+                    if now - last_yield_time >= min_yield_interval:
+                        display_content = ''.join(full_history)
+                        if display_content:
+                            content = display_content + f"\n\n{msg[1]}"
+                            live_stream = format_live_output(content)
+                        else:
+                            live_stream = f"**Live:** {msg[1]}"
+                        yield make_followup_yield(chat_history, live_stream, working=True)
+                        last_yield_time = now
+
+            except queue.Empty:
+                now = time_module.time()
+                if now - last_yield_time >= 0.3:
+                    display_content = ''.join(full_history)
+                    if display_content:
+                        live_stream = format_live_output(display_content)
+                        yield make_followup_yield(chat_history, live_stream, working=True)
+                        last_yield_time = now
+
+        relay_thread.join(timeout=1)
+
+        # Update chat history with final response
+        if error_holder[0]:
+            chat_history[pending_idx] = {
+                "role": "assistant",
+                "content": f"**CODING AI**\n\n❌ *Error: {error_holder[0]}*"
+            }
+            self._session_active = False
+            yield make_followup_yield(chat_history, "", show_followup=False)
+        elif response_holder[0]:
+            parsed = parse_codex_output(response_holder[0])
+            chat_history[pending_idx] = make_chat_message("CODING AI", parsed)
+
+            # Update stored history
+            self._current_chat_history = chat_history
+
+            # Update session log
+            if self.current_session_log_path:
+                streaming_transcript = ''.join(full_history) if full_history else None
+                self.session_logger.update_log(
+                    self.current_session_log_path,
+                    chat_history,
+                    streaming_transcript=streaming_transcript,
+                    status="continued"
+                )
+
+            yield make_followup_yield(chat_history, "", show_followup=True)
+        else:
+            chat_history[pending_idx] = {
+                "role": "assistant",
+                "content": "**CODING AI**\n\n❌ *No response received*"
+            }
+            yield make_followup_yield(chat_history, "", show_followup=True)
 
     def create_interface(self) -> gr.Blocks:
         """Create the Gradio interface."""
@@ -1918,13 +1848,26 @@ Create a better plan that addresses the issue."""
                     # Allow override via env var (for screenshots)
                     default_path = os.environ.get('CHAD_PROJECT_PATH', str(Path.cwd()))
 
-                    with gr.Row():
-                        project_path = gr.Textbox(
-                            label="Project Path",
-                            placeholder="/path/to/project",
-                            value=default_path
-                        )
-                        with gr.Column(scale=1, min_width=240):
+                    account_choices = list(self.security_mgr.list_accounts().keys())
+                    role_assignments = self.security_mgr.list_role_assignments()
+                    initial_coding = role_assignments.get("CODING", "")
+
+                    with gr.Row(elem_id="run-top-row", equal_height=True):
+                        with gr.Column(elem_id="run-top-main", scale=1):
+                            with gr.Row(elem_id="run-top-inputs", equal_height=True):
+                                project_path = gr.Textbox(
+                                    label="Project Path",
+                                    placeholder="/path/to/project",
+                                    value=default_path,
+                                    scale=3
+                                )
+                                coding_agent_dropdown = gr.Dropdown(
+                                    choices=account_choices,
+                                    value=initial_coding if initial_coding in account_choices else None,
+                                    label="Coding Agent",
+                                    scale=1,
+                                    min_width=260
+                                )
                             with gr.Row(elem_id="role-status-row"):
                                 role_status = gr.Markdown(config_status, elem_id="role-config-status")
                                 log_path = self.current_session_log_path
@@ -1935,7 +1878,7 @@ Create a better plan that addresses the issue."""
                                     variant="secondary",
                                     size="sm",
                                     scale=0,
-                                    min_width=120,
+                                    min_width=140,
                                     elem_id="session-log-btn"
                                 )
                         cancel_btn = gr.Button(
@@ -1943,7 +1886,8 @@ Create a better plan that addresses the issue."""
                             variant="stop",
                             interactive=False,
                             elem_id="cancel-task-btn",
-                            min_width=110
+                            min_width=40,
+                            scale=0
                         )
 
                     # Task status header (shows selected task description and status)
@@ -1978,10 +1922,28 @@ Create a better plan that addresses the issue."""
                                     autoscroll=False
                                 )
 
+                                # Follow-up input (hidden initially, shown after task completion)
+                                with gr.Row(visible=False, elem_id="followup-row") as followup_row:
+                                    followup_input = gr.TextArea(
+                                        label="Continue conversation...",
+                                        placeholder="Ask for changes or additional work...",
+                                        lines=2,
+                                        elem_id="followup-input",
+                                        scale=5
+                                    )
+                                    send_followup_btn = gr.Button(
+                                        "Send ➤",
+                                        variant="primary",
+                                        elem_id="send-followup-btn",
+                                        interactive=False,
+                                        scale=1,
+                                        min_width=80
+                                    )
+
                     # Live activity stream
                     live_stream_box = gr.Markdown("", elem_id="live-stream-box", sanitize_html=False)
 
-                # Providers Tab (combined management + usage)
+                # Providers Tab (configuration + usage)
                 with gr.Tab("⚙️ Providers"):
                     account_items = list(self.security_mgr.list_accounts().items())
                     # Allow room for new providers without needing a reload
@@ -2003,7 +1965,6 @@ Create a better plan that addresses the issue."""
                                 f'<span class="provider-card__header-text">'
                                 f'{account_name} ({provider_type})</span>'
                             )
-                            role_value = self._get_account_role(account_name) or "(none)"
                             model_choices = self.get_models_for_account(account_name)
                             stored_model = self.security_mgr.get_account_model(account_name)
                             model_value = stored_model if stored_model in model_choices else model_choices[0]
@@ -2018,7 +1979,6 @@ Create a better plan that addresses the issue."""
                             account_name = ""
                             visible = False
                             header_text = ""
-                            role_value = "(none)"
                             model_choices = ["default"]
                             model_value = "default"
                             reasoning_choices = ["default"]
@@ -2035,12 +1995,6 @@ Create a better plan that addresses the issue."""
                                     delete_btn = gr.Button("🗑︎", variant="secondary", size="sm", min_width=0, scale=0, elem_classes=["provider-delete"])  # noqa: E501
                                 account_state = gr.State(account_name)
                                 with gr.Row(elem_classes=["provider-controls"]):
-                                    role_dropdown = gr.Dropdown(
-                                        choices=["(none)", "CODING", "MANAGEMENT", "BOTH"],
-                                        label="Role",
-                                        value=role_value,
-                                        scale=1
-                                    )
                                     model_dropdown = gr.Dropdown(
                                         choices=model_choices,
                                         label="Preferred Model",
@@ -2065,7 +2019,6 @@ Create a better plan that addresses the issue."""
                             "header": card_header,
                             "account_state": account_state,
                             "account_name": account_name,  # Store name for delete handler
-                            "role_dropdown": role_dropdown,
                             "model_dropdown": model_dropdown,
                             "reasoning_dropdown": reasoning_dropdown,
                             "usage_box": usage_box,
@@ -2095,7 +2048,6 @@ Create a better plan that addresses the issue."""
                             card["group"],  # Use group for visibility control (Column visibility doesn't update)
                             card["header"],
                             card["account_state"],
-                            card["role_dropdown"],
                             card["model_dropdown"],
                             card["reasoning_dropdown"],
                             card["usage_box"],
@@ -2105,10 +2057,11 @@ Create a better plan that addresses the issue."""
                     # Add role status and start button to outputs so they update when roles change
                     provider_outputs_with_task_status = provider_outputs + [role_status, start_btn]
 
-                    # Include task status in add_provider outputs so Run Task tab updates
+                    # Include task status and agent dropdown in add_provider outputs so Run Task tab updates
                     add_provider_outputs = (
                         provider_outputs +
-                        [new_provider_name, add_btn, add_provider_accordion, role_status, start_btn]
+                        [new_provider_name, add_btn, add_provider_accordion, role_status, start_btn,
+                         coding_agent_dropdown]
                     )
 
                     def refresh_with_task_status():
@@ -2128,10 +2081,17 @@ Create a better plan that addresses the issue."""
                     )
 
                     def add_provider_with_task_status(provider_name, provider_type):
-                        """Add provider and also return updated task status."""
+                        """Add provider and also return updated task status and agent dropdown choices."""
                         base = self.add_provider(provider_name, provider_type)
                         is_ready, config_msg = self.get_role_config_status()
-                        return (*base, config_msg, gr.update(interactive=is_ready))
+                        # Get updated account choices for agent dropdowns
+                        new_choices = list(self.security_mgr.list_accounts().keys())
+                        return (
+                            *base,
+                            config_msg,
+                            gr.update(interactive=is_ready),
+                            gr.update(choices=new_choices)
+                        )
 
                     add_btn.click(
                         add_provider_with_task_status,
@@ -2139,18 +2099,7 @@ Create a better plan that addresses the issue."""
                         outputs=add_provider_outputs
                     )
 
-                    def assign_role_with_task_status(account_name, role):
-                        base = self.assign_role(account_name, role)
-                        is_ready, config_msg = self.get_role_config_status()
-                        return (*base, config_msg, gr.update(interactive=is_ready))
-
                     for card in provider_cards:
-                        card["role_dropdown"].change(
-                            assign_role_with_task_status,
-                            inputs=[card["account_state"], card["role_dropdown"]],
-                            outputs=provider_outputs_with_task_status
-                        )
-
                         card["model_dropdown"].change(
                             self.set_model,
                             inputs=[card["account_state"], card["model_dropdown"]],
@@ -2168,23 +2117,38 @@ Create a better plan that addresses the issue."""
                             def handler(pending_delete, current_account):
                                 # Skip if card has no account (empty slot)
                                 if not current_account:
-                                    return (pending_delete, *self._provider_action_response(""))
+                                    new_choices = list(self.security_mgr.list_accounts().keys())
+                                    return (
+                                        pending_delete,
+                                        *self._provider_action_response(""),
+                                        gr.update(choices=new_choices)
+                                    )
 
                                 if pending_delete == current_account:
                                     # Second click - actually delete
                                     result = self.delete_provider(current_account, confirmed=True)
-                                    return (None, *result)  # Reset pending state + provider outputs
+                                    new_choices = list(self.security_mgr.list_accounts().keys())
+                                    return (
+                                        None,
+                                        *result,
+                                        gr.update(choices=new_choices)
+                                    )
                                 else:
                                     # First click - show confirmation button (tick icon)
                                     result = self._provider_action_response(
                                         f"Click the ✓ icon in '{current_account}' titlebar to confirm deletion",
                                         pending_delete=current_account
                                     )
-                                    return (current_account, *result)  # Set pending state + provider outputs
+                                    new_choices = list(self.security_mgr.list_accounts().keys())
+                                    return (
+                                        current_account,
+                                        *result,
+                                        gr.update(choices=new_choices)
+                                    )
                             return handler
 
-                        # Outputs include pending_delete_state + all provider outputs
-                        delete_outputs = [pending_delete_state] + provider_outputs
+                        # Outputs include pending_delete_state + provider outputs + agent dropdown
+                        delete_outputs = [pending_delete_state] + provider_outputs + [coding_agent_dropdown]
 
                         card["delete_btn"].click(
                             fn=make_delete_handler(),
@@ -2195,13 +2159,42 @@ Create a better plan that addresses the issue."""
             # Connect task execution (outside tabs)
             start_btn.click(
                 self.start_chad_task,
-                inputs=[project_path, task_description],
-                outputs=[chatbot, live_stream_box, task_status_header, project_path, task_description, start_btn, cancel_btn, role_status, session_log_btn]  # noqa: E501
+                inputs=[project_path, task_description, coding_agent_dropdown],
+                outputs=[chatbot, live_stream_box, task_status_header, project_path, task_description, start_btn, cancel_btn, role_status, session_log_btn, followup_input, followup_row, send_followup_btn]  # noqa: E501
             )
 
             cancel_btn.click(
                 self.cancel_task,
                 outputs=[live_stream_box]
+            )
+
+            # Connect follow-up message handling
+            send_followup_btn.click(
+                self.send_followup,
+                inputs=[followup_input, chatbot],
+                outputs=[chatbot, live_stream_box, followup_input, followup_row, send_followup_btn]
+            )
+
+            # Update role status and start button when agent dropdowns change
+            def update_agent_selection(coding):
+                """Update role status based on current agent selection."""
+                accounts = self.security_mgr.list_accounts()
+                if coding and coding in accounts:
+                    coding_provider = accounts.get(coding, "unknown")
+                    coding_model = self.security_mgr.get_account_model(coding)
+                    coding_info = f"{coding} ({coding_provider}"
+                    if coding_model != "default":
+                        coding_info += f", {coding_model}"
+                    coding_info += ")"
+                    status = f"✓ Ready — **Coding:** {coding_info}"
+                    return status, gr.update(interactive=True)
+                status = "⚠️ Please select a Coding Agent"
+                return status, gr.update(interactive=False)
+
+            coding_agent_dropdown.change(
+                update_agent_selection,
+                inputs=[coding_agent_dropdown],
+                outputs=[role_status, start_btn]
             )
 
             return interface

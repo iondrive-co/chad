@@ -12,7 +12,7 @@ class TestChadWebUI:
         """Create a mock security manager."""
         mgr = Mock()
         mgr.list_accounts.return_value = {'claude': 'anthropic', 'gpt': 'openai'}
-        mgr.list_role_assignments.return_value = {'CODING': 'claude', 'MANAGEMENT': 'gpt'}
+        mgr.list_role_assignments.return_value = {'CODING': 'claude'}
         mgr.get_account_model.return_value = 'default'
         mgr.get_account_reasoning.return_value = 'default'
         return mgr
@@ -47,8 +47,6 @@ class TestChadWebUI:
         assert 'anthropic' in result
         assert 'gpt' in result
         assert 'openai' in result
-        assert 'CODING' in result
-        assert 'MANAGEMENT' in result
 
     def test_list_providers_empty(self, mock_security_mgr):
         """Test listing providers when no accounts exist."""
@@ -226,20 +224,18 @@ class TestChadWebUI:
 
     def test_cancel_task(self, web_ui, mock_security_mgr):
         """Test cancelling a running task."""
-        mock_session_mgr = Mock()
-        web_ui.session_manager = mock_session_mgr
+        mock_provider = Mock()
+        web_ui._active_coding_provider = mock_provider
 
         result = web_ui.cancel_task()
 
         assert '🛑' in result
         assert 'cancelled' in result.lower()
         assert web_ui.cancel_requested is True
-        mock_session_mgr.stop_all.assert_called_once()
+        mock_provider.stop_session.assert_called_once()
 
     def test_cancel_task_no_session(self, web_ui, mock_security_mgr):
         """Test cancelling when no session is running."""
-        web_ui.session_manager = None
-
         result = web_ui.cancel_task()
 
         assert '🛑' in result
@@ -254,7 +250,7 @@ class TestChadWebUITaskExecution:
         """Create a mock security manager."""
         mgr = Mock()
         mgr.list_accounts.return_value = {'claude': 'anthropic'}
-        mgr.list_role_assignments.return_value = {'CODING': 'claude', 'MANAGEMENT': 'claude'}
+        mgr.list_role_assignments.return_value = {'CODING': 'claude'}
         mgr.get_account_model.return_value = 'default'
         mgr.get_account_reasoning.return_value = 'default'
         return mgr
@@ -267,7 +263,7 @@ class TestChadWebUITaskExecution:
 
     def test_start_task_missing_project(self, web_ui):
         """Test starting task without project path."""
-        results = list(web_ui.start_chad_task('', 'do something', False))
+        results = list(web_ui.start_chad_task('', 'do something', 'test-coding'))
 
         assert len(results) > 0
         last_result = results[-1]
@@ -279,7 +275,7 @@ class TestChadWebUITaskExecution:
 
     def test_start_task_missing_description(self, web_ui):
         """Test starting task without task description."""
-        results = list(web_ui.start_chad_task('/tmp', '', False))
+        results = list(web_ui.start_chad_task('/tmp', '', 'test-coding'))
 
         assert len(results) > 0
         last_result = results[-1]
@@ -290,7 +286,7 @@ class TestChadWebUITaskExecution:
 
     def test_start_task_invalid_path(self, web_ui):
         """Test starting task with invalid project path."""
-        results = list(web_ui.start_chad_task('/nonexistent/path/xyz', 'do something', False))
+        results = list(web_ui.start_chad_task('/nonexistent/path/xyz', 'do something', 'test-coding'))
 
         assert len(results) > 0
         last_result = results[-1]
@@ -300,13 +296,13 @@ class TestChadWebUITaskExecution:
         assert '❌' in status_value
         assert 'Invalid project path' in status_value
 
-    def test_start_task_missing_roles(self, mock_security_mgr):
-        """Test starting task when roles are not assigned."""
+    def test_start_task_missing_agents(self, mock_security_mgr):
+        """Test starting task when agents are not selected."""
         from chad.web_ui import ChadWebUI
         mock_security_mgr.list_role_assignments.return_value = {}
 
         web_ui = ChadWebUI(mock_security_mgr, 'test-password')
-        results = list(web_ui.start_chad_task('/tmp', 'do something', False))
+        results = list(web_ui.start_chad_task('/tmp', 'do something', ''))
 
         assert len(results) > 0
         last_result = results[-1]
@@ -314,7 +310,7 @@ class TestChadWebUITaskExecution:
         status_header = last_result[2]
         status_value = status_header.get('value', '') if isinstance(status_header, dict) else str(status_header)
         assert '❌' in status_value
-        assert 'CODING' in status_value or 'MANAGEMENT' in status_value
+        assert 'Coding Agent' in status_value
 
 
 class TestChadWebUIInterface:
@@ -948,9 +944,6 @@ class TestSessionLogging:
             project_path="/tmp/test-project",
             coding_account="claude",
             coding_provider="anthropic",
-            management_account="gpt",
-            management_provider="openai",
-            managed_mode=False
         )
 
         assert log_path is not None
@@ -968,12 +961,12 @@ class TestSessionLogging:
         assert data["project_path"] == "/tmp/test-project"
         assert data["status"] == "running"
         assert data["success"] is None
-        assert data["managed_mode"] is False
+        assert "managed_mode" not in data
         assert len(data["conversation"]) == 0
 
         # Update with conversation
         chat_history = [
-            {"role": "user", "content": "**MANAGEMENT:** Plan the task"},
+            {"role": "user", "content": "**Task:** Plan the work"},
             {"role": "assistant", "content": "**CODING:** Done!"}
         ]
         web_ui.session_logger.update_log(log_path, chat_history)
@@ -998,8 +991,6 @@ class TestSessionLogging:
         assert data["status"] == "completed"
         assert data["coding"]["account"] == "claude"
         assert data["coding"]["provider"] == "anthropic"
-        assert data["management"]["account"] == "gpt"
-        assert data["management"]["provider"] == "openai"
 
         # Cleanup
         log_path.unlink()
@@ -1009,138 +1000,6 @@ class TestSessionLogging:
             chad_dir.rmdir()
 
 
-class TestStateMachineIntegration:
-    """Integration tests for the state machine relay loop."""
-
-    @pytest.fixture
-    def mock_security_mgr(self):
-        """Create a mock security manager with roles assigned."""
-        mgr = Mock()
-        mgr.list_accounts.return_value = {'coding-ai': 'anthropic', 'mgmt-ai': 'openai'}
-        mgr.list_role_assignments.return_value = {'CODING': 'coding-ai', 'MANAGEMENT': 'mgmt-ai'}
-        mgr.get_account_model.return_value = 'default'
-        return mgr
-
-    @pytest.fixture
-    def web_ui(self, mock_security_mgr):
-        """Create a ChadWebUI instance."""
-        from chad.web_ui import ChadWebUI
-        return ChadWebUI(mock_security_mgr, 'test-password')
-
-    @patch('chad.web_ui.SessionManager')
-    def test_immediate_plan_accepted(self, mock_session_manager_class, web_ui, tmp_path):
-        """Test that management can create a plan immediately without investigation."""
-        mock_manager = Mock()
-        mock_manager.start_sessions.return_value = True
-        mock_manager.are_sessions_alive.side_effect = [True, True, True, False]
-
-        # Management immediately outputs a PLAN without investigating - should be accepted
-        mock_manager.get_management_response.return_value = "PLAN:\n1. Do something\n2. Do another thing"
-
-        # Coding AI response for implementation
-        mock_manager.get_coding_response.return_value = "Done. Completed both steps."
-
-        mock_manager.stop_all = Mock()
-        mock_session_manager_class.return_value = mock_manager
-
-        # Create a test directory
-        test_dir = tmp_path / "test_project"
-        test_dir.mkdir()
-
-        # Run the task in managed mode (third param True)
-        results = []
-        for i, result in enumerate(web_ui.start_chad_task(str(test_dir), 'test task', True)):
-            results.append(result)
-            if i > 5:
-                web_ui.cancel_requested = True
-                break
-
-        # Check that plan was sent to coding AI (implementation started)
-        coding_calls = mock_manager.send_to_coding.call_args_list
-        assert len(coding_calls) >= 1
-        first_coding_call = str(coding_calls[0])
-        assert 'plan' in first_coding_call.lower() or 'execute' in first_coding_call.lower()
-
-    @patch('chad.web_ui.SessionManager')
-    def test_plan_accepted_after_investigation(self, mock_session_manager_class, web_ui, tmp_path):
-        """Test that plan is accepted after proper investigation."""
-        mock_manager = Mock()
-        mock_manager.start_sessions.return_value = True
-        mock_manager.are_sessions_alive.side_effect = [True, True, True, True, False]  # Stop after a few iterations
-
-        # Management asks investigation question first, then creates plan
-        mgmt_responses = [
-            "Please search for files related to the header component",  # Investigation question
-            "PLAN:\n1. Modify header.css\n2. Update colors",            # Plan after receiving findings
-        ]
-        mock_manager.get_management_response.side_effect = mgmt_responses
-
-        # Coding AI provides investigation findings
-        mock_manager.get_coding_response.return_value = "Found: src/header.css with current styles"
-
-        mock_manager.stop_all = Mock()
-        mock_session_manager_class.return_value = mock_manager
-
-        test_dir = tmp_path / "test_project"
-        test_dir.mkdir()
-
-        # Run in managed mode (third param True)
-        list(web_ui.start_chad_task(str(test_dir), 'change header colors', True))
-
-        # Verify that coding AI was called for investigation
-        coding_calls = mock_manager.send_to_coding.call_args_list
-        assert len(coding_calls) >= 1
-        # First coding call should be the investigation question
-        first_coding_call = str(coding_calls[0])
-        assert 'header' in first_coding_call.lower() or 'search' in first_coding_call.lower()
-
-
-class TestDeleteConfirmationIcon:
-    """Test that delete confirmation button shows tick icon."""
-
-    @pytest.fixture
-    def mock_security_mgr(self):
-        """Create a mock security manager."""
-        mgr = Mock()
-        mgr.list_accounts.return_value = {'claude': 'anthropic', 'gpt': 'openai'}
-        mgr.list_role_assignments.return_value = {'CODING': 'claude'}
-        mgr.get_account_model.return_value = 'default'
-        mgr.get_account_reasoning.return_value = 'default'
-        return mgr
-
-    def test_delete_button_shows_tick_for_pending(self, mock_security_mgr):
-        """Delete button should show tick symbol when pending confirmation."""
-        from chad.provider_ui import ProviderUIManager
-
-        provider_ui = ProviderUIManager(mock_security_mgr, 'test-password')
-        state = provider_ui.provider_state(5, pending_delete='claude')
-
-        # Check that one of the delete button updates contains tick symbol
-        found_tick = False
-        for item in state:
-            if isinstance(item, dict) and 'value' in item:
-                if item.get('value') == '✓':
-                    found_tick = True
-                    break
-        assert found_tick, "Delete confirmation button should show ✓ symbol"
-
-    def test_delete_button_shows_trash_normally(self, mock_security_mgr):
-        """Delete button should show trash icon when not pending."""
-        from chad.provider_ui import ProviderUIManager
-
-        provider_ui = ProviderUIManager(mock_security_mgr, 'test-password')
-        state = provider_ui.provider_state(5, pending_delete=None)
-
-        # Check that delete buttons show trash icon
-        found_trash = False
-        for item in state:
-            if isinstance(item, dict) and 'value' in item:
-                if '🗑' in str(item.get('value', '')):
-                    found_trash = True
-                    break
-        assert found_trash, "Delete button should show trash icon when not pending"
-
-
 class TestSessionLogIncludesTask:
     """Test that session log conversation includes the task description."""
 
@@ -1148,8 +1007,8 @@ class TestSessionLogIncludesTask:
     def mock_security_mgr(self):
         """Create a mock security manager with roles assigned."""
         mgr = Mock()
-        mgr.list_accounts.return_value = {'coding-ai': 'mock', 'mgmt-ai': 'mock'}
-        mgr.list_role_assignments.return_value = {'CODING': 'coding-ai', 'MANAGEMENT': 'mgmt-ai'}
+        mgr.list_accounts.return_value = {'coding-ai': 'mock'}
+        mgr.list_role_assignments.return_value = {'CODING': 'coding-ai'}
         mgr.get_account_model.return_value = 'default'
         mgr.get_account_reasoning.return_value = 'default'
         return mgr
@@ -1178,8 +1037,8 @@ class TestSessionLogIncludesTask:
 
         task_description = "Fix the login bug"
 
-        # Run task in direct mode (third param False or omitted)
-        list(web_ui.start_chad_task(str(test_dir), task_description, False))
+        # Run task with agent selections
+        list(web_ui.start_chad_task(str(test_dir), task_description, 'coding-ai'))
 
         # Get the session log path
         session_log_path = web_ui.current_session_log_path

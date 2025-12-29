@@ -115,16 +115,38 @@ class SecurityManager:
             return {}
 
     def save_config(self, config: dict[str, Any]) -> None:
-        """Save configuration to file.
+        """Save configuration to file atomically.
+
+        Uses write-to-temp-then-rename pattern to avoid race conditions
+        where concurrent reads could see a truncated/empty file.
 
         Args:
             config: Configuration dictionary to save
         """
+        import os
+        import tempfile
+
         try:
-            with open(self.config_path, 'w') as f:
-                json.dump(config, f, indent=2)
-            # Secure the config file (readable only by owner)
-            self.config_path.chmod(0o600)
+            # Write to temp file in same directory (for atomic rename)
+            fd, tmp_path = tempfile.mkstemp(
+                dir=self.config_path.parent,
+                prefix='.chad_config_',
+                suffix='.tmp'
+            )
+            try:
+                with os.fdopen(fd, 'w') as f:
+                    json.dump(config, f, indent=2)
+                # Set permissions before rename
+                os.chmod(tmp_path, 0o600)
+                # Atomic rename
+                os.replace(tmp_path, self.config_path)
+            except Exception:
+                # Clean up temp file on error
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except IOError as e:
             print(f"Error: Could not save config file: {e}")
 
@@ -441,7 +463,7 @@ class SecurityManager:
 
         Args:
             account_name: Account name to assign role to
-            role: Role name ('CODING', 'MANAGEMENT', etc.)
+            role: Role name ('CODING')
 
         Raises:
             ValueError: If account doesn't exist
@@ -465,6 +487,8 @@ class SecurityManager:
         Returns:
             Account name assigned to this role, or None if not assigned
         """
+        if role != 'CODING':
+            return None
         config = self.load_config()
         return config.get('role_assignments', {}).get(role)
 
@@ -475,7 +499,9 @@ class SecurityManager:
             Dict mapping role names to account names
         """
         config = self.load_config()
-        return config.get('role_assignments', {})
+        assignments = config.get('role_assignments', {}) or {}
+        # Only the CODING role is supported in simple mode
+        return {role: acct for role, acct in assignments.items() if role == 'CODING'}
 
     def clear_role(self, role: str) -> None:
         """Remove a role assignment.
