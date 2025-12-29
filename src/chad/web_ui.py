@@ -1868,13 +1868,17 @@ class ChadWebUI:
     def send_followup(  # noqa: C901
         self,
         followup_message: str,
-        current_history: list
+        current_history: list,
+        coding_agent: str = "",
+        verification_agent: str = "",
     ) -> Iterator[tuple[list, str, gr.update, gr.update, gr.update]]:
-        """Send a follow-up message to the active session.
+        """Send a follow-up message, with optional provider handoff and verification.
 
         Args:
             followup_message: The follow-up message to send
             current_history: Current chat history from the UI
+            coding_agent: Currently selected coding agent from dropdown
+            verification_agent: Currently selected verification agent from dropdown
 
         Yields:
             Tuples of (chat_history, live_stream, followup_input, followup_row, send_btn)
@@ -1899,6 +1903,62 @@ class ChadWebUI:
             yield make_followup_yield(chat_history, "", show_followup=True)
             return
 
+        # Check if we need provider handoff
+        accounts = self.security_mgr.list_accounts()
+        provider_changed = (
+            coding_agent
+            and coding_agent in accounts
+            and coding_agent != self._current_coding_account
+        )
+
+        if provider_changed:
+            # Stop old session if active
+            if self._active_coding_provider:
+                try:
+                    self._active_coding_provider.stop_session()
+                except Exception:
+                    pass
+                self._active_coding_provider = None
+                self._session_active = False
+
+            # Start new provider
+            coding_provider_type = accounts[coding_agent]
+            coding_model = self.security_mgr.get_account_model(coding_agent)
+            coding_reasoning = self.security_mgr.get_account_reasoning(coding_agent)
+
+            coding_config = ModelConfig(
+                provider=coding_provider_type,
+                model_name=coding_model,
+                account_name=coding_agent,
+                reasoning_effort=None if coding_reasoning == 'default' else coding_reasoning
+            )
+
+            handoff_msg = (
+                f"───────────── 🔄 PROVIDER HANDOFF ─────────────\n\n"
+                f"*Switching to {coding_agent} ({coding_provider_type})*"
+            )
+            chat_history.append({"role": "user", "content": handoff_msg})
+            yield make_followup_yield(chat_history, "🔄 Switching providers...", working=True)
+
+            new_provider = create_provider(coding_config)
+            project_path = self._current_project_path or str(Path.cwd())
+
+            if not new_provider.start_session(project_path, None):
+                chat_history.append({
+                    "role": "assistant",
+                    "content": f"**CODING AI**\n\n❌ *Failed to start {coding_agent} session*"
+                })
+                yield make_followup_yield(chat_history, "", show_followup=False)
+                return
+
+            self._active_coding_provider = new_provider
+            self._current_coding_account = coding_agent
+            self._session_active = True
+
+            # Include conversation context for the new provider
+            context_summary = self._build_handoff_context(chat_history)
+            followup_message = f"{context_summary}\n\n# Follow-up Request\n\n{followup_message}"
+
         if not self._session_active or not self._active_coding_provider:
             chat_history.append({
                 "role": "user",
@@ -1913,10 +1973,13 @@ class ChadWebUI:
             return
 
         # Add user's follow-up message to history
-        chat_history.append({
-            "role": "user",
-            "content": f"**Follow-up**\n\n{followup_message}"
-        })
+        if provider_changed:
+            # Extract just the user's actual message after handoff context
+            display_msg = followup_message.split('# Follow-up Request')[-1].strip()
+            user_content = f"**Follow-up** (via {coding_agent})\n\n{display_msg}"
+        else:
+            user_content = f"**Follow-up**\n\n{followup_message}"
+        chat_history.append({"role": "user", "content": user_content})
 
         # Add placeholder for AI response
         chat_history.append({
@@ -2020,31 +2083,158 @@ class ChadWebUI:
                 "content": f"**CODING AI**\n\n❌ *Error: {error_holder[0]}*"
             }
             self._session_active = False
+            self._update_session_log(chat_history, full_history)
             yield make_followup_yield(chat_history, "", show_followup=False)
-        elif response_holder[0]:
-            parsed = parse_codex_output(response_holder[0])
-            chat_history[pending_idx] = make_chat_message("CODING AI", parsed)
+            return
 
-            # Update stored history
-            self._current_chat_history = chat_history
-
-            # Update session log
-            if self.current_session_log_path:
-                streaming_transcript = ''.join(full_history) if full_history else None
-                self.session_logger.update_log(
-                    self.current_session_log_path,
-                    chat_history,
-                    streaming_transcript=streaming_transcript,
-                    status="continued"
-                )
-
-            yield make_followup_yield(chat_history, "", show_followup=True)
-        else:
+        if not response_holder[0]:
             chat_history[pending_idx] = {
                 "role": "assistant",
                 "content": "**CODING AI**\n\n❌ *No response received*"
             }
+            self._update_session_log(chat_history, full_history)
             yield make_followup_yield(chat_history, "", show_followup=True)
+            return
+
+        parsed = parse_codex_output(response_holder[0])
+        chat_history[pending_idx] = make_chat_message("CODING AI", parsed)
+        last_coding_output = parsed
+
+        # Update stored history
+        self._current_chat_history = chat_history
+        self._update_session_log(chat_history, full_history)
+
+        yield make_followup_yield(chat_history, "", show_followup=True, working=True)
+
+        # Run verification on follow-up
+        actual_verification_account = (
+            self._current_coding_account
+            if verification_agent == self.SAME_AS_CODING
+            else verification_agent
+        )
+
+        if actual_verification_account and actual_verification_account in accounts:
+            # Run verification
+            chat_history.append({
+                "role": "user",
+                "content": "───────────── 🔍 VERIFICATION ─────────────"
+            })
+            yield make_followup_yield(chat_history, "🔍 Running verification...", working=True)
+
+            def verification_activity(activity_type: str, detail: str):
+                pass  # Quiet verification
+
+            verified, verification_feedback = self._run_verification(
+                self._current_project_path or str(Path.cwd()),
+                last_coding_output,
+                actual_verification_account,
+                on_activity=verification_activity,
+                timeout=300.0
+            )
+
+            if verified is None:
+                chat_history.append({
+                    "role": "assistant",
+                    "content": f"**VERIFICATION AI**\n\n❌ {verification_feedback}"
+                })
+                chat_history.append({
+                    "role": "user",
+                    "content": "───────────── ❌ VERIFICATION ERROR ─────────────"
+                })
+            elif verified:
+                chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
+                chat_history.append({
+                    "role": "user",
+                    "content": "───────────── ✅ VERIFICATION PASSED ─────────────"
+                })
+            else:
+                chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
+                chat_history.append({
+                    "role": "user",
+                    "content": "───────────── ❌ VERIFICATION FAILED ─────────────"
+                })
+                # Send revision request to coding agent
+                if self._session_active and coding_provider.is_alive():
+                    revision_request = (
+                        "The verification agent found issues with your work. "
+                        "Please address them:\n\n"
+                        f"{verification_feedback}\n\n"
+                        "Please fix these issues and confirm when done."
+                    )
+                    chat_history.append({
+                        "role": "user",
+                        "content": "───────────── 🔄 REVISION REQUESTED ─────────────"
+                    })
+                    chat_history.append({
+                        "role": "assistant",
+                        "content": "**CODING AI**\n\n⏳ *Working on revisions...*"
+                    })
+                    revision_idx = len(chat_history) - 1
+                    yield make_followup_yield(chat_history, "🔄 Revision in progress...", working=True)
+
+                    coding_provider.send_message(revision_request)
+                    revision_response = coding_provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
+
+                    if revision_response:
+                        parsed_revision = parse_codex_output(revision_response)
+                        chat_history[revision_idx] = make_chat_message("CODING AI", parsed_revision)
+                    else:
+                        chat_history[revision_idx] = {
+                            "role": "assistant",
+                            "content": "**CODING AI**\n\n❌ *No response to revision request*"
+                        }
+
+            self._current_chat_history = chat_history
+            self._update_session_log(chat_history, full_history)
+
+        yield make_followup_yield(chat_history, "", show_followup=True)
+
+    def _build_handoff_context(self, chat_history: list) -> str:
+        """Build a context summary for provider handoff.
+
+        Args:
+            chat_history: The current chat history
+
+        Returns:
+            A summary of the conversation for the new provider
+        """
+        # Extract key messages from history
+        context_parts = ["# Previous Conversation Summary\n"]
+
+        for msg in chat_history:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+
+            # Skip dividers and status messages
+            if "─────" in content:
+                continue
+
+            if role == "user" and content.startswith("**Task**"):
+                context_parts.append(f"**Original Task:**\n{content.replace('**Task**', '').strip()}\n")
+            elif role == "assistant" and "CODING AI" in content:
+                # Summarize the response (first 500 chars)
+                summary = content.replace("**CODING AI**", "").strip()[:500]
+                if len(summary) == 500:
+                    summary += "..."
+                context_parts.append(f"**Previous Response (summary):**\n{summary}\n")
+
+        return "\n".join(context_parts)
+
+    def _update_session_log(self, chat_history: list, streaming_history: list = None):
+        """Update the session log with current state.
+
+        Args:
+            chat_history: Current chat history
+            streaming_history: Optional streaming transcript chunks
+        """
+        if self.current_session_log_path:
+            streaming_transcript = ''.join(streaming_history) if streaming_history else None
+            self.session_logger.update_log(
+                self.current_session_log_path,
+                chat_history,
+                streaming_transcript=streaming_transcript,
+                status="continued"
+            )
 
     def create_interface(self) -> gr.Blocks:
         """Create the Gradio interface."""
@@ -2186,7 +2376,11 @@ class ChadWebUI:
                     provider_feedback = gr.Markdown("")
                     gr.Markdown("### Providers", elem_classes=["provider-section-title"])
 
-                    provider_list = gr.Markdown(self.list_providers(), elem_classes=["provider-summary"])
+                    provider_list = gr.Markdown(
+                        self.list_providers(),
+                        elem_id="provider-summary-panel",
+                        elem_classes=["provider-summary"]
+                    )
                     refresh_btn = gr.Button("🔄 Refresh", variant="secondary")
                     pending_delete_state = gr.State(None)  # Tracks which account is pending deletion
 
@@ -2223,7 +2417,8 @@ class ChadWebUI:
                         # gr.Column(visible=False) prevents proper rendering updates
                         card_group_classes = ["provider-card"] if visible else ["provider-card", "provider-card-empty"]
                         with gr.Column(visible=True) as card_column:
-                            with gr.Group(elem_classes=card_group_classes) as card_group:
+                            card_elem_id = f"provider-card-{idx}"
+                            with gr.Group(elem_id=card_elem_id, elem_classes=card_group_classes) as card_group:
                                 with gr.Row(elem_classes=["provider-card__header-row"]):
                                     card_header = gr.Markdown(header_text, elem_classes=["provider-card__header"])
                                     delete_btn = gr.Button("🗑︎", variant="secondary", size="sm", min_width=0, scale=0, elem_classes=["provider-delete"])  # noqa: E501
@@ -2262,6 +2457,7 @@ class ChadWebUI:
                     with gr.Accordion(
                         "Add New Provider",
                         open=False,
+                        elem_id="add-provider-panel",
                         elem_classes=["add-provider-accordion"]
                     ) as add_provider_accordion:
                         gr.Markdown("Click to add another provider. Close the accordion to retract without adding.")
@@ -2417,7 +2613,7 @@ class ChadWebUI:
             # Connect follow-up message handling
             send_followup_btn.click(
                 self.send_followup,
-                inputs=[followup_input, chatbot],
+                inputs=[followup_input, chatbot, coding_agent_dropdown, verification_agent_dropdown],
                 outputs=[chatbot, live_stream_box, followup_input, followup_row, send_followup_btn]
             )
 

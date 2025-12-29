@@ -13,32 +13,16 @@ Edit these prompts to customize agent behavior.
 CODING_AGENT_PROMPT = """\
 {project_docs}
 
-# Workflow
-
-Follow this workflow for every task:
-
-## 1. Understand the Issue
-- If the task involves a visual/UI component, run `mcp__chad-ui-playwright__screenshot` \
-with label="before" to capture the current state
-- Review the screenshot to confirm you understand the issue
-
-## 2. Make Changes
-- Implement the fix or feature
-- Keep changes focused and minimal
-
-## 3. Verify Visually
-- If visual/UI component: run `mcp__chad-ui-playwright__screenshot` with label="after"
-- Compare before/after to ensure the issue is resolved
-
-## 4. Run Tests
-- Run `mcp__chad-ui-playwright__verify` to execute lint and the full test suite
-- Fix any failures before completing
-
+Firstly, write a test which should fail until the following task has been successfully completed. For any UI-affecting
+work, see if the project has a means to take a "before" screenshot, if so do that and review the screenshot to confirm
+you understand the issue/current state.
 ---
-
 # Task
 
 {task}
+---
+Once you have completed your the above, take an after screenshot if that is supported to confirm that it is fixed/done.
+Run any tests and lint available in the project and fix all issues even if you didn't cause them.
 """
 
 
