@@ -1,1 +1,1 @@
-See AGENTS.md in root of repository
+@../AGENTS.md
