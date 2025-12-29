@@ -230,8 +230,18 @@ def run_screenshot_subprocess(
     viewport: Optional[Dict[str, int]] = None,
     label: str | None = None,
     issue_id: str = "",
+    selector: str | None = None,
 ) -> Dict[str, object]:
-    """Run screenshot_ui.py in a subprocess to avoid event loop conflicts."""
+    """Run screenshot_ui.py in a subprocess to avoid event loop conflicts.
+
+    Args:
+        tab: Which tab to screenshot ("run" or "providers")
+        headless: Whether to run browser in headless mode
+        viewport: Browser viewport dimensions
+        label: Optional label for the screenshot filename
+        issue_id: Optional issue ID for the screenshot filename
+        selector: Optional CSS selector to capture a specific element instead of full page
+    """
     viewport = viewport or {"width": 1280, "height": 900}
     artifacts_dir = Path(tempfile.mkdtemp(prefix="chad_visual_"))
     parts = []
@@ -263,6 +273,8 @@ def run_screenshot_subprocess(
     ]
     if headless:
         cmd.append("--headless")
+    if selector:
+        cmd.extend(["--selector", selector])
 
     result = subprocess.run(
         cmd,

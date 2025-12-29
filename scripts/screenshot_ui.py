@@ -14,6 +14,10 @@ Examples:
     # Screenshot specific tab
     python scripts/screenshot_ui.py --tab providers
 
+    # Screenshot a specific component using CSS selector
+    python scripts/screenshot_ui.py --tab run --selector "#run-top-inputs"
+    python scripts/screenshot_ui.py --tab providers --selector "#provider-card-0"
+
     # Capture both dark and light variants and open them when finished (handy in PyCharm)
     python scripts/screenshot_ui.py
 
@@ -25,6 +29,7 @@ Examples:
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 import webbrowser
@@ -39,7 +44,6 @@ try:
         create_temp_env,
         open_playwright_page,
         resolve_screenshot_output,
-        screenshot_page,
         start_chad,
         stop_chad,
     )
@@ -50,6 +54,22 @@ except ImportError as e:
 
 
 DEFAULT_OUTPUT = Path("/tmp/chad/screenshot.png")
+
+
+def screenshot_element(page, selector: str, output_path: Path) -> Path:
+    """Screenshot a specific element by CSS selector."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    element = page.locator(selector)
+    element.wait_for(state="visible", timeout=10000)
+    element.screenshot(path=os.fspath(output_path))
+    return output_path
+
+
+def screenshot_page(page, output_path: Path) -> Path:
+    """Screenshot the full page."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=os.fspath(output_path))
+    return output_path
 
 
 def main():
@@ -67,6 +87,12 @@ def main():
         choices=["run", "providers"],
         default=None,
         help="Tab to screenshot (default: run)"
+    )
+    parser.add_argument(
+        "--selector", "-s",
+        type=str,
+        default=None,
+        help="CSS selector to capture a specific element (e.g., '#run-top-inputs')"
     )
     parser.add_argument(
         "--width", type=int, default=1280,
@@ -105,7 +131,8 @@ def main():
 
         for scheme in schemes:
             target_path = resolve_screenshot_output(args.output, scheme, multi)
-            print(f"Taking screenshot of {args.tab or 'run'} tab ({scheme} mode)...")
+            target_desc = args.selector if args.selector else (args.tab or 'run') + " tab"
+            print(f"Taking screenshot of {target_desc} ({scheme} mode)...")
             with open_playwright_page(
                 instance.port,
                 tab=args.tab,
@@ -115,7 +142,10 @@ def main():
                 render_delay=2.0,
             ) as page:
                 target_path.parent.mkdir(parents=True, exist_ok=True)
-                screenshot_page(page, target_path)
+                if args.selector:
+                    screenshot_element(page, args.selector, target_path)
+                else:
+                    screenshot_page(page, target_path)
                 outputs.append(target_path)
                 print(f"Saved: {target_path}")
 
