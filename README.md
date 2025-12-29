@@ -25,12 +25,22 @@ chad
 
 ### How is this better than $Grug?
 
-- Gradio ui to make it easy to add and remove agents, pick a default coding account, change preferred models, and view usage
-- Provider tokens encrypted with a master password you create and supply every session, which can be wiped by specifying a new password at login
+-> Gradio UI to manage multiple coding agents, select preferred models, monitor usage quotas, and run tasks:
+<details open>
+<summary><b>Screenshots</b></summary>
 
-<p style="text-align: center;">
-  <img src="docs/screenshot.png" width="800">
-</p>
+#### Select a task and agent
+<img src="docs/screenshot-task-input.png" width="800" alt="Task input panel">
+
+#### Monitor multiple provider accounts with usage tracking
+<img src="docs/screenshot-providers.png" width="800" alt="Providers tab">
+
+#### View completed tasks with verification results and live activity
+<img src="docs/screenshot-conversation.png" width="800" alt="Completed task conversation">
+
+</details>
+
+-> Provider tokens encrypted with a master password you create each session
 
 ### Is this satire?
 

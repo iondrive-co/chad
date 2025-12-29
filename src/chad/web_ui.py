@@ -168,12 +168,28 @@ body, .gradio-container, .gradio-container * {
 }
 
 .provider-summary {
-  background: #fff;
-  border: 1px solid #e2e8f0;
+  background: #1a1f2e;
+  border: 1px solid #2d3748;
   border-radius: 14px;
   padding: 12px 14px;
-  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
-  color: #0f172a;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
+}
+
+.provider-summary,
+.provider-summary * {
+  color: #e2e8f0 !important;
+}
+
+.provider-summary strong {
+  color: #63b3ed !important;
+}
+
+.provider-summary code {
+  background: #2d3748 !important;
+  color: #a0aec0 !important;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.9em;
 }
 
 .provider-card {
@@ -424,10 +440,12 @@ body, .gradio-container, .gradio-container * {
 #live-stream-box pre,
 #live-stream-box .live-output-content pre {
   color: #f0abfc !important;
-  background: rgba(0, 0, 0, 0.3) !important;
-  padding: 1px 4px;
-  border-radius: 3px;
+  background: none !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
   font-family: inherit;
+  font-weight: 600;
 }
 
 /* ANSI colored spans - let them keep their inline colors with brightness boost */
@@ -930,6 +948,27 @@ def highlight_diffs(html_content: str) -> str:
             result.append(line)
 
     return '\n'.join(result)
+
+
+def normalize_live_stream_spacing(content: str) -> str:
+    """Collapse excessive blank lines in live stream output."""
+    if not content:
+        return ""
+
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip("\n")
+
+
+def build_live_stream_html(content: str, ai_name: str = "CODING AI") -> str:
+    """Render live stream text as HTML with consistent spacing and header."""
+    cleaned = normalize_live_stream_spacing(content)
+    if not cleaned.strip():
+        return ""
+    html_content = highlight_diffs(ansi_to_html(cleaned))
+    header = f'<div class="live-output-header">▶ {ai_name} (Live Stream)</div>'
+    body = f'<div class="live-output-content">{html_content}</div>'
+    return f"{header}\n{body}"
 
 
 def summarize_content(content: str, max_length: int = 200) -> str:
@@ -1508,15 +1547,6 @@ class ChadWebUI:
             min_yield_interval = 0.05
             pending_message_idx = None
 
-            def format_live_output(ai_name: str, content: str) -> str:
-                if not content.strip():
-                    return ""
-                html_content = ansi_to_html(content)
-                html_content = highlight_diffs(html_content)
-                header = f'<div class="live-output-header">▶ {ai_name} (Live Stream)</div>'
-                body = f'<div class="live-output-content">{html_content}</div>'
-                return f'{header}\\n{body}'
-
             def get_display_content() -> str:
                 if not full_history:
                     return ""
@@ -1591,8 +1621,8 @@ class ChadWebUI:
                             now = time_module.time()
                             if now - last_yield_time >= min_yield_interval:
                                 display_content = get_display_content()
-                                current_live_stream = format_live_output(
-                                    current_ai, display_content
+                                current_live_stream = build_live_stream_html(
+                                    display_content, current_ai
                                 )
                                 yield make_yield(
                                     chat_history, current_status, current_live_stream
@@ -1606,8 +1636,8 @@ class ChadWebUI:
                             display_content = get_display_content()
                             if display_content:
                                 content = display_content + f"\n\n{last_activity}"
-                                current_live_stream = format_live_output(
-                                    current_ai, content
+                                current_live_stream = build_live_stream_html(
+                                    content, current_ai
                                 )
                             else:
                                 current_live_stream = f"**Live:** {last_activity}"
@@ -1621,8 +1651,8 @@ class ChadWebUI:
                     if now - last_yield_time >= 0.3:
                         display_content = get_display_content()
                         if display_content:
-                            current_live_stream = format_live_output(
-                                current_ai, display_content
+                            current_live_stream = build_live_stream_html(
+                                display_content, current_ai
                             )
                         elif last_activity:
                             current_live_stream = f"**Live:** {last_activity}"
@@ -2026,15 +2056,6 @@ class ChadWebUI:
         last_yield_time = 0.0
         min_yield_interval = 0.05
 
-        def format_live_output(content: str) -> str:
-            if not content.strip():
-                return ""
-            html_content = ansi_to_html(content)
-            html_content = highlight_diffs(html_content)
-            header = '<div class="live-output-header">▶ CODING AI (Live Stream)</div>'
-            body = f'<div class="live-output-content">{html_content}</div>'
-            return f'{header}\\n{body}'
-
         while not relay_complete.is_set() and not self.cancel_requested:
             try:
                 msg = message_queue.get(timeout=0.02)
@@ -2049,7 +2070,7 @@ class ChadWebUI:
                             display_content = ''.join(full_history)
                             if len(display_content) > 50000:
                                 display_content = display_content[-50000:]
-                            live_stream = format_live_output(display_content)
+                            live_stream = build_live_stream_html(display_content)
                             yield make_followup_yield(chat_history, live_stream, working=True)
                             last_yield_time = now
 
@@ -2059,7 +2080,7 @@ class ChadWebUI:
                         display_content = ''.join(full_history)
                         if display_content:
                             content = display_content + f"\n\n{msg[1]}"
-                            live_stream = format_live_output(content)
+                            live_stream = build_live_stream_html(content)
                         else:
                             live_stream = f"**Live:** {msg[1]}"
                         yield make_followup_yield(chat_history, live_stream, working=True)
@@ -2070,7 +2091,7 @@ class ChadWebUI:
                 if now - last_yield_time >= 0.3:
                     display_content = ''.join(full_history)
                     if display_content:
-                        live_stream = format_live_output(display_content)
+                        live_stream = build_live_stream_html(display_content)
                         yield make_followup_yield(chat_history, live_stream, working=True)
                         last_yield_time = now
 
@@ -2338,7 +2359,14 @@ class ChadWebUI:
                                                 interactive=is_ready,
                                                 elem_id="start-task-btn"
                                             )
+                                # In screenshot mode, pre-populate with sample conversation
+                                chat_value = None
+                                if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
+                                    from .screenshot_fixtures import CHAT_HISTORY
+                                    chat_value = CHAT_HISTORY
+
                                 chatbot = gr.Chatbot(
+                                    value=chat_value,
                                     label="Agent Communication",
                                     show_label=False,
                                     height=400,
@@ -2364,8 +2392,13 @@ class ChadWebUI:
                                         min_width=80
                                     )
 
-                    # Live activity stream
-                    live_stream_box = gr.Markdown("", elem_id="live-stream-box", sanitize_html=False)
+                    # Live activity stream - pre-populate in screenshot mode
+                    live_content = ""
+                    if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
+                        from .screenshot_fixtures import LIVE_VIEW_CONTENT
+                        live_content = LIVE_VIEW_CONTENT
+
+                    live_stream_box = gr.Markdown(live_content, elem_id="live-stream-box", sanitize_html=False)
 
                 # Providers Tab (configuration + usage)
                 with gr.Tab("⚙️ Providers"):
