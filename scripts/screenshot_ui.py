@@ -14,6 +14,9 @@ Examples:
     # Screenshot specific tab
     python scripts/screenshot_ui.py --tab providers
 
+    # Capture both dark and light variants and open them when finished (handy in PyCharm)
+    python scripts/screenshot_ui.py
+
     # Custom output path
     python scripts/screenshot_ui.py --output /tmp/chad-ui.png
 
@@ -24,6 +27,7 @@ Examples:
 import argparse
 import sys
 from pathlib import Path
+import webbrowser
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -34,6 +38,7 @@ try:
         PlaywrightUnavailable,
         create_temp_env,
         open_playwright_page,
+        resolve_screenshot_output,
         screenshot_page,
         start_chad,
         stop_chad,
@@ -76,6 +81,12 @@ def main():
         action="store_true",
         help="Run browser in headless mode (no window)"
     )
+    parser.add_argument(
+        "--color-scheme",
+        choices=["dark", "light", "both"],
+        default="both",
+        help=argparse.SUPPRESS,
+    )
 
     args = parser.parse_args()
 
@@ -87,20 +98,29 @@ def main():
         instance = start_chad(env)
         print(f"Chad running on port {instance.port}")
 
-        print(f"Taking screenshot of {args.tab or 'run'} tab...")
-
         viewport = {"width": args.width, "height": args.height}
-        with open_playwright_page(
-            instance.port,
-            tab=args.tab,
-            headless=args.headless,
-            viewport=viewport,
-            render_delay=2.0,
-        ) as page:
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            screenshot_page(page, args.output)
+        schemes = ["dark", "light"]
+        multi = True
+        outputs = []
 
-        print(f"Screenshot saved: {args.output}")
+        for scheme in schemes:
+            target_path = resolve_screenshot_output(args.output, scheme, multi)
+            print(f"Taking screenshot of {args.tab or 'run'} tab ({scheme} mode)...")
+            with open_playwright_page(
+                instance.port,
+                tab=args.tab,
+                headless=args.headless,
+                viewport=viewport,
+                color_scheme=scheme,
+                render_delay=2.0,
+            ) as page:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                screenshot_page(page, target_path)
+                outputs.append(target_path)
+                print(f"Saved: {target_path}")
+
+        for path in outputs:
+            webbrowser.open(path.as_uri())
 
     except PlaywrightUnavailable as e:
         print(f"Playwright error: {e}", file=sys.stderr)
