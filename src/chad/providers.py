@@ -790,6 +790,8 @@ class OpenAICodexProvider(AIProvider):
 
                 return None
 
+            api_error = [None]  # Track API errors
+
             def process_chunk(chunk: str) -> None:
                 # Parse JSON events and convert to human-readable text
                 for line in chunk.split('\n'):
@@ -801,6 +803,13 @@ class OpenAICodexProvider(AIProvider):
                         if not isinstance(event, dict):
                             continue
                         json_events.append(event)
+
+                        # Check for API errors (model not supported, etc.)
+                        if event.get('type') == 'error':
+                            api_error[0] = event.get('message', 'Unknown API error')
+                        elif event.get('type') == 'turn.failed':
+                            error_info = event.get('error', {})
+                            api_error[0] = error_info.get('message', 'Turn failed')
 
                         # Extract thread_id from first event
                         if event.get('type') == 'thread.started' and 'thread_id' in event:
@@ -837,7 +846,11 @@ class OpenAICodexProvider(AIProvider):
             self.master_fd = None
 
             if timed_out:
-                return f"Error: Codex execution timed out ({int(timeout / 60)} minutes)"
+                raise RuntimeError(f"Codex execution timed out ({int(timeout / 60)} minutes)")
+
+            # Check for API errors (model not supported, etc.)
+            if api_error[0]:
+                raise RuntimeError(f"Codex API error: {api_error[0]}")
 
             # Extract response from JSON events
             response_parts = []
@@ -858,12 +871,19 @@ class OpenAICodexProvider(AIProvider):
             output = _strip_ansi_codes(output)
             return output.strip() if output else "No response from Codex"
 
+        except RuntimeError:
+            # API errors (model not supported, timeout) - clean up and re-raise
+            self.current_message = None
+            self.process = None
+            _close_master_fd(self.master_fd)
+            self.master_fd = None
+            raise
         except (FileNotFoundError, PermissionError, OSError) as e:
             self.current_message = None
             self.process = None
             _close_master_fd(self.master_fd)
             self.master_fd = None
-            return (
+            raise RuntimeError(
                 f"Failed to run Codex: {e}\n\n"
                 "Make sure Codex CLI is installed and authenticated.\n"
                 "Run 'codex' to authenticate."

@@ -1216,7 +1216,9 @@ class ChadWebUI:
         coding_output: str,
         verification_account: str,
         on_activity: callable = None,
-        timeout: float = 300.0
+        timeout: float = 300.0,
+        verification_model: str | None = None,
+        verification_reasoning: str | None = None
     ) -> tuple[bool, str]:
         """Run the verification agent to review the coding agent's work.
 
@@ -1237,8 +1239,10 @@ class ChadWebUI:
             return True, "Verification skipped: account not found"
 
         verification_provider = accounts[verification_account]
-        verification_model = self.security_mgr.get_account_model(verification_account)
-        verification_reasoning = self.security_mgr.get_account_reasoning(verification_account)
+        stored_model = self.security_mgr.get_account_model(verification_account)
+        stored_reasoning = self.security_mgr.get_account_reasoning(verification_account)
+        verification_model = verification_model or stored_model
+        verification_reasoning = verification_reasoning or stored_reasoning
 
         verification_config = ModelConfig(
             provider=verification_provider,
@@ -1394,6 +1398,46 @@ class ChadWebUI:
         self._active_coding_config = None
         return "🛑 Task cancelled"
 
+    def _resolve_verification_preferences(
+        self,
+        coding_account: str,
+        coding_model: str,
+        coding_reasoning: str,
+        verification_agent: str,
+        verification_model: str | None = None,
+        verification_reasoning: str | None = None,
+    ) -> tuple[str | None, str, str]:
+        """Resolve verification account/model/reasoning selections without mutating coding prefs."""
+        accounts = self.security_mgr.list_accounts()
+        actual_account = coding_account if verification_agent == self.SAME_AS_CODING else verification_agent
+        if not actual_account or actual_account not in accounts:
+            return None, coding_model, coding_reasoning
+
+        def normalize(value: str | None, fallback: str) -> str:
+            if not value or value == self.SAME_AS_CODING:
+                return fallback
+            return value
+
+        if verification_agent == self.SAME_AS_CODING:
+            resolved_model = normalize(verification_model, coding_model)
+            resolved_reasoning = normalize(verification_reasoning, coding_reasoning)
+        else:
+            account_model = self.security_mgr.get_account_model(actual_account)
+            account_reasoning = self.security_mgr.get_account_reasoning(actual_account)
+            resolved_model = normalize(verification_model, account_model)
+            resolved_reasoning = normalize(verification_reasoning, account_reasoning)
+
+            # Persist explicit verification preferences to the verification account only
+            try:
+                if verification_model and verification_model != self.SAME_AS_CODING:
+                    self.security_mgr.set_account_model(actual_account, resolved_model)
+                if verification_reasoning and verification_reasoning != self.SAME_AS_CODING:
+                    self.security_mgr.set_account_reasoning(actual_account, resolved_reasoning)
+            except Exception:
+                pass
+
+        return actual_account, resolved_model, resolved_reasoning
+
     def start_chad_task(  # noqa: C901
         self,
         project_path: str,
@@ -1402,6 +1446,8 @@ class ChadWebUI:
         verification_agent: str = "(Same as Coding Agent)",
         coding_model: str | None = None,
         coding_reasoning: str | None = None,
+        verification_model: str | None = None,
+        verification_reasoning: str | None = None,
     ) -> Iterator[tuple[
         list, str, gr.Markdown, gr.Textbox, gr.TextArea, gr.Button, gr.Button, gr.Markdown,
         gr.update, gr.Row, gr.Button
@@ -1480,6 +1526,20 @@ class ChadWebUI:
             selected_model = coding_model or self.security_mgr.get_account_model(coding_account) or "default"
             selected_reasoning = (
                 coding_reasoning or self.security_mgr.get_account_reasoning(coding_account) or "default"
+            )
+            verification_model_value = verification_model or self.SAME_AS_CODING
+            verification_reasoning_value = verification_reasoning or self.SAME_AS_CODING
+            (
+                actual_verification_account,
+                resolved_verification_model,
+                resolved_verification_reasoning
+            ) = self._resolve_verification_preferences(
+                coding_account,
+                selected_model,
+                selected_reasoning,
+                verification_agent,
+                verification_model_value,
+                verification_reasoning_value
             )
 
             try:
@@ -1768,10 +1828,7 @@ class ChadWebUI:
             # Track the active configuration only when the session can continue
             self._active_coding_config = coding_config if self._session_active else None
 
-            # Determine the verification account to use
-            actual_verification_account = (
-                coding_account if verification_agent == self.SAME_AS_CODING else verification_agent
-            )
+            verification_account_for_run = actual_verification_account or verification_agent
 
             if self.cancel_requested:
                 final_status = "🛑 Task cancelled by user"
@@ -1816,9 +1873,11 @@ class ChadWebUI:
                     verified, verification_feedback = self._run_verification(
                         str(path_obj),
                         last_coding_output,
-                        actual_verification_account,
+                        verification_account_for_run,
                         on_activity=verification_activity,
-                        timeout=300.0
+                        timeout=300.0,
+                        verification_model=resolved_verification_model,
+                        verification_reasoning=resolved_verification_reasoning
                     )
 
                     # Add verification result to chat
@@ -1877,8 +1936,19 @@ class ChadWebUI:
                             yield make_yield(chat_history, f"{status_prefix}⏳ Coding agent working on revisions...", "")
 
                             # Send the revision request
-                            coding_provider_instance.send_message(revision_request)
-                            revision_response = coding_provider_instance.get_response(timeout=coding_timeout)
+                            try:
+                                coding_provider_instance.send_message(revision_request)
+                                revision_response = coding_provider_instance.get_response(timeout=coding_timeout)
+                            except Exception as exc:
+                                chat_history[revision_pending_idx] = {
+                                    "role": "assistant",
+                                    "content": f"**CODING AI**\n\n❌ *Error: {exc}*"
+                                }
+                                self._session_active = False
+                                self._active_coding_provider = None
+                                self._active_coding_config = None
+                                self.session_logger.update_log(session_log_path, chat_history)
+                                break
 
                             if revision_response:
                                 parsed_revision = parse_codex_output(revision_response)
@@ -1983,6 +2053,8 @@ class ChadWebUI:
         verification_agent: str = "",
         coding_model: str | None = None,
         coding_reasoning: str | None = None,
+        verification_model: str | None = None,
+        verification_reasoning: str | None = None,
     ) -> Iterator[tuple[list, str, gr.update, gr.update, gr.update]]:
         """Send a follow-up message, with optional provider handoff and verification.
 
@@ -2035,6 +2107,20 @@ class ChadWebUI:
             coding_reasoning if coding_reasoning is not None else (
                 self.security_mgr.get_account_reasoning(coding_agent) if has_account else "default"
             )
+        )
+        verification_model_value = verification_model or self.SAME_AS_CODING
+        verification_reasoning_value = verification_reasoning or self.SAME_AS_CODING
+        (
+            actual_verification_account,
+            resolved_verification_model,
+            resolved_verification_reasoning
+        ) = self._resolve_verification_preferences(
+            coding_agent if has_account else "",
+            requested_model,
+            requested_reasoning,
+            verification_agent or self.SAME_AS_CODING,
+            verification_model_value,
+            verification_reasoning_value
         )
 
         if has_account:
@@ -2268,13 +2354,9 @@ class ChadWebUI:
         yield make_followup_yield(chat_history, "", show_followup=True, working=True)
 
         # Run verification on follow-up
-        actual_verification_account = (
-            self._current_coding_account
-            if verification_agent == self.SAME_AS_CODING
-            else verification_agent
-        )
+        verification_account_for_run = actual_verification_account or verification_agent
 
-        if actual_verification_account and actual_verification_account in accounts:
+        if verification_account_for_run and verification_account_for_run in accounts:
             # Verification loop (like start_chad_task)
             max_verification_attempts = 3
             verification_attempt = 0
@@ -2299,9 +2381,11 @@ class ChadWebUI:
                 verified, verification_feedback = self._run_verification(
                     self._current_project_path or str(Path.cwd()),
                     last_coding_output,
-                    actual_verification_account,
+                    verification_account_for_run,
                     on_activity=verification_activity,
-                    timeout=300.0
+                    timeout=300.0,
+                    verification_model=resolved_verification_model,
+                    verification_reasoning=resolved_verification_reasoning
                 )
 
                 if verified is None:
@@ -2349,8 +2433,19 @@ class ChadWebUI:
                             f"{verification_feedback}\n\n"
                             "Please fix these issues and confirm when done."
                         )
-                        coding_provider.send_message(revision_request)
-                        revision_response = coding_provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
+                        try:
+                            coding_provider.send_message(revision_request)
+                            revision_response = coding_provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
+                        except Exception as exc:
+                            chat_history[revision_idx] = {
+                                "role": "assistant",
+                                "content": f"**CODING AI**\n\n❌ *Error: {exc}*"
+                            }
+                            self._session_active = False
+                            self._active_coding_provider = None
+                            self._active_coding_config = None
+                            self._update_session_log(chat_history, full_history)
+                            break
 
                         if revision_response:
                             parsed_revision = parse_codex_output(revision_response)
@@ -2490,6 +2585,38 @@ class ChadWebUI:
 
                         return provider_type, model_choices, model_value, reasoning_choices, reasoning_value
 
+                    def get_verification_preference_state(verification: str, coding_account: str):
+                        """Return dropdown state for verification preferences."""
+                        accounts_state = self.security_mgr.list_accounts()
+                        if verification == self.SAME_AS_CODING or not verification:
+                            source_account = coding_account if coding_account in accounts_state else None
+                            _, model_choices, _, reasoning_choices, _ = get_preference_state(source_account)
+                            if not model_choices:
+                                model_choices = ["default"]
+                            if not reasoning_choices:
+                                reasoning_choices = ["default"]
+                            return (
+                                [self.SAME_AS_CODING] + model_choices,
+                                self.SAME_AS_CODING,
+                                [self.SAME_AS_CODING] + reasoning_choices,
+                                self.SAME_AS_CODING,
+                                bool(source_account)
+                            )
+
+                        (
+                            provider_type,
+                            model_choices,
+                            model_value,
+                            reasoning_choices,
+                            reasoning_value
+                        ) = get_preference_state(verification)
+                        if not model_choices:
+                            model_choices = ["default"]
+                        if not reasoning_choices:
+                            reasoning_choices = ["default"]
+                        has_account = bool(verification and verification in accounts_state)
+                        return (model_choices, model_value, reasoning_choices, reasoning_value, has_account)
+
                     (
                         _initial_provider_type,
                         initial_model_choices,
@@ -2497,6 +2624,13 @@ class ChadWebUI:
                         initial_reasoning_choices,
                         initial_reasoning_value
                     ) = get_preference_state(initial_coding, persist=True)
+                    (
+                        initial_verification_model_choices,
+                        initial_verification_model_value,
+                        initial_verification_reasoning_choices,
+                        initial_verification_reasoning_value,
+                        initial_verification_interactive
+                    ) = get_verification_preference_state(initial_verification, initial_coding)
 
                     with gr.Row(elem_id="run-top-row", equal_height=True):
                         with gr.Column(elem_id="run-top-main", scale=1):
@@ -2538,14 +2672,6 @@ class ChadWebUI:
                                         min_width=200,
                                         interactive=bool(initial_coding and initial_coding in account_choices)
                                     )
-                                with gr.Column(scale=1, min_width=200):
-                                    verification_agent_dropdown = gr.Dropdown(
-                                        choices=verification_choices,
-                                        value=initial_verification,
-                                        label="Verification Agent",
-                                        scale=1,
-                                        min_width=200
-                                    )
                                     coding_reasoning_dropdown = gr.Dropdown(
                                         choices=initial_reasoning_choices,
                                         value=initial_reasoning_value,
@@ -2554,6 +2680,32 @@ class ChadWebUI:
                                         scale=1,
                                         min_width=200,
                                         interactive=bool(initial_coding and initial_coding in account_choices)
+                                    )
+                                with gr.Column(scale=1, min_width=200):
+                                    verification_agent_dropdown = gr.Dropdown(
+                                        choices=verification_choices,
+                                        value=initial_verification,
+                                        label="Verification Agent",
+                                        scale=1,
+                                        min_width=200
+                                    )
+                                    verification_model_dropdown = gr.Dropdown(
+                                        choices=initial_verification_model_choices,
+                                        value=initial_verification_model_value,
+                                        label="Verification Preferred Model",
+                                        allow_custom_value=True,
+                                        scale=1,
+                                        min_width=200,
+                                        interactive=initial_verification_interactive
+                                    )
+                                    verification_reasoning_dropdown = gr.Dropdown(
+                                        choices=initial_verification_reasoning_choices,
+                                        value=initial_verification_reasoning_value,
+                                        label="Verification Reasoning Effort",
+                                        allow_custom_value=True,
+                                        scale=1,
+                                        min_width=200,
+                                        interactive=initial_verification_interactive
                                     )
                         cancel_btn = gr.Button(
                             "🛑 Cancel",
@@ -2660,6 +2812,66 @@ class ChadWebUI:
                             interactive=has_account
                         )
                         return status, start_update, model_update, reasoning_update
+
+                    def compute_verification_updates(selected_verification: str, current_coding: str):
+                        """Return verification model/reasoning dropdown updates."""
+                        accounts_state = self.security_mgr.list_accounts()
+                        if selected_verification == self.SAME_AS_CODING or not selected_verification:
+                            source_account = current_coding if current_coding in accounts_state else None
+                            _, model_choices, _, reasoning_choices, _ = get_preference_state(source_account)
+                            if not model_choices:
+                                model_choices = ["default"]
+                            if not reasoning_choices:
+                                reasoning_choices = ["default"]
+                            interactive = bool(source_account)
+                            return (
+                                gr.update(
+                                    choices=[self.SAME_AS_CODING] + model_choices,
+                                    value=self.SAME_AS_CODING,
+                                    interactive=interactive
+                                ),
+                                gr.update(
+                                    choices=[self.SAME_AS_CODING] + reasoning_choices,
+                                    value=self.SAME_AS_CODING,
+                                    interactive=interactive
+                                )
+                            )
+
+                        _, model_choices, model_value, reasoning_choices, reasoning_value = get_preference_state(
+                            selected_verification
+                        )
+                        if not model_choices:
+                            model_choices = ["default"]
+                        if not reasoning_choices:
+                            reasoning_choices = ["default"]
+                        has_account = bool(selected_verification and selected_verification in accounts_state)
+                        return (
+                            gr.update(
+                                choices=model_choices,
+                                value=model_value,
+                                interactive=has_account
+                            ),
+                            gr.update(
+                                choices=reasoning_choices,
+                                value=reasoning_value,
+                                interactive=has_account
+                            )
+                        )
+
+                    def compute_role_updates(coding_account: str, verification_selection: str):
+                        """Return all dropdown updates for coding + verification preferences."""
+                        status, start_update, model_update, reasoning_update = compute_coding_updates(coding_account)
+                        verification_model_update, verification_reasoning_update = compute_verification_updates(
+                            verification_selection, coding_account
+                        )
+                        return (
+                            status,
+                            start_update,
+                            model_update,
+                            reasoning_update,
+                            verification_model_update,
+                            verification_reasoning_update
+                        )
 
                     def update_ready_status(account: str, model: str, reasoning: str):
                         """Persist preference changes and refresh status/start button."""
@@ -2780,7 +2992,9 @@ class ChadWebUI:
                         role_status,
                         start_btn,
                         coding_model_dropdown,
-                        coding_reasoning_dropdown
+                        coding_reasoning_dropdown,
+                        verification_model_dropdown,
+                        verification_reasoning_dropdown
                     ]
 
                     # Include task status and agent dropdowns in add_provider outputs so Run Task tab updates
@@ -2796,17 +3010,30 @@ class ChadWebUI:
                             verification_agent_dropdown,
                             coding_model_dropdown,
                             coding_reasoning_dropdown,
+                            verification_model_dropdown,
+                            verification_reasoning_dropdown,
                         ]
                     )
 
-                    def refresh_with_task_status(current_coding):
+                    def refresh_with_task_status(current_coding, current_verification):
                         base = self._provider_action_response("")
-                        status, start_update, model_update, reasoning_update = compute_coding_updates(current_coding)
-                        return (*base, status, start_update, model_update, reasoning_update)
+                        status, start_update, model_update, reasoning_update, verification_model_update, verification_reasoning_update = compute_role_updates(  # noqa: E501
+                            current_coding,
+                            current_verification
+                        )
+                        return (
+                            *base,
+                            status,
+                            start_update,
+                            model_update,
+                            reasoning_update,
+                            verification_model_update,
+                            verification_reasoning_update
+                        )
 
                     refresh_btn.click(
                         refresh_with_task_status,
-                        inputs=[coding_agent_dropdown],
+                        inputs=[coding_agent_dropdown, verification_agent_dropdown],
                         outputs=provider_outputs_with_task_status
                     )
 
@@ -2816,14 +3043,22 @@ class ChadWebUI:
                         outputs=[add_btn]
                     )
 
-                    def add_provider_with_task_status(provider_name, provider_type, current_coding):
+                    def add_provider_with_task_status(
+                        provider_name,
+                        provider_type,
+                        current_coding,
+                        current_verification
+                    ):
                         """Add provider and also return updated task status and agent dropdown choices."""
                         base = self.add_provider(provider_name, provider_type)
                         # Get updated account choices for agent dropdowns
                         new_choices = list(self.security_mgr.list_accounts().keys())
                         new_verification_choices = [self.SAME_AS_CODING] + new_choices
                         selected_coding = current_coding if current_coding in new_choices else ""
-                        status, start_update, model_update, reasoning_update = compute_coding_updates(selected_coding)
+                        status, start_update, model_update, reasoning_update, verification_model_update, verification_reasoning_update = compute_role_updates(  # noqa: E501
+                            selected_coding,
+                            current_verification if current_verification in new_verification_choices else self.SAME_AS_CODING  # noqa: E501
+                        )
                         return (
                             *base,
                             status,
@@ -2831,12 +3066,19 @@ class ChadWebUI:
                             gr.update(choices=new_choices, value=selected_coding or None),
                             gr.update(choices=new_verification_choices),
                             model_update,
-                            reasoning_update
+                            reasoning_update,
+                            verification_model_update,
+                            verification_reasoning_update
                         )
 
                     add_btn.click(
                         add_provider_with_task_status,
-                        inputs=[new_provider_name, new_provider_type, coding_agent_dropdown],
+                        inputs=[
+                            new_provider_name,
+                            new_provider_type,
+                            coding_agent_dropdown,
+                            verification_agent_dropdown
+                        ],
                         outputs=add_provider_outputs
                     )
 
@@ -2844,14 +3086,15 @@ class ChadWebUI:
                         # Two-step delete using dynamic account_state (not captured name)
                         # This ensures handlers work correctly after cards shift due to deletions
                         def make_delete_handler():
-                            def handler(pending_delete, current_account, current_coding):
+                            def handler(pending_delete, current_account, current_coding, current_verification):
                                 # Skip if card has no account (empty slot)
                                 if not current_account:
                                     new_choices = list(self.security_mgr.list_accounts().keys())
                                     new_verification_choices = [self.SAME_AS_CODING] + new_choices
                                     selected_coding = current_coding if current_coding in new_choices else ""
-                                    status, start_update, model_update, reasoning_update = compute_coding_updates(
-                                        selected_coding
+                                    status, start_update, model_update, reasoning_update, verification_model_update, verification_reasoning_update = compute_role_updates(  # noqa: E501
+                                        selected_coding,
+                                        current_verification if current_verification in new_verification_choices else self.SAME_AS_CODING  # noqa: E501
                                     )
                                     return (
                                         pending_delete,
@@ -2861,7 +3104,9 @@ class ChadWebUI:
                                         status,
                                         start_update,
                                         model_update,
-                                        reasoning_update
+                                        reasoning_update,
+                                        verification_model_update,
+                                        verification_reasoning_update
                                     )
 
                                 if pending_delete == current_account:
@@ -2879,8 +3124,9 @@ class ChadWebUI:
                                 new_choices = list(self.security_mgr.list_accounts().keys())
                                 new_verification_choices = [self.SAME_AS_CODING] + new_choices
                                 selected_coding = current_coding if current_coding in new_choices else ""
-                                status, start_update, model_update, reasoning_update = compute_coding_updates(
-                                    selected_coding
+                                status, start_update, model_update, reasoning_update, verification_model_update, verification_reasoning_update = compute_role_updates(  # noqa: E501
+                                    selected_coding,
+                                    current_verification if current_verification in new_verification_choices else self.SAME_AS_CODING  # noqa: E501
                                 )
                                 return (
                                     pending_value,
@@ -2890,7 +3136,9 @@ class ChadWebUI:
                                     status,
                                     start_update,
                                     model_update,
-                                    reasoning_update
+                                    reasoning_update,
+                                    verification_model_update,
+                                    verification_reasoning_update
                                 )
                             return handler
 
@@ -2904,13 +3152,20 @@ class ChadWebUI:
                                 role_status,
                                 start_btn,
                                 coding_model_dropdown,
-                                coding_reasoning_dropdown
+                                coding_reasoning_dropdown,
+                                verification_model_dropdown,
+                                verification_reasoning_dropdown
                             ]
                         )
 
                         card["delete_btn"].click(
                             fn=make_delete_handler(),
-                            inputs=[pending_delete_state, card["account_state"], coding_agent_dropdown],
+                            inputs=[
+                                pending_delete_state,
+                                card["account_state"],
+                                coding_agent_dropdown,
+                                verification_agent_dropdown
+                            ],
                             outputs=delete_outputs
                         )
 
@@ -2923,7 +3178,9 @@ class ChadWebUI:
                     coding_agent_dropdown,
                     verification_agent_dropdown,
                     coding_model_dropdown,
-                    coding_reasoning_dropdown
+                    coding_reasoning_dropdown,
+                    verification_model_dropdown,
+                    verification_reasoning_dropdown
                 ],
                 outputs=[chatbot, live_stream_box, task_status_header, project_path, task_description, start_btn, cancel_btn, role_status, session_log_btn, followup_input, followup_row, send_followup_btn]  # noqa: E501
             )
@@ -2942,20 +3199,29 @@ class ChadWebUI:
                     coding_agent_dropdown,
                     verification_agent_dropdown,
                     coding_model_dropdown,
-                    coding_reasoning_dropdown
+                    coding_reasoning_dropdown,
+                    verification_model_dropdown,
+                    verification_reasoning_dropdown
                 ],
                 outputs=[chatbot, live_stream_box, followup_input, followup_row, send_followup_btn]
             )
 
             # Update role status and start button when agent dropdowns change
-            def update_agent_selection(coding):
-                """Update coding controls when the agent selection changes."""
-                return compute_coding_updates(coding)
+            def update_agent_selection(coding, verification):
+                """Update coding + verification controls when the agent selection changes."""
+                return compute_role_updates(coding, verification)
 
             coding_agent_dropdown.change(
                 update_agent_selection,
-                inputs=[coding_agent_dropdown],
-                outputs=[role_status, start_btn, coding_model_dropdown, coding_reasoning_dropdown]
+                inputs=[coding_agent_dropdown, verification_agent_dropdown],
+                outputs=[
+                    role_status,
+                    start_btn,
+                    coding_model_dropdown,
+                    coding_reasoning_dropdown,
+                    verification_model_dropdown,
+                    verification_reasoning_dropdown
+                ]
             )
 
             coding_model_dropdown.change(
@@ -2971,7 +3237,7 @@ class ChadWebUI:
             )
 
             # Handle verification agent dropdown changes
-            def update_verification_selection(verification):
+            def update_verification_selection(verification, coding):
                 """Persist verification agent selection when changed."""
                 if verification == self.SAME_AS_CODING:
                     # Reset to default (use coding agent)
@@ -2983,9 +3249,12 @@ class ChadWebUI:
                     except ValueError:
                         pass  # Account doesn't exist, ignore
 
+                return compute_verification_updates(verification, coding)
+
             verification_agent_dropdown.change(
                 update_verification_selection,
-                inputs=[verification_agent_dropdown]
+                inputs=[verification_agent_dropdown, coding_agent_dropdown],
+                outputs=[verification_model_dropdown, verification_reasoning_dropdown]
             )
 
             return interface
