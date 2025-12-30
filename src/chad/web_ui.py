@@ -228,9 +228,9 @@ body, .gradio-container, .gradio-container * {
   border: 1px solid #1f2b46;
   border-radius: 16px;
   margin-bottom: 0 !important;
-  padding: 14px 16px;
+  padding: 10px 12px;
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28);
-  gap: 8px;
+  gap: 4px;
 }
 
 .provider-card:nth-of-type(even) {
@@ -303,10 +303,10 @@ body, .gradio-container, .gradio-container * {
 }
 
 .provider-usage-title {
-  margin-top: 10px !important;
+  margin-top: 6px !important;
   color: #475569;
   border-top: 1px solid #e2e8f0;
-  padding-top: 8px;
+  padding-top: 4px;
   letter-spacing: 0.01em;
 }
 
@@ -319,7 +319,7 @@ body, .gradio-container, .gradio-container * {
   background: #fff;
   border: 1px solid #e2e8f0;
   border-radius: 12px;
-  padding: 10px 12px;
+  padding: 6px 8px;
   color: #1e293b;
   box-shadow: 0 4px 10px rgba(15, 23, 42, 0.06);
 }
@@ -376,6 +376,27 @@ body, .gradio-container, .gradio-container * {
 /* Hide empty provider cards - groups are hidden via CSS, columns via JavaScript */
 .gr-group:has(.provider-card__header-row):not(:has(.provider-card__header-text)) {
   display: none !important;
+}
+
+/* Two-column layout for provider cards */
+.provider-cards-row {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 12px !important;
+  align-items: stretch !important;
+}
+
+.provider-cards-row > .column {
+  flex: 0 0 calc(50% - 6px) !important;
+  max-width: calc(50% - 6px) !important;
+}
+
+/* On smaller screens, switch to single column */
+@media (max-width: 1024px) {
+  .provider-cards-row > .column {
+    flex: 0 0 100% !important;
+    max-width: 100% !important;
+  }
 }
 
 #live-output-box {
@@ -2272,75 +2293,107 @@ class ChadWebUI:
         )
 
         if actual_verification_account and actual_verification_account in accounts:
-            # Run verification
-            chat_history.append({
-                "role": "user",
-                "content": "───────────── 🔍 VERIFICATION ─────────────"
-            })
-            yield make_followup_yield(chat_history, "🔍 Running verification...", working=True)
+            # Verification loop (like start_chad_task)
+            max_verification_attempts = 3
+            verification_attempt = 0
+            verified = False
 
-            def verification_activity(activity_type: str, detail: str):
-                pass  # Quiet verification
+            while not verified and verification_attempt < max_verification_attempts and not self.cancel_requested:
+                verification_attempt += 1
+                verify_status = (
+                    f"🔍 Running verification "
+                    f"(attempt {verification_attempt}/{max_verification_attempts})..."
+                )
+                yield make_followup_yield(chat_history, verify_status, working=True)
 
-            verified, verification_feedback = self._run_verification(
-                self._current_project_path or str(Path.cwd()),
-                last_coding_output,
-                actual_verification_account,
-                on_activity=verification_activity,
-                timeout=300.0
-            )
-
-            if verified is None:
-                chat_history.append({
-                    "role": "assistant",
-                    "content": f"**VERIFICATION AI**\n\n❌ {verification_feedback}"
-                })
                 chat_history.append({
                     "role": "user",
-                    "content": "───────────── ❌ VERIFICATION ERROR ─────────────"
+                    "content": f"───────────── 🔍 VERIFICATION (Attempt {verification_attempt}) ─────────────"
                 })
-            elif verified:
-                chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
-                chat_history.append({
-                    "role": "user",
-                    "content": "───────────── ✅ VERIFICATION PASSED ─────────────"
-                })
-            else:
-                chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
-                chat_history.append({
-                    "role": "user",
-                    "content": "───────────── ❌ VERIFICATION FAILED ─────────────"
-                })
-                # Send revision request to coding agent
-                if self._session_active and coding_provider.is_alive():
-                    revision_request = (
-                        "The verification agent found issues with your work. "
-                        "Please address them:\n\n"
-                        f"{verification_feedback}\n\n"
-                        "Please fix these issues and confirm when done."
-                    )
-                    chat_history.append({
-                        "role": "user",
-                        "content": "───────────── 🔄 REVISION REQUESTED ─────────────"
-                    })
+
+                def verification_activity(activity_type: str, detail: str):
+                    pass  # Quiet verification
+
+                verified, verification_feedback = self._run_verification(
+                    self._current_project_path or str(Path.cwd()),
+                    last_coding_output,
+                    actual_verification_account,
+                    on_activity=verification_activity,
+                    timeout=300.0
+                )
+
+                if verified is None:
+                    # Verification error - stop
                     chat_history.append({
                         "role": "assistant",
-                        "content": "**CODING AI**\n\n⏳ *Working on revisions...*"
+                        "content": f"**VERIFICATION AI**\n\n❌ {verification_feedback}"
                     })
-                    revision_idx = len(chat_history) - 1
-                    yield make_followup_yield(chat_history, "🔄 Revision in progress...", working=True)
+                    chat_history.append({
+                        "role": "user",
+                        "content": "───────────── ❌ VERIFICATION ERROR ─────────────"
+                    })
+                    self._update_session_log(chat_history, full_history)
+                    break
+                elif verified:
+                    chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
+                    chat_history.append({
+                        "role": "user",
+                        "content": "───────────── ✅ VERIFICATION PASSED ─────────────"
+                    })
+                else:
+                    chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
 
-                    coding_provider.send_message(revision_request)
-                    revision_response = coding_provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
-
-                    if revision_response:
-                        parsed_revision = parse_codex_output(revision_response)
-                        chat_history[revision_idx] = make_chat_message("CODING AI", parsed_revision)
-                    else:
-                        chat_history[revision_idx] = {
+                    # Check if we can revise
+                    can_revise = (
+                        self._session_active
+                        and coding_provider.is_alive()
+                        and verification_attempt < max_verification_attempts
+                    )
+                    if can_revise:
+                        chat_history.append({
+                            "role": "user",
+                            "content": "───────────── 🔄 REVISION REQUESTED ─────────────"
+                        })
+                        chat_history.append({
                             "role": "assistant",
-                            "content": "**CODING AI**\n\n❌ *No response to revision request*"
-                        }
+                            "content": "**CODING AI**\n\n⏳ *Working on revisions...*"
+                        })
+                        revision_idx = len(chat_history) - 1
+                        yield make_followup_yield(chat_history, "🔄 Revision in progress...", working=True)
+
+                        revision_request = (
+                            "The verification agent found issues with your work. "
+                            "Please address them:\n\n"
+                            f"{verification_feedback}\n\n"
+                            "Please fix these issues and confirm when done."
+                        )
+                        coding_provider.send_message(revision_request)
+                        revision_response = coding_provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
+
+                        if revision_response:
+                            parsed_revision = parse_codex_output(revision_response)
+                            chat_history[revision_idx] = make_chat_message("CODING AI", parsed_revision)
+                            last_coding_output = parsed_revision
+                        else:
+                            chat_history[revision_idx] = {
+                                "role": "assistant",
+                                "content": "**CODING AI**\n\n❌ *No response to revision request*"
+                            }
+                            self._update_session_log(chat_history, full_history)
+                            break
+
+                        yield make_followup_yield(chat_history, "✓ Revision complete, re-verifying...", working=True)
+                    else:
+                        # Can't continue - add failure message
+                        chat_history.append({
+                            "role": "user",
+                            "content": "───────────── ❌ VERIFICATION FAILED ─────────────"
+                        })
+                        self._update_session_log(chat_history, full_history)
+                        break
+
+                # Incremental session log update after each verification attempt
+                self._update_session_log(chat_history, full_history)
 
         # Always update stored history and session log after follow-up completes
         self._current_chat_history = chat_history
@@ -2667,44 +2720,50 @@ class ChadWebUI:
                     pending_delete_state = gr.State(None)  # Tracks which account is pending deletion
 
                     provider_cards = []
-                    for idx in range(self.provider_card_count):
-                        if idx < len(account_items):
-                            account_name, provider_type = account_items[idx]
-                            visible = True
-                            header_text = (
-                                f'<span class="provider-card__header-text">'
-                                f'{account_name} ({provider_type})</span>'
+                    with gr.Row(equal_height=True, elem_classes=["provider-cards-row"]):
+                        for idx in range(self.provider_card_count):
+                            if idx < len(account_items):
+                                account_name, provider_type = account_items[idx]
+                                visible = True
+                                header_text = (
+                                    f'<span class="provider-card__header-text">'
+                                    f'{account_name} ({provider_type})</span>'
+                                )
+                                usage_text = self.get_provider_usage(account_name)
+                            else:
+                                account_name = ""
+                                visible = False
+                                header_text = ""
+                                usage_text = ""
+
+                            # Always create columns visible - use CSS classes to show/hide
+                            # gr.Column(visible=False) prevents proper rendering updates
+                            card_group_classes = (
+                                ["provider-card"] if visible else ["provider-card", "provider-card-empty"]
                             )
-                            usage_text = self.get_provider_usage(account_name)
-                        else:
-                            account_name = ""
-                            visible = False
-                            header_text = ""
-                            usage_text = ""
+                            with gr.Column(visible=True, scale=1) as card_column:
+                                card_elem_id = f"provider-card-{idx}"
+                                with gr.Group(elem_id=card_elem_id, elem_classes=card_group_classes) as card_group:
+                                    with gr.Row(elem_classes=["provider-card__header-row"]):
+                                        card_header = gr.Markdown(header_text, elem_classes=["provider-card__header"])
+                                        delete_btn = gr.Button(
+                                            "🗑︎", variant="secondary", size="sm",
+                                            min_width=0, scale=0, elem_classes=["provider-delete"]
+                                        )
+                                    account_state = gr.State(account_name)
 
-                        # Always create columns visible - use CSS classes to show/hide
-                        # gr.Column(visible=False) prevents proper rendering updates
-                        card_group_classes = ["provider-card"] if visible else ["provider-card", "provider-card-empty"]
-                        with gr.Column(visible=True) as card_column:
-                            card_elem_id = f"provider-card-{idx}"
-                            with gr.Group(elem_id=card_elem_id, elem_classes=card_group_classes) as card_group:
-                                with gr.Row(elem_classes=["provider-card__header-row"]):
-                                    card_header = gr.Markdown(header_text, elem_classes=["provider-card__header"])
-                                    delete_btn = gr.Button("🗑︎", variant="secondary", size="sm", min_width=0, scale=0, elem_classes=["provider-delete"])  # noqa: E501
-                                account_state = gr.State(account_name)
+                                    gr.Markdown("Usage", elem_classes=["provider-usage-title"])
+                                    usage_box = gr.Markdown(usage_text, elem_classes=["provider-usage"])
 
-                                gr.Markdown("Usage", elem_classes=["provider-usage-title"])
-                                usage_box = gr.Markdown(usage_text, elem_classes=["provider-usage"])
-
-                        provider_cards.append({
-                            "column": card_column,
-                            "group": card_group,  # Use group for visibility control
-                            "header": card_header,
-                            "account_state": account_state,
-                            "account_name": account_name,  # Store name for delete handler
-                            "usage_box": usage_box,
-                            "delete_btn": delete_btn
-                        })
+                            provider_cards.append({
+                                "column": card_column,
+                                "group": card_group,  # Use group for visibility control
+                                "header": card_header,
+                                "account_state": account_state,
+                                "account_name": account_name,  # Store name for delete handler
+                                "usage_box": usage_box,
+                                "delete_btn": delete_btn
+                            })
 
                     with gr.Accordion(
                         "Add New Provider",
