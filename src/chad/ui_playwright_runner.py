@@ -56,6 +56,11 @@ class TempChadEnv:
     project_dir: Path
     temp_dir: Path
     password: str = ""
+    env_vars: dict = None  # Additional environment variables for screenshot mode
+
+    def __post_init__(self):
+        if self.env_vars is None:
+            self.env_vars = {}
 
     def cleanup(self) -> None:
         """Remove temporary directories and unset overrides."""
@@ -88,8 +93,13 @@ def ensure_playwright():
         ) from exc
 
 
-def create_temp_env() -> TempChadEnv:
-    """Create a temporary Chad config and project for UI testing."""
+def create_temp_env(screenshot_mode: bool = True) -> TempChadEnv:
+    """Create a temporary Chad config and project for UI testing.
+
+    Args:
+        screenshot_mode: If True, populate with rich synthetic data for screenshots.
+                        If False, use minimal mock data for functional tests.
+    """
     temp_dir = Path(tempfile.mkdtemp(prefix="chad_ui_runner_"))
     config_path = temp_dir / "config.json"
     project_dir = temp_dir / "project"
@@ -108,11 +118,53 @@ def create_temp_env() -> TempChadEnv:
     }
     security_mgr.save_config(config)
 
-    # Store mock account for automation
-    security_mgr.store_account("mock-coding", "mock", "", password, "mock-model")
-    security_mgr.assign_role("mock-coding", "CODING")
+    if screenshot_mode:
+        # Use rich synthetic data for realistic screenshots
+        from .screenshot_fixtures import (
+            MOCK_ACCOUNTS,
+            setup_mock_accounts,
+            create_mock_codex_auth,
+            create_mock_claude_creds,
+            create_mock_gemini_creds,
+            create_mock_mistral_config,
+        )
 
-    return TempChadEnv(config_path=config_path, project_dir=project_dir, temp_dir=temp_dir, password=password)
+        setup_mock_accounts(security_mgr, password)
+
+        # Create mock credential files for each provider type
+        chad_dir = temp_dir / ".chad"
+
+        for account_name, account_data in MOCK_ACCOUNTS.items():
+            provider = account_data["provider"]
+            if provider == "openai":
+                codex_home = chad_dir / "codex-homes" / account_name
+                create_mock_codex_auth(codex_home, account_data)
+            elif provider == "anthropic":
+                claude_config = chad_dir / "claude-configs" / account_name
+                create_mock_claude_creds(claude_config, account_data)
+
+        # Gemini and Mistral use global config locations, create in temp
+        create_mock_gemini_creds(temp_dir / ".gemini")
+        create_mock_mistral_config(temp_dir / ".vibe")
+
+        # Store paths for provider lookups
+        env_vars = {
+            "CHAD_SCREENSHOT_MODE": "1",
+            "CHAD_TEMP_HOME": str(temp_dir),
+        }
+    else:
+        # Minimal mock for functional tests
+        security_mgr.store_account("mock-coding", "mock", "", password, "mock-model")
+        security_mgr.assign_role("mock-coding", "CODING")
+        env_vars = {}
+
+    return TempChadEnv(
+        config_path=config_path,
+        project_dir=project_dir,
+        temp_dir=temp_dir,
+        password=password,
+        env_vars=env_vars if screenshot_mode else {},
+    )
 
 
 def _wait_for_port(process: subprocess.Popen[str], timeout: int = 30) -> int:
@@ -147,6 +199,18 @@ def _wait_for_ready(port: int, timeout: int = 30) -> None:
 
 def start_chad(env: TempChadEnv) -> ChadInstance:
     """Start Chad with an ephemeral port and return the running instance."""
+    # Build environment with screenshot mode vars if present
+    chad_env = {
+        **os.environ,
+        "CHAD_CONFIG": os.fspath(env.config_path),
+        "CHAD_PASSWORD": env.password,
+        "CHAD_PROJECT_PATH": os.fspath(env.project_dir),
+        "PYTHONPATH": os.fspath(PROJECT_ROOT / "src"),
+    }
+    # Add any additional env vars (e.g., CHAD_SCREENSHOT_MODE, CHAD_TEMP_HOME)
+    if env.env_vars:
+        chad_env.update(env.env_vars)
+
     process = subprocess.Popen(
         [os.fspath(Path(sys.executable)), "-m", "chad", "--port", "0"],
         stdout=subprocess.PIPE,
@@ -154,13 +218,7 @@ def start_chad(env: TempChadEnv) -> ChadInstance:
         stdin=subprocess.DEVNULL,
         text=True,
         bufsize=1,
-        env={
-            **os.environ,
-            "CHAD_CONFIG": os.fspath(env.config_path),
-            "CHAD_PASSWORD": env.password,
-            "CHAD_PROJECT_PATH": os.fspath(env.project_dir),
-            "PYTHONPATH": os.fspath(PROJECT_ROOT / "src"),
-        },
+        env=chad_env,
         cwd=os.fspath(PROJECT_ROOT),
     )
     port = _wait_for_port(process)
@@ -230,8 +288,18 @@ def run_screenshot_subprocess(
     viewport: Optional[Dict[str, int]] = None,
     label: str | None = None,
     issue_id: str = "",
+    selector: str | None = None,
 ) -> Dict[str, object]:
-    """Run screenshot_ui.py in a subprocess to avoid event loop conflicts."""
+    """Run screenshot_ui.py in a subprocess to avoid event loop conflicts.
+
+    Args:
+        tab: Which tab to screenshot ("run" or "providers")
+        headless: Whether to run browser in headless mode
+        viewport: Browser viewport dimensions
+        label: Optional label for the screenshot filename
+        issue_id: Optional issue ID for the screenshot filename
+        selector: Optional CSS selector to capture a specific element instead of full page
+    """
     viewport = viewport or {"width": 1280, "height": 900}
     artifacts_dir = Path(tempfile.mkdtemp(prefix="chad_visual_"))
     parts = []
@@ -263,6 +331,8 @@ def run_screenshot_subprocess(
     ]
     if headless:
         cmd.append("--headless")
+    if selector:
+        cmd.extend(["--selector", selector])
 
     result = subprocess.run(
         cmd,

@@ -2,8 +2,39 @@
 
 Three core capabilities:
 1. verify() - Run lint + all tests to check for regressions
-2. screenshot(tab) - Capture UI for understanding and verification
+2. screenshot(tab, component) - Capture UI for understanding and verification
 3. hypothesis/check_result/report - Track hypotheses with binary rejection checks
+
+Component Screenshots
+--------------------
+The screenshot() tool supports capturing specific UI components instead of full tabs.
+This is useful for:
+- Testing individual component changes without full-page screenshots
+- Verifying specific areas of the UI
+- Creating focused before/after comparisons
+
+Available components for each tab:
+
+**Run Tab (tab="run"):**
+- "project-path" - Project path and agent selection dropdowns
+- "agent-communication" - The chat interface for agent messages
+- "live-view" - Live activity stream (may be empty initially)
+
+**Providers Tab (tab="providers"):**
+- "provider-summary" - Summary panel showing all providers
+- "provider-card" - First visible provider card with model/reasoning settings
+- "add-provider" - The "Add New Provider" accordion panel
+
+Usage Examples:
+    # Full tab screenshot
+    screenshot(tab="run")
+
+    # Specific component screenshot
+    screenshot(tab="run", component="project-path")
+    screenshot(tab="providers", component="provider-card")
+
+    # With label for before/after comparisons
+    screenshot(tab="run", component="agent-communication", label="before")
 """
 
 from __future__ import annotations
@@ -125,43 +156,81 @@ def verify() -> Dict[str, object]:
 # Tool 2: SCREENSHOT - Capture UI for verification
 # =============================================================================
 
+# Component name to CSS selector mapping for granular screenshots
+# Note: Use IDs where available, CSS class selectors as fallback
+COMPONENT_SELECTORS = {
+    # Run tab components
+    "project-path": "#run-top-inputs",
+    "agent-communication": "#agent-chatbot",
+    "live-view": "#live-stream-box",
+    # Providers tab components
+    "provider-summary": "#provider-summary-panel",
+    "provider-card": ".gr-group:has(.provider-card__header-text)",  # First visible provider card
+    "add-provider": "#add-provider-panel",
+}
+
+
 @SERVER.tool()
 def screenshot(
     tab: str = "run",
+    component: str = "",
     label: str = "",
 ) -> Dict[str, object]:
-    """Capture a screenshot of a UI tab.
+    """Capture a screenshot of a UI tab or specific component.
 
     Use this tool to:
     - Understand a UI issue before making changes (label="before")
     - Verify changes look correct after making changes (label="after")
+    - Capture specific UI components for focused verification
 
     Args:
         tab: Which tab to screenshot ("run" or "providers")
+        component: Optional specific component to capture. Available components:
+            Run tab: "project-path", "agent-communication", "live-view"
+            Providers tab: "provider-summary", "provider-card", "add-provider"
+            Leave empty to capture the entire tab.
         label: Optional label like "before" or "after" for the filename
 
     Returns:
         Path to the saved screenshot
+
+    Examples:
+        screenshot(tab="run") - Full run tab
+        screenshot(tab="run", component="project-path") - Just the project path panel
+        screenshot(tab="providers", component="provider-card") - A single provider card
     """
     normalized = tab.lower().strip()
     tab_name = "providers" if normalized.startswith("p") else "run"
+
+    # Resolve component to selector
+    selector = None
+    if component:
+        component_key = component.lower().strip().replace("_", "-")
+        selector = COMPONENT_SELECTORS.get(component_key)
+        if not selector:
+            available = ", ".join(COMPONENT_SELECTORS.keys())
+            return _failure(f"Unknown component '{component}'. Available: {available}")
 
     result = run_screenshot_subprocess(
         tab=tab_name,
         headless=True,
         viewport={"width": 1280, "height": 900},
         label=label if label else None,
+        selector=selector,
     )
 
     if result.get("success"):
         screenshots = result.get("screenshots") or [result.get("screenshot")]
+        component_info = f" (component: {component})" if component else ""
         return {
             "success": True,
             "tab": tab_name,
+            "component": component or "(full tab)",
+            "selector": selector or "(none)",
             "label": label or "(none)",
             "screenshot": result.get("screenshot"),
             "screenshots": screenshots,
-            "message": f"Screenshots saved: {', '.join(screenshots)}",
+            "message": f"Screenshots saved{component_info}: {', '.join(screenshots)}",
         }
     return _failure(result.get("stderr") or result.get("stdout") or "Screenshot failed")
 
@@ -346,18 +415,29 @@ def list_tools() -> Dict[str, object]:
         "success": True,
         "tools": {
             "verify": "Run lint + ALL tests (unit + visual) to check for regressions",
-            "screenshot": "Capture UI tab screenshot for understanding/verification",
+            "screenshot": "Capture UI tab or specific component screenshot",
             "hypothesis": "Record a hypothesis with binary rejection checks",
             "check_result": "File the result of a binary check (pass/fail)",
             "report": "Get final report of all hypotheses and results",
         },
+        "screenshot_components": {
+            "run_tab": ["project-path", "agent-communication", "live-view"],
+            "providers_tab": ["provider-summary", "provider-card", "add-provider"],
+        },
         "workflow": [
-            "1. Use screenshot(tab, label='before') if working on UI",
+            "1. Use screenshot(tab, component, label='before') if working on UI",
             "2. Use hypothesis() to record theories with checks",
             "3. Use check_result() to file results as you verify each check",
             "4. Use verify() to confirm no regressions",
-            "5. Use screenshot(tab, label='after') if working on UI",
+            "5. Use screenshot(tab, component, label='after') if working on UI",
             "6. Use report() to get final summary for user",
+        ],
+        "screenshot_examples": [
+            "screenshot(tab='run') - Full run tab",
+            "screenshot(tab='run', component='project-path') - Project path panel only",
+            "screenshot(tab='run', component='agent-communication') - Chat panel only",
+            "screenshot(tab='providers', component='provider-card') - Single provider card",
+            "screenshot(tab='providers', component='provider-summary') - Summary panel only",
         ],
     }
 

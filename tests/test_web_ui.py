@@ -1,5 +1,7 @@
 """Tests for web UI module."""
 
+import re
+import socket
 from unittest.mock import Mock, patch, MagicMock
 import pytest
 
@@ -242,6 +244,89 @@ class TestChadWebUI:
         assert web_ui.cancel_requested is True
 
 
+class TestLiveStreamPresentation:
+    """Formatting and styling tests for the live activity stream."""
+
+    def test_live_stream_spacing_removes_all_blank_lines(self):
+        """Live stream should remove all blank lines for compact display."""
+        from chad import web_ui
+
+        raw = "first line\n\n\nsecond block\n\n\n\nthird"
+        normalized = web_ui.normalize_live_stream_spacing(raw)
+
+        assert normalized == "first line\nsecond block\nthird"
+        rendered = web_ui.build_live_stream_html(raw, "AI")
+
+        assert "first line\nsecond block\nthird" in rendered
+        assert "\n\n" not in rendered
+
+
+class TestPortResolution:
+    """Ensure the UI chooses a safe port when launching."""
+
+    @pytest.fixture(autouse=True)
+    def skip_when_sockets_blocked(self):
+        """Skip port resolution tests when sockets are not permitted."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM):
+                pass
+        except PermissionError:
+            pytest.skip("Socket operations not permitted in this environment")
+
+    def test_resolve_port_keeps_requested_when_free(self):
+        """Requested port should be used when it is available."""
+        from chad.web_ui import _resolve_port
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            free_port = s.getsockname()[1]
+
+        port, ephemeral, conflicted = _resolve_port(free_port)
+
+        assert port == free_port
+        assert ephemeral is False
+        assert conflicted is False
+
+    def test_resolve_port_returns_ephemeral_when_in_use(self):
+        """If the requested port is busy, fall back to an ephemeral choice."""
+        from chad.web_ui import _resolve_port
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            busy_port = s.getsockname()[1]
+            s.listen(1)
+
+            port, ephemeral, conflicted = _resolve_port(busy_port)
+
+        assert port != busy_port
+        assert ephemeral is True
+        assert conflicted is True
+
+    def test_resolve_port_supports_explicit_ephemeral(self):
+        """Port zero should always yield an ephemeral assignment."""
+        from chad.web_ui import _resolve_port
+
+        port, ephemeral, conflicted = _resolve_port(0)
+
+        assert port > 0
+        assert ephemeral is True
+        assert conflicted is False
+
+    def test_live_stream_inline_code_is_color_only(self):
+        """Inline code should be colored text without a background box."""
+        from chad import web_ui
+
+        code_css_match = re.search(
+            r"#live-stream-box\s+code[^}]*\{([^}]*)\}",
+            web_ui.PROVIDER_PANEL_CSS,
+        )
+        assert code_css_match, "Expected live stream code style block"
+
+        code_block = code_css_match.group(1)
+        assert "background: none" in code_block or "background: transparent" in code_block
+        assert "padding: 0" in code_block
+
+
 class TestChadWebUITaskExecution:
     """Test cases for task execution in ChadWebUI."""
 
@@ -312,6 +397,79 @@ class TestChadWebUITaskExecution:
         assert '❌' in status_value
         assert 'Coding Agent' in status_value
 
+    def test_followup_restarts_with_updated_preferences(self, tmp_path, monkeypatch):
+        """Follow-up should honor updated model/reasoning after task completion."""
+        from chad import web_ui
+
+        security_mgr = Mock()
+        security_mgr.list_accounts.return_value = {'claude': 'anthropic'}
+        security_mgr.list_role_assignments.return_value = {'CODING': 'claude'}
+        security_mgr.get_account_model.return_value = 'claude-3'
+        security_mgr.get_account_reasoning.return_value = 'medium'
+        security_mgr.assign_role = Mock()
+        security_mgr.set_account_model = Mock()
+        security_mgr.set_account_reasoning = Mock()
+        security_mgr.set_verification_agent = Mock()
+        security_mgr.clear_role = Mock()
+
+        created_configs = []
+
+        class StubProvider:
+            def __init__(self, config):
+                self.config = config
+                self.stopped = False
+
+            def set_activity_callback(self, cb):
+                self.cb = cb
+
+            def start_session(self, project_path, context):
+                return True
+
+            def send_message(self, message):
+                return None
+
+            def get_response(self, timeout=None):
+                return "codex\nok"
+
+            def stop_session(self):
+                self.stopped = True
+
+            def supports_multi_turn(self):
+                return True
+
+            def is_alive(self):
+                return not self.stopped
+
+        def fake_create_provider(config):
+            created_configs.append(config)
+            return StubProvider(config)
+
+        monkeypatch.setattr(web_ui, "create_provider", fake_create_provider)
+        monkeypatch.setattr(web_ui.ChadWebUI, "_run_verification", lambda *args, **kwargs: (True, "ok"))
+
+        ui = web_ui.ChadWebUI(security_mgr, 'test-password')
+        ui.session_logger.base_dir = tmp_path
+
+        list(ui.start_chad_task(str(tmp_path), "do something", "claude", ""))
+
+        security_mgr.get_account_model.return_value = "claude-latest"
+        security_mgr.get_account_reasoning.return_value = "high"
+
+        list(
+            ui.send_followup(
+                "continue",
+                ui._current_chat_history,
+                coding_agent="claude",
+                verification_agent="",
+                coding_model="claude-latest",
+                coding_reasoning="high"
+            )
+        )
+
+        assert len(created_configs) == 2
+        assert created_configs[-1].model_name == "claude-latest"
+        assert created_configs[-1].reasoning_effort == "high"
+
 
 class TestChadWebUIInterface:
     """Test cases for Gradio interface creation."""
@@ -344,9 +502,10 @@ class TestChadWebUIInterface:
 class TestLaunchWebUI:
     """Test cases for launch_web_ui function."""
 
+    @patch('chad.web_ui._resolve_port', return_value=(7860, False, False))
     @patch('chad.web_ui.ChadWebUI')
     @patch('chad.web_ui.SecurityManager')
-    def test_launch_with_existing_password(self, mock_security_class, mock_webui_class):
+    def test_launch_with_existing_password(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """Test launching with existing user and provided password (trusted)."""
         from chad.web_ui import launch_web_ui
 
@@ -369,11 +528,13 @@ class TestLaunchWebUI:
         mock_security.verify_main_password.assert_not_called()
         mock_webui_class.assert_called_once_with(mock_security, 'test-password')
         mock_app.launch.assert_called_once()
+        mock_resolve_port.assert_called_once_with(7860)
         assert result == (None, 7860)
 
+    @patch('chad.web_ui._resolve_port', return_value=(7860, False, False))
     @patch('chad.web_ui.ChadWebUI')
     @patch('chad.web_ui.SecurityManager')
-    def test_launch_without_password_verifies(self, mock_security_class, mock_webui_class):
+    def test_launch_without_password_verifies(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """Test launching without password triggers verification."""
         from chad.web_ui import launch_web_ui
 
@@ -395,11 +556,13 @@ class TestLaunchWebUI:
 
         mock_security.verify_main_password.assert_called_once()
         mock_webui_class.assert_called_once_with(mock_security, 'verified-password')
+        mock_resolve_port.assert_called_once_with(7860)
         assert result == (None, 7860)
 
+    @patch('chad.web_ui._resolve_port', return_value=(7860, False, False))
     @patch('chad.web_ui.ChadWebUI')
     @patch('chad.web_ui.SecurityManager')
-    def test_launch_first_run_with_password(self, mock_security_class, mock_webui_class):
+    def test_launch_first_run_with_password(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """Test launching on first run with password provided."""
         from chad.web_ui import launch_web_ui
 
@@ -421,7 +584,37 @@ class TestLaunchWebUI:
         mock_security.hash_password.assert_called_once_with('new-password')
         mock_security.save_config.assert_called_once()
         mock_app.launch.assert_called_once()
+        mock_resolve_port.assert_called_once_with(7860)
         assert result == (None, 7860)
+
+    @patch('chad.web_ui._resolve_port', return_value=(43210, True, True))
+    @patch('chad.web_ui.ChadWebUI')
+    @patch('chad.web_ui.SecurityManager')
+    def test_launch_falls_back_when_port_busy(self, mock_security_class, mock_webui_class, mock_resolve_port):
+        """New launches should fall back to an ephemeral port if the default is in use."""
+        from chad.web_ui import launch_web_ui
+
+        mock_security = Mock()
+        mock_security.is_first_run.return_value = False
+        mock_security_class.return_value = mock_security
+
+        mock_app = Mock()
+        mock_app.launch.return_value = (Mock(server_port=43210), 'http://127.0.0.1:43210', None)
+        mock_webui = Mock()
+        mock_webui.create_interface.return_value = mock_app
+        mock_webui_class.return_value = mock_webui
+
+        result = launch_web_ui('test-password')
+
+        mock_resolve_port.assert_called_once_with(7860)
+        mock_app.launch.assert_called_once_with(
+            server_name="127.0.0.1",
+            server_port=43210,
+            share=False,
+            inbrowser=True,
+            quiet=False,
+        )
+        assert result == (None, 43210)
 
 
 class TestGeminiUsage:
