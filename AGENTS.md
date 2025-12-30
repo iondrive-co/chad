@@ -7,11 +7,18 @@ flawlessly working features.
 
 ## Before making changes
 
-Firstly, write a test which should fail until the issue is fixed or feature is implemented. For any UI-affecting work,
-take a "before" screenshot with `mcp__chad-ui-playwright__screenshot`. Use the `component` parameter to capture just
-the affected UI component, or omit it to capture the full tab. MCP screenshots are saved to a temp directory like
-`/tmp/chad_visual_xxxxx/` with filenames derived from the label/tab (e.g., `before_run.png`). Review the screenshot
-to confirm you understand the issue/current state.
+**For UI work, first search `src/chad/visual_test_map.py` for keywords from your task** (e.g., "reasoning effort",
+"verification agent"). The `UI_COMPONENT_MAP` tells you which screenshot component to use and which tests cover it:
+```python
+# Example: Task mentions "reasoning effort dropdown"
+# Search visual_test_map.py for "reasoning" → finds REASONING_EFFORT_DROPDOWN:
+#   tab="run", component="project-path", tests=["TestCodingAgentLayout"]
+```
+
+Then write a test which should fail until the issue is fixed or feature is implemented. Take a "before" screenshot
+with `mcp__chad-ui-playwright__screenshot` using the component from the map. MCP screenshots are saved to a temp
+directory like `/tmp/chad_visual_xxxxx/` with filenames derived from the label/tab (e.g., `before_run.png`). Review
+the screenshot to confirm you understand the issue/current state.
 
 When designing new code, never make fallback code to handle paths other than the happy one, instead spend as much effort
 as necessary to make sure that everyone using your feature sees the same happy path you tested. Similarly don't provide

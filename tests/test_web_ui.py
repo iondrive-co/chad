@@ -397,6 +397,198 @@ class TestChadWebUITaskExecution:
         assert '❌' in status_value
         assert 'Coding Agent' in status_value
 
+    def test_verification_preferences_use_verification_agent(self, monkeypatch, tmp_path):
+        """Verification dropdowns should apply to verification agent without mutating coding prefs."""
+        from chad import web_ui
+
+        security_mgr = Mock()
+        security_mgr.list_accounts.return_value = {'coder': 'anthropic', 'verifier': 'openai'}
+        security_mgr.list_role_assignments.return_value = {'CODING': 'coder'}
+        security_mgr.get_account_model.side_effect = lambda acct: {'coder': 'claude-3', 'verifier': 'gpt-4'}[acct]
+        security_mgr.get_account_reasoning.side_effect = lambda acct: {'coder': 'medium', 'verifier': 'high'}[acct]
+        security_mgr.assign_role = Mock()
+        security_mgr.set_account_model = Mock()
+        security_mgr.set_account_reasoning = Mock()
+
+        captured = {}
+
+        class StubProvider:
+            def __init__(self, config):
+                self.config = config
+                self.stopped = False
+
+            def set_activity_callback(self, cb):
+                self.cb = cb
+
+            def start_session(self, project_path, context):
+                return True
+
+            def send_message(self, message):
+                return None
+
+            def get_response(self, timeout=None):
+                return "codex\nok"
+
+            def stop_session(self):
+                self.stopped = True
+
+            def supports_multi_turn(self):
+                return True
+
+            def is_alive(self):
+                return not self.stopped
+
+        def fake_create_provider(config):
+            return StubProvider(config)
+
+        def fake_run_verification(
+            project_path,
+            coding_output,
+            verification_account,
+            on_activity=None,
+            timeout=300.0,
+            verification_model=None,
+            verification_reasoning=None
+        ):
+            captured["account"] = verification_account
+            captured["model"] = verification_model
+            captured["reasoning"] = verification_reasoning
+            return True, "ok"
+
+        monkeypatch.setattr(web_ui, "create_provider", fake_create_provider)
+        ui = web_ui.ChadWebUI(security_mgr, 'test-password')
+        ui.session_logger.base_dir = tmp_path
+        monkeypatch.setattr(ui, "_run_verification", fake_run_verification)
+
+        list(
+            ui.start_chad_task(
+                str(tmp_path),
+                "do something",
+                "coder",
+                "verifier",
+                "claude-3-opus",
+                "medium",
+                "gpt-4o",
+                "max"
+            )
+        )
+
+        assert captured["account"] == "verifier"
+        assert captured["model"] == "gpt-4o"
+        assert captured["reasoning"] == "max"
+
+        model_calls = [call.args for call in security_mgr.set_account_model.call_args_list]
+        assert ("coder", "gpt-4o") not in model_calls
+        assert ("verifier", "gpt-4o") in model_calls
+        reasoning_calls = [call.args for call in security_mgr.set_account_reasoning.call_args_list]
+        assert ("coder", "max") not in reasoning_calls
+        assert ("verifier", "max") in reasoning_calls
+
+    def test_start_task_revision_runtime_error_handled(self, monkeypatch, tmp_path):
+        """Runtime errors during revision should be surfaced without crashing."""
+        from chad import web_ui
+
+        security_mgr = Mock()
+        security_mgr.list_accounts.return_value = {'claude': 'anthropic'}
+        security_mgr.list_role_assignments.return_value = {'CODING': 'claude'}
+        security_mgr.get_account_model.return_value = 'default'
+        security_mgr.get_account_reasoning.return_value = 'default'
+        security_mgr.assign_role = Mock()
+        security_mgr.set_account_model = Mock()
+        security_mgr.set_account_reasoning = Mock()
+
+        class StubProvider:
+            def __init__(self, config):
+                self.config = config
+                self.calls = 0
+                self.stopped = False
+
+            def set_activity_callback(self, cb):
+                self.cb = cb
+
+            def start_session(self, project_path, context):
+                return True
+
+            def send_message(self, message):
+                return None
+
+            def get_response(self, timeout=None):
+                self.calls += 1
+                if self.calls == 1:
+                    return "codex\nok"
+                raise RuntimeError("timeout during revision")
+
+            def stop_session(self):
+                self.stopped = True
+
+            def supports_multi_turn(self):
+                return True
+
+            def is_alive(self):
+                return not self.stopped
+
+        monkeypatch.setattr(web_ui, "create_provider", lambda config: StubProvider(config))
+        ui = web_ui.ChadWebUI(security_mgr, 'test-password')
+        ui.session_logger.base_dir = tmp_path
+        monkeypatch.setattr(ui, "_run_verification", lambda *args, **kwargs: (False, "issues"))
+
+        results = list(ui.start_chad_task(str(tmp_path), "do something", "claude"))
+        last_history = results[-1][0]
+        assert any("Error:" in msg.get("content", "") for msg in last_history)
+
+    def test_followup_revision_runtime_error_handled(self, monkeypatch, tmp_path):
+        """Follow-up revisions should surface RuntimeError without crashing."""
+        from chad import web_ui
+        from chad.providers import ModelConfig
+
+        security_mgr = Mock()
+        security_mgr.list_accounts.return_value = {'claude': 'anthropic'}
+        security_mgr.list_role_assignments.return_value = {'CODING': 'claude'}
+        security_mgr.get_account_model.return_value = 'default'
+        security_mgr.get_account_reasoning.return_value = 'default'
+        security_mgr.assign_role = Mock()
+        security_mgr.set_account_model = Mock()
+        security_mgr.set_account_reasoning = Mock()
+
+        class StubProvider:
+            def __init__(self):
+                self.calls = 0
+                self.stopped = False
+
+            def set_activity_callback(self, cb):
+                self.cb = cb
+
+            def send_message(self, message):
+                return None
+
+            def get_response(self, timeout=None):
+                self.calls += 1
+                if self.calls == 1:
+                    return "codex\nok"
+                raise RuntimeError("timeout during revision")
+
+            def is_alive(self):
+                return not self.stopped
+
+        ui = web_ui.ChadWebUI(security_mgr, 'test-password')
+        ui.session_logger.base_dir = tmp_path
+        ui._session_active = True
+        ui._active_coding_provider = StubProvider()
+        ui._active_coding_config = ModelConfig(
+            provider="anthropic",
+            model_name="default",
+            account_name="claude",
+            reasoning_effort=None
+        )
+        ui._current_coding_account = "claude"
+        ui._current_project_path = str(tmp_path)
+        ui._current_chat_history = []
+        monkeypatch.setattr(ui, "_run_verification", lambda *args, **kwargs: (False, "issues"))
+
+        results = list(ui.send_followup("follow up", [], "claude", web_ui.ChadWebUI.SAME_AS_CODING))
+        last_history = results[-1][0]
+        assert any("Error:" in msg.get("content", "") for msg in last_history)
+
     def test_followup_restarts_with_updated_preferences(self, tmp_path, monkeypatch):
         """Follow-up should honor updated model/reasoning after task completion."""
         from chad import web_ui
@@ -769,8 +961,7 @@ class TestModelSelection:
         """Test getting models for openai provider."""
         models = web_ui.get_models_for_account('gpt')
 
-        assert 'o3' in models
-        assert 'o4-mini' in models
+        # Only 'default' is guaranteed - other models come from user's config/sessions
         assert 'default' in models
 
     def test_get_models_for_unknown_account(self, web_ui):

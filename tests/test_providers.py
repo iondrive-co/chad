@@ -884,8 +884,8 @@ class TestOpenAICodexProvider:
         provider.project_path = "/tmp/test_project"
         provider.current_message = "What is 2+2?"
 
-        response = provider.get_response(timeout=1.0)
-        assert "timed out" in response
+        with pytest.raises(RuntimeError, match="timed out"):
+            provider.get_response(timeout=1.0)
         assert provider.current_message is None
         mock_process.kill.assert_called_once()
 
@@ -901,8 +901,8 @@ class TestOpenAICodexProvider:
         provider.project_path = "/tmp/test_project"
         provider.current_message = "What is 2+2?"
 
-        response = provider.get_response()
-        assert "Failed to run Codex" in response
+        with pytest.raises(RuntimeError, match="Failed to run Codex"):
+            provider.get_response()
         assert provider.current_message is None
 
     def test_get_response_no_message(self):
@@ -1042,14 +1042,18 @@ class TestOpenAICodexProviderIntegration:
             # Send a simple math question
             provider.send_message("What is 2+2? Just output the number.")
 
-            # Get response
-            response = provider.get_response(timeout=60)
+            # Get response - may raise RuntimeError for API errors
+            try:
+                response = provider.get_response(timeout=60)
+            except RuntimeError as e:
+                error_msg = str(e)
+                if "not supported" in error_msg or "API error" in error_msg:
+                    pytest.skip(f"Codex API limitation: {error_msg}")
+                raise
 
             # The response should contain "4" somewhere
             if "Permission denied" in response or "Fatal error" in response:
                 pytest.skip("Codex CLI session dir not accessible in CI environment")
-            if "Failed to run Codex" in response:
-                pytest.skip("Codex CLI failed to execute")
             assert "4" in response, f"Expected '4' in response, got: {response}"
 
             # Clean up

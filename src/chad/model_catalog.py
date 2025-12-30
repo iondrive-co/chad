@@ -33,19 +33,10 @@ class ModelCatalog:
     cache_ttl: float = 300.0
     max_session_files: int = 60
 
-    OPENAI_FALLBACK: tuple[str, ...] = (
-        "gpt-5.2-codex",
-        "gpt-5.1-codex-max",
-        "gpt-5.1-codex",
-        "gpt-5.1-codex-mini",
-        "gpt-5.2",
-        "gpt-4.1",
-        "gpt-4.1-mini",
-        "o3",
-        "o4-mini",
-        "codex-mini",
-        "default",
-    )
+    # Only include "default" in fallback - specific models vary by account type
+    # (ChatGPT accounts vs API accounts have different available models)
+    # User's actual available models are discovered from config/session files
+    OPENAI_FALLBACK: tuple[str, ...] = ("default",)
     ANTHROPIC_FALLBACK: tuple[str, ...] = (
         "claude-sonnet-4-20250514",
         "claude-opus-4-20250514",
