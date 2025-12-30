@@ -276,22 +276,17 @@ def get_mock_usage(account_name: str) -> str:
 
 LIVE_VIEW_CONTENT = """<div class="live-output-content">
 <span style="color: #56b6c2; font-weight: bold;">⏺ Agent working on task...</span>
-
 <span style="color: #e5c07b;">• Reading src/chad/web_ui.py</span>
 <span style="color: #5c6370;">  Lines 1-500 of 2500</span>
-
 <span style="color: #98c379;">• Edit: src/chad/provider_ui.py</span>
-<span style="color: #98c379;">+</span>     def get_remaining_capacity(self) -> float:
+<span style="color: #98c379;">+</span>     def get_remaining_capacity(self) -&gt; float:
 <span style="color: #98c379;">+</span>         \"\"\"Calculate remaining API capacity.\"\"\"
 <span style="color: #98c379;">+</span>         return max(0, 1.0 - self.current_usage)
-
 <span style="color: #c678dd;">• Running: pytest tests/test_provider_ui.py -v</span>
 <span style="color: #5c6370;">  tests/test_provider_ui.py::test_usage_display PASSED
   tests/test_provider_ui.py::test_capacity_calculation PASSED
   tests/test_provider_ui.py::test_progress_bar PASSED</span>
-
 <span style="color: #98c379;">✓ All 3 tests passed</span>
-
 <span style="color: #61afef; font-weight: bold;">━━━ Task Progress ━━━</span>
 <span style="color: #98c379;">✓</span> Implement capacity tracking
 <span style="color: #98c379;">✓</span> Add unit tests
