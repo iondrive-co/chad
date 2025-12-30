@@ -181,7 +181,7 @@ class TestCodingAgentLayout:
     """Ensure the coding agent selector sits inside the top controls bar."""
 
     def test_status_row_spans_top_bar(self, page: Page):
-        """Status row should span nearly the full top bar (minus cancel button)."""
+        """Status row should sit beneath project path within the header area."""
         top_row = page.locator("#run-top-row")
         inputs_row = page.locator("#run-top-inputs")
         status_row = page.locator("#role-status-row")
@@ -200,25 +200,76 @@ class TestCodingAgentLayout:
         status_box = status_row.bounding_box()
         row_box = top_row.bounding_box()
         cancel_box = cancel_btn.bounding_box()
+        project_box = project_path.bounding_box()
 
-        assert inputs_box and status_box and row_box and cancel_box, "Missing bounding box data for layout assertions"
-
-        # Inputs should sit above the status row in the combined header area
-        assert inputs_box["y"] + inputs_box["height"] <= status_box["y"] + 6, (
-            "Status row should appear below the project path / coding agent inputs"
+        assert inputs_box and status_box and row_box and cancel_box and project_box, (
+            "Missing bounding box data for layout assertions"
         )
 
-        available_width = row_box["width"] - cancel_box["width"] - 16
-
-        assert status_box["width"] >= available_width * 0.8, (
-            f"Status row should use most of the top bar width (got {status_box['width']}, "
-            f"expected >= {available_width * 0.8})"
+        # Status should sit below project path within the top row column
+        assert status_box["y"] >= project_box["y"] + project_box["height"] - 2, (
+            "Status row should appear below the project path input"
         )
 
-        # Ensure the status row starts near the left edge of the main content
-        assert status_box["x"] <= row_box["x"] + 40, (
-            "Status row should align with the main header content, not just the right column"
+        # Status should align to project path column rather than the cancel column
+        assert status_box["x"] <= project_box["x"] + 4
+        available_width = row_box["width"] - cancel_box["width"]
+        assert status_box["width"] <= available_width
+
+    def test_run_top_controls_stack_with_matching_widths(self, page: Page):
+        """Preferred/Reasoning controls should stack under agent selectors with aligned widths."""
+        project_path = page.get_by_label("Project Path")
+        status = page.locator("#role-config-status")
+        session_log = page.locator("#session-log-btn")
+        coding_agent = page.get_by_label("Coding Agent")
+        coding_model = page.get_by_label("Preferred Model")
+        verification_agent = page.get_by_label("Verification Agent")
+        reasoning = page.get_by_label("Reasoning Effort")
+
+        expect(project_path).to_be_visible()
+        expect(status).to_be_visible()
+        expect(session_log).to_be_visible()
+        expect(coding_agent).to_be_visible()
+        expect(coding_model).to_be_visible()
+        expect(verification_agent).to_be_visible()
+        expect(reasoning).to_be_visible()
+
+        project_box = project_path.bounding_box()
+        status_box = status.bounding_box()
+        log_box = session_log.bounding_box()
+        coding_box = coding_agent.bounding_box()
+        model_box = coding_model.bounding_box()
+        verification_box = verification_agent.bounding_box()
+        reasoning_box = reasoning.bounding_box()
+
+        assert (
+            project_box
+            and status_box
+            and log_box
+            and coding_box
+            and model_box
+            and verification_box
+            and reasoning_box
         )
+
+        assert status_box["y"] >= project_box["y"] + project_box["height"] - 2, (
+            "Status should appear beneath the Project Path field"
+        )
+        assert log_box["y"] >= project_box["y"] + project_box["height"] - 2, (
+            "Session log button should appear beneath the Project Path field"
+        )
+
+        assert model_box["y"] >= coding_box["y"] + coding_box["height"] - 2, (
+            "Preferred Model should stack beneath Coding Agent"
+        )
+        assert reasoning_box["y"] >= verification_box["y"] + verification_box["height"] - 2, (
+            "Reasoning Effort should stack beneath Verification Agent"
+        )
+
+        assert abs(model_box["x"] - coding_box["x"]) <= 4
+        assert abs(model_box["width"] - coding_box["width"]) <= 4
+        assert abs(reasoning_box["x"] - verification_box["x"]) <= 4
+        assert abs(reasoning_box["width"] - verification_box["width"]) <= 4
 
     def test_cancel_button_visible_light_and_dark(self, page: Page):
         """Cancel button should stay visible in both color schemes and be a bit wider on large layouts."""

@@ -31,8 +31,12 @@ SCS = [
 def main() -> int:
     """Main entry point for Chad web interface."""
     parser = argparse.ArgumentParser(description="Chad: YOLO AI")
-    parser.add_argument('--port', type=int, default=7860,
-                        help='Port to run on (default: 7860, use 0 for ephemeral)')
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=7860,
+        help='Port to run on (default: 7860, use 0 for ephemeral; falls back if busy)'
+    )
     args = parser.parse_args()
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
