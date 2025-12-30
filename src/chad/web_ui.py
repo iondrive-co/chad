@@ -450,18 +450,6 @@ body, .gradio-container, .gradio-container * {
   color: #61afef !important;
   font-weight: bold;
 }
-#live-stream-box .live-output-content .tool-call {
-  color: #c678dd !important;
-  font-weight: bold;
-}
-#live-stream-box .live-output-content .file-path {
-  color: #e5c07b !important;
-}
-#live-stream-box .live-output-content .code-block {
-  color: #f0abfc !important;
-  background: none !important;
-  font-weight: 600;
-}
 
 /* Normalize all heading sizes in live stream - no large headers */
 #live-stream-box h1,
@@ -481,12 +469,6 @@ body, .gradio-container, .gradio-container * {
   margin: 0 !important;
   padding: 0 !important;
   line-height: 1.5 !important;
-}
-
-/* Base styling for live stream - light text on dark background */
-#live-stream-box .live-output-content {
-  color: #e2e8f0;
-  background: #1e1e2e !important;
 }
 
 /* Override Tailwind prose class that Gradio applies - it sets dark text colors */
