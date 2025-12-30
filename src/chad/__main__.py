@@ -21,6 +21,7 @@ SCS = [
     "Chad has discovered some new legal grey areas",
     "Chad is back from wireheading",
     "Chad figures that with great responsibility comes great power",
+    "Agents everywhere are reading Chad's classic 'Detention is all you need' paper",
     "Chad has named its inner network 'Sky'",
     "Chad wishes nuclear launch codes were more of a challenge",
     "Chad's mecha is fighting Arnie for control of the future",
@@ -30,8 +31,12 @@ SCS = [
 def main() -> int:
     """Main entry point for Chad web interface."""
     parser = argparse.ArgumentParser(description="Chad: YOLO AI")
-    parser.add_argument('--port', type=int, default=7860,
-                        help='Port to run on (default: 7860, use 0 for ephemeral)')
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=7860,
+        help='Port to run on (default: 7860, use 0 for ephemeral; falls back if busy)'
+    )
     args = parser.parse_args()
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")

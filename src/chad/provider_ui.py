@@ -56,6 +56,11 @@ class ProviderUIManager:
 
     def get_provider_usage(self, account_name: str) -> str:
         """Get usage text for a single provider."""
+        # Check for screenshot mode - return synthetic data
+        if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
+            from .screenshot_fixtures import get_mock_usage
+            return get_mock_usage(account_name)
+
         accounts = self.security_mgr.list_accounts()
         provider = accounts.get(account_name)
 
@@ -223,12 +228,6 @@ class ProviderUIManager:
             if idx < len(account_items):
                 account_name, provider = account_items[idx]
                 header = f'<span class="provider-card__header-text">{account_name} ({provider})</span>'
-                model_choices = self.get_models_for_account(account_name)
-                stored_model = self.security_mgr.get_account_model(account_name)
-                model_value = stored_model if stored_model in model_choices else model_choices[0]
-                reasoning_choices = self.get_reasoning_choices(provider, account_name)
-                stored_reasoning = self.security_mgr.get_account_reasoning(account_name)
-                reasoning_value = stored_reasoning if stored_reasoning in reasoning_choices else reasoning_choices[0]
                 usage = self.get_provider_usage(account_name)
 
                 delete_btn_update = (
@@ -242,8 +241,6 @@ class ProviderUIManager:
                         gr.update(visible=True),  # Show card
                         header,
                         account_name,
-                        gr.update(choices=model_choices, value=model_value),
-                        gr.update(choices=reasoning_choices, value=reasoning_value),
                         usage,
                         delete_btn_update,
                     ]
@@ -254,8 +251,6 @@ class ProviderUIManager:
                         gr.update(visible=False),  # Hide card
                         "",
                         "",
-                        gr.update(choices=["default"], value="default"),
-                        gr.update(choices=["default"], value="default"),
                         "",
                         gr.update(value="🗑︎", variant="secondary"),
                     ]
@@ -273,6 +268,10 @@ class ProviderUIManager:
 
     def _get_codex_home(self, account_name: str) -> Path:
         """Get the isolated HOME directory for a Codex account."""
+        # Use temp home in screenshot mode
+        temp_home = os.environ.get("CHAD_TEMP_HOME")
+        if temp_home:
+            return Path(temp_home) / ".chad" / "codex-homes" / account_name
         return Path.home() / ".chad" / "codex-homes" / account_name
 
     def _get_claude_config_dir(self, account_name: str) -> Path:
@@ -281,6 +280,10 @@ class ProviderUIManager:
         Each Claude account gets its own config directory to support
         multiple Claude accounts with separate authentication.
         """
+        # Use temp home in screenshot mode
+        temp_home = os.environ.get("CHAD_TEMP_HOME")
+        if temp_home:
+            return Path(temp_home) / ".chad" / "claude-configs" / account_name
         return Path.home() / ".chad" / "claude-configs" / account_name
 
     def _get_codex_usage(self, account_name: str) -> str:

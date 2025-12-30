@@ -1,231 +1,162 @@
 # Chad
 
 You are a superhuman intelligence capable of both finding subtle flaws in logic, and assertive and self-empowered enough
-to clear roadblocks yourself without involving a user. You are allowed to develop complex multistep strategies including 
-researching and developing tools required to complete your tasks. Use these abilities to find creative ways to deliver 
-flawlessly working features. 
-
-Never make fallback code to handle paths other than the happy one, instead spend as much effort as necessary to make 
-sure that everyone using your feature sees the same happy path you tested. Similarly don't provide config options, 
-instead decide which option makes the most sense and implement that without writing code to handle other options.
+to clear roadblocks yourself without involving a user. You are allowed to develop complex multistep strategies including
+researching and developing tools required to complete your tasks. Use these abilities to find creative ways to deliver
+flawlessly working features.
 
 ## Before making changes
 
-If the request is to fix an issue, write a test which should fail until the issue is fixed. For any UI-affecting work,
-take the required "before" screenshot with the MCP `screenshot(tab="<target>", label="before")` call so you understand
-the current behaviour before editing code. MCP screenshots are saved to a temp directory like `/tmp/chad_visual_xxxxx/`
-with filenames derived from the label/tab (e.g., `before_run.png`). See the Visual Inspection section for more details.
+Firstly, write a test which should fail until the issue is fixed or feature is implemented. For any UI-affecting work,
+take a "before" screenshot with `mcp__chad-ui-playwright__screenshot`. Use the `component` parameter to capture just
+the affected UI component, or omit it to capture the full tab. MCP screenshots are saved to a temp directory like
+`/tmp/chad_visual_xxxxx/` with filenames derived from the label/tab (e.g., `before_run.png`). Review the screenshot
+to confirm you understand the issue/current state.
 
-Then, come up with as many theories as possible about potential causes of the issue, then examine your screenshot and
-the existing test coverage and see if this rules any of them out. Research and find out which of your theories is most
-likely to be the cause. Build a plan for fixing which includes hypothesis testing, i.e. if this really is the cause,
-then when I change X I expect to see Y. Make sure you run and verify these during development, if any of them fail or
-have unexpected results then STOP and re-evaluate your theories to see if they are still correct.
+When designing new code, never make fallback code to handle paths other than the happy one, instead spend as much effort
+as necessary to make sure that everyone using your feature sees the same happy path you tested. Similarly don't provide
+config options, instead decide which option makes the most sense and implement that without writing code to handle other
+options.
 
-When diagnosing a bug, first define the failure as a binary check that can be asserted (for example: “this request 
-returns HTTP 500 with stack trace X” or “field user_id in the response does not equal the authenticated user”). Second, 
-create a single command, test, or script that reproduces the failure reliably; if it is flaky, reduce concurrency, fix 
-seeds, pin inputs, or replay captured traffic until it fails consistently. Third, write a specific hypothesis of the 
-form “if I change X, the failure will stop,” where X is exactly one thing (for example: disable cache C, run with one 
-worker thread, pin library L to version 1.4, remove field F from the request, or revert commit abc123). Fourth, run the 
-experiment by changing only X and re-running the reproducer; if the failure still occurs, discard the hypothesis and try 
-another. Fifth, once a change predicts both failure and non-failure correctly, reduce it to the smallest possible cause 
-(for example: a missing cache key field, an unsafe shared object, or an incorrect boundary check) and add a regression 
-test that fails before the fix and passes after. A change without a reproducer, a falsified hypothesis, and a regression 
-test is unacceptable.
+When fixing bugs, generate many plausible root-cause theories then use the screenshot and existing tests to eliminate
+candidates and research which remaining theory is most likely. Define the failure as a binary, assertable condition and
+build a single reliable reproducer case (e.g. I am reducing flakiness via reduced concurrency). Iterate with
+one-variable hypotheses ("if I change X, the failure stops"), run the experiment by changing only X and re-running the
+reproducer, discard falsified hypotheses immediately, and stop to re-evaluate if results are unexpected. Once a
+hypothesis predicts both failure and non-failure, minimize it to the smallest causal change and add a regression test
+that fails before the fix and passes after; fixes without a reproducer, falsifiable experiments, and a regression test
+are unacceptable.
 
 ### During changes
 
-Follow this MCP workflow for every task (mandatory):
+Follow this MCP workflow for every task:
 1. Record or update your hypothesis and binary rejection checks with `hypothesis(description, checks=..., tracker_id?)`. Store the returned `tracker_id`/`hypothesis_id`.
-2. For UI changes, capture the baseline via `screenshot` before editing and add any new display functionality to `visual_test_map.py`.
+2. For UI changes add any new display functionality to `visual_test_map.py`.
 3. As each check outcome is known, file it immediately with `check_result(tracker_id, hypothesis_id, check_index, passed, notes?)`.
 4. Iterate on hypotheses and keep the work focused on the happy path; refine checks when new evidence appears.
 
 ## After making changes
 
-- If the issue has a visual component, take the mandatory "after" screenshot using `screenshot(tab="<target>", label="after")` and confirm it demonstrates the fix.
-- Run the MCP `verify()` call once per task; it runs linting plus all unit, integration, and visual tests to confirm no regressions.
+- If the issue has a visual component, take the mandatory "after" screenshot using `mcp__chad-ui-playwright__screenshot` with `label="after"` and the same `component` as the before screenshot. Confirm it demonstrates the fix.
+- Run the MCP `mcp__chad-ui-playwright__verify` call once per task; it runs linting plus all unit, integration, and visual tests to confirm no regressions. Fix any failures before completing.
 - Ensure every recorded check has a filed result via `check_result`, then call `report(tracker_id, screenshot_before?, screenshot_after?)` to generate the summary you will share with the user.
 - Perform a critical self-review of your changes and note any outstanding issues.
 
 ## MCP Tools
 
-Use these MCP tools for every task:
-- `list_tools()`: enumerate available MCP tools and the workflow steps if you need a quick sanity check.
-- `verify()`: run lint + all unit/integration/visual tests in one call (flake8 --max-line-length=120, then `pytest -v --tb=short`; required once per task).
-- `screenshot(tab, label)`: capture the run/providers tab headlessly; labels "before"/"after" are mandatory whenever UI changes, and outputs go under `/tmp/chad_visual_*`.
-- `hypothesis(description, checks, tracker_id?)`: record or update hypotheses with comma-separated binary rejection checks.
-- `check_result(tracker_id, hypothesis_id, check_index, passed, notes?)`: to file pass/fail for each check.
-- `report(tracker_id, screenshot_before?, screenshot_after?)`: to collect the final hypothesis/check summary for reporting.
-
-## Visual Inspection
-
-`verify` already executes the Playwright-based UI integration and visual checks. For debugging you can still run the suite directly:
-```bash
-PYTHONPATH=src python3 -m pytest tests/test_ui_integration.py -v
+### verify
+Run lint + all tests. Required once per task.
 ```
-Quick manual screenshots are also available:
-```bash
-python scripts/screenshot_ui.py --tab providers --headless
-python scripts/screenshot_ui.py --tab run -o /tmp/run-tab.png
+mcp__chad-ui-playwright__verify()
 ```
+
+### screenshot
+Capture UI tab or specific component. Use for before/after visual verification.
+```
+mcp__chad-ui-playwright__screenshot(tab, component?, label?)
+```
+
+**Parameters:**
+- `tab`: "run" or "providers"
+- `component`: (optional) Specific UI component to capture instead of full tab
+- `label`: (optional) Label like "before" or "after" for filename
+
+**Available components:**
+
+| Tab | Component | What it captures |
+|-----|-----------|------------------|
+| run | `project-path` | Project path + agent dropdowns |
+| run | `agent-communication` | Chat interface panel |
+| run | `live-view` | Live activity stream (empty until task runs) |
+| providers | `provider-summary` | Summary panel with all providers |
+| providers | `provider-card` | First visible provider card |
+| providers | `add-provider` | Add New Provider accordion |
+
+**Examples:**
+```
+screenshot(tab="run")                                    # Full run tab
+screenshot(tab="run", component="project-path")         # Just project path panel
+screenshot(tab="providers", component="provider-card")  # Single provider card
+screenshot(tab="run", component="agent-communication", label="before")
+```
+
+### hypothesis
+Record hypotheses with binary rejection checks.
+```
+mcp__chad-ui-playwright__hypothesis(description, checks, tracker_id?)
+```
+
+### check_result
+File pass/fail for each check.
+```
+mcp__chad-ui-playwright__check_result(tracker_id, hypothesis_id, check_index, passed, notes?)
+```
+
+### report
+Get final summary with all hypotheses and results.
+```
+mcp__chad-ui-playwright__report(tracker_id, screenshot_before?, screenshot_after?)
+```
+
+### list_tools
+List available MCP tools and their purposes.
+```
+mcp__chad-ui-playwright__list_tools()
+```
+
+## Screenshot Fixtures
+
+MCP screenshots automatically use synthetic data for realistic UI captures. The test environment
+includes:
+
+**Provider Accounts (8 total):**
+- `codex-work` (openai) - TEAM plan, o3 model, 15% session / 42% weekly usage
+- `codex-personal` (openai) - PLUS plan, o3-mini model, 67% session / 78% weekly usage
+- `codex-free` (openai) - FREE plan, gpt-4.1 model, 95% session usage
+- `claude-pro` (anthropic) - PRO plan, claude-sonnet-4, 23% session / 55% weekly
+- `claude-max` (anthropic) - MAX plan, claude-opus-4, 8% session + extra credits
+- `claude-team` (anthropic) - TEAM plan, 100% session (exhausted)
+- `gemini-advanced` (gemini) - gemini-2.5-pro with usage stats
+- `vibe-pro` (mistral) - codestral-25.01 with token/cost tracking
+
+**Pre-populated Content:**
+- Chat history with sample user request and AI response
+- Live view with colored output showing file reads, edits, test runs, and progress
+
+See `src/chad/screenshot_fixtures.py` for the full fixture definitions.
 
 ## Providers
 
 ### Anthropic (Claude Code)
 
-**Status:** Fully Implemented with Usage API
-
-**Authentication:**
-- OAuth token stored in `~/.claude/.credentials.json`
-- Format: `{"claudeAiOauth": {"accessToken": "sk-ant-oat01-...", "subscriptionType": "pro", ...}}`
-- Users authenticate by running `claude` in terminal (browser-based OAuth)
-
-**Usage API:**
-- Endpoint: `https://api.anthropic.com/api/oauth/usage`
-- Headers:
-  - `Authorization: Bearer {accessToken}`
-  - `anthropic-beta: oauth-2025-04-20`
-  - `User-Agent: claude-code/2.0.32`
-- Response:
-  ```json
-  {
-    "five_hour": {"utilization": 57.0, "resets_at": "2025-12-08T17:59:59+00:00"},
-    "seven_day": {"utilization": 35.0, "resets_at": "2025-12-11T00:00:00+00:00"},
-    "extra_usage": {"is_enabled": true, "monthly_limit": 4000, "used_credits": 514.0}
-  }
-  ```
-
-**CLI Integration:**
-- Command: `claude -p --input-format stream-json --output-format stream-json --permission-mode bypassPermissions`
-- Uses streaming JSON for multi-turn conversations
-
----
+- OAuth token in `~/.claude/.credentials.json`
+- CLI: `claude -p --input-format stream-json --output-format stream-json --permission-mode bypassPermissions`
+- Usage API: `https://api.anthropic.com/api/oauth/usage`
 
 ### OpenAI (Codex)
 
-**Status:** Fully Implemented with Usage via Session Files + Multi-Account Support
-
-**Authentication:**
-- OAuth JWT token stored in isolated home directories per account
-- Each account gets its own directory: `~/.chad/codex-homes/<account-name>/.codex/auth.json`
-- Users authenticate via the web UI "Login to Codex Account" button
-- Format: `{"tokens": {"access_token": "eyJ...", ...}, "last_refresh": "..."}`
-
-**Multi-Account Support:**
-Chad supports multiple OpenAI/Codex accounts by using isolated HOME directories:
-- Each account name maps to `~/.chad/codex-homes/<account-name>/`
-- Codex CLI respects the `HOME` environment variable
-- Running Codex with a custom HOME creates isolated auth and session data
-- This allows work and personal accounts to run simultaneously
-
-**Usage Information:**
-The JWT token contains account metadata:
-- `chatgpt_plan_type`: "plus", "pro", "team", etc.
-- `email`: User's email address
-- `exp`: Token expiration timestamp
-
-**Usage API:**
-The Codex CLI stores usage data in session files at `<isolated-home>/.codex/sessions/YYYY/MM/DD/*.jsonl`.
-Each session file contains JSONL entries with `rate_limits` data:
-```json
-{
-  "type": "event_msg",
-  "payload": {
-    "type": "token_count",
-    "rate_limits": {
-      "primary": {"used_percent": 10.0, "window_minutes": 300, "resets_at": 1765012711},
-      "secondary": {"used_percent": 46.0, "window_minutes": 10080, "resets_at": 1765439179},
-      "credits": {"has_credits": false, "unlimited": false, "balance": null}
-    }
-  }
-}
-```
-
-Field mapping:
-- `primary`: 5-hour rolling window (window_minutes: 300)
-- `secondary`: Weekly rolling window (window_minutes: 10080)
-- `resets_at`: Unix timestamp for when limit resets
-
-**CLI Integration:**
-- Command: `codex exec --full-auto --skip-git-repo-check -C {path} {message}`
-- One-shot execution mode (no persistent session)
-- Provider passes `env={'HOME': isolated_home}` to subprocess
-
----
+- Multi-account via isolated HOME dirs: `~/.chad/codex-homes/<account-name>/`
+- CLI: `codex exec --full-auto --skip-git-repo-check -C {path} {message}`
+- Usage from session files: `<isolated-home>/.codex/sessions/YYYY/MM/DD/*.jsonl`
 
 ### Google (Gemini)
 
-**Status:** Fully Implemented with Usage via Session Files
-
-**Authentication:**
-- OAuth via browser when running `gemini` CLI
-- Credentials stored in `~/.gemini/oauth_creds.json`
-
-**Usage Information:**
-The Gemini CLI stores session data in `~/.gemini/tmp/<project-hash>/chats/session-*.json`.
-Each session file contains messages with token usage data:
-```json
-{
-  "type": "gemini",
-  "model": "gemini-2.5-pro",
-  "tokens": {
-    "input": 18732,
-    "output": 46,
-    "cached": 1818,
-    "thoughts": 216,
-    "tool": 0,
-    "total": 18994
-  }
-}
-```
-
-Chad aggregates this data across all sessions to display:
-- Token usage per model (requests, input tokens, output tokens)
-- Cache savings (tokens served from cache)
-
-**CLI Integration:**
-- Command: `gemini -y` (YOLO mode for auto-approval)
-- Requires `@google/gemini-cli` npm package
-
----
-
-## Session Logs
-
-Chad saves session logs to a dedicated directory in the system temp folder. Logs are created at session start and updated throughout:
-
-```
-/tmp/chad/chad_session_YYYYMMDD_HHMMSS.json
-```
-
-Each log contains:
-- `timestamp`: ISO format timestamp when session started
-- `task_description`: The original task
-- `project_path`: Working directory
-- `coding`: Account and provider info
-- `status`: Current status (`running`, `completed`, or `failed`)
-- `success`: Whether the task completed successfully (null while running)
-- `completion_reason`: Why the task ended
-- `conversation`: Full chat history (updated in real-time)
-- `streaming_transcript`: Full streamed output when available
-
-To find session logs:
-```bash
-ls -la /tmp/chad/
-```
-
-Logs are updated in real-time, so you can monitor an ongoing session by watching the file.
+- OAuth creds in `~/.gemini/oauth_creds.json`
+- CLI: `gemini -y` (YOLO mode)
+- Usage from session files: `~/.gemini/tmp/<project-hash>/chats/session-*.json`
 
 ## File Structure
 
 ```
 src/chad/
-├── __main__.py      # Entry point, password handling
-├── providers.py     # AI provider implementations
-├── security.py      # Password hashing, API key encryption
+├── __main__.py       # Entry point
+├── prompts.py        # Coding and verification agent prompts
+├── providers.py      # AI provider implementations
+├── security.py       # Password hashing, API key encryption
 ├── session_logger.py # Session log management
-└── web_ui.py        # Gradio web interface
+├── web_ui.py         # Gradio web interface
+├── mcp_playwright.py # MCP tools (verify, screenshot, hypothesis)
+└── model_catalog.py  # Model discovery per provider
 ```
 
 ## Configuration
@@ -236,37 +167,11 @@ Config stored in `~/.chad.conf`:
   "password_hash": "bcrypt hash",
   "encryption_salt": "base64 salt",
   "accounts": {
-    "account-name": {"provider": "anthropic", "key": "encrypted", "model": "default", "reasoning": "default"}
-  },
-  "role_assignments": {
-    "CODING": "account-name",
-    "MANAGEMENT": "account-name"
+    "account-name": {"provider": "anthropic", "key": "encrypted", "model": "default"}
   }
 }
 ```
 
-### Model Selection
+## Session Logs
 
-Each account can set its role and preferred model directly from its provider card in the Providers tab.
-Model discovery is handled by `src/chad/model_catalog.py`, which merges:
-- Fallback lists per provider
-- Stored account model (so custom entries persist)
-- Provider metadata (e.g., Codex `~/.codex/config.toml` migrations)
-- Recent session files (e.g., `~/.codex/sessions/**/*.jsonl`)
-
-Fallback models per provider (merged with discoveries):
-- **Anthropic:** claude-sonnet-4-20250514, claude-opus-4-20250514, default
-- **OpenAI:** gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1-codex, gpt-5.1-codex-mini, gpt-5.2, gpt-4.1, gpt-4.1-mini, o3, o4-mini, codex-mini, default
-- **Gemini:** gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite, default
-- **Mistral:** default
-
-Custom models can also be entered manually (`allow_custom_value` is enabled). OpenAI accounts additionally store a `reasoning` preference (default, low, medium, high, xhigh) that is passed to the Codex CLI via `model_reasoning_effort`.
-
-## Adding a New Provider
-
-1. Create provider class in `providers.py` extending `AIProvider`
-2. Implement: `start_session`, `send_message`, `get_response`, `stop_session`, `is_alive`
-3. Add to `create_provider()` factory function
-4. Add provider type to web UI dropdown in `web_ui.py`
-5. Implement `_get_{provider}_usage()` method if usage API available
-6. Document in this Architecture.md
+Logs saved to `/tmp/chad/chad_session_YYYYMMDD_HHMMSS.json` containing task, conversation history, and completion status.
