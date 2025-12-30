@@ -15,7 +15,7 @@ VISUAL_TEST_MAP: dict[str, list[str]] = {
         "TestProvidersTab",
         "TestDeleteProvider",
     ],
-    # Main web UI - tabs, elements, live stream, task execution
+    # Main web UI - tabs, elements, live stream, task execution, two-column provider layout
     "chad/web_ui.py": [
         "TestUIElements",
         "TestReadyStatus",
@@ -28,6 +28,7 @@ VISUAL_TEST_MAP: dict[str, list[str]] = {
         "TestRealisticLiveContent",
         "TestNoStatusBox",
         "TestScreenshots",
+        "TestProviderTwoColumnLayout",
     ],
     # Security manager - affects provider authentication display
     "chad/security.py": [
