@@ -457,6 +457,45 @@ class TestTaskTabs:
         start_btns = page.locator('button:has-text("Start Task"):visible')
         expect(start_btns.first).to_be_visible(timeout=5000)
 
+    def test_task_2_session_log_stays_single_line(self, page: Page):
+        """Task 2 session log button should keep icon and filename on one line."""
+        plus_tab = page.get_by_role("tab", name="➕")
+        plus_tab.click()
+
+        task2_tab = page.get_by_role("tab", name="Task 2")
+        expect(task2_tab).to_be_visible(timeout=5000)
+
+        # Ensure Task 2 is active
+        task2_tab.click()
+        page.wait_for_timeout(500)
+
+        layout = page.evaluate(
+            """
+() => {
+  const rows = Array.from(document.querySelectorAll('.role-status-row'));
+  const visibleRow = rows.find((row) => {
+    const style = window.getComputedStyle(row);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    const rect = row.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  });
+  if (!visibleRow) return { error: 'no visible status row' };
+  const btn = visibleRow.querySelector('a[download], button, .download-button');
+  if (!btn) return { error: 'no session log button' };
+  const style = window.getComputedStyle(btn);
+  return {
+    whiteSpace: style.whiteSpace,
+    text: (btn.textContent || '').trim(),
+  };
+}
+"""
+        )
+
+        assert not layout.get("error"), f"Session log lookup failed: {layout.get('error')}"
+        assert layout["whiteSpace"] == "nowrap", (
+            f"Expected session log button to stay on one line, got whiteSpace={layout['whiteSpace']}"
+        )
+
     def test_click_plus_twice_reveals_task_3(self, page: Page):
         """Clicking + twice should reveal Task 2 then Task 3."""
         plus_tab = page.get_by_role("tab", name="➕")
@@ -677,6 +716,41 @@ class TestLiveViewFormat:
 
         assert result.has_diff_classes, (
             f"Should detect diff classes in content. HTML: {result.raw_html[:200]}"
+        )
+
+    def test_plain_text_with_newlines_renders_on_multiple_lines(self, page: Page):
+        """Plain text with newlines (Claude-style) should render on multiple lines, not one long line."""
+        # Simulate Claude output which is plain text with \n newlines
+        plain_text_content = """Line 1: First line of output
+Line 2: Second line
+Line 3: Third line
+Line 4: Fourth line"""
+
+        # The UI should convert this to HTML via build_live_stream_html
+        # which wraps it in live-output-content div
+        html_wrapped = f'<div class="live-output-content">{plain_text_content}</div>'
+        inject_live_stream_content(page, html_wrapped)
+
+        # Get the rendered content element - use .last since inject creates it
+        content_box = page.locator('#live-stream-box .live-output-content').last
+
+        # Check that content is visible
+        assert content_box.is_visible(), "Live output content should be visible"
+
+        # Get the computed height - if all text is on one line, height will be ~1.5em
+        # If properly formatted with line breaks, height should be much larger
+        box_height = content_box.evaluate("el => el.offsetHeight")
+
+        # With 4 lines and line-height: 1.5, we expect at least 60px (4 * 1.5 * 13px font ≈ 78px)
+        assert box_height > 60, (
+            f"Content appears to be on one line (height={box_height}px). "
+            "Expected multi-line rendering with newlines preserved."
+        )
+
+        # Also check that the white-space CSS property is set to preserve newlines
+        white_space = content_box.evaluate("el => getComputedStyle(el).whiteSpace")
+        assert white_space in ('pre-wrap', 'pre', 'pre-line'), (
+            f"white-space should preserve newlines, got: {white_space}"
         )
 
 

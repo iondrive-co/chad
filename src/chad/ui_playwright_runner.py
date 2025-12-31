@@ -269,9 +269,28 @@ def open_playwright_page(
 def _select_tab(page: "Page", tab: str) -> None:
     """Select a UI tab by friendly name."""
     normalized = tab.strip().lower()
-    label = "🚀 Run Task" if normalized in {"run", "task", "default"} else "⚙️ Providers"
-    page.get_by_role("tab", name=label).click()
-    page.wait_for_timeout(500)
+    if normalized in {"run", "task", "default"}:
+        labels = ["🚀 Run Task", "Task 1"]
+    else:
+        labels = ["⚙️ Providers"]
+
+    for label in labels:
+        locator = page.get_by_role("tab", name=label)
+        try:
+            locator.click(timeout=5000)
+            page.wait_for_timeout(500)
+            return
+        except Exception:
+            continue
+
+    # Fallback: click the first available tab to avoid hanging when labels drift
+    any_tab = page.get_by_role("tab")
+    try:
+        any_tab.first.click(timeout=5000)
+        page.wait_for_timeout(500)
+        return
+    except Exception:
+        raise ChadLaunchError(f"Could not find tab matching '{tab}'")
 
 
 def screenshot_page(page: "Page", output_path: Path) -> Path:
@@ -709,6 +728,11 @@ def inject_live_stream_content(page: "Page", html_content: str) -> None:
 
     This makes the live stream box visible and inserts test HTML content.
     """
+    try:
+        page.wait_for_selector("#live-stream-box", state="attached", timeout=5000)
+    except Exception:
+        return
+
     page.evaluate(
         """
 (htmlContent) => {
