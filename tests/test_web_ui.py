@@ -2,8 +2,51 @@
 
 import re
 import socket
+import subprocess
 from unittest.mock import Mock, patch, MagicMock
 import pytest
+
+
+@pytest.fixture
+def git_repo(tmp_path):
+    """Create a temporary git repository for testing."""
+    repo_path = tmp_path / "test_repo"
+    repo_path.mkdir()
+
+    # Initialize git repo
+    subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+    )
+
+    # Create initial file and commit
+    (repo_path / "README.md").write_text("# Test Repository\n")
+    subprocess.run(["git", "add", "."], cwd=repo_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Initial commit"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+    )
+
+    # Ensure we're on main branch
+    subprocess.run(
+        ["git", "branch", "-M", "main"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+    )
+
+    return repo_path
 
 
 class TestChadWebUI:
@@ -403,7 +446,7 @@ class TestChadWebUITaskExecution:
         assert '❌' in status_value
         assert 'Coding Agent' in status_value
 
-    def test_verification_preferences_use_verification_agent(self, monkeypatch, tmp_path):
+    def test_verification_preferences_use_verification_agent(self, monkeypatch, tmp_path, git_repo):
         """Verification dropdowns should apply to verification agent without mutating coding prefs."""
         from chad import web_ui
 
@@ -470,7 +513,7 @@ class TestChadWebUITaskExecution:
         list(
             ui.start_chad_task(
                 session.id,
-                str(tmp_path),
+                str(git_repo),
                 "do something",
                 "coder",
                 "verifier",
@@ -492,7 +535,28 @@ class TestChadWebUITaskExecution:
         assert ("coder", "max") not in reasoning_calls
         assert ("verifier", "max") in reasoning_calls
 
-    def test_start_task_revision_runtime_error_handled(self, monkeypatch, tmp_path):
+    def test_same_as_coding_uses_coding_preferences(self, mock_security_mgr):
+        """Verification prefs must mirror coding selections when using same agent."""
+        from chad import web_ui
+
+        mock_security_mgr.list_accounts.return_value = {"claude": "anthropic", "gpt": "openai"}
+        ui = web_ui.ChadWebUI(mock_security_mgr, "test-password")
+
+        verification_agent = ui.SAME_AS_CODING
+        account, model, reasoning = ui._resolve_verification_preferences(
+            "claude",
+            "claude-3-opus",
+            "high",
+            verification_agent,
+            "gpt-5.1-codex-max",
+            "max",
+        )
+
+        assert account == "claude"
+        assert model == "claude-3-opus"
+        assert reasoning == "high"
+
+    def test_start_task_revision_runtime_error_handled(self, monkeypatch, tmp_path, git_repo):
         """Runtime errors during revision should be surfaced without crashing."""
         from chad import web_ui
 
@@ -541,7 +605,7 @@ class TestChadWebUITaskExecution:
         monkeypatch.setattr(ui, "_run_verification", lambda *args, **kwargs: (False, "issues"))
 
         session = ui.create_session("test")
-        results = list(ui.start_chad_task(session.id, str(tmp_path), "do something", "claude"))
+        results = list(ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
         last_history = results[-1][0]
         assert any("Error:" in msg.get("content", "") for msg in last_history)
 
@@ -599,7 +663,7 @@ class TestChadWebUITaskExecution:
         last_history = results[-1][0]
         assert any("Error:" in msg.get("content", "") for msg in last_history)
 
-    def test_followup_restarts_with_updated_preferences(self, tmp_path, monkeypatch):
+    def test_followup_restarts_with_updated_preferences(self, tmp_path, monkeypatch, git_repo):
         """Follow-up should honor updated model/reasoning after task completion."""
         from chad import web_ui
 
@@ -653,7 +717,7 @@ class TestChadWebUITaskExecution:
         ui.session_logger.base_dir = tmp_path
 
         session = ui.create_session("test")
-        list(ui.start_chad_task(session.id, str(tmp_path), "do something", "claude", ""))
+        list(ui.start_chad_task(session.id, str(git_repo), "do something", "claude", ""))
 
         security_mgr.get_account_model.return_value = "claude-latest"
         security_mgr.get_account_reasoning.return_value = "high"
@@ -1416,7 +1480,7 @@ class TestSessionLogIncludesTask:
         return ChadWebUI(mock_security_mgr, 'test-password')
 
     @patch('chad.providers.create_provider')
-    def test_session_log_starts_with_task(self, mock_create_provider, web_ui, tmp_path):
+    def test_session_log_starts_with_task(self, mock_create_provider, web_ui, tmp_path, git_repo):
         """Session log should include task description as first message."""
         import json
 
@@ -1428,15 +1492,12 @@ class TestSessionLogIncludesTask:
         mock_provider.is_alive.return_value = False  # Task completes immediately
         mock_create_provider.return_value = mock_provider
 
-        test_dir = tmp_path / "test_project"
-        test_dir.mkdir()
-
         task_description = "Fix the login bug"
 
         # Create a session and run task
         session = web_ui.create_session("test")
         session.log_path = web_ui.session_logger.precreate_log()
-        list(web_ui.start_chad_task(session.id, str(test_dir), task_description, 'coding-ai'))
+        list(web_ui.start_chad_task(session.id, str(git_repo), task_description, 'coding-ai'))
 
         # Get the session log path
         session_log_path = session.log_path

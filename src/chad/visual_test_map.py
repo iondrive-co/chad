@@ -154,7 +154,7 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         component="provider-summary",
         tests=["TestProvidersTab", "TestProviderTwoColumnLayout"],
         source_file="chad/provider_ui.py",
-        keywords=["provider summary", "all providers", "provider list"],
+        keywords=["provider summary", "all providers", "provider list", "provider count"],
     ),
     "ADD_PROVIDER": UIComponent(
         tab="providers",

@@ -162,7 +162,7 @@ def verify() -> Dict[str, object]:
 # Note: Use IDs where available, CSS class selectors as fallback
 COMPONENT_SELECTORS = {
     # Run tab components
-    "project-path": "#run-top-inputs",
+    "project-path": "#run-top-row",
     "agent-communication": "#agent-chatbot",
     "live-view": "#live-stream-box",
     # Providers tab components
