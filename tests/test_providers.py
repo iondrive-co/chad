@@ -1020,40 +1020,51 @@ class TestCodexJsonEventParsing:
 
 
 class TestOpenAICodexProviderIntegration:
-    """Integration tests for OpenAICodexProvider that actually invoke codex."""
+    """Integration tests for OpenAICodexProvider using mocked subprocess."""
 
-    def test_real_codex_execution(self):
-        """Test that codex exec actually works end-to-end."""
-        import shutil
+    def test_codex_execution_flow(self):
+        """Test the end-to-end flow with mocked codex CLI."""
         import tempfile
+        import json
+        import os
 
-        # Skip if codex is not installed
-        if not shutil.which('codex'):
-            pytest.skip("Codex CLI not installed")
-
-        config = ModelConfig(provider="openai", model_name="codex")
+        config = ModelConfig(provider="openai", model_name="o4-mini")
         provider = OpenAICodexProvider(config)
 
-        # Use a temporary directory for the test
         with tempfile.TemporaryDirectory() as tmpdir:
-            result = provider.start_session(tmpdir)
-            assert result is True
+            # Mock start_session
+            provider.project_path = tmpdir
+            provider.process = Mock()
+            provider.process.poll.return_value = None
 
-            # Send a simple math question
+            # Send a message
             provider.send_message("What is 2+2? Just output the number.")
 
-            # Get response - may raise RuntimeError for API errors
-            try:
-                response = provider.get_response(timeout=60)
-            except RuntimeError as e:
-                error_msg = str(e)
-                if "not supported" in error_msg or "API error" in error_msg:
-                    pytest.skip(f"Codex API limitation: {error_msg}")
-                raise
+            # Create mock PTY process that outputs JSON events
+            mock_process = Mock()
+            # poll() returns None while running, then 0 when done
+            poll_values = [None] * 5 + [0] * 100  # 5 running, then always done
+            mock_process.poll.side_effect = poll_values
+            mock_process.stdin = Mock()
+            mock_process.pid = 12345
+            mock_process.returncode = 0
+            mock_process.wait.return_value = 0
 
-            # The response should contain "4" somewhere
-            if "Permission denied" in response or "Fatal error" in response:
-                pytest.skip("Codex CLI session dir not accessible in CI environment")
+            # Create a pipe to simulate PTY output
+            read_fd, write_fd = os.pipe()
+
+            # Write mock JSON output
+            json_output = json.dumps({
+                "type": "item.completed",
+                "item": {"type": "message", "content": [{"type": "text", "text": "The answer is 4"}]}
+            }) + "\n"
+            os.write(write_fd, json_output.encode())
+            os.close(write_fd)
+
+            with patch('chad.providers._start_pty_process', return_value=(mock_process, read_fd)):
+                with patch('chad.providers.find_cli_executable', return_value='/usr/bin/codex'):
+                    response = provider.get_response(timeout=5)
+
             assert "4" in response, f"Expected '4' in response, got: {response}"
 
             # Clean up

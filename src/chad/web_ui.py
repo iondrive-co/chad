@@ -15,7 +15,13 @@ from .security import SecurityManager
 from .session_logger import SessionLogger
 from .providers import ModelConfig, parse_codex_output, create_provider
 from .model_catalog import ModelCatalog
-from .prompts import build_coding_prompt, get_verification_prompt, parse_verification_response, VerificationParseError
+from .prompts import (
+    build_coding_prompt,
+    extract_coding_summary,
+    get_verification_prompt,
+    parse_verification_response,
+    VerificationParseError,
+)
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\][^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")
 
@@ -1094,7 +1100,11 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
 
     # For long content, make it collapsible with a summary
     if collapsible and len(content) > 300:
-        summary = summarize_content(content)
+        # First try to extract structured summary from JSON block
+        summary = extract_coding_summary(content)
+        if not summary:
+            # Fall back to heuristic-based extraction
+            summary = summarize_content(content)
         formatted = f"**{speaker}**\n\n{summary}\n\n<details><summary>Show full output</summary>\n\n{content}\n\n</details>"  # noqa: E501
     else:
         formatted = f"**{speaker}**\n\n{content}"
@@ -1875,7 +1885,6 @@ class ChadWebUI:
                         last_coding_output,
                         verification_account_for_run,
                         on_activity=verification_activity,
-                        timeout=300.0,
                         verification_model=resolved_verification_model,
                         verification_reasoning=resolved_verification_reasoning
                     )
@@ -1891,6 +1900,7 @@ class ChadWebUI:
                             "role": "user",
                             "content": "───────────── ❌ VERIFICATION ERROR ─────────────"
                         })
+                        self.session_logger.update_log(session_log_path, chat_history)
                         break
                     elif verified:
                         chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
@@ -1898,8 +1908,10 @@ class ChadWebUI:
                             "role": "user",
                             "content": "───────────── ✅ VERIFICATION PASSED ─────────────"
                         })
+                        self.session_logger.update_log(session_log_path, chat_history)
                     else:
                         chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
+                        self.session_logger.update_log(session_log_path, chat_history)
 
                         # If not verified and session is still active, send feedback to coding agent
                         can_revise = (
@@ -1916,6 +1928,7 @@ class ChadWebUI:
                                 "role": "user",
                                 "content": revision_content
                             })
+                            self.session_logger.update_log(session_log_path, chat_history)
                             revision_status = f"{status_prefix}🔄 Sending revision request to coding agent..."
                             yield make_yield(chat_history, revision_status, "")
 
@@ -1933,6 +1946,7 @@ class ChadWebUI:
                                 "content": "**CODING AI**\n\n⏳ *Working on revisions...*"
                             })
                             revision_pending_idx = len(chat_history) - 1
+                            self.session_logger.update_log(session_log_path, chat_history)
                             yield make_yield(chat_history, f"{status_prefix}⏳ Coding agent working on revisions...", "")
 
                             # Send the revision request
@@ -1954,11 +1968,13 @@ class ChadWebUI:
                                 parsed_revision = parse_codex_output(revision_response)
                                 chat_history[revision_pending_idx] = make_chat_message("CODING AI", parsed_revision)
                                 last_coding_output = parsed_revision
+                                self.session_logger.update_log(session_log_path, chat_history)
                             else:
                                 chat_history[revision_pending_idx] = {
                                     "role": "assistant",
                                     "content": "**CODING AI**\n\n❌ *No response to revision request*"
                                 }
+                                self.session_logger.update_log(session_log_path, chat_history)
                                 break
 
                             yield make_yield(chat_history, f"{status_prefix}✓ Revision complete, re-verifying...", "")
@@ -2383,7 +2399,6 @@ class ChadWebUI:
                     last_coding_output,
                     verification_account_for_run,
                     on_activity=verification_activity,
-                    timeout=300.0,
                     verification_model=resolved_verification_model,
                     verification_reasoning=resolved_verification_reasoning
                 )
@@ -2406,8 +2421,10 @@ class ChadWebUI:
                         "role": "user",
                         "content": "───────────── ✅ VERIFICATION PASSED ─────────────"
                     })
+                    self._update_session_log(chat_history, full_history)
                 else:
                     chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
+                    self._update_session_log(chat_history, full_history)
 
                     # Check if we can revise
                     can_revise = (
@@ -2425,6 +2442,7 @@ class ChadWebUI:
                             "content": "**CODING AI**\n\n⏳ *Working on revisions...*"
                         })
                         revision_idx = len(chat_history) - 1
+                        self._update_session_log(chat_history, full_history)
                         yield make_followup_yield(chat_history, "🔄 Revision in progress...", working=True)
 
                         revision_request = (
@@ -2451,6 +2469,7 @@ class ChadWebUI:
                             parsed_revision = parse_codex_output(revision_response)
                             chat_history[revision_idx] = make_chat_message("CODING AI", parsed_revision)
                             last_coding_output = parsed_revision
+                            self._update_session_log(chat_history, full_history)
                         else:
                             chat_history[revision_idx] = {
                                 "role": "assistant",

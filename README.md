@@ -42,6 +42,6 @@ chad
 
 -> Provider tokens encrypted with a master password you create each session
 
-### Is this satire?
+### Is this satire? What are you even doing here?
 
-Sadly, no. "As a society, what are we even doing here?" might be a better question.
+¯\_(ツ)_/¯

@@ -63,12 +63,36 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         source_file="chad/web_ui.py",
         keywords=["preferred model", "model dropdown", "model selection", "coding model"],
     ),
+    "VERIFICATION_MODEL_DROPDOWN": UIComponent(
+        tab="run",
+        component="project-path",
+        tests=["TestCodingAgentLayout", "TestUIElements"],
+        source_file="chad/web_ui.py",
+        keywords=[
+            "verification model",
+            "verification preferred model",
+            "verifier model",
+            "verification model dropdown",
+        ],
+    ),
     "REASONING_EFFORT_DROPDOWN": UIComponent(
         tab="run",
         component="project-path",
         tests=["TestCodingAgentLayout", "TestUIElements"],
         source_file="chad/web_ui.py",
         keywords=["reasoning effort", "reasoning dropdown", "effort level"],
+    ),
+    "VERIFICATION_REASONING_DROPDOWN": UIComponent(
+        tab="run",
+        component="project-path",
+        tests=["TestCodingAgentLayout", "TestUIElements"],
+        source_file="chad/web_ui.py",
+        keywords=[
+            "verification reasoning",
+            "verification reasoning effort",
+            "verifier reasoning",
+            "verification reasoning dropdown",
+        ],
     ),
     "PROJECT_PATH_INPUT": UIComponent(
         tab="run",
