@@ -38,8 +38,11 @@ chad
 #### View completed tasks with verification results and live activity
 <img src="docs/screenshot-conversation.png" width="800" alt="Completed task conversation">
 
-#### Run multiple tasks in parallel with dynamic tabs
+#### Run multiple tasks in parallel
 <img src="docs/screenshot-task-tabs.png" width="800" alt="Multiple task tabs">
+
+#### Resolve merge conflicts with side-by-side diff view
+<img src="docs/screenshot-merge-conflicts.png" width="800" alt="Merge conflict resolution">
 
 </details>
 

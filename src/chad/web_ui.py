@@ -25,6 +25,7 @@ from .prompts import (
     parse_verification_response,
     VerificationParseError,
 )
+from .git_worktree import GitWorktreeManager, MergeConflict
 
 
 @dataclass
@@ -41,6 +42,22 @@ class Session:
     chat_history: list = field(default_factory=list)
     project_path: str | None = None
     coding_account: str | None = None
+    # Git worktree support
+    worktree_path: Path | None = None
+    worktree_branch: str | None = None
+    has_worktree_changes: bool = False
+    merge_conflicts: list[MergeConflict] | None = None
+
+
+@dataclass
+class VerificationDropdownState:
+    """Resolved state for verification model/reasoning dropdowns."""
+
+    model_choices: list[str]
+    model_value: str
+    reasoning_choices: list[str]
+    reasoning_value: str
+    interactive: bool
 
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\][^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")
@@ -794,6 +811,112 @@ body, .gradio-container, .gradio-container * {
 .cancel-task-btn {
   flex-shrink: 0 !important;
 }
+
+/* Merge section styling */
+.accept-merge-btn,
+.accept-merge-btn button {
+  background: #22c55e !important;
+  border: 1px solid #16a34a !important;
+  color: white !important;
+}
+
+.accept-merge-btn:hover,
+.accept-merge-btn button:hover {
+  background: #16a34a !important;
+}
+
+/* Conflict viewer styling */
+.conflict-viewer {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.85rem;
+  border: 1px solid #3b4252;
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 12px 0;
+}
+
+.conflict-file {
+  border-bottom: 1px solid #3b4252;
+}
+
+.conflict-file:last-child {
+  border-bottom: none;
+}
+
+.conflict-file-header {
+  background: #2e3440;
+  padding: 8px 12px;
+  margin: 0;
+  font-size: 0.9rem;
+  color: #88c0d0;
+  border-bottom: 1px solid #3b4252;
+}
+
+.conflict-hunk {
+  margin: 0;
+  border-bottom: 1px solid #4c566a;
+}
+
+.conflict-hunk:last-child {
+  border-bottom: none;
+}
+
+.conflict-context {
+  padding: 4px 12px;
+  background: #2e3440;
+  color: #d8dee9;
+}
+
+.conflict-context pre {
+  margin: 2px 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.conflict-comparison {
+  display: flex;
+}
+
+.conflict-side {
+  flex: 1;
+  padding: 8px 12px;
+  overflow-x: auto;
+  min-width: 0;
+}
+
+.conflict-side pre {
+  margin: 2px 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.conflict-original {
+  background: #3b2828;
+  border-right: 1px solid #4c566a;
+}
+
+.conflict-incoming {
+  background: #283b28;
+}
+
+.conflict-side-header {
+  font-weight: bold;
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #4c566a;
+}
+
+.conflict-original .conflict-side-header {
+  color: #bf616a;
+}
+
+.conflict-incoming .conflict-side-header {
+  color: #a3be8c;
+}
+
+.conflict-side-content {
+  color: #e5e9f0;
+}
 """
 # fmt: on
 
@@ -1228,15 +1351,16 @@ def highlight_code_syntax(html_content: str) -> str:
     """
     import re
 
-    # Python/general programming keywords
+    # Python/general programming keywords (excluding 'def' which is handled in function definitions)
     keywords = (
-        r"\b(def|class|import|from|if|else|elif|for|while|return|try|except|finally|with|as|"
+        r"\b(import|from|if|else|elif|for|while|return|try|except|finally|with|as|"
         r"pass|break|continue|in|is|not|and|or|lambda|yield|global|nonlocal|assert|raise|"
         r"del|True|False|None)\b"
     )
 
     # Function/method definitions and calls
     function_def = r"\b(def)\s+(\w+)\s*\("
+    class_def = r"\b(class)\s+(\w+)"
 
     # String patterns (handles quotes)
     strings = r'(["\'])(?:(?=(\\?))\2.)*?\1'
@@ -1252,11 +1376,12 @@ def highlight_code_syntax(html_content: str) -> str:
 
     # Process code blocks
     def process_code_block(match):
+        full_match = match.group(0)
         code_content = match.group(1)
 
-        # Skip if already has syntax highlighting
-        if 'class="' in code_content:
-            return match.group(0)
+        # Skip if already has manual syntax highlighting spans in content
+        if '<span class="' in code_content:
+            return full_match
 
         # Apply highlighting in order of precedence
         # 1. Comments (highest precedence)
@@ -1269,24 +1394,31 @@ def highlight_code_syntax(html_content: str) -> str:
             strings, r'<span class="string">\g<0></span>', code_content
         )
 
-        # 3. Function definitions
+        # 3. Function definitions (before general keywords to avoid conflicts)
         code_content = re.sub(
             function_def,
             r'<span class="keyword">\1</span> <span class="function">\2</span>(',
             code_content,
         )
 
-        # 4. Keywords
+        # 4. Class definitions
+        code_content = re.sub(
+            class_def,
+            r'<span class="keyword">\1</span> <span class="class-name">\2</span>',
+            code_content,
+        )
+
+        # 5. Keywords
         code_content = re.sub(
             keywords, r'<span class="keyword">\1</span>', code_content
         )
 
-        # 5. Numbers
+        # 6. Numbers
         code_content = re.sub(
             numbers, r'<span class="number">\g<0></span>', code_content
         )
 
-        # 6. Class names
+        # 7. Class names
         code_content = re.sub(
             class_names, r'<span class="class-name">\g<0></span>', code_content
         )
@@ -1303,8 +1435,8 @@ def highlight_code_syntax(html_content: str) -> str:
         pre_tag = match.group(1)
         code_content = match.group(2)
 
-        # Skip if already has syntax highlighting
-        if 'class="' in code_content:
+        # Skip if already has manual syntax highlighting spans in content
+        if '<span class="' in code_content:
             return match.group(0)
 
         # More aggressive highlighting for pre/code blocks
@@ -1318,6 +1450,11 @@ def highlight_code_syntax(html_content: str) -> str:
         code_content = re.sub(
             function_def,
             r'<span class="keyword">\1</span> <span class="function">\2</span>(',
+            code_content,
+        )
+        code_content = re.sub(
+            class_def,
+            r'<span class="keyword">\1</span> <span class="class-name">\2</span>',
             code_content,
         )
         code_content = re.sub(
@@ -1793,29 +1930,97 @@ class ChadWebUI:
             return value
 
         if verification_agent == self.SAME_AS_CODING:
-            resolved_model = normalize(verification_model, coding_model)
-            resolved_reasoning = normalize(verification_reasoning, coding_reasoning)
-        else:
-            account_model = self.security_mgr.get_account_model(actual_account)
-            account_reasoning = self.security_mgr.get_account_reasoning(actual_account)
-            resolved_model = normalize(verification_model, account_model)
-            resolved_reasoning = normalize(verification_reasoning, account_reasoning)
+            resolved_model = normalize(coding_model, "default")
+            resolved_reasoning = normalize(coding_reasoning, "default")
+            return actual_account, resolved_model, resolved_reasoning
 
-            # Persist explicit verification preferences to the verification account only
-            try:
-                if verification_model and verification_model != self.SAME_AS_CODING:
-                    self.security_mgr.set_account_model(actual_account, resolved_model)
-                if (
-                    verification_reasoning
-                    and verification_reasoning != self.SAME_AS_CODING
-                ):
-                    self.security_mgr.set_account_reasoning(
-                        actual_account, resolved_reasoning
-                    )
-            except Exception:
-                pass
+        account_model = self.security_mgr.get_account_model(actual_account)
+        account_reasoning = self.security_mgr.get_account_reasoning(actual_account)
+        resolved_model = normalize(verification_model, account_model)
+        resolved_reasoning = normalize(verification_reasoning, account_reasoning)
+
+        # Persist explicit verification preferences to the verification account only
+        try:
+            if verification_model and verification_model != self.SAME_AS_CODING:
+                self.security_mgr.set_account_model(actual_account, resolved_model)
+            if verification_reasoning and verification_reasoning != self.SAME_AS_CODING:
+                self.security_mgr.set_account_reasoning(
+                    actual_account, resolved_reasoning
+                )
+        except Exception:
+            pass
 
         return actual_account, resolved_model, resolved_reasoning
+
+    def _build_verification_dropdown_state(
+        self,
+        coding_agent: str | None,
+        verification_agent: str | None,
+        coding_model_value: str | None,
+        coding_reasoning_value: str | None,
+        current_verification_model: str | None = None,
+        current_verification_reasoning: str | None = None,
+    ) -> VerificationDropdownState:
+        """Resolve verification dropdown values based on current selections."""
+        accounts_map = self.security_mgr.list_accounts()
+        account_choices = list(accounts_map.keys())
+        actual_account = (
+            coding_agent if verification_agent == self.SAME_AS_CODING else verification_agent
+        )
+        interactive = bool(
+            actual_account
+            and actual_account in account_choices
+            and verification_agent != self.SAME_AS_CODING
+        )
+
+        if not actual_account or actual_account not in account_choices:
+            return VerificationDropdownState(
+                ["default"],
+                "default",
+                ["default"],
+                "default",
+                False,
+            )
+
+        provider_type = accounts_map.get(actual_account, "")
+        model_choices = self.get_models_for_account(actual_account) or ["default"]
+        reasoning_choices = self.get_reasoning_choices(
+            provider_type, actual_account
+        ) or ["default"]
+
+        def value_or_default(
+            preferred: str | None, choices: list[str], allow_custom: bool = False
+        ) -> str:
+            if preferred:
+                if preferred in choices or allow_custom:
+                    return preferred
+            return choices[0]
+
+        if verification_agent == self.SAME_AS_CODING:
+            model_value = value_or_default(
+                coding_model_value, model_choices, allow_custom=True
+            )
+            reasoning_value = value_or_default(
+                coding_reasoning_value, reasoning_choices, allow_custom=True
+            )
+        else:
+            stored_model = self.security_mgr.get_account_model(actual_account) or "default"
+            preferred_model = current_verification_model or stored_model
+            model_value = value_or_default(preferred_model, model_choices)
+
+            stored_reasoning = (
+                self.security_mgr.get_account_reasoning(actual_account) or "default"
+            )
+            preferred_reasoning = current_verification_reasoning or stored_reasoning
+            reasoning_value = value_or_default(preferred_reasoning, reasoning_choices)
+
+        return VerificationDropdownState(
+            model_choices=model_choices,
+            model_value=model_value,
+            reasoning_choices=reasoning_choices,
+            reasoning_value=reasoning_value,
+            interactive=interactive,
+        )
 
     def start_chad_task(  # noqa: C901
         self,
@@ -1857,6 +2062,9 @@ class ChadWebUI:
             summary: str | None = None,
             interactive: bool = False,
             show_followup: bool = False,
+            show_merge: bool = False,
+            merge_summary: str = "",
+            branch_choices: list[str] | None = None,
         ):
             """Format output tuple for Gradio with current UI state."""
             display_stream = live_stream
@@ -1874,6 +2082,11 @@ class ChadWebUI:
                 content = history[0].get("content", "")
                 if isinstance(content, str) and content.startswith("**Task**"):
                     display_history = history[1:]
+            # Build branch dropdown update
+            if branch_choices:
+                branch_update = gr.update(choices=branch_choices, value=branch_choices[0])
+            else:
+                branch_update = gr.update()
             return (
                 display_history,
                 display_stream,
@@ -1887,6 +2100,9 @@ class ChadWebUI:
                 gr.update(value=""),  # Clear followup input
                 gr.update(visible=show_followup),  # Show/hide followup row
                 gr.update(interactive=show_followup),  # Enable/disable send button
+                gr.update(visible=show_merge),  # Show/hide merge section
+                gr.update(value=merge_summary),  # Merge changes summary
+                branch_update,  # Branch dropdown choices
             )
 
         try:
@@ -1910,6 +2126,25 @@ class ChadWebUI:
             if coding_agent not in accounts:
                 msg = f"❌ Coding agent '{coding_agent}' not found"
                 yield make_yield([], msg, summary=msg, interactive=True)
+                return
+
+            # Check if project is a git repository
+            git_mgr = GitWorktreeManager(path_obj)
+            if not git_mgr.is_git_repo():
+                error_msg = f"❌ Project must be a git repository: {project_path}"
+                yield make_yield([], error_msg, summary=error_msg, interactive=True)
+                return
+
+            # Create worktree for this task
+            try:
+                worktree_path = git_mgr.create_worktree(session_id)
+                session.worktree_path = worktree_path
+                session.worktree_branch = git_mgr._branch_name(session_id)
+                session.project_path = str(path_obj)
+                task_working_dir = worktree_path
+            except Exception as e:
+                error_msg = f"❌ Failed to create worktree: {e}"
+                yield make_yield([], error_msg, summary=error_msg, interactive=True)
                 return
 
             coding_account = coding_agent
@@ -2014,10 +2249,10 @@ class ChadWebUI:
             session.provider = coding_provider_instance
             coding_provider_instance.set_activity_callback(on_activity)
 
-            # Read project documentation (AGENTS.md, CLAUDE.md, etc.)
-            project_docs = self._read_project_docs(path_obj)
+            # Read project documentation from worktree (AGENTS.md, CLAUDE.md, etc.)
+            project_docs = self._read_project_docs(task_working_dir)
 
-            if not coding_provider_instance.start_session(str(path_obj), None):
+            if not coding_provider_instance.start_session(str(task_working_dir), None):
                 failure = f"{status_prefix}❌ Failed to start coding session"
                 session.provider = None
                 session.config = None
@@ -2519,7 +2754,6 @@ class ChadWebUI:
 
             # Store session state for follow-up messages
             session.chat_history = chat_history
-            session.project_path = project_path
             session.coding_account = coding_account
 
             # Show follow-up input if session can continue (Claude with successful task)
@@ -2528,6 +2762,18 @@ class ChadWebUI:
                 final_status += "\n\n*Session active - you can send follow-up messages*"
                 final_summary = f"{status_prefix}{final_status}"
 
+            # Check for worktree changes to show merge section
+            has_changes, merge_summary_text = self.check_worktree_changes(session_id)
+
+            # Get available branches for merge target
+            branches = []
+            if has_changes and session.project_path:
+                try:
+                    git_mgr = GitWorktreeManager(Path(session.project_path))
+                    branches = git_mgr.get_branches()
+                except Exception:
+                    branches = ["main"]
+
             yield make_yield(
                 chat_history,
                 final_summary,
@@ -2535,6 +2781,9 @@ class ChadWebUI:
                 summary=final_summary,
                 interactive=True,
                 show_followup=can_continue,
+                show_merge=has_changes,
+                merge_summary=merge_summary_text,
+                branch_choices=branches if has_changes else None,
             )
 
         except Exception as e:  # pragma: no cover - defensive
@@ -2550,6 +2799,8 @@ class ChadWebUI:
                 summary=error_msg,
                 interactive=True,
                 show_followup=False,
+                show_merge=False,
+                merge_summary="",
             )
 
     def send_followup(  # noqa: C901
@@ -2727,9 +2978,13 @@ class ChadWebUI:
             )
 
             new_provider = create_provider(coding_config)
-            project_path = session.project_path or str(Path.cwd())
+            # Use worktree path if available, otherwise fall back to project path
+            if session.worktree_path:
+                working_dir = str(session.worktree_path)
+            else:
+                working_dir = session.project_path or str(Path.cwd())
 
-            if not new_provider.start_session(project_path, None):
+            if not new_provider.start_session(working_dir, None):
                 chat_history.append(
                     {
                         "role": "assistant",
@@ -3066,6 +3321,217 @@ class ChadWebUI:
 
         yield make_followup_yield(chat_history, "", show_followup=True)
 
+    def is_project_git_repo(self, project_path: str) -> bool:
+        """Check if project path is a valid git repository."""
+        if not project_path:
+            return False
+        path = Path(project_path).expanduser().resolve()
+        if not path.exists() or not path.is_dir():
+            return False
+        git_mgr = GitWorktreeManager(path)
+        return git_mgr.is_git_repo()
+
+    def check_worktree_changes(self, session_id: str) -> tuple[bool, str]:
+        """Check if worktree has changes and return summary."""
+        session = self.get_session(session_id)
+        if not session.worktree_path or not session.project_path:
+            return False, ""
+
+        git_mgr = GitWorktreeManager(Path(session.project_path))
+        has_changes = git_mgr.has_changes(session_id)
+        session.has_worktree_changes = has_changes
+
+        if has_changes:
+            summary = git_mgr.get_diff_summary(session_id)
+            return True, summary
+        return False, ""
+
+    def attempt_merge(
+        self,
+        session_id: str,
+        commit_message: str = "",
+        target_branch: str = "",
+    ) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update]:
+        """Attempt to merge worktree changes to a target branch."""
+        session = self.get_session(session_id)
+        if not session.worktree_path or not session.project_path:
+            return (
+                gr.update(visible=False),
+                gr.update(),
+                gr.update(visible=False),
+                gr.update(),
+                gr.update(),
+            )
+
+        git_mgr = GitWorktreeManager(Path(session.project_path))
+        msg = commit_message.strip() if commit_message else None
+        branch = target_branch.strip() if target_branch else None
+        success, conflicts = git_mgr.merge_to_main(session_id, msg, branch)
+
+        target_name = branch or git_mgr.get_main_branch()
+        if success:
+            # Cleanup worktree after successful merge
+            git_mgr.cleanup_after_merge(session_id)
+            session.worktree_path = None
+            session.worktree_branch = None
+            session.has_worktree_changes = False
+            return (
+                gr.update(visible=False),
+                gr.update(value=f"✓ Changes merged to {target_name}."),
+                gr.update(visible=False),
+                gr.update(),
+                gr.update(),
+            )
+        else:
+            session.merge_conflicts = conflicts
+            conflict_count = sum(len(c.hunks) for c in (conflicts or []))
+            file_count = len(conflicts or [])
+            conflict_msg = (
+                f"**{file_count} file(s)** with "
+                f"**{conflict_count} conflict(s)** need resolution."
+            )
+            return (
+                gr.update(visible=False),
+                gr.update(),
+                gr.update(visible=True),
+                gr.update(value=conflict_msg),
+                gr.update(value=self._render_conflicts_html(conflicts or [])),
+            )
+
+    def _render_conflicts_html(self, conflicts: list[MergeConflict]) -> str:
+        """Render conflicts as HTML for side-by-side display."""
+        if not conflicts:
+            return "<p>No conflicts to display.</p>"
+
+        html_parts = ['<div class="conflict-viewer">']
+
+        for conflict in conflicts:
+            html_parts.append('<div class="conflict-file">')
+            file_path_escaped = html.escape(conflict.file_path)
+            html_parts.append(f'<h4 class="conflict-file-header">{file_path_escaped}</h4>')
+
+            for hunk in conflict.hunks:
+                hunk_attrs = f'data-file="{file_path_escaped}" data-hunk="{hunk.hunk_index}"'
+                html_parts.append(f'<div class="conflict-hunk" {hunk_attrs}>')
+
+                # Context before
+                if hunk.context_before:
+                    html_parts.append('<div class="conflict-context">')
+                    for line in hunk.context_before:
+                        html_parts.append(f'<pre>{html.escape(line)}</pre>')
+                    html_parts.append('</div>')
+
+                # Side-by-side comparison
+                html_parts.append('<div class="conflict-comparison">')
+
+                # Original (HEAD) side
+                html_parts.append('<div class="conflict-side conflict-original">')
+                html_parts.append('<div class="conflict-side-header">Original (HEAD)</div>')
+                html_parts.append('<div class="conflict-side-content">')
+                for line in hunk.original_lines:
+                    html_parts.append(f'<pre>{html.escape(line)}</pre>')
+                html_parts.append('</div>')
+                html_parts.append('</div>')
+
+                # Incoming (worktree) side
+                html_parts.append('<div class="conflict-side conflict-incoming">')
+                html_parts.append('<div class="conflict-side-header">Incoming (Task Changes)</div>')
+                html_parts.append('<div class="conflict-side-content">')
+                for line in hunk.incoming_lines:
+                    html_parts.append(f'<pre>{html.escape(line)}</pre>')
+                html_parts.append('</div>')
+                html_parts.append('</div>')
+
+                html_parts.append('</div>')  # conflict-comparison
+
+                # Context after
+                if hunk.context_after:
+                    html_parts.append('<div class="conflict-context">')
+                    for line in hunk.context_after:
+                        html_parts.append(f'<pre>{html.escape(line)}</pre>')
+                    html_parts.append('</div>')
+
+                html_parts.append('</div>')  # conflict-hunk
+
+            html_parts.append('</div>')  # conflict-file
+
+        html_parts.append('</div>')  # conflict-viewer
+        return '\n'.join(html_parts)
+
+    def resolve_all_conflicts(
+        self, session_id: str, use_incoming: bool
+    ) -> tuple[gr.update, gr.update, gr.update, gr.update]:
+        """Resolve all conflicts by choosing all original or all incoming."""
+        session = self.get_session(session_id)
+        if not session.project_path:
+            return (gr.update(), gr.update(), gr.update(visible=False), gr.update())
+
+        git_mgr = GitWorktreeManager(Path(session.project_path))
+        git_mgr.resolve_all_conflicts(use_incoming)
+
+        # Complete the merge
+        if git_mgr.complete_merge():
+            git_mgr.cleanup_after_merge(session_id)
+            session.worktree_path = None
+            session.worktree_branch = None
+            session.merge_conflicts = None
+            session.has_worktree_changes = False
+            return (
+                gr.update(visible=False),
+                gr.update(value="✓ All conflicts resolved. Merge complete."),
+                gr.update(visible=False),
+                gr.update(),
+            )
+        else:
+            return (
+                gr.update(),
+                gr.update(value="❌ Failed to complete merge."),
+                gr.update(),
+                gr.update(),
+            )
+
+    def abort_merge_action(
+        self, session_id: str
+    ) -> tuple[gr.update, gr.update, gr.update, gr.update]:
+        """Abort an in-progress merge."""
+        session = self.get_session(session_id)
+        if not session.project_path:
+            return (gr.update(), gr.update(), gr.update(visible=False), gr.update())
+
+        git_mgr = GitWorktreeManager(Path(session.project_path))
+        git_mgr.abort_merge()
+        session.merge_conflicts = None
+
+        # Check if worktree still has changes
+        has_changes, summary = self.check_worktree_changes(session_id)
+
+        return (
+            gr.update(visible=has_changes),
+            gr.update(value=summary if has_changes else "Merge aborted."),
+            gr.update(visible=False),
+            gr.update(),
+        )
+
+    def discard_worktree_changes(
+        self, session_id: str
+    ) -> tuple[gr.update, gr.update, gr.update, gr.update]:
+        """Discard worktree and all changes."""
+        session = self.get_session(session_id)
+        if session.worktree_path and session.project_path:
+            git_mgr = GitWorktreeManager(Path(session.project_path))
+            git_mgr.delete_worktree(session_id)
+            session.worktree_path = None
+            session.worktree_branch = None
+            session.has_worktree_changes = False
+            session.merge_conflicts = None
+
+        return (
+            gr.update(visible=False),
+            gr.update(value="Changes discarded."),
+            gr.update(visible=False),
+            gr.update(),
+        )
+
     def _build_handoff_context(self, chat_history: list) -> str:
         """Build a context summary for provider handoff.
 
@@ -3195,49 +3661,11 @@ class ChadWebUI:
             else coding_reasoning_choices[0]
         )
 
-        # Get initial model/reasoning choices for verification agent
-        verif_account = (
-            initial_verification
-            if initial_verification != self.SAME_AS_CODING
-            else initial_coding
-        )
-        verif_model_choices = (
-            self.get_models_for_account(verif_account) if verif_account else ["default"]
-        )
-        if not verif_model_choices:
-            verif_model_choices = ["default"]
-        stored_verif_model = (
-            self.security_mgr.get_account_model(verif_account)
-            if verif_account
-            else "default"
-        )
-        verif_model_value = (
-            stored_verif_model
-            if stored_verif_model in verif_model_choices
-            else verif_model_choices[0]
-        )
-
-        verif_provider_type = accounts_map.get(verif_account, "")
-        verif_reasoning_choices = (
-            self.get_reasoning_choices(verif_provider_type, verif_account)
-            if verif_provider_type
-            else ["default"]
-        )
-        if not verif_reasoning_choices:
-            verif_reasoning_choices = ["default"]
-        stored_verif_reasoning = (
-            self.security_mgr.get_account_reasoning(verif_account)
-            if verif_account
-            else "default"
-        )
-        verif_reasoning_value = (
-            stored_verif_reasoning
-            if stored_verif_reasoning in verif_reasoning_choices
-            else verif_reasoning_choices[0]
-        )
-
-        verif_interactive = bool(
-            initial_verification and initial_verification in account_choices
+        verif_state = self._build_verification_dropdown_state(
+            initial_coding,
+            initial_verification,
+            coding_model_value,
+            coding_reasoning_value,
         )
 
         with gr.Row(
@@ -3323,24 +3751,24 @@ class ChadWebUI:
                             key=f"verification-agent-{session_id}",
                         )
                         verification_model = gr.Dropdown(
-                            choices=verif_model_choices,
-                            value=verif_model_value,
+                            choices=verif_state.model_choices,
+                            value=verif_state.model_value,
                             label="Verification Preferred Model",
                             allow_custom_value=True,
                             scale=1,
                             min_width=200,
                             key=f"verification-model-{session_id}",
-                            interactive=verif_interactive,
+                            interactive=verif_state.interactive,
                         )
                         verification_reasoning = gr.Dropdown(
-                            choices=verif_reasoning_choices,
-                            value=verif_reasoning_value,
+                            choices=verif_state.reasoning_choices,
+                            value=verif_state.reasoning_value,
                             label="Verification Reasoning Effort",
                             allow_custom_value=True,
                             scale=1,
                             min_width=200,
                             key=f"verification-reasoning-{session_id}",
-                            interactive=verif_interactive,
+                            interactive=verif_state.interactive,
                         )
             cancel_btn = gr.Button(
                 "🛑 Cancel",
@@ -3408,6 +3836,70 @@ class ChadWebUI:
                 key=f"send-followup-{session_id}",
             )
 
+        # Merge section - shown when worktree has changes
+        with gr.Column(visible=False, key=f"merge-section-{session_id}") as merge_section:
+            gr.Markdown("### Changes Ready to Merge")
+            changes_summary = gr.Markdown(
+                "",
+                key=f"changes-summary-{session_id}",
+            )
+            with gr.Row():
+                merge_commit_msg = gr.Textbox(
+                    label="Commit Message",
+                    placeholder="Describe the changes being merged...",
+                    value="",
+                    scale=3,
+                    key=f"merge-commit-msg-{session_id}",
+                )
+                merge_target_branch = gr.Dropdown(
+                    label="Target Branch",
+                    choices=["main"],
+                    value="main",
+                    scale=1,
+                    key=f"merge-target-branch-{session_id}",
+                )
+            with gr.Row():
+                accept_merge_btn = gr.Button(
+                    "✓ Accept & Merge",
+                    variant="primary",
+                    interactive=True,
+                    key=f"accept-merge-{session_id}",
+                    elem_classes=["accept-merge-btn"],
+                )
+                discard_btn = gr.Button(
+                    "✗ Discard Changes",
+                    variant="stop",
+                    key=f"discard-{session_id}",
+                )
+
+        # Conflict resolution section - shown when merge has conflicts
+        with gr.Column(visible=False, key=f"conflict-section-{session_id}") as conflict_section:
+            gr.Markdown("### Merge Conflicts Detected")
+            conflict_info = gr.Markdown(
+                "",
+                key=f"conflict-info-{session_id}",
+            )
+            gr.HTML(
+                "",
+                key=f"conflict-display-{session_id}",
+            )
+            with gr.Row():
+                accept_all_ours_btn = gr.Button(
+                    "Accept All Original",
+                    variant="secondary",
+                    key=f"accept-ours-{session_id}",
+                )
+                accept_all_theirs_btn = gr.Button(
+                    "Accept All Incoming",
+                    variant="secondary",
+                    key=f"accept-theirs-{session_id}",
+                )
+                abort_merge_btn = gr.Button(
+                    "Abort Merge",
+                    variant="stop",
+                    key=f"abort-merge-{session_id}",
+                )
+
         # Event handlers - must be defined inside @gr.render
         def start_task_wrapper(
             proj_path,
@@ -3449,6 +3941,35 @@ class ChadWebUI:
                 v_reason,
             )
 
+        def verification_dropdown_updates(
+            coding_value,
+            verification_value,
+            coding_model_value,
+            coding_reasoning_value,
+            current_verif_model,
+            current_verif_reasoning,
+        ):
+            state = self._build_verification_dropdown_state(
+                coding_value,
+                verification_value,
+                coding_model_value,
+                coding_reasoning_value,
+                current_verif_model,
+                current_verif_reasoning,
+            )
+            return (
+                gr.update(
+                    choices=state.model_choices,
+                    value=state.model_value,
+                    interactive=state.interactive,
+                ),
+                gr.update(
+                    choices=state.reasoning_choices,
+                    value=state.reasoning_value,
+                    interactive=state.interactive,
+                ),
+            )
+
         start_btn.click(
             start_task_wrapper,
             inputs=[
@@ -3474,6 +3995,9 @@ class ChadWebUI:
                 followup_input,
                 followup_row,
                 send_followup_btn,
+                merge_section,
+                changes_summary,
+                merge_target_branch,
             ],
         )
 
@@ -3500,15 +4024,69 @@ class ChadWebUI:
             ],
         )
 
+        # Merge button handlers
+        def merge_wrapper(commit_msg, target_branch):
+            return self.attempt_merge(session_id, commit_msg, target_branch)
+
+        def discard_wrapper():
+            return self.discard_worktree_changes(session_id)
+
+        def accept_ours_wrapper():
+            return self.resolve_all_conflicts(session_id, use_incoming=False)
+
+        def accept_theirs_wrapper():
+            return self.resolve_all_conflicts(session_id, use_incoming=True)
+
+        def abort_wrapper():
+            return self.abort_merge_action(session_id)
+
+        accept_merge_btn.click(
+            merge_wrapper,
+            inputs=[merge_commit_msg, merge_target_branch],
+            outputs=[merge_section, changes_summary, conflict_section, conflict_info],
+        )
+
+        discard_btn.click(
+            discard_wrapper,
+            outputs=[merge_section, changes_summary, conflict_section, conflict_info],
+        )
+
+        accept_all_ours_btn.click(
+            accept_ours_wrapper,
+            outputs=[merge_section, changes_summary, conflict_section, conflict_info],
+        )
+
+        accept_all_theirs_btn.click(
+            accept_theirs_wrapper,
+            outputs=[merge_section, changes_summary, conflict_section, conflict_info],
+        )
+
+        abort_merge_btn.click(
+            abort_wrapper,
+            outputs=[merge_section, changes_summary, conflict_section, conflict_info],
+        )
+
         # Handler for coding agent selection change
-        def on_coding_agent_change(selected_account):
+        def on_coding_agent_change(
+            selected_account, verification_value, current_verif_model, current_verif_reasoning
+        ):
             """Update role assignment, status, and dropdowns when coding agent changes."""
             if not selected_account:
+                verif_model_update, verif_reasoning_update = verification_dropdown_updates(
+                    None,
+                    verification_value,
+                    None,
+                    None,
+                    current_verif_model,
+                    current_verif_reasoning,
+                )
                 return (
                     gr.update(value=self.format_role_status()),
                     gr.update(interactive=False),
                     gr.update(choices=["default"], value="default", interactive=False),
                     gr.update(choices=["default"], value="default", interactive=False),
+                    verif_model_update,
+                    verif_reasoning_update,
                 )
 
             # Assign the coding role
@@ -3549,6 +4127,15 @@ class ChadWebUI:
                 else reasoning_choices[0]
             )
 
+            verif_model_update, verif_reasoning_update = verification_dropdown_updates(
+                selected_account,
+                verification_value,
+                model_value,
+                reasoning_value,
+                current_verif_model,
+                current_verif_reasoning,
+            )
+
             return (
                 gr.update(value=status_text),
                 gr.update(interactive=is_ready),
@@ -3556,12 +4143,107 @@ class ChadWebUI:
                 gr.update(
                     choices=reasoning_choices, value=reasoning_value, interactive=True
                 ),
+                verif_model_update,
+                verif_reasoning_update,
             )
 
         coding_agent.change(
             on_coding_agent_change,
-            inputs=[coding_agent],
-            outputs=[role_status, start_btn, coding_model, coding_reasoning],
+            inputs=[coding_agent, verification_agent, verification_model, verification_reasoning],
+            outputs=[
+                role_status, start_btn, coding_model, coding_reasoning,
+                verification_model, verification_reasoning
+            ],
+        )
+
+        def on_verification_agent_change(
+            selected_verification,
+            coding_value,
+            coding_model_value,
+            coding_reasoning_value,
+            current_verif_model,
+            current_verif_reasoning,
+        ):
+            return verification_dropdown_updates(
+                coding_value,
+                selected_verification,
+                coding_model_value,
+                coding_reasoning_value,
+                current_verif_model,
+                current_verif_reasoning,
+            )
+
+        verification_agent.change(
+            on_verification_agent_change,
+            inputs=[
+                verification_agent,
+                coding_agent,
+                coding_model,
+                coding_reasoning,
+                verification_model,
+                verification_reasoning,
+            ],
+            outputs=[verification_model, verification_reasoning],
+        )
+
+        def on_coding_model_change(
+            model_value,
+            coding_value,
+            verification_value,
+            coding_reasoning_value,
+            current_verif_model,
+            current_verif_reasoning,
+        ):
+            return verification_dropdown_updates(
+                coding_value,
+                verification_value,
+                model_value,
+                coding_reasoning_value,
+                current_verif_model,
+                current_verif_reasoning,
+            )
+
+        coding_model.change(
+            on_coding_model_change,
+            inputs=[
+                coding_model,
+                coding_agent,
+                verification_agent,
+                coding_reasoning,
+                verification_model,
+                verification_reasoning,
+            ],
+            outputs=[verification_model, verification_reasoning],
+        )
+
+        def on_coding_reasoning_change(
+            reasoning_value,
+            coding_value,
+            verification_value,
+            coding_model_value,
+            current_verif_model,
+            current_verif_reasoning,
+        ):
+            return verification_dropdown_updates(
+                coding_value,
+                verification_value,
+                coding_model_value,
+                reasoning_value,
+                current_verif_model,
+                current_verif_reasoning,
+            )
+
+        coding_reasoning.change(
+            on_coding_reasoning_change,
+            inputs=[
+                coding_reasoning,
+                coding_agent,
+                verification_agent,
+                coding_model,
+                verification_model,
+                verification_reasoning,
+            ],
+            outputs=[verification_model, verification_reasoning],
         )
 
     def _create_providers_ui(self):

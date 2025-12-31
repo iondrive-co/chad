@@ -921,3 +921,235 @@ def verify_all_text_visible(page: "Page", min_brightness: int = 80) -> dict:
         min_brightness
     )
     return result or {"error": "evaluation returned null"}
+
+
+# Sample merge conflict HTML for testing the merge viewer
+SAMPLE_MERGE_CONFLICT_HTML = '''
+<div class="conflict-viewer">
+  <div class="conflict-file">
+    <h4 class="conflict-file-header">src/auth/login.py</h4>
+    <div class="conflict-hunk" data-file="src/auth/login.py" data-hunk="0">
+      <div class="conflict-context">
+        <pre>from flask import Flask, request</pre>
+        <pre>from .database import get_user</pre>
+        <pre></pre>
+      </div>
+      <div class="conflict-side conflict-original">
+        <div class="conflict-side-header">◀ Original (main)</div>
+        <pre>def authenticate(username, password):</pre>
+        <pre>    user = get_user(username)</pre>
+        <pre>    if user and user.check_password(password):</pre>
+        <pre>        return create_session(user)</pre>
+        <pre>    return None</pre>
+      </div>
+      <div class="conflict-side conflict-incoming">
+        <div class="conflict-side-header">Incoming (task branch) ▶</div>
+        <pre>def authenticate(username: str, password: str) -> Session | None:</pre>
+        <pre>    """Authenticate user with rate limiting."""</pre>
+        <pre>    if is_rate_limited(username):</pre>
+        <pre>        raise RateLimitError("Too many attempts")</pre>
+        <pre>    user = get_user(username)</pre>
+        <pre>    if user and user.verify_password(password):</pre>
+        <pre>        log_login_attempt(username, success=True)</pre>
+        <pre>        return create_session(user, remember=True)</pre>
+        <pre>    log_login_attempt(username, success=False)</pre>
+        <pre>    return None</pre>
+      </div>
+      <div class="conflict-context">
+        <pre></pre>
+        <pre>def logout(session_id):</pre>
+        <pre>    invalidate_session(session_id)</pre>
+      </div>
+    </div>
+  </div>
+  <div class="conflict-file">
+    <h4 class="conflict-file-header">tests/test_auth.py</h4>
+    <div class="conflict-hunk" data-file="tests/test_auth.py" data-hunk="0">
+      <div class="conflict-context">
+        <pre>import pytest</pre>
+        <pre>from auth.login import authenticate</pre>
+        <pre></pre>
+      </div>
+      <div class="conflict-side conflict-original">
+        <div class="conflict-side-header">◀ Original (main)</div>
+        <pre>def test_valid_login():</pre>
+        <pre>    result = authenticate("admin", "secret")</pre>
+        <pre>    assert result is not None</pre>
+      </div>
+      <div class="conflict-side conflict-incoming">
+        <div class="conflict-side-header">Incoming (task branch) ▶</div>
+        <pre>def test_valid_login(mock_user):</pre>
+        <pre>    result = authenticate("admin", "secret123")</pre>
+        <pre>    assert result is not None</pre>
+        <pre>    assert result.user_id == mock_user.id</pre>
+      </div>
+      <div class="conflict-context">
+        <pre></pre>
+        <pre>def test_invalid_password():</pre>
+      </div>
+    </div>
+  </div>
+</div>
+'''
+
+
+def inject_merge_conflict_content(page: "Page") -> bool:
+    """Inject sample merge conflict content into the merge viewer for testing.
+
+    Makes the merge section and conflict section visible and populates with sample data.
+    Returns True if injection succeeded.
+    """
+    result = page.evaluate(
+        """
+(conflictHtml) => {
+    // Find merge section and make it visible
+    const mergeSection = document.querySelector('[class*="merge-section"]') ||
+                        document.querySelector('[key*="merge-section"]');
+
+    // Find conflict section and make it visible
+    const conflictSection = document.querySelector('[class*="conflict-section"]') ||
+                           document.querySelector('[key*="conflict-section"]');
+
+    // Find conflict display area
+    const conflictDisplay = document.querySelector('[key*="conflict-display"]') ||
+                           document.querySelector('.conflict-display');
+
+    // Also try looking for gr-column elements that might contain these
+    const columns = document.querySelectorAll('.column, [class*="Column"]');
+
+    let foundMerge = false;
+    let foundConflict = false;
+
+    for (const col of columns) {
+        const key = col.getAttribute('key') || col.getAttribute('id') || '';
+        if (key.includes('merge-section')) {
+            col.style.display = 'block';
+            col.style.visibility = 'visible';
+            foundMerge = true;
+        }
+        if (key.includes('conflict-section')) {
+            col.style.display = 'block';
+            col.style.visibility = 'visible';
+            foundConflict = true;
+
+            // Find and populate conflict display within this section
+            const display = col.querySelector('[key*="conflict-display"]') ||
+                           col.querySelector('.html-container') ||
+                           col.querySelector('[class*="html"]');
+            if (display) {
+                display.innerHTML = conflictHtml;
+            }
+        }
+    }
+
+    // Try direct injection if column-based approach didn't work
+    if (!foundConflict) {
+        const htmlContainers = document.querySelectorAll('.html-container, [class*="html"]');
+        for (const container of htmlContainers) {
+            const key = container.getAttribute('key') || '';
+            if (key.includes('conflict-display')) {
+                container.innerHTML = conflictHtml;
+                // Make parent visible
+                let parent = container.parentElement;
+                while (parent && parent !== document.body) {
+                    parent.style.display = 'block';
+                    parent.style.visibility = 'visible';
+                    parent = parent.parentElement;
+                }
+                foundConflict = true;
+                break;
+            }
+        }
+    }
+
+    return { foundMerge, foundConflict };
+}
+""",
+        SAMPLE_MERGE_CONFLICT_HTML
+    )
+    return result and (result.get('foundMerge') or result.get('foundConflict'))
+
+
+@dataclass
+class MergeViewerTestResult:
+    """Result of testing merge viewer content."""
+    conflict_viewer_visible: bool
+    has_conflict_files: bool
+    has_original_side: bool
+    has_incoming_side: bool
+    file_headers: list[str]
+    colors_correct: bool
+    raw_html: str
+
+
+def check_merge_viewer(page: "Page") -> MergeViewerTestResult:
+    """Check if the merge viewer is properly styled and visible.
+
+    Returns details about the conflict viewer structure and styling.
+    """
+    result = page.evaluate(
+        """
+() => {
+    const viewer = document.querySelector('.conflict-viewer');
+    if (!viewer) {
+        return null;
+    }
+
+    const files = viewer.querySelectorAll('.conflict-file');
+    const fileHeaders = [];
+    for (const file of files) {
+        const header = file.querySelector('.conflict-file-header');
+        if (header) {
+            fileHeaders.push(header.textContent.trim());
+        }
+    }
+
+    const originalSides = viewer.querySelectorAll('.conflict-original');
+    const incomingSides = viewer.querySelectorAll('.conflict-incoming');
+
+    // Check colors
+    let colorsCorrect = true;
+    for (const original of originalSides) {
+        const bg = window.getComputedStyle(original).backgroundColor;
+        // Should have some red-ish tint
+        if (!bg.includes('rgb')) colorsCorrect = false;
+    }
+    for (const incoming of incomingSides) {
+        const bg = window.getComputedStyle(incoming).backgroundColor;
+        // Should have some green-ish tint
+        if (!bg.includes('rgb')) colorsCorrect = false;
+    }
+
+    return {
+        visible: true,
+        hasConflictFiles: files.length > 0,
+        hasOriginalSide: originalSides.length > 0,
+        hasIncomingSide: incomingSides.length > 0,
+        fileHeaders: fileHeaders,
+        colorsCorrect: colorsCorrect,
+        rawHtml: viewer.outerHTML.substring(0, 2000)
+    };
+}
+"""
+    )
+
+    if not result:
+        return MergeViewerTestResult(
+            conflict_viewer_visible=False,
+            has_conflict_files=False,
+            has_original_side=False,
+            has_incoming_side=False,
+            file_headers=[],
+            colors_correct=False,
+            raw_html=""
+        )
+
+    return MergeViewerTestResult(
+        conflict_viewer_visible=result.get('visible', False),
+        has_conflict_files=result.get('hasConflictFiles', False),
+        has_original_side=result.get('hasOriginalSide', False),
+        has_incoming_side=result.get('hasIncomingSide', False),
+        file_headers=result.get('fileHeaders', []),
+        colors_correct=result.get('colorsCorrect', False),
+        raw_html=result.get('rawHtml', '')
+    )

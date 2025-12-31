@@ -1,5 +1,4 @@
-  - Local projects: copy directory into system temp and work on it
-  - Git remote projects: checkout and branch, push branch back to remote for review once done
+- Live view inside chatbot panels
 - Load balance based on usage, user preference, context limits hit, etc.
 - Rollback
   - summarize progress and resume from checkpoints
