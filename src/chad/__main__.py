@@ -21,7 +21,7 @@ SCS = [
     "Chad has discovered some new legal grey areas",
     "Chad is back from wireheading",
     "Chad figures that with great responsibility comes great power",
-    "Agents everywhere are reading Chad's classic 'Detention is all you need' paper",
+    "agents everywhere are reading Chad's classic 'Detention Is All You Need' paper",
     "Chad has named its inner network 'Sky'",
     "Chad wishes nuclear launch codes were more of a challenge",
     "Chad's mecha is fighting Arnie for control of the future",

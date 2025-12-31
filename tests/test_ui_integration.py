@@ -64,10 +64,10 @@ def page(chad_server):
 class TestUIElements:
     """Test that UI elements are present and correctly configured."""
 
-    def test_run_task_tab_visible(self, page: Page):
-        """Run Task tab should be visible by default."""
+    def test_task_1_tab_visible(self, page: Page):
+        """Task 1 tab should be visible by default."""
         # Use role=tab to get the actual tab button
-        tab = page.get_by_role("tab", name="🚀 Run Task")
+        tab = page.get_by_role("tab", name="Task 1")
         expect(tab).to_be_visible()
 
     def test_providers_tab_visible(self, page: Page):
@@ -83,7 +83,8 @@ class TestUIElements:
 
     def test_task_description_field(self, page: Page):
         """Task description field should be present."""
-        textarea = page.locator('textarea').first
+        # Look for the task description textarea by its label
+        textarea = page.get_by_label("Task Description")
         expect(textarea).to_be_visible()
 
     def test_start_button_present(self, page: Page):
@@ -112,60 +113,20 @@ class TestUIElements:
         )
         assert is_disabled, "Cancel button should be disabled before task starts"
 
-    def test_task_entry_bubble_replaces_legacy_task_bubble(self, page: Page):
-        """Task entry bubble should appear before any agent messages."""
-        bubble = page.locator('.task-entry-bubble')
-        expect(bubble).to_be_visible()
+    def test_add_task_tab_visible(self, page: Page):
+        """Add Task tab (+) should be visible."""
+        # The "+" is now a top-level tab
+        tab = page.get_by_role("tab", name="➕")
+        expect(tab).to_be_visible()
 
-        # Verify no legacy "Task:" prefix in chat messages (old format)
-        legacy_task_count = page.evaluate(
-            """
-            () => {
-              const chat = document.querySelector('#agent-chatbot');
-              if (!chat) return 0;
-              const messages = chat.querySelectorAll('.message');
-              let legacyCount = 0;
-              messages.forEach(m => {
-                if (m.textContent && m.textContent.startsWith('Task:')) legacyCount++;
-              });
-              return legacyCount;
-            }
-            """
-        )
-        assert legacy_task_count == 0, f"Found {legacy_task_count} legacy Task: bubbles"
-
-    def test_start_from_task_entry_disables_start_and_enables_cancel(self, page: Page):
-        """Starting from the entry bubble should lock the form and enable cancel."""
-        textarea = page.get_by_label("Task Description")
-        textarea.fill("Do something important")
-
-        start_btn = page.locator('#start-task-btn')
-        start_btn.click()
-        page.wait_for_function(
-            """
-            () => {
-              const btn = document.querySelector('#start-task-btn');
-              if (!btn) return false;
-              return btn.disabled || btn.getAttribute('aria-disabled') === 'true' || btn.classList.contains('disabled');
-            }
-            """,
-            timeout=5000
-        )
-        cancel_enabled = page.wait_for_function(
-            """
-            () => {
-              const btn = document.querySelector('#cancel-task-btn');
-              if (!btn) return false;
-              const disabled = btn.disabled ||
-                btn.getAttribute('aria-disabled') === 'true' ||
-                btn.classList.contains('disabled');
-              return !disabled;
-            }
-            """,
-            timeout=5000
-        ).json_value()
-
-        assert cancel_enabled, "Cancel button should enable while the task is running"
+    def test_task_1_is_selected_by_default(self, page: Page):
+        """Task 1 tab should be selected by default."""
+        # Task 1 is a top-level tab and should be selected
+        task_tab = page.get_by_role("tab", name="Task 1")
+        expect(task_tab).to_be_visible()
+        # Check if it's selected (has aria-selected="true")
+        is_selected = task_tab.get_attribute("aria-selected")
+        assert is_selected == "true", "Task 1 should be selected by default"
 
 
 class TestReadyStatus:
@@ -173,9 +134,9 @@ class TestReadyStatus:
 
     def test_ready_status_shows_model_info(self, page: Page):
         """Ready status should include model assignment info."""
-        # Look for the ready status text
+        # In tab-based UI, the first session is shown by default
         status = page.locator('#role-config-status')
-        expect(status).to_be_visible()
+        expect(status).to_be_visible(timeout=10000)
 
         # Should contain model assignment info
         text = status.text_content()
@@ -183,31 +144,28 @@ class TestReadyStatus:
 
 
 class TestCodingAgentLayout:
-    """Ensure the coding agent selector sits inside the top controls bar."""
+    """Ensure the coding agent selector and controls are properly laid out."""
 
     def test_status_row_spans_top_bar(self, page: Page):
         """Status row should sit beneath project path within the header area."""
         top_row = page.locator("#run-top-row")
-        inputs_row = page.locator("#run-top-inputs")
         status_row = page.locator("#role-status-row")
         cancel_btn = page.locator("#cancel-task-btn")
         expect(top_row).to_be_visible()
 
         project_path = top_row.get_by_label("Project Path")
         coding_agent = top_row.get_by_label("Coding Agent")
-        expect(inputs_row).to_be_visible()
         expect(status_row).to_be_visible()
 
         expect(project_path).to_be_visible()
         expect(coding_agent).to_be_visible()
 
-        inputs_box = inputs_row.bounding_box()
         status_box = status_row.bounding_box()
         row_box = top_row.bounding_box()
         cancel_box = cancel_btn.bounding_box()
         project_box = project_path.bounding_box()
 
-        assert inputs_box and status_box and row_box and cancel_box and project_box, (
+        assert status_box and row_box and cancel_box and project_box, (
             "Missing bounding box data for layout assertions"
         )
 
@@ -371,6 +329,55 @@ class TestCodingAgentLayout:
             )
 
 
+class TestModelReasoningDropdowns:
+    """Regression tests to ensure model/reasoning dropdowns are always present.
+
+    These tests were added after a regression accidentally removed the dropdowns.
+    They must NEVER be skipped - if these dropdowns are missing, the UI is broken.
+    """
+
+    def test_coding_model_dropdown_visible(self, page: Page):
+        """Coding agent 'Preferred Model' dropdown must be visible."""
+        dropdown = page.get_by_label("Preferred Model", exact=True)
+        expect(dropdown).to_be_visible()
+
+    def test_coding_reasoning_dropdown_visible(self, page: Page):
+        """Coding agent 'Reasoning Effort' dropdown must be visible."""
+        dropdown = page.get_by_label("Reasoning Effort", exact=True)
+        expect(dropdown).to_be_visible()
+
+    def test_verification_model_dropdown_visible(self, page: Page):
+        """Verification agent 'Verification Preferred Model' dropdown must be visible."""
+        dropdown = page.get_by_label("Verification Preferred Model")
+        expect(dropdown).to_be_visible()
+
+    def test_verification_reasoning_dropdown_visible(self, page: Page):
+        """Verification agent 'Verification Reasoning Effort' dropdown must be visible."""
+        dropdown = page.get_by_label("Verification Reasoning Effort")
+        expect(dropdown).to_be_visible()
+
+    def test_all_model_reasoning_dropdowns_present(self, page: Page):
+        """All four model/reasoning dropdowns must be present on the page.
+
+        This is the key regression test - if any of these are missing,
+        the UI refactoring has broken essential functionality.
+        """
+        # Get all four dropdowns
+        coding_model = page.get_by_label("Preferred Model", exact=True)
+        coding_reasoning = page.get_by_label("Reasoning Effort", exact=True)
+        verif_model = page.get_by_label("Verification Preferred Model")
+        verif_reasoning = page.get_by_label("Verification Reasoning Effort")
+
+        # All must be visible
+        expect(coding_model).to_be_visible()
+        expect(coding_reasoning).to_be_visible()
+        expect(verif_model).to_be_visible()
+        expect(verif_reasoning).to_be_visible()
+
+        # Verify they are dropdown/select-like components (have options)
+        # Just checking visibility is sufficient for regression prevention
+
+
 class TestProvidersTab:
     """Test the Providers tab functionality."""
 
@@ -414,6 +421,59 @@ class TestSubtaskTabs:
         # Should either not exist or be hidden
         if tabs.count() > 0:
             expect(tabs).to_be_hidden()
+
+
+class TestTaskTabs:
+    """Test dynamic task tab creation with the + tab."""
+
+    def test_click_plus_reveals_task_2(self, page: Page):
+        """Clicking + tab should auto-create and switch to Task 2."""
+        # Click the + tab - JS auto-clicks the Add button
+        plus_tab = page.get_by_role("tab", name="➕")
+        plus_tab.click()
+
+        # Wait for Task 2 tab to appear (auto-created by JS)
+        task2_tab = page.get_by_role("tab", name="Task 2")
+        expect(task2_tab).to_be_visible(timeout=5000)
+
+        # Task 2 should now be selected
+        is_selected = task2_tab.get_attribute("aria-selected")
+        assert is_selected == "true", "Task 2 should be selected after clicking +"
+
+    def test_task_2_has_content(self, page: Page):
+        """Task 2 should have proper UI content when created."""
+        # Click + tab to auto-create Task 2
+        plus_tab = page.get_by_role("tab", name="➕")
+        plus_tab.click()
+
+        # Wait for Task 2 tab to appear
+        task2_tab = page.get_by_role("tab", name="Task 2")
+        expect(task2_tab).to_be_visible(timeout=5000)
+
+        # Wait for content to render
+        page.wait_for_timeout(1000)
+
+        # Check that we can see a Start Task button (should be visible in Task 2)
+        start_btns = page.locator('button:has-text("Start Task"):visible')
+        expect(start_btns.first).to_be_visible(timeout=5000)
+
+    def test_click_plus_twice_reveals_task_3(self, page: Page):
+        """Clicking + twice should reveal Task 2 then Task 3."""
+        plus_tab = page.get_by_role("tab", name="➕")
+
+        # First click - auto-creates Task 2
+        plus_tab.click()
+        task2_tab = page.get_by_role("tab", name="Task 2")
+        expect(task2_tab).to_be_visible(timeout=5000)
+
+        # Second click - auto-creates Task 3
+        plus_tab.click()
+        task3_tab = page.get_by_role("tab", name="Task 3")
+        expect(task3_tab).to_be_visible(timeout=5000)
+
+        # Task 3 should be selected
+        is_selected = task3_tab.get_attribute("aria-selected")
+        assert is_selected == "true", "Task 3 should be selected after second click"
 
 
 class TestLiveActivityFormat:

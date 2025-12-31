@@ -226,22 +226,24 @@ class TestChadWebUI:
 
     def test_cancel_task(self, web_ui, mock_security_mgr):
         """Test cancelling a running task."""
+        session = web_ui.create_session("test")
         mock_provider = Mock()
-        web_ui._active_coding_provider = mock_provider
+        session.provider = mock_provider
 
-        result = web_ui.cancel_task()
+        result = web_ui.cancel_task(session.id)
 
         assert '🛑' in result
         assert 'cancelled' in result.lower()
-        assert web_ui.cancel_requested is True
+        assert session.cancel_requested is True
         mock_provider.stop_session.assert_called_once()
 
     def test_cancel_task_no_session(self, web_ui, mock_security_mgr):
         """Test cancelling when no session is running."""
-        result = web_ui.cancel_task()
+        session = web_ui.create_session("test")
+        result = web_ui.cancel_task(session.id)
 
         assert '🛑' in result
-        assert web_ui.cancel_requested is True
+        assert session.cancel_requested is True
 
 
 class TestLiveStreamPresentation:
@@ -348,7 +350,8 @@ class TestChadWebUITaskExecution:
 
     def test_start_task_missing_project(self, web_ui):
         """Test starting task without project path."""
-        results = list(web_ui.start_chad_task('', 'do something', 'test-coding'))
+        session = web_ui.create_session("test")
+        results = list(web_ui.start_chad_task(session.id, '', 'do something', 'test-coding'))
 
         assert len(results) > 0
         last_result = results[-1]
@@ -360,7 +363,8 @@ class TestChadWebUITaskExecution:
 
     def test_start_task_missing_description(self, web_ui):
         """Test starting task without task description."""
-        results = list(web_ui.start_chad_task('/tmp', '', 'test-coding'))
+        session = web_ui.create_session("test")
+        results = list(web_ui.start_chad_task(session.id, '/tmp', '', 'test-coding'))
 
         assert len(results) > 0
         last_result = results[-1]
@@ -371,7 +375,8 @@ class TestChadWebUITaskExecution:
 
     def test_start_task_invalid_path(self, web_ui):
         """Test starting task with invalid project path."""
-        results = list(web_ui.start_chad_task('/nonexistent/path/xyz', 'do something', 'test-coding'))
+        session = web_ui.create_session("test")
+        results = list(web_ui.start_chad_task(session.id, '/nonexistent/path/xyz', 'do something', 'test-coding'))
 
         assert len(results) > 0
         last_result = results[-1]
@@ -387,7 +392,8 @@ class TestChadWebUITaskExecution:
         mock_security_mgr.list_role_assignments.return_value = {}
 
         web_ui = ChadWebUI(mock_security_mgr, 'test-password')
-        results = list(web_ui.start_chad_task('/tmp', 'do something', ''))
+        session = web_ui.create_session("test")
+        results = list(web_ui.start_chad_task(session.id, '/tmp', 'do something', ''))
 
         assert len(results) > 0
         last_result = results[-1]
@@ -460,8 +466,10 @@ class TestChadWebUITaskExecution:
         ui.session_logger.base_dir = tmp_path
         monkeypatch.setattr(ui, "_run_verification", fake_run_verification)
 
+        session = ui.create_session("test")
         list(
             ui.start_chad_task(
+                session.id,
                 str(tmp_path),
                 "do something",
                 "coder",
@@ -532,7 +540,8 @@ class TestChadWebUITaskExecution:
         ui.session_logger.base_dir = tmp_path
         monkeypatch.setattr(ui, "_run_verification", lambda *args, **kwargs: (False, "issues"))
 
-        results = list(ui.start_chad_task(str(tmp_path), "do something", "claude"))
+        session = ui.create_session("test")
+        results = list(ui.start_chad_task(session.id, str(tmp_path), "do something", "claude"))
         last_history = results[-1][0]
         assert any("Error:" in msg.get("content", "") for msg in last_history)
 
@@ -572,20 +581,21 @@ class TestChadWebUITaskExecution:
 
         ui = web_ui.ChadWebUI(security_mgr, 'test-password')
         ui.session_logger.base_dir = tmp_path
-        ui._session_active = True
-        ui._active_coding_provider = StubProvider()
-        ui._active_coding_config = ModelConfig(
+        session = ui.create_session("test")
+        session.active = True
+        session.provider = StubProvider()
+        session.config = ModelConfig(
             provider="anthropic",
             model_name="default",
             account_name="claude",
             reasoning_effort=None
         )
-        ui._current_coding_account = "claude"
-        ui._current_project_path = str(tmp_path)
-        ui._current_chat_history = []
+        session.coding_account = "claude"
+        session.project_path = str(tmp_path)
+        session.chat_history = []
         monkeypatch.setattr(ui, "_run_verification", lambda *args, **kwargs: (False, "issues"))
 
-        results = list(ui.send_followup("follow up", [], "claude", web_ui.ChadWebUI.SAME_AS_CODING))
+        results = list(ui.send_followup(session.id, "follow up", [], "claude", web_ui.ChadWebUI.SAME_AS_CODING))
         last_history = results[-1][0]
         assert any("Error:" in msg.get("content", "") for msg in last_history)
 
@@ -642,15 +652,17 @@ class TestChadWebUITaskExecution:
         ui = web_ui.ChadWebUI(security_mgr, 'test-password')
         ui.session_logger.base_dir = tmp_path
 
-        list(ui.start_chad_task(str(tmp_path), "do something", "claude", ""))
+        session = ui.create_session("test")
+        list(ui.start_chad_task(session.id, str(tmp_path), "do something", "claude", ""))
 
         security_mgr.get_account_model.return_value = "claude-latest"
         security_mgr.get_account_reasoning.return_value = "high"
 
         list(
             ui.send_followup(
+                session.id,
                 "continue",
-                ui._current_chat_history,
+                session.chat_history,
                 coding_agent="claude",
                 verification_agent="",
                 coding_model="claude-latest",
@@ -1421,11 +1433,13 @@ class TestSessionLogIncludesTask:
 
         task_description = "Fix the login bug"
 
-        # Run task with agent selections
-        list(web_ui.start_chad_task(str(test_dir), task_description, 'coding-ai'))
+        # Create a session and run task
+        session = web_ui.create_session("test")
+        session.log_path = web_ui.session_logger.precreate_log()
+        list(web_ui.start_chad_task(session.id, str(test_dir), task_description, 'coding-ai'))
 
         # Get the session log path
-        session_log_path = web_ui.current_session_log_path
+        session_log_path = session.log_path
         assert session_log_path is not None
         assert session_log_path.exists()
 

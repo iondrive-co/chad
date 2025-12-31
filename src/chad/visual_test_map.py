@@ -163,6 +163,15 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         source_file="chad/provider_ui.py",
         keywords=["add provider", "new provider", "add account"],
     ),
+
+    # --- Task Tabs ---
+    "TASK_TABS": UIComponent(
+        tab="run",
+        component=None,  # Full tab view to see tab bar
+        tests=["TestTaskTabs", "TestUIElements"],
+        source_file="chad/web_ui.py",
+        keywords=["task tab", "task tabs", "add task", "plus tab", "new task", "multiple tasks"],
+    ),
 }
 
 
@@ -231,6 +240,7 @@ VISUAL_TEST_MAP: dict[str, list[str]] = {
         "TestNoStatusBox",
         "TestScreenshots",
         "TestProviderTwoColumnLayout",
+        "TestTaskTabs",
     ],
     # Security manager - affects provider authentication display
     "chad/security.py": [
