@@ -65,3 +65,6 @@ addopts = "-v"
 markers = [
     "visual: marks tests as visual/UI tests requiring Playwright (deselect with '-m \"not visual\"')",
 ]
+filterwarnings = [
+    "ignore:datetime.datetime.utcfromtimestamp:DeprecationWarning",
+]

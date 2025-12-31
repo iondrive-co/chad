@@ -86,13 +86,13 @@ def verify() -> Dict[str, object]:
         env = {**os.environ, "PYTHONPATH": str(project_root / "src")}
         results: Dict[str, object] = {"phases": {}}
 
-        # Phase 1: Lint
+        # Phase 1: Lint (typically <1 second)
         lint_result = subprocess.run(
             [sys.executable, "-m", "flake8", ".", "--max-line-length=120"],
             capture_output=True,
             text=True,
             cwd=str(project_root),
-            timeout=60,
+            timeout=30,
         )
         lint_issues = [line for line in lint_result.stdout.split("\n") if line.strip()]
         results["phases"]["lint"] = {
@@ -108,13 +108,15 @@ def verify() -> Dict[str, object]:
             return results
 
         # Phase 2: All tests (unit + integration + visual)
+        # Use pytest-xdist for parallel execution (-n auto uses all CPU cores)
+        # Tests typically complete in ~15 seconds parallel, 2 min timeout is plenty
         test_result = subprocess.run(
-            [sys.executable, "-m", "pytest", "-v", "--tb=short"],
+            [sys.executable, "-m", "pytest", "-v", "--tb=short", "-n", "auto"],
             capture_output=True,
             text=True,
             cwd=str(project_root),
             env=env,
-            timeout=600,  # 10 minutes for all tests including visual
+            timeout=120,
         )
 
         # Parse test counts

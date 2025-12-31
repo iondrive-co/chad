@@ -62,6 +62,17 @@ class TestVisualTestMap:
         tests = get_tests_for_file("chad/src/chad/provider_ui.py")
         assert "TestProvidersTab" in tests
 
+    def test_find_component_verification_preferences(self):
+        from chad.visual_test_map import find_component
+
+        model_component = find_component("verification model")
+        assert model_component is not None
+        assert "project-path" == model_component.component
+
+        reasoning_component = find_component("verification reasoning")
+        assert reasoning_component is not None
+        assert "project-path" == reasoning_component.component
+
 
 class TestMCPHelpers:
     """Test MCP helper functions."""

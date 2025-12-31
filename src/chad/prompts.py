@@ -23,6 +23,11 @@ you understand the issue/current state.
 ---
 Once you have completed your the above, take an after screenshot if that is supported to confirm that it is fixed/done.
 Run any tests and lint available in the project and fix all issues even if you didn't cause them.
+
+When you are done, end your response with a JSON summary block like this:
+```json
+{{"change_summary": "One sentence describing what was changed"}}
+```
 """
 
 
@@ -48,10 +53,11 @@ The coding agent was given a task and has reported completion. Here is their out
 ---
 
 Please verify the work by:
-1. Checking that the files mentioned were actually modified on disk
+1. Checking that the files mentioned were actually modified on disk (use Read/Glob tools)
 2. Reviewing the changes for correctness and completeness
-3. Checking if tests pass (run `mcp__chad-ui-playwright__verify` if available)
-4. Looking for any obvious bugs, security issues, or problems
+3. Looking for any obvious bugs, security issues, or problems
+4. If the coding agent already ran tests and they passed, you do NOT need to re-run them.
+Trust the coding agent's test output unless you have specific concerns about the implementation.
 
 You MUST respond with valid JSON in exactly this format:
 
@@ -159,3 +165,33 @@ def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
     issues = data.get("issues", [])
 
     return passed, summary, issues
+
+
+def extract_coding_summary(response: str) -> str | None:
+    """Extract the change_summary from a coding agent response.
+
+    Args:
+        response: Raw response from the coding agent
+
+    Returns:
+        The change_summary string if found, None otherwise
+    """
+    import json
+    import re
+
+    # Look for JSON block with change_summary
+    json_match = re.search(r'```json\s*(\{[^`]*"change_summary"[^`]*\})\s*```', response, re.DOTALL)
+    if json_match:
+        try:
+            data = json.loads(json_match.group(1))
+            if "change_summary" in data:
+                return data["change_summary"]
+        except json.JSONDecodeError:
+            pass
+
+    # Try to find raw JSON with change_summary
+    json_match = re.search(r'\{\s*"change_summary"\s*:\s*"([^"]+)"\s*\}', response)
+    if json_match:
+        return json_match.group(1)
+
+    return None

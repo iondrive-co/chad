@@ -1443,6 +1443,72 @@ class TestSessionLogIncludesTask:
         session_log_path.unlink(missing_ok=True)
 
 
+class TestCodingSummaryExtraction:
+    """Test extraction of structured summaries from coding agent output."""
+
+    def test_extract_coding_summary_from_json_block(self):
+        """Extract summary from a ```json code block."""
+        from chad.prompts import extract_coding_summary
+        content = '''Some thinking text here...
+
+```json
+{"change_summary": "Fixed the authentication bug in login flow"}
+```
+'''
+        result = extract_coding_summary(content)
+        assert result == "Fixed the authentication bug in login flow"
+
+    def test_extract_coding_summary_from_raw_json(self):
+        """Extract summary from raw JSON without code block."""
+        from chad.prompts import extract_coding_summary
+        content = 'Done! {"change_summary": "Added new feature"}'
+        result = extract_coding_summary(content)
+        assert result == "Added new feature"
+
+    def test_extract_coding_summary_returns_none_when_missing(self):
+        """Return None when no change_summary found."""
+        from chad.prompts import extract_coding_summary
+        content = "Just some regular text without any JSON."
+        result = extract_coding_summary(content)
+        assert result is None
+
+    def test_make_chat_message_uses_extracted_summary(self):
+        """make_chat_message should prefer extracted JSON summary over heuristics."""
+        from chad.web_ui import make_chat_message
+        # Content needs to be > 300 chars to trigger collapsible mode
+        content = '''I'm thinking about this task...
+
+I'll also check that things are working correctly in the codebase.
+
+More random text that shouldn't be the summary. This needs to be long enough
+to trigger the collapsible mode which requires more than 300 characters total.
+Here's some more filler text to ensure we hit that threshold.
+
+```json
+{"change_summary": "Updated the config parser to handle edge cases"}
+```
+'''
+        message = make_chat_message("CODING AI", content)
+        # The summary should be the JSON-extracted one
+        summary_part = message["content"].split("<details>")[0]
+        assert "Updated the config parser to handle edge cases" in summary_part
+        # The heuristic match should NOT be in the summary part
+        assert "I'll also check" not in summary_part
+
+    def test_make_chat_message_falls_back_to_heuristic(self):
+        """make_chat_message should use heuristics when no JSON summary."""
+        from chad.web_ui import make_chat_message
+        content = '''Some thinking text...
+
+I've updated the authentication module to fix the login issue.
+
+More details here...
+''' + "x" * 300  # Make it long enough to trigger collapsible
+        message = make_chat_message("CODING AI", content)
+        # Should use heuristic extraction (starts with "I've updated...")
+        assert "I've updated the authentication module" in message["content"]
+
+
 class TestAnsiToHtml:
     """Test that ANSI escape codes are properly converted to HTML spans."""
 

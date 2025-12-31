@@ -1,10 +1,10 @@
 {
   "mcpServers": {
     "chad-ui-playwright": {
-      "command": "python3",
+      "command": "venv/bin/python",
       "args": ["-m", "chad.mcp_playwright"],
       "env": {
-        "PYTHONPATH": "src:venv/lib/python3.12/site-packages"
+        "PYTHONPATH": "src"
       }
     }
   }
