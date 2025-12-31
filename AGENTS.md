@@ -49,6 +49,8 @@ Follow this MCP workflow for every task:
 - Ensure every recorded check has a filed result via `check_result`, then call `report(tracker_id, screenshot_before?, screenshot_after?)` to generate the summary you will share with the user.
 - Perform a critical self-review of your changes and note any outstanding issues.
 
+**CRITICAL: All tests must pass - no skipping allowed.** Never use `@pytest.mark.skip` or skip tests for any reason. If a test fails, fix the code or the test - do not skip it. If you encounter tests that were previously skipped, unskip them and make them pass. Skipped tests hide regressions and are unacceptable in this codebase.
+
 ## MCP Tools
 
 ### verify

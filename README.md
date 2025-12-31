@@ -38,6 +38,9 @@ chad
 #### View completed tasks with verification results and live activity
 <img src="docs/screenshot-conversation.png" width="800" alt="Completed task conversation">
 
+#### Run multiple tasks in parallel with dynamic tabs
+<img src="docs/screenshot-task-tabs.png" width="800" alt="Multiple task tabs">
+
 </details>
 
 -> Provider tokens encrypted with a master password you create each session
