@@ -83,16 +83,16 @@ class TestSecurityManager:
         mgr = SecurityManager(config_path)
 
         test_config = {
-            'password_hash': 'hashed_password',
-            'encryption_salt': 'test_salt',
-            'api_keys': {'anthropic': 'encrypted_key'}
+            "password_hash": "hashed_password",
+            "encryption_salt": "test_salt",
+            "api_keys": {"anthropic": "encrypted_key"},
         }
 
         mgr.save_config(test_config)
 
         # Verify file was created and has correct permissions
         assert config_path.exists()
-        assert oct(config_path.stat().st_mode)[-3:] == '600'
+        assert oct(config_path.stat().st_mode)[-3:] == "600"
 
         # Load and verify
         loaded_config = mgr.load_config()
@@ -107,7 +107,7 @@ class TestSecurityManager:
         """Test is_first_run when config exists but no password hash."""
         config_path = tmp_path / "test.conf"
         mgr = SecurityManager(config_path)
-        mgr.save_config({'api_keys': {}})
+        mgr.save_config({"api_keys": {}})
 
         assert mgr.is_first_run() is True
 
@@ -115,79 +115,76 @@ class TestSecurityManager:
         """Test is_first_run when password hash exists."""
         config_path = tmp_path / "test.conf"
         mgr = SecurityManager(config_path)
-        mgr.save_config({'password_hash': 'test_hash'})
+        mgr.save_config({"password_hash": "test_hash"})
 
         assert mgr.is_first_run() is False
 
-    @patch('getpass.getpass')
+    @patch("getpass.getpass")
     def test_setup_main_password(self, mock_getpass, tmp_path):
         """Test main password setup."""
         config_path = tmp_path / "test.conf"
         mgr = SecurityManager(config_path)
 
         # Mock password input (password, then confirmation)
-        mock_getpass.side_effect = ['testpassword123', 'testpassword123']
+        mock_getpass.side_effect = ["testpassword123", "testpassword123"]
 
         password = mgr.setup_main_password()
 
-        assert password == 'testpassword123'
+        assert password == "testpassword123"
         assert config_path.exists()
 
         # Verify config was saved correctly
         config = mgr.load_config()
-        assert 'password_hash' in config
-        assert 'encryption_salt' in config
-        assert 'accounts' in config
+        assert "password_hash" in config
+        assert "encryption_salt" in config
+        assert "accounts" in config
 
         # Verify password hash is valid
-        assert mgr.verify_password(password, config['password_hash']) is True
+        assert mgr.verify_password(password, config["password_hash"]) is True
 
-    @patch('getpass.getpass')
+    @patch("getpass.getpass")
     def test_setup_main_password_short_allowed(self, mock_getpass, tmp_path):
         """Test main password setup allows short passwords with warning."""
         mgr = SecurityManager(tmp_path / "test.conf")
 
         # Mock: short password, then confirmation
-        mock_getpass.side_effect = ['short', 'short']
+        mock_getpass.side_effect = ["short", "short"]
 
         password = mgr.setup_main_password()
-        assert password == 'short'
+        assert password == "short"
 
-    @patch('getpass.getpass')
+    @patch("getpass.getpass")
     def test_setup_main_password_empty_allowed(self, mock_getpass, tmp_path):
         """Test main password setup allows empty password with warning."""
         mgr = SecurityManager(tmp_path / "test.conf")
 
         # Mock: empty password, then confirmation
-        mock_getpass.side_effect = ['', '']
+        mock_getpass.side_effect = ["", ""]
 
         password = mgr.setup_main_password()
-        assert password == ''
+        assert password == ""
 
-    @patch('getpass.getpass')
+    @patch("getpass.getpass")
     def test_setup_main_password_mismatch(self, mock_getpass, tmp_path):
         """Test main password setup with mismatched passwords."""
         mgr = SecurityManager(tmp_path / "test.conf")
 
         # Mock: password, wrong confirmation, then correct pair
-        mock_getpass.side_effect = [
-            'testpassword123', 'wrongconfirm',
-            'testpassword123', 'testpassword123'
-        ]
+        mock_getpass.side_effect = ["testpassword123", "wrongconfirm", "testpassword123", "testpassword123"]
 
         password = mgr.setup_main_password()
-        assert password == 'testpassword123'
+        assert password == "testpassword123"
 
-    @patch('getpass.getpass')
+    @patch("getpass.getpass")
     def test_verify_main_password_success(self, mock_getpass, tmp_path):
         """Test successful main password verification."""
         config_path = tmp_path / "test.conf"
         mgr = SecurityManager(config_path)
 
         # Setup password first
-        password = 'testpassword123'
+        password = "testpassword123"
         password_hash = mgr.hash_password(password)
-        mgr.save_config({'password_hash': password_hash})
+        mgr.save_config({"password_hash": password_hash})
 
         # Mock getpass to return correct password
         mock_getpass.return_value = password
@@ -195,86 +192,88 @@ class TestSecurityManager:
         verified_password = mgr.verify_main_password()
         assert verified_password == password
 
-    @patch('getpass.getpass')
+    @patch("getpass.getpass")
     def test_verify_main_password_retry(self, mock_getpass, tmp_path):
         """Test main password verification with retry."""
         config_path = tmp_path / "test.conf"
         mgr = SecurityManager(config_path)
 
-        password = 'testpassword123'
+        password = "testpassword123"
         password_hash = mgr.hash_password(password)
-        mgr.save_config({'password_hash': password_hash})
+        mgr.save_config({"password_hash": password_hash})
 
         # Mock: wrong password (triggers reset prompt), cancel with EOFError, then correct password
-        mock_getpass.side_effect = ['wrongpassword', EOFError(), password]
+        mock_getpass.side_effect = ["wrongpassword", EOFError(), password]
 
         verified_password = mgr.verify_main_password()
         assert verified_password == password
 
-    @patch('getpass.getpass')
+    @patch("getpass.getpass")
     def test_verify_main_password_retry_after_decline(self, mock_getpass, tmp_path):
         """Test main password verification retries after cancelling reset."""
         config_path = tmp_path / "test.conf"
         mgr = SecurityManager(config_path)
 
-        password = 'correct123'
+        password = "correct123"
         password_hash = mgr.hash_password(password)
-        mgr.save_config({'password_hash': password_hash})
+        mgr.save_config({"password_hash": password_hash})
 
         # Mock: wrong password, cancel reset, wrong password again, cancel reset, then correct password
-        mock_getpass.side_effect = ['wrong1', EOFError(), 'wrong2', KeyboardInterrupt(), password]
+        mock_getpass.side_effect = ["wrong1", EOFError(), "wrong2", KeyboardInterrupt(), password]
 
         verified = mgr.verify_main_password()
         assert verified == password
 
-    @patch('getpass.getpass')
+    @patch("getpass.getpass")
     def test_verify_main_password_reset_accepted(self, mock_getpass, tmp_path):
         """Test main password reset when user accepts."""
         config_path = tmp_path / "test.conf"
         mgr = SecurityManager(config_path)
 
         # Setup old password and accounts
-        old_password = 'oldpassword'
+        old_password = "oldpassword"
         password_hash = mgr.hash_password(old_password)
-        mgr.save_config({
-            'password_hash': password_hash,
-            'accounts': {'test-account': {'provider': 'anthropic', 'key': 'encrypted'}}
-        })
+        mgr.save_config(
+            {
+                "password_hash": password_hash,
+                "accounts": {"test-account": {"provider": "anthropic", "key": "encrypted"}},
+            }
+        )
 
         # Mock: wrong password (becomes new password candidate), then confirmation
         mock_getpass.side_effect = [
-            'newpassword',  # Wrong password (becomes new password)
-            'newpassword'   # Confirmation
+            "newpassword",  # Wrong password (becomes new password)
+            "newpassword",  # Confirmation
         ]
 
         new_password = mgr.verify_main_password()
 
-        assert new_password == 'newpassword'
+        assert new_password == "newpassword"
         # Verify old accounts were deleted
         config = mgr.load_config()
-        assert 'accounts' in config
-        assert len(config['accounts']) == 0
+        assert "accounts" in config
+        assert len(config["accounts"]) == 0
 
-    @patch('getpass.getpass')
+    @patch("getpass.getpass")
     def test_verify_main_password_reset_confirmation_failed_then_retry(self, mock_getpass, tmp_path):
         """Test main password reset with mismatched confirmation, then retry and succeed."""
         config_path = tmp_path / "test.conf"
         mgr = SecurityManager(config_path)
 
-        old_password = 'correct123'
+        old_password = "correct123"
         password_hash = mgr.hash_password(old_password)
-        mgr.save_config({'password_hash': password_hash})
+        mgr.save_config({"password_hash": password_hash})
 
         # Mock: wrong password, mismatched confirmation, wrong password again, matching confirmation
         mock_getpass.side_effect = [
-            'newpass',    # Wrong password (becomes new password candidate)
-            'different',  # Mismatched confirmation - loops back
-            'newpass2',   # Wrong password again (becomes new password candidate)
-            'newpass2'    # Matching confirmation
+            "newpass",  # Wrong password (becomes new password candidate)
+            "different",  # Mismatched confirmation - loops back
+            "newpass2",  # Wrong password again (becomes new password candidate)
+            "newpass2",  # Matching confirmation
         ]
 
         verified = mgr.verify_main_password()
-        assert verified == 'newpass2'
+        assert verified == "newpass2"
 
     def test_store_and_get_api_key(self, tmp_path):
         """Test storing and retrieving API keys."""
@@ -284,22 +283,19 @@ class TestSecurityManager:
         # Setup master password
         import base64
         import bcrypt
-        password = 'masterpassword'
+
+        password = "masterpassword"
         password_hash = mgr.hash_password(password)
         salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
 
-        mgr.save_config({
-            'password_hash': password_hash,
-            'encryption_salt': salt,
-            'api_keys': {}
-        })
+        mgr.save_config({"password_hash": password_hash, "encryption_salt": salt, "api_keys": {}})
 
         # Store API key
-        api_key = 'sk-test-anthropic-key-12345'
-        mgr.store_api_key('anthropic', api_key, password)
+        api_key = "sk-test-anthropic-key-12345"
+        mgr.store_api_key("anthropic", api_key, password)
 
         # Retrieve API key
-        retrieved_key = mgr.get_api_key('anthropic', password)
+        retrieved_key = mgr.get_api_key("anthropic", password)
         assert retrieved_key == api_key
 
     def test_get_api_key_nonexistent(self, tmp_path):
@@ -309,15 +305,13 @@ class TestSecurityManager:
 
         import base64
         import bcrypt
-        password = 'masterpassword'
+
+        password = "masterpassword"
         salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
 
-        mgr.save_config({
-            'encryption_salt': salt,
-            'api_keys': {}
-        })
+        mgr.save_config({"encryption_salt": salt, "api_keys": {}})
 
-        retrieved_key = mgr.get_api_key('nonexistent', password)
+        retrieved_key = mgr.get_api_key("nonexistent", password)
         assert retrieved_key is None
 
     def test_has_api_key(self, tmp_path):
@@ -325,27 +319,20 @@ class TestSecurityManager:
         config_path = tmp_path / "test.conf"
         mgr = SecurityManager(config_path)
 
-        mgr.save_config({
-            'api_keys': {'anthropic': 'encrypted_key'}
-        })
+        mgr.save_config({"api_keys": {"anthropic": "encrypted_key"}})
 
-        assert mgr.has_api_key('anthropic') is True
-        assert mgr.has_api_key('openai') is False
+        assert mgr.has_api_key("anthropic") is True
+        assert mgr.has_api_key("openai") is False
 
     def test_list_stored_providers(self, tmp_path):
         """Test listing stored providers."""
         config_path = tmp_path / "test.conf"
         mgr = SecurityManager(config_path)
 
-        mgr.save_config({
-            'api_keys': {
-                'anthropic': 'key1',
-                'openai': 'key2'
-            }
-        })
+        mgr.save_config({"api_keys": {"anthropic": "key1", "openai": "key2"}})
 
         providers = mgr.list_stored_providers()
-        assert set(providers) == {'anthropic', 'openai'}
+        assert set(providers) == {"anthropic", "openai"}
 
     def test_list_stored_providers_empty(self, tmp_path):
         """Test listing providers when none are stored."""
@@ -364,25 +351,22 @@ class TestSecurityManager:
         # Setup main password
         import base64
         import bcrypt
-        password = 'testpassword'
+
+        password = "testpassword"
         password_hash = mgr.hash_password(password)
         salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
 
-        mgr.save_config({
-            'password_hash': password_hash,
-            'encryption_salt': salt,
-            'accounts': {}
-        })
+        mgr.save_config({"password_hash": password_hash, "encryption_salt": salt, "accounts": {}})
 
         # Store account
-        api_key = 'sk-test-key-12345'
-        mgr.store_account('work-anthropic', 'anthropic', api_key, password)
+        api_key = "sk-test-key-12345"
+        mgr.store_account("work-anthropic", "anthropic", api_key, password)
 
         # Retrieve account
-        account = mgr.get_account('work-anthropic', password)
+        account = mgr.get_account("work-anthropic", password)
         assert account is not None
-        assert account['provider'] == 'anthropic'
-        assert account['api_key'] == api_key
+        assert account["provider"] == "anthropic"
+        assert account["api_key"] == api_key
 
     def test_list_accounts(self, tmp_path):
         """Test listing all accounts."""
@@ -391,25 +375,22 @@ class TestSecurityManager:
 
         import base64
         import bcrypt
-        password = 'testpassword'
+
+        password = "testpassword"
         password_hash = mgr.hash_password(password)
         salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
 
-        mgr.save_config({
-            'password_hash': password_hash,
-            'encryption_salt': salt,
-            'accounts': {}
-        })
+        mgr.save_config({"password_hash": password_hash, "encryption_salt": salt, "accounts": {}})
 
         # Store multiple accounts
-        mgr.store_account('work-anthropic', 'anthropic', 'key1', password)
-        mgr.store_account('personal-openai', 'openai', 'key2', password)
+        mgr.store_account("work-anthropic", "anthropic", "key1", password)
+        mgr.store_account("personal-openai", "openai", "key2", password)
 
         # List accounts
         accounts = mgr.list_accounts()
         assert len(accounts) == 2
-        assert accounts['work-anthropic'] == 'anthropic'
-        assert accounts['personal-openai'] == 'openai'
+        assert accounts["work-anthropic"] == "anthropic"
+        assert accounts["personal-openai"] == "openai"
 
     def test_has_account(self, tmp_path):
         """Test checking if account exists."""
@@ -418,20 +399,17 @@ class TestSecurityManager:
 
         import base64
         import bcrypt
-        password = 'testpassword'
+
+        password = "testpassword"
         password_hash = mgr.hash_password(password)
         salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
 
-        mgr.save_config({
-            'password_hash': password_hash,
-            'encryption_salt': salt,
-            'accounts': {}
-        })
+        mgr.save_config({"password_hash": password_hash, "encryption_salt": salt, "accounts": {}})
 
-        mgr.store_account('my-account', 'anthropic', 'key', password)
+        mgr.store_account("my-account", "anthropic", "key", password)
 
-        assert mgr.has_account('my-account') is True
-        assert mgr.has_account('nonexistent') is False
+        assert mgr.has_account("my-account") is True
+        assert mgr.has_account("nonexistent") is False
 
     def test_backward_compatibility_with_old_format(self, tmp_path):
         """Test that old api_keys format is still readable."""
@@ -440,32 +418,29 @@ class TestSecurityManager:
 
         import base64
         import bcrypt
-        password = 'testpassword'
+
+        password = "testpassword"
         password_hash = mgr.hash_password(password)
         salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
         salt_bytes = base64.urlsafe_b64decode(salt.encode())
 
         # Create old format config
-        api_key = 'sk-old-key'
+        api_key = "sk-old-key"
         encrypted_key = mgr.encrypt_value(api_key, password, salt_bytes)
 
-        mgr.save_config({
-            'password_hash': password_hash,
-            'encryption_salt': salt,
-            'api_keys': {
-                'anthropic': encrypted_key
-            }
-        })
+        mgr.save_config(
+            {"password_hash": password_hash, "encryption_salt": salt, "api_keys": {"anthropic": encrypted_key}}
+        )
 
         # Should be able to read with new methods
         accounts = mgr.list_accounts()
-        assert 'anthropic' in accounts
-        assert accounts['anthropic'] == 'anthropic'
+        assert "anthropic" in accounts
+        assert accounts["anthropic"] == "anthropic"
 
-        account = mgr.get_account('anthropic', password)
+        account = mgr.get_account("anthropic", password)
         assert account is not None
-        assert account['provider'] == 'anthropic'
-        assert account['api_key'] == api_key
+        assert account["provider"] == "anthropic"
+        assert account["api_key"] == api_key
 
     def test_encrypt_value_produces_different_output_each_time(self, tmp_path):
         """Test that encrypt_value produces different output each time due to IV."""
@@ -526,7 +501,7 @@ class TestSecurityManager:
 
         encrypted = mgr.encrypt_value(value, password, salt_bytes)
         # Truncate the encrypted value to corrupt it
-        corrupted = encrypted[:len(encrypted)//2]
+        corrupted = encrypted[: len(encrypted) // 2]
 
         with pytest.raises(Exception):  # Should raise some form of decryption error
             mgr.decrypt_value(corrupted, password, salt_bytes)
@@ -536,7 +511,7 @@ class TestSecurityManager:
         config_path = tmp_path / "test.conf"
         mgr = SecurityManager(config_path)
 
-        result = mgr.get_role_assignment('NONEXISTENT_ROLE')
+        result = mgr.get_role_assignment("NONEXISTENT_ROLE")
         assert result is None
 
     def test_list_role_assignments_empty(self, tmp_path):
@@ -555,21 +530,19 @@ class TestSecurityManager:
 
         import base64
         import bcrypt
+
         password_hash = mgr.hash_password(password)
         salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
-        mgr.save_config({
-            'password_hash': password_hash,
-            'encryption_salt': salt
-        })
+        mgr.save_config({"password_hash": password_hash, "encryption_salt": salt})
 
-        mgr.store_account('account1', 'anthropic', 'key1', password, 'model1')
-        mgr.store_account('account2', 'openai', 'key2', password, 'model2')
+        mgr.store_account("account1", "anthropic", "key1", password, "model1")
+        mgr.store_account("account2", "openai", "key2", password, "model2")
 
-        mgr.assign_role('account1', 'CODING')
-        assert mgr.get_role_assignment('CODING') == 'account1'
+        mgr.assign_role("account1", "CODING")
+        assert mgr.get_role_assignment("CODING") == "account1"
 
-        mgr.assign_role('account2', 'CODING')
-        assert mgr.get_role_assignment('CODING') == 'account2'
+        mgr.assign_role("account2", "CODING")
+        assert mgr.get_role_assignment("CODING") == "account2"
 
     def test_assign_role_to_account_that_doesnt_exist(self, tmp_path):
         """assign_role should error when the account does not exist."""
@@ -577,15 +550,15 @@ class TestSecurityManager:
         mgr = SecurityManager(config_path)
 
         with pytest.raises(ValueError):
-            mgr.assign_role('nonexistent', 'CODING')
+            mgr.assign_role("nonexistent", "CODING")
 
     def test_clear_role_nonexistent(self, tmp_path):
         """Clearing a missing role should be a no-op."""
         config_path = tmp_path / "test.conf"
         mgr = SecurityManager(config_path)
 
-        mgr.clear_role('NONEXISTENT_ROLE')
-        assert mgr.get_role_assignment('NONEXISTENT_ROLE') is None
+        mgr.clear_role("NONEXISTENT_ROLE")
+        assert mgr.get_role_assignment("NONEXISTENT_ROLE") is None
 
     def test_delete_account_cascades_to_role_assignments(self, tmp_path):
         """delete_account should remove related role assignments."""
@@ -595,28 +568,26 @@ class TestSecurityManager:
 
         import base64
         import bcrypt
+
         password_hash = mgr.hash_password(password)
         salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
-        mgr.save_config({
-            'password_hash': password_hash,
-            'encryption_salt': salt
-        })
+        mgr.save_config({"password_hash": password_hash, "encryption_salt": salt})
 
-        mgr.store_account('test_account', 'anthropic', 'key', password, 'model')
-        mgr.assign_role('test_account', 'CODING')
-        assert mgr.get_role_assignment('CODING') == 'test_account'
+        mgr.store_account("test_account", "anthropic", "key", password, "model")
+        mgr.assign_role("test_account", "CODING")
+        assert mgr.get_role_assignment("CODING") == "test_account"
 
-        mgr.delete_account('test_account')
+        mgr.delete_account("test_account")
 
-        assert mgr.get_role_assignment('CODING') is None
-        assert 'test_account' not in mgr.list_accounts()
+        assert mgr.get_role_assignment("CODING") is None
+        assert "test_account" not in mgr.list_accounts()
 
     def test_delete_account_nonexistent(self, tmp_path):
         """Deleting a missing account should not error."""
         config_path = tmp_path / "test.conf"
         mgr = SecurityManager(config_path)
 
-        mgr.delete_account('nonexistent')
+        mgr.delete_account("nonexistent")
 
     def test_save_and_load_preferences(self, tmp_path):
         """Test saving and loading user preferences."""
@@ -625,7 +596,7 @@ class TestSecurityManager:
 
         mgr.save_preferences("/tmp/project-path")
         loaded_prefs = mgr.load_preferences()
-        assert loaded_prefs == {'project_path': "/tmp/project-path"}
+        assert loaded_prefs == {"project_path": "/tmp/project-path"}
 
     def test_load_preferences_nonexistent(self, tmp_path):
         """Test loading preferences when none have been saved."""
@@ -642,31 +613,28 @@ class TestSecurityManager:
 
         import base64
         import bcrypt
-        password = 'testpassword'
+
+        password = "testpassword"
         password_hash = mgr.hash_password(password)
         salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
         salt_bytes = base64.urlsafe_b64decode(salt.encode())
 
         # Create mixed format config
-        old_key = mgr.encrypt_value('old-api-key', password, salt_bytes)
-        new_account_key = mgr.encrypt_value('new-api-key', password, salt_bytes)
+        old_key = mgr.encrypt_value("old-api-key", password, salt_bytes)
+        new_account_key = mgr.encrypt_value("new-api-key", password, salt_bytes)
 
-        mgr.save_config({
-            'password_hash': password_hash,
-            'encryption_salt': salt,
-            'api_keys': {  # Old format
-                'anthropic': old_key
-            },
-            'accounts': {  # New format
-                'new_account': {
-                    'provider': 'openai',
-                    'encrypted_api_key': new_account_key,
-                    'model': 'gpt-4'
-                }
+        mgr.save_config(
+            {
+                "password_hash": password_hash,
+                "encryption_salt": salt,
+                "api_keys": {"anthropic": old_key},  # Old format
+                "accounts": {  # New format
+                    "new_account": {"provider": "openai", "encrypted_api_key": new_account_key, "model": "gpt-4"}
+                },
             }
-        })
+        )
 
         accounts = mgr.list_accounts()
-        assert 'anthropic' in accounts  # From old format
-        assert 'new_account' in accounts  # From new format
+        assert "anthropic" in accounts  # From old format
+        assert "new_account" in accounts  # From new format
         assert len(accounts) == 2  # No duplicates

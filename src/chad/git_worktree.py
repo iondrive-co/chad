@@ -69,9 +69,7 @@ class GitWorktreeManager:
         self.project_path = Path(project_path).resolve()
         self.worktree_base = self.project_path / self.WORKTREE_DIR
 
-    def _run_git(
-        self, *args: str, cwd: Path | None = None, check: bool = True
-    ) -> subprocess.CompletedProcess:
+    def _run_git(self, *args: str, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
         """Run a git command and return the result."""
         cmd = ["git"] + list(args)
         return subprocess.run(
@@ -173,13 +171,12 @@ class GitWorktreeManager:
 
         # Remove worktree if it exists
         if worktree_path.exists():
-            result = self._run_git(
-                "worktree", "remove", "--force", str(worktree_path), check=False
-            )
+            result = self._run_git("worktree", "remove", "--force", str(worktree_path), check=False)
             if result.returncode != 0:
                 # Try to prune and remove directory manually
                 self._run_git("worktree", "prune", check=False)
                 import shutil
+
                 shutil.rmtree(worktree_path, ignore_errors=True)
 
         # Always try to delete the branch (it might exist without the worktree)
@@ -201,9 +198,7 @@ class GitWorktreeManager:
         # Check for commits ahead of main
         main_branch = self.get_main_branch()
         branch_name = self._branch_name(task_id)
-        result = self._run_git(
-            "rev-list", "--count", f"{main_branch}..{branch_name}", check=False
-        )
+        result = self._run_git("rev-list", "--count", f"{main_branch}..{branch_name}", check=False)
         ahead_count = int(result.stdout.strip()) if result.stdout.strip() else 0
         return ahead_count > 0
 
@@ -223,16 +218,11 @@ class GitWorktreeManager:
         branch_name = self._branch_name(task_id)
 
         # Get diff stat against base
-        result = self._run_git(
-            "diff", "--stat", f"{base}...{branch_name}", cwd=worktree_path, check=False
-        )
+        result = self._run_git("diff", "--stat", f"{base}...{branch_name}", cwd=worktree_path, check=False)
         stat = result.stdout.strip()
 
         # Get list of changed files
-        result = self._run_git(
-            "diff", "--name-status", f"{base}...{branch_name}",
-            cwd=worktree_path, check=False
-        )
+        result = self._run_git("diff", "--name-status", f"{base}...{branch_name}", cwd=worktree_path, check=False)
         files = result.stdout.strip()
 
         # Also check for uncommitted changes
@@ -265,9 +255,7 @@ class GitWorktreeManager:
         diff_parts = []
 
         # Get committed diff
-        result = self._run_git(
-            "diff", f"{base}...{branch_name}", cwd=worktree_path, check=False
-        )
+        result = self._run_git("diff", f"{base}...{branch_name}", cwd=worktree_path, check=False)
         if result.stdout.strip():
             diff_parts.append(result.stdout.strip())
 
@@ -287,9 +275,7 @@ class GitWorktreeManager:
 
         return "\n".join(diff_parts) if diff_parts else "No changes"
 
-    def get_parsed_diff(
-        self, task_id: str, base_commit: str | None = None
-    ) -> list[FileDiff]:
+    def get_parsed_diff(self, task_id: str, base_commit: str | None = None) -> list[FileDiff]:
         """Get structured diff data for the worktree changes.
 
         Args:
@@ -310,9 +296,7 @@ class GitWorktreeManager:
         all_diff_text = []
 
         # Committed changes
-        result = self._run_git(
-            "diff", f"{base}...{branch_name}", cwd=worktree_path, check=False
-        )
+        result = self._run_git("diff", f"{base}...{branch_name}", cwd=worktree_path, check=False)
         if result.stdout.strip():
             all_diff_text.append(result.stdout)
 
@@ -477,9 +461,7 @@ class GitWorktreeManager:
         merge_msg = commit_message or f"Merge {branch_name}"
 
         # Attempt merge
-        result = self._run_git(
-            "merge", "--no-ff", branch_name, "-m", merge_msg, check=False
-        )
+        result = self._run_git("merge", "--no-ff", branch_name, "-m", merge_msg, check=False)
 
         if result.returncode == 0:
             return True, None
@@ -563,9 +545,7 @@ class GitWorktreeManager:
 
         return hunks
 
-    def resolve_conflict(
-        self, file_path: str, hunk_index: int, use_incoming: bool
-    ) -> bool:
+    def resolve_conflict(self, file_path: str, hunk_index: int, use_incoming: bool) -> bool:
         """Resolve a single conflict hunk by choosing original or incoming."""
         full_path = self.project_path / file_path
         if not full_path.exists():

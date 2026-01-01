@@ -1073,9 +1073,12 @@ body, .gradio-container, .gradio-container * {
 # JavaScript to fix Gradio visibility updates and maintain scroll position
 # Note: This is passed to gr.Blocks(js=...) to execute on page load
 SCREENSHOT_MODE_JS = "true" if os.environ.get("CHAD_SCREENSHOT_MODE") == "1" else "false"
-CUSTOM_JS = """
+CUSTOM_JS = (
+    """
 function() {
-    const screenshotMode = """ + SCREENSHOT_MODE_JS + """;
+    const screenshotMode = """
+    + SCREENSHOT_MODE_JS
+    + """;
     // Fix for Gradio not properly updating column visibility after initial render
     function fixProviderCardVisibility() {
         const columns = document.querySelectorAll('.column');
@@ -1225,11 +1228,10 @@ function() {
     setTimeout(setupPlusTabAutoClick, 100);
 }
 """
+)
 
 
-def _brighten_color(
-    r: int, g: int, b: int, min_brightness: int = 140
-) -> tuple[int, int, int]:
+def _brighten_color(r: int, g: int, b: int, min_brightness: int = 140) -> tuple[int, int, int]:
     """Brighten a color if it's too dark for a dark background.
 
     Uses perceived brightness (ITU-R BT.709) and boosts dark colors.
@@ -1363,41 +1365,29 @@ def ansi_to_html(text: str) -> str:
                                     result.append('<span style="font-style:italic">')
                                     current_styles.append("italic")
                                 elif code == "4":
-                                    result.append(
-                                        '<span style="text-decoration:underline">'
-                                    )
+                                    result.append('<span style="text-decoration:underline">')
                                     current_styles.append("underline")
                                 elif code == "38":
                                     # Extended foreground color
                                     if idx + 1 < len(codes):
-                                        if codes[idx + 1] == "5" and idx + 2 < len(
-                                            codes
-                                        ):
+                                        if codes[idx + 1] == "5" and idx + 2 < len(codes):
                                             # 256-color: 38;5;N
                                             try:
                                                 n = int(codes[idx + 2])
-                                                r, g, b = _brighten_color(
-                                                    *_256_to_rgb(n)
-                                                )
-                                                result.append(
-                                                    f'<span style="color:rgb({r},{g},{b})">'
-                                                )
+                                                r, g, b = _brighten_color(*_256_to_rgb(n))
+                                                result.append(f'<span style="color:rgb({r},{g},{b})">')
                                                 current_styles.append("color")
                                             except ValueError:
                                                 pass
                                             idx += 2
-                                        elif codes[idx + 1] == "2" and idx + 4 < len(
-                                            codes
-                                        ):
+                                        elif codes[idx + 1] == "2" and idx + 4 < len(codes):
                                             # True color: 38;2;R;G;B
                                             try:
                                                 r = int(codes[idx + 2])
                                                 g = int(codes[idx + 3])
                                                 b = int(codes[idx + 4])
                                                 r, g, b = _brighten_color(r, g, b)
-                                                result.append(
-                                                    f'<span style="color:rgb({r},{g},{b})">'
-                                                )
+                                                result.append(f'<span style="color:rgb({r},{g},{b})">')
                                                 current_styles.append("color")
                                             except ValueError:
                                                 pass
@@ -1411,14 +1401,10 @@ def ansi_to_html(text: str) -> str:
                                             idx += 4
                                 elif code in basic_colors:
                                     r, g, b = _brighten_color(*basic_colors[code])
-                                    result.append(
-                                        f'<span style="color:rgb({r},{g},{b})">'
-                                    )
+                                    result.append(f'<span style="color:rgb({r},{g},{b})">')
                                     current_styles.append("color")
                                 elif code in bg_colors:
-                                    result.append(
-                                        f'<span style="background-color:{bg_colors[code]}">'
-                                    )
+                                    result.append(f'<span style="background-color:{bg_colors[code]}">')
                                     current_styles.append("bg")
                                 idx += 1
                         # Skip the entire CSI sequence (including non-SGR ones)
@@ -1433,11 +1419,7 @@ def ansi_to_html(text: str) -> str:
                         if text[j] == "\x07":
                             j += 1
                             break
-                        if (
-                            text[j] == "\x1b"
-                            and j + 1 < len(text)
-                            and text[j + 1] == "\\"
-                        ):
+                        if text[j] == "\x1b" and j + 1 < len(text) and text[j + 1] == "\\":
                             j += 2
                             break
                         j += 1
@@ -1551,14 +1533,10 @@ def highlight_code_syntax(html_content: str) -> str:
 
         # Apply highlighting in order of precedence
         # 1. Comments (highest precedence)
-        code_content = re.sub(
-            comments, r'<span class="comment">\1</span>', code_content
-        )
+        code_content = re.sub(comments, r'<span class="comment">\1</span>', code_content)
 
         # 2. Strings
-        code_content = re.sub(
-            strings, r'<span class="string">\g<0></span>', code_content
-        )
+        code_content = re.sub(strings, r'<span class="string">\g<0></span>', code_content)
 
         # 3. Function definitions (before general keywords to avoid conflicts)
         code_content = re.sub(
@@ -1575,26 +1553,18 @@ def highlight_code_syntax(html_content: str) -> str:
         )
 
         # 5. Keywords
-        code_content = re.sub(
-            keywords, r'<span class="keyword">\1</span>', code_content
-        )
+        code_content = re.sub(keywords, r'<span class="keyword">\1</span>', code_content)
 
         # 6. Numbers
-        code_content = re.sub(
-            numbers, r'<span class="number">\g<0></span>', code_content
-        )
+        code_content = re.sub(numbers, r'<span class="number">\g<0></span>', code_content)
 
         # 7. Class names
-        code_content = re.sub(
-            class_names, r'<span class="class-name">\g<0></span>', code_content
-        )
+        code_content = re.sub(class_names, r'<span class="class-name">\g<0></span>', code_content)
 
         return f"<code>{code_content}</code>"
 
     # Apply to all code blocks
-    html_content = re.sub(
-        r"<code[^>]*>(.*?)</code>", process_code_block, html_content, flags=re.DOTALL
-    )
+    html_content = re.sub(r"<code[^>]*>(.*?)</code>", process_code_block, html_content, flags=re.DOTALL)
 
     # Also handle pre/code blocks specifically for better formatting
     def process_pre_code_block(match):
@@ -1607,12 +1577,8 @@ def highlight_code_syntax(html_content: str) -> str:
 
         # More aggressive highlighting for pre/code blocks
         # Apply the same patterns but ensure we catch everything
-        code_content = re.sub(
-            comments, r'<span class="comment">\1</span>', code_content
-        )
-        code_content = re.sub(
-            strings, r'<span class="string">\g<0></span>', code_content
-        )
+        code_content = re.sub(comments, r'<span class="comment">\1</span>', code_content)
+        code_content = re.sub(strings, r'<span class="string">\g<0></span>', code_content)
         code_content = re.sub(
             function_def,
             r'<span class="keyword">\1</span> <span class="function">\2</span>(',
@@ -1623,24 +1589,15 @@ def highlight_code_syntax(html_content: str) -> str:
             r'<span class="keyword">\1</span> <span class="class-name">\2</span>',
             code_content,
         )
-        code_content = re.sub(
-            keywords, r'<span class="keyword">\1</span>', code_content
-        )
-        code_content = re.sub(
-            numbers, r'<span class="number">\g<0></span>', code_content
-        )
-        code_content = re.sub(
-            class_names, r'<span class="class-name">\g<0></span>', code_content
-        )
+        code_content = re.sub(keywords, r'<span class="keyword">\1</span>', code_content)
+        code_content = re.sub(numbers, r'<span class="number">\g<0></span>', code_content)
+        code_content = re.sub(class_names, r'<span class="class-name">\g<0></span>', code_content)
 
         # Also highlight common builtins
         builtins = (
-            r"\b(print|len|range|str|int|float|list|dict|set|tuple|open|type|isinstance|"
-            r"hasattr|getattr|setattr)\b"
+            r"\b(print|len|range|str|int|float|list|dict|set|tuple|open|type|isinstance|" r"hasattr|getattr|setattr)\b"
         )
-        code_content = re.sub(
-            builtins, r'<span class="builtin">\1</span>', code_content
-        )
+        code_content = re.sub(builtins, r'<span class="builtin">\1</span>', code_content)
 
         return f"{pre_tag}{code_content}</code></pre>"
 
@@ -1763,9 +1720,7 @@ class ChadWebUI:
         self.sessions: dict[str, Session] = {}
         self.provider_card_count = 10
         self.model_catalog = ModelCatalog(security_mgr)
-        self.provider_ui = ProviderUIManager(
-            security_mgr, main_password, self.model_catalog
-        )
+        self.provider_ui = ProviderUIManager(security_mgr, main_password, self.model_catalog)
         self.session_logger = SessionLogger()
 
     def get_session(self, session_id: str) -> Session:
@@ -1811,9 +1766,7 @@ class ChadWebUI:
         return self.provider_ui._get_mistral_remaining_usage()
 
     def _provider_state(self, pending_delete: str = None) -> tuple:
-        return self.provider_ui.provider_state(
-            self.provider_card_count, pending_delete=pending_delete
-        )
+        return self.provider_ui.provider_state(self.provider_card_count, pending_delete=pending_delete)
 
     def _provider_action_response(self, feedback: str, pending_delete: str = None):
         return self.provider_ui.provider_action_response(
@@ -1821,9 +1774,7 @@ class ChadWebUI:
         )
 
     def _provider_state_with_confirm(self, pending_delete: str) -> tuple:
-        return self.provider_ui.provider_state_with_confirm(
-            pending_delete, self.provider_card_count
-        )
+        return self.provider_ui.provider_state_with_confirm(pending_delete, self.provider_card_count)
 
     def _get_codex_home(self, account_name: str) -> Path:
         return self.provider_ui._get_codex_home(account_name)
@@ -1906,9 +1857,7 @@ class ChadWebUI:
             provider=verification_provider,
             model_name=verification_model,
             account_name=verification_account,
-            reasoning_effort=None
-            if verification_reasoning == "default"
-            else verification_reasoning,
+            reasoning_effort=None if verification_reasoning == "default" else verification_reasoning,
         )
 
         verification_prompt = get_verification_prompt(coding_output)
@@ -1942,9 +1891,7 @@ class ChadWebUI:
                     else:
                         feedback = summary
                         if issues:
-                            feedback += "\n\nIssues:\n" + "\n".join(
-                                f"- {issue}" for issue in issues
-                            )
+                            feedback += "\n\nIssues:\n" + "\n".join(f"- {issue}" for issue in issues)
                         return False, feedback
 
                 except VerificationParseError as e:
@@ -1969,9 +1916,7 @@ class ChadWebUI:
     def get_account_choices(self) -> list[str]:
         return self.provider_ui.get_account_choices()
 
-    def _check_provider_login(
-        self, provider_type: str, account_name: str
-    ) -> tuple[bool, str]:  # noqa: C901
+    def _check_provider_login(self, provider_type: str, account_name: str) -> tuple[bool, str]:  # noqa: C901
         return self.provider_ui._check_provider_login(provider_type, account_name)
 
     def _setup_codex_account(self, account_name: str) -> str:
@@ -2008,9 +1953,7 @@ class ChadWebUI:
         subprocess.run([codex_cli, "logout"], env=env, capture_output=True, timeout=10)
 
         # Now run login - this will open a browser
-        result = subprocess.run(
-            [codex_cli, "login"], env=env, capture_output=True, text=True, timeout=120
-        )
+        result = subprocess.run([codex_cli, "login"], env=env, capture_output=True, text=True, timeout=120)
 
         if result.returncode == 0:
             return f"✅ **Login successful for '{account_name}'!**\n\nRefresh the Usage Statistics to see account details."  # noqa: E501
@@ -2019,9 +1962,7 @@ class ChadWebUI:
             return f"⚠️ **Login may have failed**\n\n{error}\n\nTry refreshing Usage Statistics to check status."
 
     def add_provider(self, provider_name: str, provider_type: str):  # noqa: C901
-        return self.provider_ui.add_provider(
-            provider_name, provider_type, self.provider_card_count
-        )
+        return self.provider_ui.add_provider(provider_name, provider_type, self.provider_card_count)
 
     def _unassign_account_roles(self, account_name: str) -> None:
         self.provider_ui._unassign_account_roles(account_name)
@@ -2033,33 +1974,23 @@ class ChadWebUI:
         return self.provider_ui.format_role_status()
 
     def assign_role(self, account_name: str, role: str):
-        return self.provider_ui.assign_role(
-            account_name, role, self.provider_card_count
-        )
+        return self.provider_ui.assign_role(account_name, role, self.provider_card_count)
 
     def set_model(self, account_name: str, model: str):
         return self.provider_ui.set_model(account_name, model, self.provider_card_count)
 
     def set_reasoning(self, account_name: str, reasoning: str):
-        return self.provider_ui.set_reasoning(
-            account_name, reasoning, self.provider_card_count
-        )
+        return self.provider_ui.set_reasoning(account_name, reasoning, self.provider_card_count)
 
     def get_models_for_account(self, account_name: str) -> list[str]:
         self.provider_ui.model_catalog = self.model_catalog
-        return self.provider_ui.get_models_for_account(
-            account_name, model_catalog_override=self.model_catalog
-        )
+        return self.provider_ui.get_models_for_account(account_name, model_catalog_override=self.model_catalog)
 
-    def get_reasoning_choices(
-        self, provider: str, account_name: str | None = None
-    ) -> list[str]:
+    def get_reasoning_choices(self, provider: str, account_name: str | None = None) -> list[str]:
         return self.provider_ui.get_reasoning_choices(provider, account_name)
 
     def delete_provider(self, account_name: str, confirmed: bool = False):
-        return self.provider_ui.delete_provider(
-            account_name, confirmed, self.provider_card_count
-        )
+        return self.provider_ui.delete_provider(account_name, confirmed, self.provider_card_count)
 
     def cancel_task(self, session_id: str) -> str:
         """Cancel the running task for a specific session."""
@@ -2093,11 +2024,7 @@ class ChadWebUI:
     ) -> tuple[str | None, str, str]:
         """Resolve verification account/model/reasoning selections without mutating coding prefs."""
         accounts = self.security_mgr.list_accounts()
-        actual_account = (
-            coding_account
-            if verification_agent == self.SAME_AS_CODING
-            else verification_agent
-        )
+        actual_account = coding_account if verification_agent == self.SAME_AS_CODING else verification_agent
         if not actual_account or actual_account not in accounts:
             return None, coding_model, coding_reasoning
 
@@ -2121,9 +2048,7 @@ class ChadWebUI:
             if verification_model and verification_model != self.SAME_AS_CODING:
                 self.security_mgr.set_account_model(actual_account, resolved_model)
             if verification_reasoning and verification_reasoning != self.SAME_AS_CODING:
-                self.security_mgr.set_account_reasoning(
-                    actual_account, resolved_reasoning
-                )
+                self.security_mgr.set_account_reasoning(actual_account, resolved_reasoning)
         except Exception:
             pass
 
@@ -2141,13 +2066,9 @@ class ChadWebUI:
         """Resolve verification dropdown values based on current selections."""
         accounts_map = self.security_mgr.list_accounts()
         account_choices = list(accounts_map.keys())
-        actual_account = (
-            coding_agent if verification_agent == self.SAME_AS_CODING else verification_agent
-        )
+        actual_account = coding_agent if verification_agent == self.SAME_AS_CODING else verification_agent
         interactive = bool(
-            actual_account
-            and actual_account in account_choices
-            and verification_agent != self.SAME_AS_CODING
+            actual_account and actual_account in account_choices and verification_agent != self.SAME_AS_CODING
         )
 
         if not actual_account or actual_account not in account_choices:
@@ -2161,33 +2082,23 @@ class ChadWebUI:
 
         provider_type = accounts_map.get(actual_account, "")
         model_choices = self.get_models_for_account(actual_account) or ["default"]
-        reasoning_choices = self.get_reasoning_choices(
-            provider_type, actual_account
-        ) or ["default"]
+        reasoning_choices = self.get_reasoning_choices(provider_type, actual_account) or ["default"]
 
-        def value_or_default(
-            preferred: str | None, choices: list[str], allow_custom: bool = False
-        ) -> str:
+        def value_or_default(preferred: str | None, choices: list[str], allow_custom: bool = False) -> str:
             if preferred:
                 if preferred in choices or allow_custom:
                     return preferred
             return choices[0]
 
         if verification_agent == self.SAME_AS_CODING:
-            model_value = value_or_default(
-                coding_model_value, model_choices, allow_custom=False
-            )
-            reasoning_value = value_or_default(
-                coding_reasoning_value, reasoning_choices, allow_custom=False
-            )
+            model_value = value_or_default(coding_model_value, model_choices, allow_custom=False)
+            reasoning_value = value_or_default(coding_reasoning_value, reasoning_choices, allow_custom=False)
         else:
             stored_model = self.security_mgr.get_account_model(actual_account) or "default"
             preferred_model = current_verification_model or stored_model
             model_value = value_or_default(preferred_model, model_choices)
 
-            stored_reasoning = (
-                self.security_mgr.get_account_reasoning(actual_account) or "default"
-            )
+            stored_reasoning = self.security_mgr.get_account_reasoning(actual_account) or "default"
             preferred_reasoning = current_verification_reasoning or stored_reasoning
             reasoning_value = value_or_default(preferred_reasoning, reasoning_choices)
 
@@ -2249,9 +2160,7 @@ class ChadWebUI:
             is_error = "❌" in status
             display_role_status = self.format_role_status()
             log_btn_update = gr.update(
-                label=f"📄 {session.log_path.name}"
-                if session.log_path
-                else "Session Log",
+                label=f"📄 {session.log_path.name}" if session.log_path else "Session Log",
                 value=str(session.log_path) if session.log_path else None,
                 visible=session.log_path is not None,
             )
@@ -2331,15 +2240,9 @@ class ChadWebUI:
             coding_provider = accounts[coding_account]
             self.security_mgr.assign_role(coding_account, "CODING")
 
-            selected_model = (
-                coding_model
-                or self.security_mgr.get_account_model(coding_account)
-                or "default"
-            )
+            selected_model = coding_model or self.security_mgr.get_account_model(coding_account) or "default"
             selected_reasoning = (
-                coding_reasoning
-                or self.security_mgr.get_account_reasoning(coding_account)
-                or "default"
+                coding_reasoning or self.security_mgr.get_account_reasoning(coding_account) or "default"
             )
             verification_model_value = verification_model or self.SAME_AS_CODING
             verification_reasoning_value = verification_reasoning or self.SAME_AS_CODING
@@ -2361,9 +2264,7 @@ class ChadWebUI:
             except Exception:
                 pass
             try:
-                self.security_mgr.set_account_reasoning(
-                    coding_account, selected_reasoning
-                )
+                self.security_mgr.set_account_reasoning(coding_account, selected_reasoning)
             except Exception:
                 pass
 
@@ -2371,9 +2272,7 @@ class ChadWebUI:
                 provider=coding_provider,
                 model_name=selected_model,
                 account_name=coding_account,
-                reasoning_effort=None
-                if selected_reasoning == "default"
-                else selected_reasoning,
+                reasoning_effort=None if selected_reasoning == "default" else selected_reasoning,
             )
 
             coding_timeout = DEFAULT_CODING_TIMEOUT
@@ -2396,15 +2295,11 @@ class ChadWebUI:
                 status_prefix += f"• Reasoning: {selected_reasoning}\n"
             status_prefix += "• Mode: Direct (coding AI only)\n\n"
 
-            chat_history.append(
-                {"role": "user", "content": f"**Task**\n\n{task_description}"}
-            )
+            chat_history.append({"role": "user", "content": f"**Task**\n\n{task_description}"})
             self.session_logger.update_log(session.log_path, chat_history)
 
             initial_status = f"{status_prefix}⏳ Initializing session..."
-            yield make_yield(
-                chat_history, initial_status, summary=initial_status, interactive=False
-            )
+            yield make_yield(chat_history, initial_status, summary=initial_status, interactive=False)
 
             def format_tool_activity(detail: str) -> str:
                 if ": " in detail:
@@ -2454,9 +2349,7 @@ class ChadWebUI:
                 try:
                     message_queue.put(("ai_switch", "CODING AI"))
                     message_queue.put(("message_start", "CODING AI"))
-                    response = coding_provider_instance.get_response(
-                        timeout=coding_timeout
-                    )
+                    response = coding_provider_instance.get_response(timeout=coding_timeout)
                     if response:
                         parsed = parse_codex_output(response)
                         message_queue.put(("message_complete", "CODING AI", parsed))
@@ -2475,10 +2368,7 @@ class ChadWebUI:
                 finally:
                     # Keep session alive for follow-ups if provider supports multi-turn
                     # and task succeeded
-                    if (
-                        not coding_provider_instance.supports_multi_turn()
-                        or not task_success[0]
-                    ):
+                    if not coding_provider_instance.supports_multi_turn() or not task_success[0]:
                         coding_provider_instance.stop_session()
                         session.provider = None
                         session.active = False
@@ -2532,9 +2422,7 @@ class ChadWebUI:
                         streaming_buffer = ""
                         last_activity = ""
                         current_live_stream = ""
-                        yield make_yield(
-                            chat_history, current_status, current_live_stream
-                        )
+                        yield make_yield(chat_history, current_status, current_live_stream)
                         last_yield_time = time_module.time()
 
                     elif msg_type == "message_start":
@@ -2548,20 +2436,13 @@ class ChadWebUI:
                         streaming_buffer = ""
                         last_activity = ""
                         current_live_stream = ""
-                        yield make_yield(
-                            chat_history, current_status, current_live_stream
-                        )
+                        yield make_yield(chat_history, current_status, current_live_stream)
                         last_yield_time = time_module.time()
 
                     elif msg_type == "message_complete":
                         speaker, content = msg[1], msg[2]
-                        if (
-                            pending_message_idx is not None
-                            and pending_message_idx < len(chat_history)
-                        ):
-                            chat_history[pending_message_idx] = make_chat_message(
-                                speaker, content
-                            )
+                        if pending_message_idx is not None and pending_message_idx < len(chat_history):
+                            chat_history[pending_message_idx] = make_chat_message(speaker, content)
                         else:
                             chat_history.append(make_chat_message(speaker, content))
                         pending_message_idx = None
@@ -2569,9 +2450,7 @@ class ChadWebUI:
                         last_activity = ""
                         current_live_stream = ""
                         self.session_logger.update_log(session.log_path, chat_history)
-                        yield make_yield(
-                            chat_history, current_status, current_live_stream
-                        )
+                        yield make_yield(chat_history, current_status, current_live_stream)
                         last_yield_time = time_module.time()
 
                     elif msg_type == "status":
@@ -2600,12 +2479,8 @@ class ChadWebUI:
                             now = time_module.time()
                             if now - last_yield_time >= min_yield_interval:
                                 display_content = get_display_content()
-                                current_live_stream = build_live_stream_html(
-                                    display_content, current_ai
-                                )
-                                yield make_yield(
-                                    chat_history, current_status, current_live_stream
-                                )
+                                current_live_stream = build_live_stream_html(display_content, current_ai)
+                                yield make_yield(chat_history, current_status, current_live_stream)
                                 last_yield_time = now
 
                     elif msg_type == "activity":
@@ -2615,14 +2490,10 @@ class ChadWebUI:
                             display_content = get_display_content()
                             if display_content:
                                 content = display_content + f"\n\n{last_activity}"
-                                current_live_stream = build_live_stream_html(
-                                    content, current_ai
-                                )
+                                current_live_stream = build_live_stream_html(content, current_ai)
                             else:
                                 current_live_stream = f"**Live:** {last_activity}"
-                            yield make_yield(
-                                chat_history, current_status, current_live_stream
-                            )
+                            yield make_yield(chat_history, current_status, current_live_stream)
                             last_yield_time = now
 
                 except queue.Empty:
@@ -2630,14 +2501,10 @@ class ChadWebUI:
                     if now - last_yield_time >= 0.3:
                         display_content = get_display_content()
                         if display_content:
-                            current_live_stream = build_live_stream_html(
-                                display_content, current_ai
-                            )
+                            current_live_stream = build_live_stream_html(display_content, current_ai)
                         elif last_activity:
                             current_live_stream = f"**Live:** {last_activity}"
-                        yield make_yield(
-                            chat_history, current_status, current_live_stream
-                        )
+                        yield make_yield(chat_history, current_status, current_live_stream)
                         last_yield_time = now
 
             if session.cancel_requested:
@@ -2664,18 +2531,11 @@ class ChadWebUI:
                         msg_type = msg[0]
                         if msg_type == "message_complete":
                             speaker, content = msg[1], msg[2]
-                            if (
-                                pending_message_idx is not None
-                                and pending_message_idx < len(chat_history)
-                            ):
-                                chat_history[pending_message_idx] = make_chat_message(
-                                    speaker, content
-                                )
+                            if pending_message_idx is not None and pending_message_idx < len(chat_history):
+                                chat_history[pending_message_idx] = make_chat_message(speaker, content)
                             else:
                                 chat_history.append(make_chat_message(speaker, content))
-                            self.session_logger.update_log(
-                                session.log_path, chat_history
-                            )
+                            self.session_logger.update_log(session.log_path, chat_history)
                             yield make_yield(chat_history, current_status, "")
                     except queue.Empty:
                         break
@@ -2685,9 +2545,7 @@ class ChadWebUI:
             # Track the active configuration only when the session can continue
             session.config = coding_config if session.active else None
 
-            verification_account_for_run = (
-                actual_verification_account or verification_agent
-            )
+            verification_account_for_run = actual_verification_account or verification_agent
 
             if session.cancel_requested:
                 final_status = "🛑 Task cancelled by user"
@@ -2702,9 +2560,7 @@ class ChadWebUI:
                 last_coding_output = completion_reason[0] or ""
                 # Also get any accumulated text from the coding agent
                 if full_history:
-                    last_coding_output = "".join(
-                        chunk for _, chunk in full_history[-50:]
-                    )
+                    last_coding_output = "".join(chunk for _, chunk in full_history[-50:])
 
                 # Run verification loop
                 max_verification_attempts = 3
@@ -2713,9 +2569,7 @@ class ChadWebUI:
                 verification_feedback = ""
 
                 while (
-                    not verified
-                    and verification_attempt < max_verification_attempts
-                    and not session.cancel_requested
+                    not verified and verification_attempt < max_verification_attempts and not session.cancel_requested
                 ):
                     verification_attempt += 1
 
@@ -2736,11 +2590,7 @@ class ChadWebUI:
 
                     # Run verification
                     def verification_activity(activity_type: str, detail: str):
-                        content = (
-                            detail
-                            if activity_type == "stream"
-                            else f"[{activity_type}] {detail}\n"
-                        )
+                        content = detail if activity_type == "stream" else f"[{activity_type}] {detail}\n"
                         message_queue.put(("stream", content))
 
                     # Run verification in worktree so it can see the changes
@@ -2772,9 +2622,7 @@ class ChadWebUI:
                         self.session_logger.update_log(session.log_path, chat_history)
                         break
                     elif verified:
-                        chat_history.append(
-                            make_chat_message("VERIFICATION AI", verification_feedback)
-                        )
+                        chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
                         chat_history.append(
                             {
                                 "role": "user",
@@ -2783,9 +2631,7 @@ class ChadWebUI:
                         )
                         self.session_logger.update_log(session.log_path, chat_history)
                     else:
-                        chat_history.append(
-                            make_chat_message("VERIFICATION AI", verification_feedback)
-                        )
+                        chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
                         self.session_logger.update_log(session.log_path, chat_history)
 
                         # If not verified and session is still active, send feedback to coding agent
@@ -2799,12 +2645,8 @@ class ChadWebUI:
                                 "───────────── 🔄 REVISION REQUESTED ─────────────\n\n"
                                 "*Sending verification feedback to coding agent...*"
                             )
-                            chat_history.append(
-                                {"role": "user", "content": revision_content}
-                            )
-                            self.session_logger.update_log(
-                                session.log_path, chat_history
-                            )
+                            chat_history.append({"role": "user", "content": revision_content})
+                            self.session_logger.update_log(session.log_path, chat_history)
                             revision_status = f"{status_prefix}🔄 Sending revision request to coding agent..."
                             yield make_yield(chat_history, revision_status, "")
 
@@ -2824,9 +2666,7 @@ class ChadWebUI:
                                 }
                             )
                             revision_pending_idx = len(chat_history) - 1
-                            self.session_logger.update_log(
-                                session.log_path, chat_history
-                            )
+                            self.session_logger.update_log(session.log_path, chat_history)
                             yield make_yield(
                                 chat_history,
                                 f"{status_prefix}⏳ Coding agent working on revisions...",
@@ -2836,11 +2676,7 @@ class ChadWebUI:
                             # Send the revision request
                             try:
                                 coding_provider_instance.send_message(revision_request)
-                                revision_response = (
-                                    coding_provider_instance.get_response(
-                                        timeout=coding_timeout
-                                    )
-                                )
+                                revision_response = coding_provider_instance.get_response(timeout=coding_timeout)
                             except Exception as exc:
                                 chat_history[revision_pending_idx] = {
                                     "role": "assistant",
@@ -2849,28 +2685,20 @@ class ChadWebUI:
                                 session.active = False
                                 session.provider = None
                                 session.config = None
-                                self.session_logger.update_log(
-                                    session.log_path, chat_history
-                                )
+                                self.session_logger.update_log(session.log_path, chat_history)
                                 break
 
                             if revision_response:
                                 parsed_revision = parse_codex_output(revision_response)
-                                chat_history[revision_pending_idx] = make_chat_message(
-                                    "CODING AI", parsed_revision
-                                )
+                                chat_history[revision_pending_idx] = make_chat_message("CODING AI", parsed_revision)
                                 last_coding_output = parsed_revision
-                                self.session_logger.update_log(
-                                    session.log_path, chat_history
-                                )
+                                self.session_logger.update_log(session.log_path, chat_history)
                             else:
                                 chat_history[revision_pending_idx] = {
                                     "role": "assistant",
                                     "content": "**CODING AI**\n\n❌ *No response to revision request*",
                                 }
-                                self.session_logger.update_log(
-                                    session.log_path, chat_history
-                                )
+                                self.session_logger.update_log(session.log_path, chat_history)
                                 break
 
                             yield make_yield(
@@ -2886,21 +2714,16 @@ class ChadWebUI:
 
                 if verified is True:
                     final_status = "✓ Task completed and verified!"
-                    completion_msg = (
-                        "───────────── ✅ TASK COMPLETED (VERIFIED) ─────────────"
-                    )
+                    completion_msg = "───────────── ✅ TASK COMPLETED (VERIFIED) ─────────────"
                     chat_history.append({"role": "user", "content": completion_msg})
                 elif verified is None:
                     # Verification errored - already added error message above
                     final_status = "❌ Task completed but verification errored"
                 else:
                     final_status = (
-                        f"⚠️ Task completed but verification failed "
-                        f"after {verification_attempt} attempt(s)"
+                        f"⚠️ Task completed but verification failed " f"after {verification_attempt} attempt(s)"
                     )
-                    completion_msg = (
-                        "───────────── ⚠️ TASK COMPLETED (UNVERIFIED) ─────────────"
-                    )
+                    completion_msg = "───────────── ⚠️ TASK COMPLETED (UNVERIFIED) ─────────────"
                     if verification_feedback:
                         if len(verification_feedback) > 200:
                             completion_msg += f"\n\n*{verification_feedback[:200]}...*"
@@ -2918,9 +2741,7 @@ class ChadWebUI:
                     failure_msg += f"\n\n*{completion_reason[0]}*"
                 chat_history.append({"role": "user", "content": failure_msg})
 
-            streaming_transcript = (
-                "".join(chunk for _, chunk in full_history) if full_history else None
-            )
+            streaming_transcript = "".join(chunk for _, chunk in full_history) if full_history else None
 
             self.session_logger.update_log(
                 session.log_path,
@@ -2954,9 +2775,7 @@ class ChadWebUI:
                 try:
                     git_mgr = GitWorktreeManager(Path(session.project_path))
                     branches = git_mgr.get_branches()
-                    parsed_diff = git_mgr.get_parsed_diff(
-                        session_id, session.worktree_base_commit
-                    )
+                    parsed_diff = git_mgr.get_parsed_diff(session_id, session.worktree_base_commit)
                     diff_html = self._render_diff_html(parsed_diff)
                 except Exception:
                     branches = ["main"]
@@ -3023,9 +2842,7 @@ class ChadWebUI:
 
         # Use stored history as base, but prefer current_history if it has more messages
         chat_history = (
-            current_history
-            if len(current_history) >= len(session.chat_history)
-            else session.chat_history.copy()
+            current_history if len(current_history) >= len(session.chat_history) else session.chat_history.copy()
         )
 
         def make_followup_yield(
@@ -3038,9 +2855,7 @@ class ChadWebUI:
             return (
                 history,
                 live_stream,
-                gr.update(
-                    value="" if not working else followup_message
-                ),  # Clear input when not working
+                gr.update(value="" if not working else followup_message),  # Clear input when not working
                 gr.update(visible=show_followup),  # Follow-up row visibility
                 gr.update(interactive=not working),  # Send button interactivity
             )
@@ -3061,20 +2876,12 @@ class ChadWebUI:
         requested_model = normalize_model_value(
             coding_model
             if coding_model is not None
-            else (
-                self.security_mgr.get_account_model(coding_agent)
-                if has_account
-                else "default"
-            )
+            else (self.security_mgr.get_account_model(coding_agent) if has_account else "default")
         )
         requested_reasoning = normalize_reasoning_value(
             coding_reasoning
             if coding_reasoning is not None
-            else (
-                self.security_mgr.get_account_reasoning(coding_agent)
-                if has_account
-                else "default"
-            )
+            else (self.security_mgr.get_account_reasoning(coding_agent) if has_account else "default")
         )
         verification_model_value = verification_model or self.SAME_AS_CODING
         verification_reasoning_value = verification_reasoning or self.SAME_AS_CODING
@@ -3094,9 +2901,7 @@ class ChadWebUI:
         if has_account:
             try:
                 self.security_mgr.set_account_model(coding_agent, requested_model)
-                self.security_mgr.set_account_reasoning(
-                    coding_agent, requested_reasoning
-                )
+                self.security_mgr.set_account_reasoning(coding_agent, requested_reasoning)
             except Exception:
                 pass
 
@@ -3106,21 +2911,14 @@ class ChadWebUI:
         # Check if we need provider handoff
         provider_changed = has_account and coding_agent != session.coding_account
 
-        active_model = normalize_model_value(
-            session.config.model_name if session.config else None
-        )
-        active_reasoning = normalize_reasoning_value(
-            session.config.reasoning_effort if session.config else None
-        )
+        active_model = normalize_model_value(session.config.model_name if session.config else None)
+        active_reasoning = normalize_reasoning_value(session.config.reasoning_effort if session.config else None)
         pref_changed = (
             has_account
             and not provider_changed
             and session.active
             and session.coding_account == coding_agent
-            and (
-                active_model != requested_model
-                or active_reasoning != requested_reasoning
-            )
+            and (active_model != requested_model or active_reasoning != requested_reasoning)
         )
 
         handoff_needed = provider_changed or pref_changed
@@ -3141,9 +2939,7 @@ class ChadWebUI:
                 provider=coding_provider_type,
                 model_name=requested_model,
                 account_name=coding_agent,
-                reasoning_effort=None
-                if requested_reasoning == "default"
-                else requested_reasoning,
+                reasoning_effort=None if requested_reasoning == "default" else requested_reasoning,
             )
 
             handoff_detail = f"{coding_agent} ({coding_provider_type}"
@@ -3153,17 +2949,10 @@ class ChadWebUI:
                 handoff_detail += f", {requested_reasoning} reasoning"
             handoff_detail += ")"
 
-            handoff_title = (
-                "PROVIDER HANDOFF" if provider_changed else "PREFERENCE UPDATE"
-            )
-            handoff_msg = (
-                f"───────────── 🔄 {handoff_title} ─────────────\n\n"
-                f"*Switching to {handoff_detail}*"
-            )
+            handoff_title = "PROVIDER HANDOFF" if provider_changed else "PREFERENCE UPDATE"
+            handoff_msg = f"───────────── 🔄 {handoff_title} ─────────────\n\n" f"*Switching to {handoff_detail}*"
             chat_history.append({"role": "user", "content": handoff_msg})
-            yield make_followup_yield(
-                chat_history, "🔄 Switching providers...", working=True
-            )
+            yield make_followup_yield(chat_history, "🔄 Switching providers...", working=True)
 
             new_provider = create_provider(coding_config)
             # Use worktree path if available, otherwise fall back to project path
@@ -3190,14 +2979,10 @@ class ChadWebUI:
 
             # Include conversation context for the new provider
             context_summary = self._build_handoff_context(chat_history)
-            followup_message = (
-                f"{context_summary}\n\n# Follow-up Request\n\n{followup_message}"
-            )
+            followup_message = f"{context_summary}\n\n# Follow-up Request\n\n{followup_message}"
 
         if not session.active or not session.provider:
-            chat_history.append(
-                {"role": "user", "content": f"**Follow-up**\n\n{followup_message}"}
-            )
+            chat_history.append({"role": "user", "content": f"**Follow-up**\n\n{followup_message}"})
             chat_history.append(
                 {
                     "role": "assistant",
@@ -3218,14 +3003,10 @@ class ChadWebUI:
         chat_history.append({"role": "user", "content": user_content})
 
         # Add placeholder for AI response
-        chat_history.append(
-            {"role": "assistant", "content": "**CODING AI**\n\n⏳ *Working...*"}
-        )
+        chat_history.append({"role": "assistant", "content": "**CODING AI**\n\n⏳ *Working...*"})
         pending_idx = len(chat_history) - 1
 
-        yield make_followup_yield(
-            chat_history, "⏳ Processing follow-up...", working=True
-        )
+        yield make_followup_yield(chat_history, "⏳ Processing follow-up...", working=True)
 
         # Set up activity callback
         def on_activity(activity_type: str, detail: str):
@@ -3279,9 +3060,7 @@ class ChadWebUI:
                             if len(display_content) > 50000:
                                 display_content = display_content[-50000:]
                             live_stream = build_live_stream_html(display_content)
-                            yield make_followup_yield(
-                                chat_history, live_stream, working=True
-                            )
+                            yield make_followup_yield(chat_history, live_stream, working=True)
                             last_yield_time = now
 
                 elif msg_type == "activity":
@@ -3293,9 +3072,7 @@ class ChadWebUI:
                             live_stream = build_live_stream_html(content)
                         else:
                             live_stream = f"**Live:** {msg[1]}"
-                        yield make_followup_yield(
-                            chat_history, live_stream, working=True
-                        )
+                        yield make_followup_yield(chat_history, live_stream, working=True)
                         last_yield_time = now
 
             except queue.Empty:
@@ -3304,9 +3081,7 @@ class ChadWebUI:
                     display_content = "".join(full_history)
                     if display_content:
                         live_stream = build_live_stream_html(display_content)
-                        yield make_followup_yield(
-                            chat_history, live_stream, working=True
-                        )
+                        yield make_followup_yield(chat_history, live_stream, working=True)
                         last_yield_time = now
 
         relay_thread.join(timeout=1)
@@ -3352,15 +3127,10 @@ class ChadWebUI:
             verification_attempt = 0
             verified = False
 
-            while (
-                not verified
-                and verification_attempt < max_verification_attempts
-                and not session.cancel_requested
-            ):
+            while not verified and verification_attempt < max_verification_attempts and not session.cancel_requested:
                 verification_attempt += 1
                 verify_status = (
-                    f"🔍 Running verification "
-                    f"(attempt {verification_attempt}/{max_verification_attempts})..."
+                    f"🔍 Running verification " f"(attempt {verification_attempt}/{max_verification_attempts})..."
                 )
                 yield make_followup_yield(chat_history, verify_status, working=True)
 
@@ -3375,9 +3145,7 @@ class ChadWebUI:
                     pass  # Quiet verification
 
                 # Run verification in worktree so it can see the changes
-                verification_path = str(
-                    session.worktree_path or session.project_path or Path.cwd()
-                )
+                verification_path = str(session.worktree_path or session.project_path or Path.cwd())
                 verified, verification_feedback = self._run_verification(
                     verification_path,
                     last_coding_output,
@@ -3404,9 +3172,7 @@ class ChadWebUI:
                     self._update_session_log(session, chat_history, full_history)
                     break
                 elif verified:
-                    chat_history.append(
-                        make_chat_message("VERIFICATION AI", verification_feedback)
-                    )
+                    chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
                     chat_history.append(
                         {
                             "role": "user",
@@ -3415,9 +3181,7 @@ class ChadWebUI:
                     )
                     self._update_session_log(session, chat_history, full_history)
                 else:
-                    chat_history.append(
-                        make_chat_message("VERIFICATION AI", verification_feedback)
-                    )
+                    chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
                     self._update_session_log(session, chat_history, full_history)
 
                     # Check if we can revise
@@ -3441,9 +3205,7 @@ class ChadWebUI:
                         )
                         revision_idx = len(chat_history) - 1
                         self._update_session_log(session, chat_history, full_history)
-                        yield make_followup_yield(
-                            chat_history, "🔄 Revision in progress...", working=True
-                        )
+                        yield make_followup_yield(chat_history, "🔄 Revision in progress...", working=True)
 
                         revision_request = (
                             "The verification agent found issues with your work. "
@@ -3453,9 +3215,7 @@ class ChadWebUI:
                         )
                         try:
                             coding_provider.send_message(revision_request)
-                            revision_response = coding_provider.get_response(
-                                timeout=DEFAULT_CODING_TIMEOUT
-                            )
+                            revision_response = coding_provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
                         except Exception as exc:
                             chat_history[revision_idx] = {
                                 "role": "assistant",
@@ -3464,28 +3224,20 @@ class ChadWebUI:
                             session.active = False
                             session.provider = None
                             session.config = None
-                            self._update_session_log(
-                                session, chat_history, full_history
-                            )
+                            self._update_session_log(session, chat_history, full_history)
                             break
 
                         if revision_response:
                             parsed_revision = parse_codex_output(revision_response)
-                            chat_history[revision_idx] = make_chat_message(
-                                "CODING AI", parsed_revision
-                            )
+                            chat_history[revision_idx] = make_chat_message("CODING AI", parsed_revision)
                             last_coding_output = parsed_revision
-                            self._update_session_log(
-                                session, chat_history, full_history
-                            )
+                            self._update_session_log(session, chat_history, full_history)
                         else:
                             chat_history[revision_idx] = {
                                 "role": "assistant",
                                 "content": "**CODING AI**\n\n❌ *No response to revision request*",
                             }
-                            self._update_session_log(
-                                session, chat_history, full_history
-                            )
+                            self._update_session_log(session, chat_history, full_history)
                             break
 
                         yield make_followup_yield(
@@ -3578,10 +3330,7 @@ class ChadWebUI:
             session.merge_conflicts = conflicts
             conflict_count = sum(len(c.hunks) for c in (conflicts or []))
             file_count = len(conflicts or [])
-            conflict_msg = (
-                f"**{file_count} file(s)** with "
-                f"**{conflict_count} conflict(s)** need resolution."
-            )
+            conflict_msg = f"**{file_count} file(s)** with " f"**{conflict_count} conflict(s)** need resolution."
             return (
                 gr.update(visible=False),
                 gr.update(),
@@ -3610,8 +3359,8 @@ class ChadWebUI:
                 if hunk.context_before:
                     html_parts.append('<div class="conflict-context">')
                     for line in hunk.context_before:
-                        html_parts.append(f'<pre>{html.escape(line)}</pre>')
-                    html_parts.append('</div>')
+                        html_parts.append(f"<pre>{html.escape(line)}</pre>")
+                    html_parts.append("</div>")
 
                 # Side-by-side comparison
                 html_parts.append('<div class="conflict-comparison">')
@@ -3621,34 +3370,34 @@ class ChadWebUI:
                 html_parts.append('<div class="conflict-side-header">Original (HEAD)</div>')
                 html_parts.append('<div class="conflict-side-content">')
                 for line in hunk.original_lines:
-                    html_parts.append(f'<pre>{html.escape(line)}</pre>')
-                html_parts.append('</div>')
-                html_parts.append('</div>')
+                    html_parts.append(f"<pre>{html.escape(line)}</pre>")
+                html_parts.append("</div>")
+                html_parts.append("</div>")
 
                 # Incoming (worktree) side
                 html_parts.append('<div class="conflict-side conflict-incoming">')
                 html_parts.append('<div class="conflict-side-header">Incoming (Task Changes)</div>')
                 html_parts.append('<div class="conflict-side-content">')
                 for line in hunk.incoming_lines:
-                    html_parts.append(f'<pre>{html.escape(line)}</pre>')
-                html_parts.append('</div>')
-                html_parts.append('</div>')
+                    html_parts.append(f"<pre>{html.escape(line)}</pre>")
+                html_parts.append("</div>")
+                html_parts.append("</div>")
 
-                html_parts.append('</div>')  # conflict-comparison
+                html_parts.append("</div>")  # conflict-comparison
 
                 # Context after
                 if hunk.context_after:
                     html_parts.append('<div class="conflict-context">')
                     for line in hunk.context_after:
-                        html_parts.append(f'<pre>{html.escape(line)}</pre>')
-                    html_parts.append('</div>')
+                        html_parts.append(f"<pre>{html.escape(line)}</pre>")
+                    html_parts.append("</div>")
 
-                html_parts.append('</div>')  # conflict-hunk
+                html_parts.append("</div>")  # conflict-hunk
 
-            html_parts.append('</div>')  # conflict-file
+            html_parts.append("</div>")  # conflict-file
 
-        html_parts.append('</div>')  # conflict-viewer
-        return '\n'.join(html_parts)
+        html_parts.append("</div>")  # conflict-viewer
+        return "\n".join(html_parts)
 
     def _render_diff_html(self, file_diffs: list[FileDiff]) -> str:
         """Render file diffs as side-by-side HTML."""
@@ -3668,13 +3417,11 @@ class ChadWebUI:
             elif file_diff.is_deleted:
                 header_extra = '<span class="deleted-file">(deleted)</span>'
 
-            html_parts.append(
-                f'<div class="diff-file-header">{file_path_escaped} {header_extra}</div>'
-            )
+            html_parts.append(f'<div class="diff-file-header">{file_path_escaped} {header_extra}</div>')
 
             if file_diff.is_binary:
                 html_parts.append('<div class="diff-binary">Binary file changed</div>')
-                html_parts.append('</div>')
+                html_parts.append("</div>")
                 continue
 
             # Render each hunk side-by-side
@@ -3689,20 +3436,12 @@ class ChadWebUI:
                 # Process lines to build left/right sides
                 for diff_line in hunk.lines:
                     if diff_line.line_type == "context":
-                        left_lines.append(
-                            (diff_line.old_line_no, diff_line.content, "context")
-                        )
-                        right_lines.append(
-                            (diff_line.new_line_no, diff_line.content, "context")
-                        )
+                        left_lines.append((diff_line.old_line_no, diff_line.content, "context"))
+                        right_lines.append((diff_line.new_line_no, diff_line.content, "context"))
                     elif diff_line.line_type == "removed":
-                        left_lines.append(
-                            (diff_line.old_line_no, diff_line.content, "removed")
-                        )
+                        left_lines.append((diff_line.old_line_no, diff_line.content, "removed"))
                     elif diff_line.line_type == "added":
-                        right_lines.append(
-                            (diff_line.new_line_no, diff_line.content, "added")
-                        )
+                        right_lines.append((diff_line.new_line_no, diff_line.content, "added"))
 
                 # Pad shorter side to match
                 max_len = max(len(left_lines), len(right_lines))
@@ -3721,9 +3460,9 @@ class ChadWebUI:
                         f'<div class="diff-line {line_type}">'
                         f'<span class="diff-line-no">{line_no_str}</span>'
                         f'<span class="diff-line-content">{content_escaped}</span>'
-                        f'</div>'
+                        f"</div>"
                     )
-                html_parts.append('</div>')
+                html_parts.append("</div>")
 
                 # Right side (modified)
                 html_parts.append('<div class="diff-side diff-side-right">')
@@ -3735,17 +3474,17 @@ class ChadWebUI:
                         f'<div class="diff-line {line_type}">'
                         f'<span class="diff-line-no">{line_no_str}</span>'
                         f'<span class="diff-line-content">{content_escaped}</span>'
-                        f'</div>'
+                        f"</div>"
                     )
-                html_parts.append('</div>')
+                html_parts.append("</div>")
 
-                html_parts.append('</div>')  # diff-comparison
-                html_parts.append('</div>')  # diff-hunk
+                html_parts.append("</div>")  # diff-comparison
+                html_parts.append("</div>")  # diff-hunk
 
-            html_parts.append('</div>')  # diff-file
+            html_parts.append("</div>")  # diff-file
 
-        html_parts.append('</div>')  # diff-viewer
-        return '\n'.join(html_parts)
+        html_parts.append("</div>")  # diff-viewer
+        return "\n".join(html_parts)
 
     def resolve_all_conflicts(
         self, session_id: str, use_incoming: bool
@@ -3753,10 +3492,7 @@ class ChadWebUI:
         """Resolve all conflicts by choosing all original or all incoming."""
         session = self.get_session(session_id)
         if not session.project_path:
-            return (
-                gr.update(), gr.update(), gr.update(visible=False),
-                gr.update(), gr.update()
-            )
+            return (gr.update(), gr.update(), gr.update(visible=False), gr.update(), gr.update())
 
         git_mgr = GitWorktreeManager(Path(session.project_path))
         git_mgr.resolve_all_conflicts(use_incoming)
@@ -3784,16 +3520,11 @@ class ChadWebUI:
                 gr.update(),
             )
 
-    def abort_merge_action(
-        self, session_id: str
-    ) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update]:
+    def abort_merge_action(self, session_id: str) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update]:
         """Abort an in-progress merge."""
         session = self.get_session(session_id)
         if not session.project_path:
-            return (
-                gr.update(), gr.update(), gr.update(visible=False),
-                gr.update(), gr.update()
-            )
+            return (gr.update(), gr.update(), gr.update(visible=False), gr.update(), gr.update())
 
         git_mgr = GitWorktreeManager(Path(session.project_path))
         git_mgr.abort_merge()
@@ -3810,9 +3541,7 @@ class ChadWebUI:
             gr.update(),
         )
 
-    def discard_worktree_changes(
-        self, session_id: str
-    ) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update]:
+    def discard_worktree_changes(self, session_id: str) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update]:
         """Discard worktree and all changes."""
         session = self.get_session(session_id)
         if session.worktree_path and session.project_path:
@@ -3852,9 +3581,7 @@ class ChadWebUI:
                 continue
 
             if role == "user" and content.startswith("**Task**"):
-                context_parts.append(
-                    f"**Original Task:**\n{content.replace('**Task**', '').strip()}\n"
-                )
+                context_parts.append(f"**Original Task:**\n{content.replace('**Task**', '').strip()}\n")
             elif role == "assistant" and "CODING AI" in content:
                 # Summarize the response (first 500 chars)
                 summary = content.replace("**CODING AI**", "").strip()[:500]
@@ -3864,9 +3591,7 @@ class ChadWebUI:
 
         return "\n".join(context_parts)
 
-    def _update_session_log(
-        self, session: Session, chat_history: list, streaming_history: list = None
-    ):
+    def _update_session_log(self, session: Session, chat_history: list, streaming_history: list = None):
         """Update the session log with current state.
 
         Args:
@@ -3875,9 +3600,7 @@ class ChadWebUI:
             streaming_history: Optional streaming transcript chunks
         """
         if session.log_path:
-            streaming_transcript = (
-                "".join(streaming_history) if streaming_history else None
-            )
+            streaming_transcript = "".join(streaming_history) if streaming_history else None
             self.session_logger.update_log(
                 session.log_path,
                 chat_history,
@@ -3901,9 +3624,7 @@ class ChadWebUI:
         initial_coding = role_assignments.get("CODING", "")
 
         # Auto-select first provider if no coding agent is assigned
-        if (
-            not initial_coding or initial_coding not in account_choices
-        ) and account_choices:
+        if (not initial_coding or initial_coding not in account_choices) and account_choices:
             initial_coding = account_choices[0]
             # Persist the auto-selection
             try:
@@ -3916,43 +3637,25 @@ class ChadWebUI:
 
         verification_choices = [self.SAME_AS_CODING] + account_choices
         stored_verification = self.security_mgr.get_verification_agent()
-        initial_verification = (
-            stored_verification
-            if stored_verification in account_choices
-            else self.SAME_AS_CODING
-        )
+        initial_verification = stored_verification if stored_verification in account_choices else self.SAME_AS_CODING
 
         # Get initial model/reasoning choices for coding agent
-        coding_model_choices = (
-            self.get_models_for_account(initial_coding)
-            if initial_coding
-            else ["default"]
-        )
+        coding_model_choices = self.get_models_for_account(initial_coding) if initial_coding else ["default"]
         if not coding_model_choices:
             coding_model_choices = ["default"]
-        stored_coding_model = (
-            self.security_mgr.get_account_model(initial_coding)
-            if initial_coding
-            else "default"
-        )
+        stored_coding_model = self.security_mgr.get_account_model(initial_coding) if initial_coding else "default"
         coding_model_value = (
-            stored_coding_model
-            if stored_coding_model in coding_model_choices
-            else coding_model_choices[0]
+            stored_coding_model if stored_coding_model in coding_model_choices else coding_model_choices[0]
         )
 
         coding_provider_type = accounts_map.get(initial_coding, "")
         coding_reasoning_choices = (
-            self.get_reasoning_choices(coding_provider_type, initial_coding)
-            if coding_provider_type
-            else ["default"]
+            self.get_reasoning_choices(coding_provider_type, initial_coding) if coding_provider_type else ["default"]
         )
         if not coding_reasoning_choices:
             coding_reasoning_choices = ["default"]
         stored_coding_reasoning = (
-            self.security_mgr.get_account_reasoning(initial_coding)
-            if initial_coding
-            else "default"
+            self.security_mgr.get_account_reasoning(initial_coding) if initial_coding else "default"
         )
         coding_reasoning_value = (
             stored_coding_reasoning
@@ -3994,9 +3697,7 @@ class ChadWebUI:
                             )
                             log_path = session.log_path
                             session_log_btn = gr.DownloadButton(
-                                label="Session Log"
-                                if not log_path
-                                else f"📄 {log_path.name}",
+                                label="Session Log" if not log_path else f"📄 {log_path.name}",
                                 value=str(log_path) if log_path else None,
                                 visible=log_path is not None,
                                 variant="secondary",
@@ -4024,9 +3725,7 @@ class ChadWebUI:
                             scale=1,
                             min_width=200,
                             key=f"coding-model-{session_id}",
-                            interactive=bool(
-                                initial_coding and initial_coding in account_choices
-                            ),
+                            interactive=bool(initial_coding and initial_coding in account_choices),
                         )
                         coding_reasoning = gr.Dropdown(
                             choices=coding_reasoning_choices,
@@ -4036,9 +3735,7 @@ class ChadWebUI:
                             scale=1,
                             min_width=200,
                             key=f"coding-reasoning-{session_id}",
-                            interactive=bool(
-                                initial_coding and initial_coding in account_choices
-                            ),
+                            interactive=bool(initial_coding and initial_coding in account_choices),
                         )
                     with gr.Column(scale=1, min_width=200):
                         verification_agent = gr.Dropdown(
@@ -4114,10 +3811,7 @@ class ChadWebUI:
             )
 
         # Live activity stream - below agent communication
-        live_stream = gr.Markdown(
-            "",
-            elem_id="live-stream-box" if is_first else None
-        )
+        live_stream = gr.Markdown("", elem_id="live-stream-box" if is_first else None)
 
         with gr.Row(visible=False, key=f"followup-row-{session_id}") as followup_row:
             followup_input = gr.TextArea(
@@ -4230,9 +3924,7 @@ class ChadWebUI:
         def cancel_wrapper():
             return self.cancel_task(session_id)
 
-        def followup_wrapper(
-            msg, history, coding, verification, c_model, c_reason, v_model, v_reason
-        ):
+        def followup_wrapper(msg, history, coding, verification, c_model, c_reason, v_model, v_reason):
             yield from self.send_followup(
                 session_id,
                 msg,
@@ -4380,9 +4072,7 @@ class ChadWebUI:
         )
 
         # Handler for coding agent selection change
-        def on_coding_agent_change(
-            selected_account, verification_value, current_verif_model, current_verif_reasoning
-        ):
+        def on_coding_agent_change(selected_account, verification_value, current_verif_model, current_verif_reasoning):
             """Update role assignment, status, and dropdowns when coding agent changes."""
             if not selected_account:
                 verif_model_update, verif_reasoning_update = verification_dropdown_updates(
@@ -4416,29 +4106,17 @@ class ChadWebUI:
             model_choices = self.get_models_for_account(selected_account)
             if not model_choices:
                 model_choices = ["default"]
-            stored_model = (
-                self.security_mgr.get_account_model(selected_account) or "default"
-            )
-            model_value = (
-                stored_model if stored_model in model_choices else model_choices[0]
-            )
+            stored_model = self.security_mgr.get_account_model(selected_account) or "default"
+            model_value = stored_model if stored_model in model_choices else model_choices[0]
 
             # Get reasoning choices
             accounts = self.security_mgr.list_accounts()
             provider_type = accounts.get(selected_account, "")
-            reasoning_choices = self.get_reasoning_choices(
-                provider_type, selected_account
-            )
+            reasoning_choices = self.get_reasoning_choices(provider_type, selected_account)
             if not reasoning_choices:
                 reasoning_choices = ["default"]
-            stored_reasoning = (
-                self.security_mgr.get_account_reasoning(selected_account) or "default"
-            )
-            reasoning_value = (
-                stored_reasoning
-                if stored_reasoning in reasoning_choices
-                else reasoning_choices[0]
-            )
+            stored_reasoning = self.security_mgr.get_account_reasoning(selected_account) or "default"
+            reasoning_value = stored_reasoning if stored_reasoning in reasoning_choices else reasoning_choices[0]
 
             verif_model_update, verif_reasoning_update = verification_dropdown_updates(
                 selected_account,
@@ -4453,9 +4131,7 @@ class ChadWebUI:
                 gr.update(value=status_text),
                 gr.update(interactive=is_ready),
                 gr.update(choices=model_choices, value=model_value, interactive=True),
-                gr.update(
-                    choices=reasoning_choices, value=reasoning_value, interactive=True
-                ),
+                gr.update(choices=reasoning_choices, value=reasoning_value, interactive=True),
                 verif_model_update,
                 verif_reasoning_update,
             )
@@ -4464,8 +4140,12 @@ class ChadWebUI:
             on_coding_agent_change,
             inputs=[coding_agent, verification_agent, verification_model, verification_reasoning],
             outputs=[
-                role_status, start_btn, coding_model, coding_reasoning,
-                verification_model, verification_reasoning
+                role_status,
+                start_btn,
+                coding_model,
+                coding_reasoning,
+                verification_model,
+                verification_reasoning,
             ],
         )
 
@@ -4581,9 +4261,7 @@ class ChadWebUI:
                 if idx < len(account_items):
                     account_name, provider_type = account_items[idx]
                     visible = True
-                    header_text = self.provider_ui.format_provider_header(
-                        account_name, provider_type, idx
-                    )
+                    header_text = self.provider_ui.format_provider_header(account_name, provider_type, idx)
                     usage_text = self.get_provider_usage(account_name)
                 else:
                     account_name = ""
@@ -4591,20 +4269,12 @@ class ChadWebUI:
                     header_text = ""
                     usage_text = ""
 
-                card_group_classes = (
-                    ["provider-card"]
-                    if visible
-                    else ["provider-card", "provider-card-empty"]
-                )
+                card_group_classes = ["provider-card"] if visible else ["provider-card", "provider-card-empty"]
                 with gr.Column(visible=True, scale=1) as card_column:
                     card_elem_id = f"provider-card-{idx}"
-                    with gr.Group(
-                        elem_id=card_elem_id, elem_classes=card_group_classes
-                    ) as card_group:
+                    with gr.Group(elem_id=card_elem_id, elem_classes=card_group_classes) as card_group:
                         with gr.Row(elem_classes=["provider-card__header-row"]):
-                            card_header = gr.Markdown(
-                                header_text, elem_classes=["provider-card__header"]
-                            )
+                            card_header = gr.Markdown(header_text, elem_classes=["provider-card__header"])
                             delete_btn = gr.Button(
                                 "🗑︎",
                                 variant="secondary",
@@ -4615,9 +4285,7 @@ class ChadWebUI:
                             )
                         account_state = gr.State(account_name)
                         gr.Markdown("Usage", elem_classes=["provider-usage-title"])
-                        usage_box = gr.Markdown(
-                            usage_text, elem_classes=["provider-usage"]
-                        )
+                        usage_box = gr.Markdown(usage_text, elem_classes=["provider-usage"])
 
                 provider_cards.append(
                     {
@@ -4637,12 +4305,8 @@ class ChadWebUI:
             elem_id="add-provider-panel",
             elem_classes=["add-provider-accordion"],
         ) as add_provider_accordion:
-            gr.Markdown(
-                "Click to add another provider. Close the accordion to retract without adding."
-            )
-            new_provider_name = gr.Textbox(
-                label="Provider Name", placeholder="e.g., work-claude"
-            )
+            gr.Markdown("Click to add another provider. Close the accordion to retract without adding.")
+            new_provider_name = gr.Textbox(label="Provider Name", placeholder="e.g., work-claude")
             new_provider_type = gr.Dropdown(
                 choices=["anthropic", "openai", "gemini", "mistral"],
                 label="Provider Type",
@@ -4685,8 +4349,7 @@ class ChadWebUI:
         add_btn.click(
             add_provider_handler,
             inputs=[new_provider_name, new_provider_type],
-            outputs=provider_outputs
-            + [new_provider_name, add_btn, add_provider_accordion],
+            outputs=provider_outputs + [new_provider_name, add_btn, add_provider_accordion],
         )
 
         for card in provider_cards:
@@ -4755,9 +4418,7 @@ class ChadWebUI:
                 for i in range(MAX_TASKS):
                     tab_id = i + 1  # Providers is 0, tasks start at 1
                     is_visible = i == 0  # Only Task 1 visible initially
-                    with gr.Tab(
-                        f"Task {i + 1}", id=tab_id, visible=is_visible
-                    ) as task_tab:
+                    with gr.Tab(f"Task {i + 1}", id=tab_id, visible=is_visible) as task_tab:
                         self._create_session_ui(all_sessions[i].id, is_first=(i == 0))
                     task_tabs.append(task_tab)
 
@@ -4775,9 +4436,7 @@ class ChadWebUI:
             def on_add_task_click(current_count):
                 if current_count >= MAX_TASKS:
                     # At max, switch back to last task tab
-                    return [gr.Tabs(selected=MAX_TASKS), current_count] + [
-                        gr.update() for _ in range(MAX_TASKS)
-                    ]
+                    return [gr.Tabs(selected=MAX_TASKS), current_count] + [gr.update() for _ in range(MAX_TASKS)]
 
                 # Create new task: increment count, show new tab, switch to it
                 new_count = current_count + 1
@@ -4847,9 +4506,7 @@ def launch_web_ui(password: str = None, port: int = 7860) -> tuple[None, int]:
     port, ephemeral, conflicted = _resolve_port(port)
     open_browser = not (requested_port == 0 and ephemeral)
     if conflicted:
-        print(
-            f"Port {requested_port} already in use; launching on ephemeral port {port}"
-        )
+        print(f"Port {requested_port} already in use; launching on ephemeral port {port}")
 
     print("\n" + "=" * 70)
     print("CHAD WEB UI")

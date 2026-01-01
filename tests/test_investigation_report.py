@@ -46,8 +46,7 @@ class TestHypotheses:
 
     def test_add_hypothesis(self, tracker):
         hypothesis_id = tracker.add_hypothesis(
-            "The CSS is not being applied",
-            ["Element has correct class", "Stylesheet is loaded"]
+            "The CSS is not being applied", ["Element has correct class", "Stylesheet is loaded"]
         )
         assert hypothesis_id == 1
         assert len(tracker._data["hypotheses"]) == 1
@@ -216,6 +215,7 @@ class TestPersistence:
 
     def test_updated_at_changes(self, tracker):
         import time
+
         original = tracker._data["updated_at"]
         time.sleep(0.01)
         tracker.add_hypothesis("New", ["Check"])
