@@ -461,7 +461,9 @@ def get_provider_names(page: "Page") -> list[str]:
     names = page.evaluate(
         """
 () => {
-  const headers = document.querySelectorAll('.provider-card__header-text');
+  const headers = document.querySelectorAll(
+    '.provider-card__header-text, .provider-card__header-text-secondary'
+  );
   const visibleNames = [];
   for (const header of headers) {
     // Check if the header is visible
@@ -517,7 +519,9 @@ def get_card_visibility_debug(page: "Page") -> list[dict]:
     const headerRow = group.querySelector('.provider-card__header-row');
     if (!headerRow) continue;
 
-    const headerText = group.querySelector('.provider-card__header-text');
+    const headerText = group.querySelector(
+      '.provider-card__header-text, .provider-card__header-text-secondary'
+    );
     const header = headerText ? headerText.textContent.trim() : '';
 
     // Get group's computed style
@@ -583,7 +587,9 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
     first_click = page.evaluate(
         """
 (providerName) => {
-  const headers = document.querySelectorAll('.provider-card__header-text');
+  const headers = document.querySelectorAll(
+    '.provider-card__header-text, .provider-card__header-text-secondary'
+  );
   for (const header of headers) {
     const text = header.textContent || '';
     if (text.includes(providerName)) {
