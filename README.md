@@ -29,19 +29,19 @@ chad
 <details open>
 <summary><b>Screenshots</b></summary>
 
-#### Select a task and agent
+#### Select coding and verification agents for a task
 <img src="docs/screenshot-task-input.png" width="800" alt="Task input panel">
 
 #### Monitor multiple provider accounts with usage tracking
 <img src="docs/screenshot-providers.png" width="800" alt="Providers tab">
 
-#### View completed tasks with verification results and live activity
+#### View task details
 <img src="docs/screenshot-conversation.png" width="800" alt="Completed task conversation">
 
 #### Run multiple tasks in parallel
 <img src="docs/screenshot-task-tabs.png" width="800" alt="Multiple task tabs">
 
-#### Resolve merge conflicts with side-by-side diff view
+#### Resolve merge conflicts
 <img src="docs/screenshot-merge-conflicts.png" width="800" alt="Merge conflict resolution">
 
 </details>

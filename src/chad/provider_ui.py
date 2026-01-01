@@ -48,16 +48,36 @@ class ProviderUIManager:
         """Return provider account items for card display."""
         accounts = self.security_mgr.list_accounts()
         account_items = list(accounts.items())
+
+        # In screenshot mode, ensure deterministic ordering for tests
         if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
-            preferred = ["codex-work", "codex-personal", "gemini-advanced", "vibe-pro"]
-            ordered: list[tuple[str, str]] = []
-            for name in preferred:
-                if name in accounts:
-                    ordered.append((name, accounts[name]))
+            # Use the same order as defined in MOCK_ACCOUNTS for consistency
+            try:
+                from .screenshot_fixtures import MOCK_ACCOUNTS
+            except ImportError:
+                from chad.screenshot_fixtures import MOCK_ACCOUNTS
+            screenshot_order = []
+            other_accounts = []
+
+            # First add accounts in the same order as MOCK_ACCOUNTS
+            for mock_name in MOCK_ACCOUNTS.keys():
+                for name, provider in account_items:
+                    if name == mock_name:
+                        screenshot_order.append((name, provider))
+                        break
+
+            # Add any additional accounts not in MOCK_ACCOUNTS
+            mock_names = set(MOCK_ACCOUNTS.keys())
             for name, provider in account_items:
-                if (name, provider) not in ordered:
-                    ordered.append((name, provider))
-            account_items = ordered
+                if name not in mock_names:
+                    other_accounts.append((name, provider))
+
+            account_items = screenshot_order + other_accounts
+
+            # Apply the duplication logic for visual testing
+            if len(account_items) >= 3:
+                account_items = account_items[:3] + [account_items[1]] + account_items[3:]
+
         return account_items
 
     def format_provider_header(self, account_name: str, provider: str, idx: int) -> str:
