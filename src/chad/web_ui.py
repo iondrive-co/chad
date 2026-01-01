@@ -1516,6 +1516,37 @@ def normalize_live_stream_spacing(content: str) -> str:
     return "\n".join(lines)
 
 
+class LiveStreamDisplayBuffer:
+    """Rolling buffer for live stream display content."""
+
+    def __init__(self, max_chars: int = 50000) -> None:
+        self.max_chars = max_chars
+        self.content = ""
+
+    def append(self, chunk: str) -> None:
+        if not chunk:
+            return
+        self.content += chunk
+        if len(self.content) > self.max_chars:
+            self.content = self.content[-self.max_chars :]
+
+
+class LiveStreamRenderState:
+    """Track live stream rendering to prevent duplicate updates."""
+
+    def __init__(self) -> None:
+        self.last_rendered_stream = ""
+
+    def reset(self) -> None:
+        self.last_rendered_stream = ""
+
+    def should_render(self, rendered_stream: str) -> bool:
+        return rendered_stream != self.last_rendered_stream
+
+    def record(self, rendered_stream: str) -> None:
+        self.last_rendered_stream = rendered_stream
+
+
 def highlight_code_syntax(html_content: str) -> str:
     """Apply syntax highlighting to code blocks in HTML content.
 
@@ -2421,20 +2452,11 @@ class ChadWebUI:
             last_activity = ""
             streaming_buffer = ""
             full_history = []  # Infinite history - list of (ai_name, content) tuples
+            display_buffer = LiveStreamDisplayBuffer()
             last_yield_time = 0.0
             min_yield_interval = 0.05
             pending_message_idx = None
-
-            def get_display_content() -> str:
-                if not full_history:
-                    return ""
-                combined = []
-                for _, chunk in full_history:
-                    combined.append(chunk)
-                full_content = "".join(combined)
-                if len(full_content) > 50000:
-                    return full_content[-50000:]
-                return full_content
+            render_state = LiveStreamRenderState()
 
             while not relay_complete.is_set() and not session.cancel_requested:
                 try:
@@ -2447,6 +2469,7 @@ class ChadWebUI:
                         streaming_buffer = ""
                         last_activity = ""
                         current_live_stream = ""
+                        render_state.reset()
                         yield make_yield(chat_history, current_status, current_live_stream)
                         last_yield_time = time_module.time()
 
@@ -2461,6 +2484,7 @@ class ChadWebUI:
                         streaming_buffer = ""
                         last_activity = ""
                         current_live_stream = ""
+                        render_state.reset()
                         yield make_yield(chat_history, current_status, current_live_stream)
                         last_yield_time = time_module.time()
 
@@ -2474,6 +2498,7 @@ class ChadWebUI:
                         streaming_buffer = ""
                         last_activity = ""
                         current_live_stream = ""
+                        render_state.reset()
                         self.session_logger.update_log(session.log_path, chat_history)
                         yield make_yield(chat_history, current_status, current_live_stream)
                         last_yield_time = time_module.time()
@@ -2482,6 +2507,7 @@ class ChadWebUI:
                         current_status = f"{status_prefix}{msg[1]}"
                         streaming_buffer = ""
                         current_live_stream = ""
+                        render_state.reset()
                         summary_text = current_status
                         yield make_yield(
                             chat_history,
@@ -2495,42 +2521,55 @@ class ChadWebUI:
                         current_ai = msg[1]
                         streaming_buffer = ""
                         full_history.append((current_ai, "Processing request\n"))
+                        display_buffer.append("Processing request\n")
 
                     elif msg_type == "stream":
                         chunk = msg[1]
                         if chunk.strip():
                             streaming_buffer += chunk
                             full_history.append((current_ai, chunk))
+                            display_buffer.append(chunk)
                             now = time_module.time()
                             if now - last_yield_time >= min_yield_interval:
-                                display_content = get_display_content()
-                                current_live_stream = build_live_stream_html(display_content, current_ai)
-                                yield make_yield(chat_history, current_status, current_live_stream)
-                                last_yield_time = now
+                                display_content = display_buffer.content
+                                rendered_stream = build_live_stream_html(display_content, current_ai)
+                                if render_state.should_render(rendered_stream):
+                                    current_live_stream = rendered_stream
+                                    yield make_yield(chat_history, current_status, current_live_stream)
+                                    render_state.record(rendered_stream)
+                                    last_yield_time = now
 
                     elif msg_type == "activity":
                         last_activity = msg[1]
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
-                            display_content = get_display_content()
+                            display_content = display_buffer.content
                             if display_content:
                                 content = display_content + f"\n\n{last_activity}"
-                                current_live_stream = build_live_stream_html(content, current_ai)
+                                rendered_stream = build_live_stream_html(content, current_ai)
                             else:
-                                current_live_stream = f"**Live:** {last_activity}"
-                            yield make_yield(chat_history, current_status, current_live_stream)
-                            last_yield_time = now
+                                rendered_stream = f"**Live:** {last_activity}"
+                            if render_state.should_render(rendered_stream):
+                                current_live_stream = rendered_stream
+                                yield make_yield(chat_history, current_status, current_live_stream)
+                                render_state.record(rendered_stream)
+                                last_yield_time = now
 
                 except queue.Empty:
                     now = time_module.time()
                     if now - last_yield_time >= 0.3:
-                        display_content = get_display_content()
+                        display_content = display_buffer.content
                         if display_content:
-                            current_live_stream = build_live_stream_html(display_content, current_ai)
+                            rendered_stream = build_live_stream_html(display_content, current_ai)
                         elif last_activity:
-                            current_live_stream = f"**Live:** {last_activity}"
-                        yield make_yield(chat_history, current_status, current_live_stream)
-                        last_yield_time = now
+                            rendered_stream = f"**Live:** {last_activity}"
+                        else:
+                            rendered_stream = ""
+                        if render_state.should_render(rendered_stream):
+                            current_live_stream = rendered_stream
+                            yield make_yield(chat_history, current_status, current_live_stream)
+                            render_state.record(rendered_stream)
+                            last_yield_time = now
 
             if session.cancel_requested:
                 for idx in range(len(chat_history) - 1, -1, -1):
@@ -3067,8 +3106,10 @@ class ChadWebUI:
         import time as time_module
 
         full_history = []
+        display_buffer = LiveStreamDisplayBuffer()
         last_yield_time = 0.0
         min_yield_interval = 0.05
+        render_state = LiveStreamRenderState()
 
         while not relay_complete.is_set() and not session.cancel_requested:
             try:
@@ -3079,34 +3120,41 @@ class ChadWebUI:
                     chunk = msg[1]
                     if chunk.strip():
                         full_history.append(chunk)
+                        display_buffer.append(chunk)
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
-                            display_content = "".join(full_history)
-                            if len(display_content) > 50000:
-                                display_content = display_content[-50000:]
+                            display_content = display_buffer.content
                             live_stream = build_live_stream_html(display_content)
-                            yield make_followup_yield(chat_history, live_stream, working=True)
-                            last_yield_time = now
+                            if render_state.should_render(live_stream):
+                                yield make_followup_yield(chat_history, live_stream, working=True)
+                                render_state.record(live_stream)
+                                last_yield_time = now
 
                 elif msg_type == "activity":
                     now = time_module.time()
                     if now - last_yield_time >= min_yield_interval:
-                        display_content = "".join(full_history)
+                        display_content = display_buffer.content
                         if display_content:
                             content = display_content + f"\n\n{msg[1]}"
                             live_stream = build_live_stream_html(content)
                         else:
                             live_stream = f"**Live:** {msg[1]}"
-                        yield make_followup_yield(chat_history, live_stream, working=True)
-                        last_yield_time = now
+                        if render_state.should_render(live_stream):
+                            yield make_followup_yield(chat_history, live_stream, working=True)
+                            render_state.record(live_stream)
+                            last_yield_time = now
 
             except queue.Empty:
                 now = time_module.time()
                 if now - last_yield_time >= 0.3:
-                    display_content = "".join(full_history)
+                    display_content = display_buffer.content
                     if display_content:
                         live_stream = build_live_stream_html(display_content)
+                    else:
+                        live_stream = ""
+                    if render_state.should_render(live_stream):
                         yield make_followup_yield(chat_history, live_stream, working=True)
+                        render_state.record(live_stream)
                         last_yield_time = now
 
         relay_thread.join(timeout=1)

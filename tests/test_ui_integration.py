@@ -252,6 +252,7 @@ class TestCodingAgentLayout:
 
     def test_cancel_button_visible_light_and_dark(self, page: Page):
         """Cancel button should stay visible in both color schemes."""
+        page.wait_for_selector("#cancel-task-btn", state="attached")
         measurements = {}
         for scheme in ("light", "dark"):
             page.emulate_media(color_scheme=scheme)
