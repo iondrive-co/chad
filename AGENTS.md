@@ -41,6 +41,8 @@ Follow this MCP workflow for every task:
 2. For UI changes add any new display functionality to `visual_test_map.py`.
 3. As each check outcome is known, file it immediately with `check_result(tracker_id, hypothesis_id, check_index, passed, notes?)`.
 4. Iterate on hypotheses and keep the work focused on the happy path; refine checks when new evidence appears.
+- Start new trackers with `hypothesis(description, checks)`; omit `tracker_id` unless you are resuming an existing tracker (empty/None will create a new tracker).
+- Prefer MCP code-mode wrappers when available to keep tool definitions/results out of context. See `src/chad/mcp_code_mode/servers/chad_ui_playwright/` for callable wrappers like `verify()`, `record_hypothesis(...)`, and `file_check_result(...)`.
 
 ## After making changes
 
@@ -58,12 +60,14 @@ Run lint + all tests. Required once per task.
 ```
 mcp__chad-ui-playwright__verify()
 ```
+- Code-mode alternative: `from chad.mcp_code_mode.servers.chad_ui_playwright import verify`
 
 ### screenshot
 Capture UI tab or specific component. Use for before/after visual verification.
 ```
 mcp__chad-ui-playwright__screenshot(tab, component?, label?)
 ```
+- Code-mode alternative: `from chad.mcp_code_mode.servers.chad_ui_playwright import screenshot`
 
 **Parameters:**
 - `tab`: "run" or "providers"
@@ -94,18 +98,21 @@ Record hypotheses with binary rejection checks.
 ```
 mcp__chad-ui-playwright__hypothesis(description, checks, tracker_id?)
 ```
+- Code-mode alternative: `from chad.mcp_code_mode.servers.chad_ui_playwright import record_hypothesis`
 
 ### check_result
 File pass/fail for each check.
 ```
 mcp__chad-ui-playwright__check_result(tracker_id, hypothesis_id, check_index, passed, notes?)
 ```
+- Code-mode alternative: `from chad.mcp_code_mode.servers.chad_ui_playwright import file_check_result`
 
 ### report
 Get final summary with all hypotheses and results.
 ```
 mcp__chad-ui-playwright__report(tracker_id, screenshot_before?, screenshot_after?)
 ```
+- Code-mode alternative: `from chad.mcp_code_mode.servers.chad_ui_playwright import report`
 
 ### list_tools
 List available MCP tools and their purposes.
@@ -164,6 +171,7 @@ src/chad/
 ├── security.py       # Password hashing, API key encryption
 ├── session_logger.py # Session log management
 ├── web_ui.py         # Gradio web interface
+├── mcp_code_mode/    # Code-mode wrappers for MCP tools (reduces prompt context)
 ├── mcp_playwright.py # MCP tools (verify, screenshot, hypothesis)
 └── model_catalog.py  # Model discovery per provider
 ```
