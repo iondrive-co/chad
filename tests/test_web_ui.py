@@ -649,6 +649,80 @@ class TestChadWebUITaskExecution:
         last_history = results[-1][0]
         assert any("Error:" in msg.get("content", "") for msg in last_history)
 
+    def test_verification_banner_yields_before_result(self, monkeypatch, tmp_path, git_repo):
+        """Verification banner should render immediately before verification finishes."""
+        from chad import web_ui
+
+        security_mgr = Mock()
+        security_mgr.list_accounts.return_value = {"claude": "anthropic"}
+        security_mgr.list_role_assignments.return_value = {"CODING": "claude"}
+        security_mgr.get_account_model.return_value = "default"
+        security_mgr.get_account_reasoning.return_value = "default"
+
+        class StubProvider:
+            def __init__(self):
+                self.stopped = False
+
+            def set_activity_callback(self, cb):
+                self.cb = cb
+
+            def start_session(self, project_path, context):
+                return True
+
+            def send_message(self, message):
+                return None
+
+            def get_response(self, timeout=None):
+                return "codex\nok"
+
+            def stop_session(self):
+                self.stopped = True
+
+            def supports_multi_turn(self):
+                return True
+
+            def is_alive(self):
+                return not self.stopped
+
+        monkeypatch.setattr(web_ui, "create_provider", lambda config: StubProvider())
+        monkeypatch.setattr(web_ui.ChadWebUI, "_run_verification", lambda *args, **kwargs: (True, "verified"))
+
+        ui = web_ui.ChadWebUI(security_mgr, "test-password")
+        ui.session_logger.base_dir = tmp_path
+
+        session = ui.create_session("test")
+        updates = []
+        for update in ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
+            history_snapshot = [msg.copy() if isinstance(msg, dict) else msg for msg in update[0]]
+            updates.append((history_snapshot, *update[1:]))
+
+        def find_first(predicate):
+            for idx, update in enumerate(updates):
+                history = update[0]
+                contents = [msg.get("content", "") for msg in history if isinstance(msg, dict)]
+                if any(predicate(content) for content in contents):
+                    return idx
+            return None
+
+        def find_banner_without_result():
+            for idx, update in enumerate(updates):
+                history = update[0]
+                contents = [msg.get("content", "") for msg in history if isinstance(msg, dict)]
+                if any("VERIFICATION (Attempt 1)" in content for content in contents) and not any(
+                    marker in content
+                    for content in contents
+                    for marker in ("VERIFICATION AI", "VERIFICATION PASSED", "VERIFICATION ERROR")
+                ):
+                    return idx
+            return None
+
+        banner_only_idx = find_banner_without_result()
+        result_idx = find_first(lambda content: "VERIFICATION AI" in content or "VERIFICATION PASSED" in content)
+
+        assert banner_only_idx is not None
+        assert result_idx is not None
+        assert banner_only_idx < result_idx
+
     def test_followup_revision_runtime_error_handled(self, monkeypatch, tmp_path):
         """Follow-up revisions should surface RuntimeError without crashing."""
         from chad import web_ui
@@ -699,6 +773,92 @@ class TestChadWebUITaskExecution:
         results = list(ui.send_followup(session.id, "follow up", [], "claude", web_ui.ChadWebUI.SAME_AS_CODING))
         last_history = results[-1][0]
         assert any("Error:" in msg.get("content", "") for msg in last_history)
+
+    def test_followup_verification_banner_yields_before_result(self, monkeypatch, tmp_path, git_repo):
+        """Follow-up verification banner should appear before results stream back."""
+        from chad import web_ui
+        from chad.providers import ModelConfig
+
+        security_mgr = Mock()
+        security_mgr.list_accounts.return_value = {"claude": "anthropic"}
+        security_mgr.list_role_assignments.return_value = {"CODING": "claude"}
+        security_mgr.get_account_model.return_value = "default"
+        security_mgr.get_account_reasoning.return_value = "default"
+
+        class StubProvider:
+            def __init__(self):
+                self.stopped = False
+
+            def set_activity_callback(self, cb):
+                self.cb = cb
+
+            def send_message(self, message):
+                return None
+
+            def get_response(self, timeout=None):
+                return "codex\nok"
+
+            def stop_session(self):
+                self.stopped = True
+
+            def supports_multi_turn(self):
+                return True
+
+            def is_alive(self):
+                return not self.stopped
+
+        monkeypatch.setattr(web_ui.ChadWebUI, "_run_verification", lambda *args, **kwargs: (True, "verified"))
+
+        ui = web_ui.ChadWebUI(security_mgr, "test-password")
+        ui.session_logger.base_dir = tmp_path
+
+        session = ui.create_session("test")
+        session.active = True
+        session.provider = StubProvider()
+        session.config = ModelConfig(
+            provider="anthropic", model_name="default", account_name="claude", reasoning_effort=None
+        )
+        session.coding_account = "claude"
+        session.project_path = str(git_repo)
+        session.chat_history = []
+
+        updates = []
+        for update in ui.send_followup(
+            session.id,
+            "follow up",
+            session.chat_history,
+            coding_agent="claude",
+            verification_agent=ui.SAME_AS_CODING,
+        ):
+            history_snapshot = [msg.copy() if isinstance(msg, dict) else msg for msg in update[0]]
+            updates.append((history_snapshot, *update[1:]))
+
+        def find_first(predicate):
+            for idx, update in enumerate(updates):
+                history = update[0]
+                contents = [msg.get("content", "") for msg in history if isinstance(msg, dict)]
+                if any(predicate(content) for content in contents):
+                    return idx
+            return None
+
+        def find_banner_without_result():
+            for idx, update in enumerate(updates):
+                history = update[0]
+                contents = [msg.get("content", "") for msg in history if isinstance(msg, dict)]
+                if any("VERIFICATION (Attempt 1)" in content for content in contents) and not any(
+                    marker in content
+                    for content in contents
+                    for marker in ("VERIFICATION AI", "VERIFICATION PASSED", "VERIFICATION ERROR")
+                ):
+                    return idx
+            return None
+
+        banner_only_idx = find_banner_without_result()
+        result_idx = find_first(lambda content: "VERIFICATION AI" in content or "VERIFICATION PASSED" in content)
+
+        assert banner_only_idx is not None
+        assert result_idx is not None
+        assert banner_only_idx < result_idx
 
     def test_followup_restarts_with_updated_preferences(self, tmp_path, monkeypatch, git_repo):
         """Follow-up should honor updated model/reasoning after task completion."""
