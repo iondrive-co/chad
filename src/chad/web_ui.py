@@ -2637,20 +2637,20 @@ class ChadWebUI:
                 ):
                     verification_attempt += 1
 
-                    # Show verification status
-                    verify_status = (
-                        f"{status_prefix}🔍 Running verification "
-                        f"(attempt {verification_attempt}/{max_verification_attempts})..."
-                    )
-                    yield make_yield(chat_history, verify_status, "")
-
-                    # Add verification message to chat
                     chat_history.append(
                         {
                             "role": "user",
                             "content": f"───────────── 🔍 VERIFICATION (Attempt {verification_attempt}) ─────────────",
                         }
                     )
+                    self.session_logger.update_log(session.log_path, chat_history)
+
+                    # Show verification status
+                    verify_status = (
+                        f"{status_prefix}🔍 Running verification "
+                        f"(attempt {verification_attempt}/{max_verification_attempts})..."
+                    )
+                    yield make_yield(chat_history, verify_status, "")
 
                     # Run verification
                     def verification_activity(activity_type: str, detail: str):
@@ -3202,17 +3202,18 @@ class ChadWebUI:
 
             while not verified and verification_attempt < max_verification_attempts and not session.cancel_requested:
                 verification_attempt += 1
-                verify_status = (
-                    f"🔍 Running verification " f"(attempt {verification_attempt}/{max_verification_attempts})..."
-                )
-                yield make_followup_yield(chat_history, verify_status, working=True)
-
                 chat_history.append(
                     {
                         "role": "user",
                         "content": f"───────────── 🔍 VERIFICATION (Attempt {verification_attempt}) ─────────────",
                     }
                 )
+                self._update_session_log(session, chat_history, full_history)
+
+                verify_status = (
+                    f"🔍 Running verification " f"(attempt {verification_attempt}/{max_verification_attempts})..."
+                )
+                yield make_followup_yield(chat_history, verify_status, working=True)
 
                 def verification_activity(activity_type: str, detail: str):
                     pass  # Quiet verification

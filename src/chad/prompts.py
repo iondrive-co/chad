@@ -21,10 +21,9 @@ you understand the issue/current state.
 
 {task}
 ---
-Once you have completed your the above, take an after screenshot if that is supported to confirm that it is fixed/done.
-Run any tests and lint available in the project and fix all issues even if you didn't cause them.
-
-When you are done, end your response with a JSON summary block like this:
+Once you have completed your changes for the task, take an after screenshot if that is supported to confirm that the
+user's request is fixed/done. Run any tests and lint available in the project and fix all issues even if you didn't
+cause them. When you are done, end your response with a JSON summary block like this:
 ```json
 {{"change_summary": "One sentence describing what was changed"}}
 ```
