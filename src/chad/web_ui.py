@@ -448,11 +448,15 @@ body, .gradio-container, .gradio-container * {
   overflow-y: auto;
 }
 
-#live-stream-box {
+#live-stream-box,
+.live-stream-box {
   margin-top: 8px;
+  /* keep position relative for scroll indicator anchoring */
+  position: relative;
 }
 
-#live-stream-box .live-output-header {
+#live-stream-box .live-output-header,
+.live-stream-box .live-output-header {
   background: #2a2a3e;
   color: #a8d4ff;
   padding: 6px 12px;
@@ -463,7 +467,8 @@ body, .gradio-container, .gradio-container * {
   margin: 0;
 }
 
-#live-stream-box .live-output-content {
+#live-stream-box .live-output-content,
+.live-stream-box .live-output-content {
   background: #1e1e2e !important;
   color: #e2e8f0 !important;
   border: 1px solid #555 !important;
@@ -482,15 +487,18 @@ body, .gradio-container, .gradio-container * {
 }
 
 /* Syntax highlighting colors for live stream */
-#live-stream-box .live-output-content .diff-add {
+#live-stream-box .live-output-content .diff-add,
+.live-stream-box .live-output-content .diff-add {
   color: #98c379 !important;
   background: rgba(152, 195, 121, 0.1) !important;
 }
-#live-stream-box .live-output-content .diff-remove {
+#live-stream-box .live-output-content .diff-remove,
+.live-stream-box .live-output-content .diff-remove {
   color: #e06c75 !important;
   background: rgba(224, 108, 117, 0.1) !important;
 }
-#live-stream-box .live-output-content .diff-header {
+#live-stream-box .live-output-content .diff-header,
+.live-stream-box .live-output-content .diff-header {
   color: #61afef !important;
   font-weight: bold;
 }
@@ -507,7 +515,18 @@ body, .gradio-container, .gradio-container * {
 #live-stream-box .live-output-content h3,
 #live-stream-box .live-output-content h4,
 #live-stream-box .live-output-content h5,
-#live-stream-box .live-output-content h6 {
+.live-stream-box h1,
+.live-stream-box h2,
+.live-stream-box h3,
+.live-stream-box h4,
+.live-stream-box h5,
+.live-stream-box h6,
+.live-stream-box .live-output-content h1,
+.live-stream-box .live-output-content h2,
+.live-stream-box .live-output-content h3,
+.live-stream-box .live-output-content h4,
+.live-stream-box .live-output-content h5,
+.live-stream-box .live-output-content h6 {
   font-size: 13px !important;
   font-weight: 600 !important;
   margin: 0 !important;
@@ -522,17 +541,28 @@ body, .gradio-container, .gradio-container * {
 #live-stream-box .md *:not([style*="color"]),
 #live-stream-box p,
 #live-stream-box span:not([style*="color"]),
-#live-stream-box div:not([style*="color"]) {
+#live-stream-box div:not([style*="color"]),
+.live-stream-box .prose,
+.live-stream-box .prose *:not([style*="color"]),
+.live-stream-box .md,
+.live-stream-box .md *:not([style*="color"]),
+.live-stream-box p,
+.live-stream-box span:not([style*="color"]),
+.live-stream-box div:not([style*="color"]) {
   color: #e2e8f0 !important;
 }
 
 /* Ensure live-output-content has light text */
-#live-stream-box .live-output-content {
+#live-stream-box .live-output-content,
+.live-stream-box .live-output-content {
   color: #e2e8f0;
 }
 
 /* Children without inline colors or syntax classes also get light text */
 #live-stream-box .live-output-content *:not([style*="color"]):not(.keyword):not(.string):not(.comment):not(.function)
+:not(.class-name):not(.number):not(.operator):not(.variable):not(.type):not(.module):not(.builtin)
+:not(.method):not(.property):not(.param):not(.constant):not(code),
+.live-stream-box .live-output-content *:not([style*="color"]):not(.keyword):not(.string):not(.comment):not(.function)
 :not(.class-name):not(.number):not(.operator):not(.variable):not(.type):not(.module):not(.builtin)
 :not(.method):not(.property):not(.param):not(.constant):not(code) {
   color: #e2e8f0;
@@ -542,7 +572,11 @@ body, .gradio-container, .gradio-container * {
 #live-stream-box code,
 #live-stream-box .live-output-content code,
 #live-stream-box pre,
-#live-stream-box .live-output-content pre {
+#live-stream-box .live-output-content pre,
+.live-stream-box code,
+.live-stream-box .live-output-content code,
+.live-stream-box pre,
+.live-stream-box .live-output-content pre {
   color: #f0abfc !important;
   background: none !important;
   padding: 0 !important;
@@ -555,49 +589,82 @@ body, .gradio-container, .gradio-container * {
 }
 
 #live-stream-box pre,
-#live-stream-box .live-output-content pre {
+#live-stream-box .live-output-content pre,
+.live-stream-box pre,
+.live-stream-box .live-output-content pre {
   white-space: pre-wrap !important;
   word-break: break-word !important;
 }
 
 /* Syntax highlighting for code blocks - matches common CLI tools */
 #live-stream-box .live-output-content code .keyword,
-#live-stream-box .live-output-content .keyword {
+#live-stream-box .live-output-content .keyword,
+.live-stream-box .live-output-content code .keyword,
+.live-stream-box .live-output-content .keyword {
   color: #c678dd !important; font-weight: 600;
 }  /* Purple for keywords */
 #live-stream-box .live-output-content code .string,
-#live-stream-box .live-output-content .string { color: #98c379 !important; }  /* Green for strings */
+#live-stream-box .live-output-content .string,
+.live-stream-box .live-output-content code .string,
+.live-stream-box .live-output-content .string { color: #98c379 !important; }  /* Green for strings */
 #live-stream-box .live-output-content code .comment,
-#live-stream-box .live-output-content .comment {
+#live-stream-box .live-output-content .comment,
+.live-stream-box .live-output-content code .comment,
+.live-stream-box .live-output-content .comment {
   color: #5c6370 !important; font-style: italic;
 }  /* Grey for comments */
 #live-stream-box .live-output-content code .function,
-#live-stream-box .live-output-content .function { color: #61afef !important; }  /* Blue for functions */
+#live-stream-box .live-output-content .function,
+.live-stream-box .live-output-content code .function,
+.live-stream-box .live-output-content .function { color: #61afef !important; }  /* Blue for functions */
 #live-stream-box .live-output-content code .class-name,
-#live-stream-box .live-output-content .class-name { color: #e5c07b !important; }  /* Yellow for classes */
+#live-stream-box .live-output-content .class-name,
+.live-stream-box .live-output-content code .class-name,
+.live-stream-box .live-output-content .class-name { color: #e5c07b !important; }  /* Yellow for classes */
 #live-stream-box .live-output-content code .number,
-#live-stream-box .live-output-content .number { color: #d19a66 !important; }  /* Orange for numbers */
+#live-stream-box .live-output-content .number,
+.live-stream-box .live-output-content code .number,
+.live-stream-box .live-output-content .number { color: #d19a66 !important; }  /* Orange for numbers */
 #live-stream-box .live-output-content code .operator,
-#live-stream-box .live-output-content .operator { color: #56b6c2 !important; }  /* Cyan for operators */
+#live-stream-box .live-output-content .operator,
+.live-stream-box .live-output-content code .operator,
+.live-stream-box .live-output-content .operator { color: #56b6c2 !important; }  /* Cyan for operators */
 #live-stream-box .live-output-content code .variable,
-#live-stream-box .live-output-content .variable { color: #e06c75 !important; }  /* Red for variables */
+#live-stream-box .live-output-content .variable,
+.live-stream-box .live-output-content code .variable,
+.live-stream-box .live-output-content .variable { color: #e06c75 !important; }  /* Red for variables */
 #live-stream-box .live-output-content code .type,
-#live-stream-box .live-output-content .type { color: #e5c07b !important; }  /* Yellow for types */
+#live-stream-box .live-output-content .type,
+.live-stream-box .live-output-content code .type,
+.live-stream-box .live-output-content .type { color: #e5c07b !important; }  /* Yellow for types */
 #live-stream-box .live-output-content code .module,
-#live-stream-box .live-output-content .module { color: #61afef !important; }  /* Blue for modules */
+#live-stream-box .live-output-content .module,
+.live-stream-box .live-output-content code .module,
+.live-stream-box .live-output-content .module { color: #61afef !important; }  /* Blue for modules */
 #live-stream-box .live-output-content code .builtin,
-#live-stream-box .live-output-content .builtin { color: #56b6c2 !important; }  /* Cyan for builtins */
+#live-stream-box .live-output-content .builtin,
+.live-stream-box .live-output-content code .builtin,
+.live-stream-box .live-output-content .builtin { color: #56b6c2 !important; }  /* Cyan for builtins */
 #live-stream-box .live-output-content code .method,
-#live-stream-box .live-output-content .method { color: #61afef !important; }  /* Blue for methods */
+#live-stream-box .live-output-content .method,
+.live-stream-box .live-output-content code .method,
+.live-stream-box .live-output-content .method { color: #61afef !important; }  /* Blue for methods */
 #live-stream-box .live-output-content code .property,
-#live-stream-box .live-output-content .property { color: #d19a66 !important; }  /* Orange for properties */
+#live-stream-box .live-output-content .property,
+.live-stream-box .live-output-content code .property,
+.live-stream-box .live-output-content .property { color: #d19a66 !important; }  /* Orange for properties */
 #live-stream-box .live-output-content code .param,
-#live-stream-box .live-output-content .param { color: #abb2bf !important; }  /* Light grey for params */
+#live-stream-box .live-output-content .param,
+.live-stream-box .live-output-content code .param,
+.live-stream-box .live-output-content .param { color: #abb2bf !important; }  /* Light grey for params */
 #live-stream-box .live-output-content code .constant,
-#live-stream-box .live-output-content .constant { color: #d19a66 !important; }  /* Orange for constants */
+#live-stream-box .live-output-content .constant,
+.live-stream-box .live-output-content code .constant,
+.live-stream-box .live-output-content .constant { color: #d19a66 !important; }  /* Orange for constants */
 
 /* ANSI colored spans - let them keep their inline colors with brightness boost */
-#live-stream-box .live-output-content span[style*="color"] {
+#live-stream-box .live-output-content span[style*="color"],
+.live-stream-box .live-output-content span[style*="color"] {
   filter: brightness(1.3);
 }
 
@@ -606,7 +673,11 @@ body, .gradio-container, .gradio-container * {
 #live-stream-box .live-output-content span[style*="rgb(92"],
 #live-stream-box .live-output-content span[style*="color:#5c6370"],
 #live-stream-box .live-output-content span[style*="color: #5c6370"],
-#live-stream-box .live-output-content span[style*="#5c6370"] {
+#live-stream-box .live-output-content span[style*="#5c6370"],
+.live-stream-box .live-output-content span[style*="rgb(92"],
+.live-stream-box .live-output-content span[style*="color:#5c6370"],
+.live-stream-box .live-output-content span[style*="color: #5c6370"],
+.live-stream-box .live-output-content span[style*="#5c6370"] {
   color: #9ca3af !important;
   filter: none !important;
 }
@@ -620,12 +691,22 @@ body, .gradio-container, .gradio-container * {
 #live-stream-box .live-output-content span[style*="color: rgb(6"],
 #live-stream-box .live-output-content span[style*="color: rgb(7"],
 #live-stream-box .live-output-content span[style*="color: rgb(8"],
-#live-stream-box .live-output-content span[style*="color: rgb(9"] {
+#live-stream-box .live-output-content span[style*="color: rgb(9"],
+.live-stream-box .live-output-content span[style*="color: rgb(1"],
+.live-stream-box .live-output-content span[style*="color: rgb(2"],
+.live-stream-box .live-output-content span[style*="color: rgb(3"],
+.live-stream-box .live-output-content span[style*="color: rgb(4"],
+.live-stream-box .live-output-content span[style*="color: rgb(5"],
+.live-stream-box .live-output-content span[style*="color: rgb(6"],
+.live-stream-box .live-output-content span[style*="color: rgb(7"],
+.live-stream-box .live-output-content span[style*="color: rgb(8"],
+.live-stream-box .live-output-content span[style*="color: rgb(9"] {
   filter: brightness(1.5) !important;
 }
 
 /* Scroll position indicator */
-#live-stream-box .scroll-indicator {
+#live-stream-box .scroll-indicator,
+.live-stream-box .scroll-indicator {
   position: absolute;
   bottom: 8px;
   right: 20px;
@@ -638,11 +719,9 @@ body, .gradio-container, .gradio-container * {
   z-index: 10;
   display: none;
 }
-#live-stream-box .scroll-indicator:hover {
+#live-stream-box .scroll-indicator:hover,
+.live-stream-box .scroll-indicator:hover {
   background: rgba(97, 175, 239, 1);
-}
-#live-stream-box {
-  position: relative;
 }
 
 /* Role status row: keep status and session log button on one line, aligned with button row below */
@@ -1121,17 +1200,22 @@ function() {
             header.classList.add('provider-card__header-text-secondary');
         });
     }
+    function getLiveStreamBoxes() {
+        return Array.from(document.querySelectorAll('#live-stream-box, .live-stream-box'));
+    }
     function ensureLiveStreamVisible() {
         if (!screenshotMode) return;
-        const liveBox = document.getElementById('live-stream-box');
-        if (!liveBox) return;
-        liveBox.classList.remove('hide-container');
-        liveBox.style.display = 'block';
-        liveBox.style.visibility = 'visible';
-        liveBox.removeAttribute('hidden');
-        if (screenshotLiveViewHtml && !liveBox.querySelector('.live-output-content')) {
-            liveBox.innerHTML = screenshotLiveViewHtml;
-        }
+        const liveBoxes = getLiveStreamBoxes();
+        if (!liveBoxes.length) return;
+        liveBoxes.forEach((liveBox) => {
+            liveBox.classList.remove('hide-container');
+            liveBox.style.display = 'block';
+            liveBox.style.visibility = 'visible';
+            liveBox.removeAttribute('hidden');
+            if (screenshotLiveViewHtml && !liveBox.querySelector('.live-output-content')) {
+                liveBox.innerHTML = screenshotLiveViewHtml;
+            }
+        });
     }
     setInterval(() => {
         normalizeProviderHeaderClasses();
@@ -1143,16 +1227,23 @@ function() {
     setTimeout(ensureLiveStreamVisible, 100);
 
     // Live stream scroll preservation
-    window._liveStreamScroll = window._liveStreamScroll || {
-        userScrolledUp: false,
-        savedScrollTop: 0,
-        lastUserScrollTime: 0,
-        ignoreNextScroll: false
-    };
-    const state = window._liveStreamScroll;
+    window._liveStreamScroll = window._liveStreamScroll || new WeakMap();
+    const scrollStates = window._liveStreamScroll;
 
-    function getScrollContainer() {
-        const liveBox = document.getElementById('live-stream-box');
+    function getScrollState(container) {
+        if (!container) return null;
+        if (!scrollStates.has(container)) {
+            scrollStates.set(container, {
+                userScrolledUp: false,
+                savedScrollTop: 0,
+                lastUserScrollTime: 0,
+                ignoreNextScroll: false
+            });
+        }
+        return scrollStates.get(container);
+    }
+
+    function getScrollContainer(liveBox) {
         if (!liveBox) return null;
         return liveBox.querySelector('.live-output-content') ||
                liveBox.querySelector('[data-testid="markdown"]') ||
@@ -1161,8 +1252,9 @@ function() {
 
     function handleUserScroll(e) {
         const container = e.target;
-        if (!container || state.ignoreNextScroll) {
-            state.ignoreNextScroll = false;
+        const state = getScrollState(container);
+        if (!container || !state || state.ignoreNextScroll) {
+            if (state) state.ignoreNextScroll = false;
             return;
         }
         const now = Date.now();
@@ -1178,7 +1270,8 @@ function() {
     }
 
     function restoreScrollPosition(container) {
-        if (!container) return;
+        const state = getScrollState(container);
+        if (!container || !state) return;
         state.ignoreNextScroll = true;
         requestAnimationFrame(() => {
             if (!state.userScrolledUp) {
@@ -1197,34 +1290,33 @@ function() {
     }
 
     function initScrollTracking() {
-        const liveBox = document.getElementById('live-stream-box');
-        if (!liveBox) {
+        const liveBoxes = getLiveStreamBoxes();
+        if (!liveBoxes.length) {
             setTimeout(initScrollTracking, 200);
             return;
         }
 
-        let lastContainer = null;
-        const observer = new MutationObserver((mutations) => {
-            const container = getScrollContainer();
-            if (!container) return;
-            if (container !== lastContainer) {
-                attachScrollListener(container);
-                lastContainer = container;
-            }
-            restoreScrollPosition(container);
-        });
+        liveBoxes.forEach((liveBox) => {
+            let lastContainer = null;
+            const syncContainer = () => {
+                const container = getScrollContainer(liveBox);
+                if (!container) return;
+                if (container !== lastContainer) {
+                    attachScrollListener(container);
+                    lastContainer = container;
+                }
+                restoreScrollPosition(container);
+            };
 
-        observer.observe(liveBox, {
-            childList: true,
-            subtree: true,
-            characterData: true
-        });
+            const observer = new MutationObserver(syncContainer);
+            observer.observe(liveBox, {
+                childList: true,
+                subtree: true,
+                characterData: true
+            });
 
-        const container = getScrollContainer();
-        if (container) {
-            attachScrollListener(container);
-            lastContainer = container;
-        }
+            syncContainer();
+        });
     }
 
     setTimeout(initScrollTracking, 100);
@@ -3982,7 +4074,7 @@ class ChadWebUI:
             )
 
         # Live activity stream - below agent communication
-        with gr.Column(elem_id="live-stream-box" if is_first else None):
+        with gr.Column(elem_id="live-stream-box" if is_first else None, elem_classes=["live-stream-box"]):
             live_stream = gr.Markdown(initial_live_stream, visible=True)
 
         with gr.Row(visible=False, key=f"followup-row-{session_id}") as followup_row:

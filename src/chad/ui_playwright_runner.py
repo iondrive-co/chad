@@ -736,21 +736,29 @@ class LiveStreamTestResult:
     computed_colors: list[dict]
 
 
-def inject_live_stream_content(page: "Page", html_content: str) -> None:
+def inject_live_stream_content(page: "Page", html_content: str, container_selector: str | None = None) -> None:
     """Inject test content into the live stream box for testing.
 
     This makes the live stream box visible and inserts test HTML content.
     """
+    target_selector = container_selector or "#live-stream-box, .live-stream-box"
     try:
-        page.wait_for_selector("#live-stream-box", state="attached", timeout=5000)
+        page.wait_for_selector(target_selector, state="attached", timeout=5000)
     except Exception:
         return
 
     page.evaluate(
         """
-(htmlContent) => {
-    const box = document.querySelector('#live-stream-box');
+(htmlContent, selector) => {
+    const root = selector ? document.querySelector(selector) : document;
+    if (selector && !root) return false;
+    const box = selector
+        ? root.querySelector('#live-stream-box, .live-stream-box')
+        : (document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box'));
     if (!box) return false;
+    if (!box.classList.contains('live-stream-box')) {
+        box.classList.add('live-stream-box');
+    }
     let node = box;
     while (node) {
         if (node.classList) {
@@ -784,19 +792,24 @@ def inject_live_stream_content(page: "Page", html_content: str) -> None:
 }
 """,
         html_content,
+        container_selector,
     )
     page.wait_for_timeout(100)
 
 
-def check_live_stream_colors(page: "Page") -> LiveStreamTestResult:
+def check_live_stream_colors(page: "Page", container_selector: str | None = None) -> LiveStreamTestResult:
     """Check if colors in the live stream are readable.
 
     Returns details about color spans and their computed colors.
     """
     result = page.evaluate(
         """
-() => {
-    const box = document.querySelector('#live-stream-box');
+(selector) => {
+    const root = selector ? document.querySelector(selector) : document;
+    if (selector && !root) return null;
+    const box = selector
+        ? root.querySelector('#live-stream-box, .live-stream-box')
+        : (document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box'));
     if (!box) return null;
 
     const contentDiv = box.querySelector('.live-output-content');
@@ -832,7 +845,8 @@ def check_live_stream_colors(page: "Page") -> LiveStreamTestResult:
         computedColors: computedColors
     };
 }
-"""
+""",
+        container_selector,
     )
 
     if not result:
@@ -871,7 +885,11 @@ def check_live_stream_colors(page: "Page") -> LiveStreamTestResult:
     )
 
 
-def verify_all_text_visible(page: "Page", min_brightness: int = 80) -> dict:
+def verify_all_text_visible(
+    page: "Page",
+    min_brightness: int = 80,
+    container_selector: str | None = None,
+) -> dict:
     """Verify that ALL text in the live stream box is visible (not too dark).
 
     This checks every text node, not just colored spans, to ensure Tailwind's
@@ -884,8 +902,12 @@ def verify_all_text_visible(page: "Page", min_brightness: int = 80) -> dict:
     """
     result = page.evaluate(
         """
-(minBrightness) => {
-    const box = document.querySelector('#live-stream-box');
+(minBrightness, selector) => {
+    const root = selector ? document.querySelector(selector) : document;
+    if (selector && !root) return { error: 'live-stream-box not found' };
+    const box = selector
+        ? root.querySelector('#live-stream-box, .live-stream-box')
+        : (document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box'));
     if (!box) return { error: 'live-stream-box not found' };
 
     const contentDiv = box.querySelector('.live-output-content');
@@ -947,6 +969,7 @@ def verify_all_text_visible(page: "Page", min_brightness: int = 80) -> dict:
 }
 """,
         min_brightness,
+        container_selector,
     )
     return result or {"error": "evaluation returned null"}
 
