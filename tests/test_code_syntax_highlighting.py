@@ -186,6 +186,41 @@ def process_data(data):
         assert inline_style["padding"] == "0px"
         assert block_style["padding"] == "0px"
 
+    def test_code_blocks_render_without_box_chrome(self, page: Page):
+        """Code blocks should not render with boxed backgrounds or borders."""
+        boxed_content = """
+<pre><code class="language-python">
+def greet(name):
+    return f"Hello {name}"
+</code></pre>
+"""
+
+        inject_live_stream_content(page, boxed_content)
+
+        pre = page.locator("#live-stream-box pre").first
+        styles = pre.evaluate(
+            "el => ({"
+            "backgroundColor: getComputedStyle(el).backgroundColor,"
+            "borderTopWidth: getComputedStyle(el).borderTopWidth,"
+            "borderTopStyle: getComputedStyle(el).borderTopStyle,"
+            "borderRadius: getComputedStyle(el).borderRadius,"
+            "boxShadow: getComputedStyle(el).boxShadow,"
+            "padding: getComputedStyle(el).padding"
+            "})"
+        )
+
+        assert styles["backgroundColor"] in ["transparent", "rgba(0, 0, 0, 0)"], (
+            f"Expected no background for code blocks, got {styles['backgroundColor']}"
+        )
+        assert styles["borderTopWidth"] == "0px" and styles["borderTopStyle"] == "none", (
+            "Expected code blocks to have no border chrome."
+        )
+        assert styles["borderRadius"] in ["0px", "0px 0px 0px 0px"], (
+            f"Expected code blocks to have square edges, got {styles['borderRadius']}"
+        )
+        assert styles["boxShadow"] == "none", "Expected code blocks to have no shadow."
+        assert styles["padding"] == "0px", "Expected code blocks to avoid padded box styling."
+
     def test_visibility_of_all_code_elements(self, page: Page):
         """All code elements should be visible on dark background."""
         inject_live_stream_content(page, self.CLI_OUTPUT_WITH_CODE)
