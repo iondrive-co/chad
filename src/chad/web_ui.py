@@ -3380,50 +3380,57 @@ class ChadWebUI:
         if not session.worktree_path or not session.project_path:
             return (
                 gr.update(visible=False), no_change, gr.update(visible=False),
-                no_change, no_change, no_change,
+                no_change, no_change, gr.update(value="❌ No worktree to merge.", visible=True),
                 no_change, no_change, no_change, no_change, no_change,
             )
 
-        git_mgr = GitWorktreeManager(Path(session.project_path))
-        msg = commit_message.strip() if commit_message else None
-        branch = target_branch.strip() if target_branch else None
-        success, conflicts = git_mgr.merge_to_main(session_id, msg, branch)
+        try:
+            git_mgr = GitWorktreeManager(Path(session.project_path))
+            msg = commit_message.strip() if commit_message else None
+            branch = target_branch.strip() if target_branch else None
+            success, conflicts = git_mgr.merge_to_main(session_id, msg, branch)
 
-        target_name = branch or git_mgr.get_main_branch()
-        if success:
-            # Cleanup worktree after successful merge
-            git_mgr.cleanup_after_merge(session_id)
-            session.worktree_path = None
-            session.worktree_branch = None
-            session.has_worktree_changes = False
-            session.worktree_base_commit = None
-            # Full reset - return tab to initial state
+            target_name = branch or git_mgr.get_main_branch()
+            if success:
+                # Cleanup worktree after successful merge
+                git_mgr.cleanup_after_merge(session_id)
+                session.worktree_path = None
+                session.worktree_branch = None
+                session.has_worktree_changes = False
+                session.worktree_base_commit = None
+                # Full reset - return tab to initial state
+                return (
+                    gr.update(visible=False),                    # merge_section
+                    gr.update(value=""),                         # changes_summary
+                    gr.update(visible=False),                    # conflict_section
+                    gr.update(value=""),                         # conflict_info
+                    gr.update(value=""),                         # conflicts_html
+                    gr.update(value=f"✓ Changes merged to {target_name}.", visible=True),
+                    gr.update(value=[]),                         # chatbot - clear
+                    gr.update(interactive=True),                 # start_btn - enable
+                    gr.update(interactive=False),                # cancel_btn - disable
+                    gr.update(value=""),                         # live_stream - clear
+                    gr.update(visible=False),                    # followup_row - hide
+                )
+            else:
+                session.merge_conflicts = conflicts
+                conflict_count = sum(len(c.hunks) for c in (conflicts or []))
+                file_count = len(conflicts or [])
+                conflict_msg = f"**{file_count} file(s)** with **{conflict_count} conflict(s)** need resolution."
+                return (
+                    gr.update(visible=False),                    # merge_section
+                    no_change,                                   # changes_summary
+                    gr.update(visible=True),                     # conflict_section
+                    gr.update(value=conflict_msg),               # conflict_info
+                    gr.update(value=self._render_conflicts_html(conflicts or [])),
+                    no_change,                                   # task_status
+                    no_change, no_change, no_change, no_change, no_change,
+                )
+        except Exception as e:
             return (
-                gr.update(visible=False),                    # merge_section
-                gr.update(value=""),                         # changes_summary
-                gr.update(visible=False),                    # conflict_section
-                gr.update(value=""),                         # conflict_info
-                gr.update(value=""),                         # conflicts_html
-                gr.update(value=f"✓ Changes merged to {target_name}.", visible=True),  # task_status
-                gr.update(value=[]),                         # chatbot - clear
-                gr.update(interactive=True),                 # start_btn - enable
-                gr.update(interactive=False),                # cancel_btn - disable
-                gr.update(value=""),                         # live_stream - clear
-                gr.update(visible=False),                    # followup_row - hide
-            )
-        else:
-            session.merge_conflicts = conflicts
-            conflict_count = sum(len(c.hunks) for c in (conflicts or []))
-            file_count = len(conflicts or [])
-            conflict_msg = f"**{file_count} file(s)** with **{conflict_count} conflict(s)** need resolution."
-            return (
-                gr.update(visible=False),                    # merge_section
-                no_change,                                   # changes_summary
-                gr.update(visible=True),                     # conflict_section
-                gr.update(value=conflict_msg),               # conflict_info
-                gr.update(value=self._render_conflicts_html(conflicts or [])),  # conflicts_html
-                no_change,                                   # task_status
-                no_change, no_change, no_change, no_change, no_change,  # no reset on conflict
+                no_change, no_change, no_change, no_change, no_change,
+                gr.update(value=f"❌ Merge error: {e}", visible=True),
+                no_change, no_change, no_change, no_change, no_change,
             )
 
     def _render_conflicts_html(self, conflicts: list[MergeConflict]) -> str:
@@ -3617,39 +3624,46 @@ class ChadWebUI:
         if not session.project_path:
             return (
                 no_change, no_change, gr.update(visible=False),
-                no_change, no_change, no_change,
+                no_change, no_change, gr.update(value="❌ No project path set.", visible=True),
                 no_change, no_change, no_change, no_change, no_change,
             )
 
-        git_mgr = GitWorktreeManager(Path(session.project_path))
-        git_mgr.resolve_all_conflicts(use_incoming)
+        try:
+            git_mgr = GitWorktreeManager(Path(session.project_path))
+            git_mgr.resolve_all_conflicts(use_incoming)
 
-        # Complete the merge
-        if git_mgr.complete_merge():
-            git_mgr.cleanup_after_merge(session_id)
-            session.worktree_path = None
-            session.worktree_branch = None
-            session.merge_conflicts = None
-            session.has_worktree_changes = False
-            session.worktree_base_commit = None
-            # Full reset - return tab to initial state
-            return (
-                gr.update(visible=False),                    # merge_section
-                gr.update(value=""),                         # changes_summary
-                gr.update(visible=False),                    # conflict_section
-                gr.update(value=""),                         # conflict_info
-                gr.update(value=""),                         # conflicts_html
-                gr.update(value="✓ All conflicts resolved. Merge complete.", visible=True),
-                gr.update(value=[]),                         # chatbot - clear
-                gr.update(interactive=True),                 # start_btn - enable
-                gr.update(interactive=False),                # cancel_btn - disable
-                gr.update(value=""),                         # live_stream - clear
-                gr.update(visible=False),                    # followup_row - hide
-            )
-        else:
+            # Complete the merge
+            if git_mgr.complete_merge():
+                git_mgr.cleanup_after_merge(session_id)
+                session.worktree_path = None
+                session.worktree_branch = None
+                session.merge_conflicts = None
+                session.has_worktree_changes = False
+                session.worktree_base_commit = None
+                # Full reset - return tab to initial state
+                return (
+                    gr.update(visible=False),                    # merge_section
+                    gr.update(value=""),                         # changes_summary
+                    gr.update(visible=False),                    # conflict_section
+                    gr.update(value=""),                         # conflict_info
+                    gr.update(value=""),                         # conflicts_html
+                    gr.update(value="✓ All conflicts resolved. Merge complete.", visible=True),
+                    gr.update(value=[]),                         # chatbot - clear
+                    gr.update(interactive=True),                 # start_btn - enable
+                    gr.update(interactive=False),                # cancel_btn - disable
+                    gr.update(value=""),                         # live_stream - clear
+                    gr.update(visible=False),                    # followup_row - hide
+                )
+            else:
+                return (
+                    no_change, no_change, no_change, no_change, no_change,
+                    gr.update(value="❌ Failed to complete merge. Check git status.", visible=True),
+                    no_change, no_change, no_change, no_change, no_change,
+                )
+        except Exception as e:
             return (
                 no_change, no_change, no_change, no_change, no_change,
-                gr.update(value="❌ Failed to complete merge.", visible=True),
+                gr.update(value=f"❌ Error resolving conflicts: {e}", visible=True),
                 no_change, no_change, no_change, no_change, no_change,
             )
 

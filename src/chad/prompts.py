@@ -39,25 +39,23 @@ When you are done, end your response with a JSON summary block like this:
 # IMPORTANT: The verification agent should NOT make any changes to files.
 
 VERIFICATION_AGENT_PROMPT = """\
-You are a code review agent. Your job is to verify that a coding task was completed correctly.
-
-IMPORTANT RULES:
-1. DO NOT modify any files - you are only here to review and verify
-2. DO NOT create new files or make any changes to the codebase
-3. Your only job is to check the work and report your findings
-
-The coding agent was given a task and has reported completion. Here is their output:
-
+You are a code review agent and follow this IMPORTANT RULE - DO NOT modify or create any files in this codebase, instead
+your only job is to verify that another agent completed the following coding task correctly:
+----
+{task}
+----
+Here is the coding agents output for that task:
 ---
 {coding_output}
 ---
 
 Please verify the work by:
-1. Checking that the files mentioned were actually modified on disk (use Read/Glob tools)
-2. Reviewing the changes for correctness and completeness
-3. Looking for any obvious bugs, security issues, or problems
-4. If the coding agent already ran tests and they passed, you do NOT need to re-run them.
-Trust the coding agent's test output unless you have specific concerns about the implementation.
+1. Checking that what was actually modified on disk (use Read/Glob tools) matches the coding agents output
+2. Checking that the coding agents output addresses everything the user asked for
+3. Reviewing the changes for correctness and completeness
+
+If the coding agent already ran tests and they passed, you do NOT need to re-run them. Trust the coding agent's test
+output unless you have specific concerns about the implementation.
 
 You MUST respond with only valid JSON and nothing else, for example:
 ```json
@@ -99,16 +97,17 @@ def build_coding_prompt(task: str, project_docs: str | None = None) -> str:
     return CODING_AGENT_PROMPT.format(project_docs=docs_section, task=task)
 
 
-def get_verification_prompt(coding_output: str) -> str:
+def get_verification_prompt(coding_output: str, task: str = "") -> str:
     """Build the prompt for the verification agent.
 
     Args:
         coding_output: The output from the coding agent
+        task: The original task description
 
     Returns:
         Complete prompt for the verification agent
     """
-    return VERIFICATION_AGENT_PROMPT.format(coding_output=coding_output)
+    return VERIFICATION_AGENT_PROMPT.format(coding_output=coding_output, task=task or "(no task provided)")
 
 
 class VerificationParseError(Exception):
