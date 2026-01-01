@@ -35,3 +35,44 @@ def test_screenshot_mode_duplicates_fourth_provider_card(monkeypatch):
         assert card_names[3] in card_names[:3]
     finally:
         env.cleanup()
+
+
+def test_provider_summary_hides_model_and_reasoning(monkeypatch):
+    """Provider summary should not show preferred model or reasoning text."""
+    env = create_temp_env(screenshot_mode=True)
+    try:
+        monkeypatch.setenv("CHAD_CONFIG", str(env.config_path))
+        for key, value in env.env_vars.items():
+            monkeypatch.setenv(key, value)
+
+        security_mgr = SecurityManager()
+        model_catalog = ModelCatalog(security_mgr)
+        provider_ui = ProviderUIManager(security_mgr, env.password, model_catalog)
+
+        summary = provider_ui.list_providers()
+
+        assert "preferred model" not in summary
+        assert "reasoning:" not in summary
+    finally:
+        env.cleanup()
+
+
+def test_provider_summary_hides_model_and_reasoning_without_screenshot_mode(monkeypatch):
+    """Provider summary should omit preferred model/reasoning in normal mode too."""
+    env = create_temp_env(screenshot_mode=False)
+    try:
+        monkeypatch.setenv("CHAD_CONFIG", str(env.config_path))
+
+        security_mgr = SecurityManager()
+        security_mgr.set_account_reasoning("mock-coding", "high")
+
+        model_catalog = ModelCatalog(security_mgr)
+        provider_ui = ProviderUIManager(security_mgr, env.password, model_catalog)
+
+        summary = provider_ui.list_providers()
+
+        assert "preferred model" not in summary
+        assert "mock-model" not in summary
+        assert "reasoning:" not in summary
+    finally:
+        env.cleanup()

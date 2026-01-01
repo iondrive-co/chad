@@ -32,7 +32,7 @@ class ProviderUIManager:
         self.installer = installer or AIToolInstaller()
 
     def list_providers(self) -> str:
-        """Summarize all configured providers with model settings."""
+        """Summarize all configured providers."""
         accounts = self.security_mgr.list_accounts()
 
         if not accounts:
@@ -40,11 +40,7 @@ class ProviderUIManager:
 
         rows = []
         for account_name, provider in accounts.items():
-            model = self.security_mgr.get_account_model(account_name)
-            model_str = f" | preferred model: `{model}`" if model != "default" else ""
-            reasoning = self.security_mgr.get_account_reasoning(account_name)
-            reasoning_str = f" | reasoning: `{reasoning}`" if reasoning != "default" else ""
-            rows.append(f"- **{account_name}** ({provider}){model_str}{reasoning_str}")
+            rows.append(f"- **{account_name}** ({provider})")
 
         return "\n".join(rows)
 
