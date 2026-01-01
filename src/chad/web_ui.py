@@ -1,6 +1,7 @@
 """Gradio web interface for Chad."""
 
 import os
+import json
 import re
 import socket
 import threading
@@ -545,10 +546,18 @@ body, .gradio-container, .gradio-container * {
   color: #f0abfc !important;
   background: none !important;
   padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
   border-radius: 0 !important;
   box-shadow: none !important;
   font-family: inherit;
   font-weight: 600;
+}
+
+#live-stream-box pre,
+#live-stream-box .live-output-content pre {
+  white-space: pre-wrap !important;
+  word-break: break-word !important;
 }
 
 /* Syntax highlighting for code blocks - matches common CLI tools */
@@ -1067,11 +1076,19 @@ body, .gradio-container, .gradio-container * {
 # JavaScript to fix Gradio visibility updates and maintain scroll position
 # Note: This is passed to gr.Blocks(js=...) to execute on page load
 SCREENSHOT_MODE_JS = "true" if os.environ.get("CHAD_SCREENSHOT_MODE") == "1" else "false"
+SCREENSHOT_LIVE_VIEW_HTML = "null"
+if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
+    from .screenshot_fixtures import LIVE_VIEW_CONTENT
+
+    SCREENSHOT_LIVE_VIEW_HTML = json.dumps(LIVE_VIEW_CONTENT)
 CUSTOM_JS = (
     """
 function() {
     const screenshotMode = """
     + SCREENSHOT_MODE_JS
+    + """;
+    const screenshotLiveViewHtml = """
+    + SCREENSHOT_LIVE_VIEW_HTML
     + """;
     // Fix for Gradio not properly updating column visibility after initial render
     function fixProviderCardVisibility() {
@@ -1104,12 +1121,26 @@ function() {
             header.classList.add('provider-card__header-text-secondary');
         });
     }
+    function ensureLiveStreamVisible() {
+        if (!screenshotMode) return;
+        const liveBox = document.getElementById('live-stream-box');
+        if (!liveBox) return;
+        liveBox.classList.remove('hide-container');
+        liveBox.style.display = 'block';
+        liveBox.style.visibility = 'visible';
+        liveBox.removeAttribute('hidden');
+        if (screenshotLiveViewHtml && !liveBox.querySelector('.live-output-content')) {
+            liveBox.innerHTML = screenshotLiveViewHtml;
+        }
+    }
     setInterval(() => {
         normalizeProviderHeaderClasses();
         fixProviderCardVisibility();
+        ensureLiveStreamVisible();
     }, 500);
     const visObserver = new MutationObserver(fixProviderCardVisibility);
     visObserver.observe(document.body, { childList: true, subtree: true, attributes: true });
+    setTimeout(ensureLiveStreamVisible, 100);
 
     // Live stream scroll preservation
     window._liveStreamScroll = window._liveStreamScroll || {
@@ -3658,6 +3689,8 @@ class ChadWebUI:
         """
         session = self.get_session(session_id)
         default_path = os.environ.get("CHAD_PROJECT_PATH", str(Path.cwd()))
+        screenshot_mode = os.environ.get("CHAD_SCREENSHOT_MODE") == "1"
+        initial_live_stream = "Live output will appear here." if screenshot_mode and is_first else ""
 
         accounts_map = self.security_mgr.list_accounts()
         account_choices = list(accounts_map.keys())
@@ -3852,7 +3885,8 @@ class ChadWebUI:
             )
 
         # Live activity stream - below agent communication
-        live_stream = gr.Markdown("", elem_id="live-stream-box" if is_first else None)
+        with gr.Column(elem_id="live-stream-box" if is_first else None):
+            live_stream = gr.Markdown(initial_live_stream, visible=True)
 
         with gr.Row(visible=False, key=f"followup-row-{session_id}") as followup_row:
             followup_input = gr.TextArea(
