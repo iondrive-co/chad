@@ -42,11 +42,13 @@ try:
         ChadLaunchError,
         PlaywrightUnavailable,
         create_temp_env,
+        inject_live_stream_content,
         open_playwright_page,
         resolve_screenshot_output,
         start_chad,
         stop_chad,
     )
+    from chad.screenshot_fixtures import LIVE_VIEW_CONTENT
 except ImportError as e:
     print(f"Error importing ui_playwright_runner: {e}", file=sys.stderr)
     print("Ensure playwright is installed: pip install playwright && playwright install chromium")
@@ -59,7 +61,33 @@ DEFAULT_OUTPUT = Path("/tmp/chad/screenshot.png")
 def screenshot_element(page, selector: str, output_path: Path) -> Path:
     """Screenshot a specific element by CSS selector."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    page.wait_for_selector(selector, state="visible", timeout=10000)
+    page.wait_for_selector(selector, state="attached", timeout=10000)
+    page.evaluate(
+        """
+(targetSelector) => {
+    const elem = document.querySelector(targetSelector);
+    if (!elem) return;
+    let node = elem;
+    while (node) {
+        if (node.classList) {
+            node.classList.remove('hide-container');
+        }
+        if (node.style) {
+            node.style.setProperty('display', 'block', 'important');
+            node.style.setProperty('visibility', 'visible', 'important');
+            node.style.setProperty('opacity', '1', 'important');
+            node.style.setProperty('height', 'auto', 'important');
+        }
+        if (node.hasAttribute && node.hasAttribute('hidden')) {
+            node.removeAttribute('hidden');
+        }
+        node = node.parentElement;
+    }
+}
+""",
+        selector,
+    )
+    page.wait_for_timeout(200)
     element = page.query_selector(selector)
     if element is None:
         raise RuntimeError(f"Selector did not resolve to an element: {selector}")
@@ -126,13 +154,15 @@ def main():
                 color_scheme=scheme,
                 render_delay=2.0,
             ) as page:
+                if args.tab in (None, "run"):
+                    inject_live_stream_content(page, LIVE_VIEW_CONTENT)
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 if args.selector:
                     screenshot_element(page, args.selector, target_path)
                 else:
                     screenshot_page(page, target_path)
-                outputs.append(target_path)
-                print(f"Saved: {target_path}")
+            outputs.append(target_path)
+            print(f"Saved: {target_path}")
 
         for path in outputs:
             webbrowser.open(path.as_uri())
