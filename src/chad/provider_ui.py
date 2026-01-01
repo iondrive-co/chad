@@ -48,8 +48,16 @@ class ProviderUIManager:
         """Return provider account items for card display."""
         accounts = self.security_mgr.list_accounts()
         account_items = list(accounts.items())
-        if os.environ.get("CHAD_SCREENSHOT_MODE") == "1" and len(account_items) >= 3:
-            account_items = account_items[:3] + [account_items[1]] + account_items[3:]
+        if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
+            preferred = ["codex-work", "codex-personal", "gemini-advanced", "vibe-pro"]
+            ordered: list[tuple[str, str]] = []
+            for name in preferred:
+                if name in accounts:
+                    ordered.append((name, accounts[name]))
+            for name, provider in account_items:
+                if (name, provider) not in ordered:
+                    ordered.append((name, provider))
+            account_items = ordered
         return account_items
 
     def format_provider_header(self, account_name: str, provider: str, idx: int) -> str:
