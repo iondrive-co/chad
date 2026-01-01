@@ -738,6 +738,50 @@ class TestChadWebUITaskExecution:
         assert created_configs[-1].model_name == "claude-latest"
         assert created_configs[-1].reasoning_effort == "high"
 
+    def test_verification_dropdown_rejects_invalid_models_for_provider(self):
+        """When verification is 'Same as Coding Agent', switching coding agents must validate model/reasoning."""
+        from chad.web_ui import ChadWebUI
+
+        security_mgr = Mock()
+        security_mgr.list_accounts.return_value = {"codex-work": "openai", "claude-pro": "anthropic"}
+
+        web_ui = ChadWebUI(security_mgr, "test-password")
+
+        # Mock get_models_for_account to return provider-specific models
+        def mock_get_models(account):
+            if account == "codex-work":
+                return ["o3", "o3-mini", "gpt-4.1"]
+            elif account == "claude-pro":
+                return ["claude-sonnet-4-202", "claude-opus-4", "claude-haiku-4"]
+            return ["default"]
+
+        # Mock get_reasoning_choices to return provider-specific reasoning
+        def mock_get_reasoning(provider_type, account):
+            if provider_type == "openai":
+                return ["low", "medium", "high"]
+            elif provider_type == "anthropic":
+                return ["default", "extended"]
+            return ["default"]
+
+        web_ui.get_models_for_account = mock_get_models
+        web_ui.get_reasoning_choices = mock_get_reasoning
+
+        # Scenario: User has codex selected with gpt-4.1 and high reasoning
+        # Then switches to claude with verification still set to "Same as Coding Agent"
+        state = web_ui._build_verification_dropdown_state(
+            coding_agent="claude-pro",
+            verification_agent=web_ui.SAME_AS_CODING,
+            coding_model_value="gpt-4.1",  # Invalid for claude!
+            coding_reasoning_value="high",  # Invalid for claude!
+        )
+
+        # BUG: Currently this test will FAIL because the code accepts invalid values
+        # The model should be a valid claude model, not gpt-4.1
+        assert state.model_value in mock_get_models("claude-pro"), \
+            f"Expected valid claude model, got {state.model_value}"
+        assert state.reasoning_value in mock_get_reasoning("anthropic", "claude-pro"), \
+            f"Expected valid claude reasoning, got {state.reasoning_value}"
+
 
 class TestChadWebUIInterface:
     """Test cases for Gradio interface creation."""

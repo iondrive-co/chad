@@ -71,13 +71,19 @@ class GitWorktreeManager:
         return result.stdout.strip()
 
     def get_branches(self) -> list[str]:
-        """Get list of all local branches."""
+        """Get list of all local branches, with current branch first."""
         result = self._run_git("branch", "--format=%(refname:short)", check=False)
         if result.returncode != 0:
             return [self.get_main_branch()]
         branches = [b.strip() for b in result.stdout.strip().split("\n") if b.strip()]
         # Filter out chad-task branches
-        return [b for b in branches if not b.startswith("chad-task-")]
+        branches = [b for b in branches if not b.startswith("chad-task-")]
+        # Put current branch first so it's the default in dropdowns
+        current = self.get_current_branch()
+        if current in branches:
+            branches.remove(current)
+            branches.insert(0, current)
+        return branches
 
     def _worktree_path(self, task_id: str) -> Path:
         """Get the worktree path for a task."""
@@ -191,6 +197,40 @@ class GitWorktreeManager:
             summary_parts.append(f"**Uncommitted changes:**\n```\n{uncommitted}\n```")
 
         return "\n\n".join(summary_parts) if summary_parts else "No changes detected"
+
+    def get_full_diff(self, task_id: str) -> str:
+        """Get the full diff content for the worktree changes."""
+        worktree_path = self._worktree_path(task_id)
+        if not worktree_path.exists():
+            return ""
+
+        main_branch = self.get_main_branch()
+        branch_name = self._branch_name(task_id)
+
+        diff_parts = []
+
+        # Get committed diff
+        result = self._run_git(
+            "diff", f"{main_branch}...{branch_name}", cwd=worktree_path, check=False
+        )
+        if result.stdout.strip():
+            diff_parts.append(result.stdout.strip())
+
+        # Get uncommitted diff
+        result = self._run_git("diff", cwd=worktree_path, check=False)
+        if result.stdout.strip():
+            if diff_parts:
+                diff_parts.append("\n# Uncommitted changes:\n")
+            diff_parts.append(result.stdout.strip())
+
+        # Get staged diff
+        result = self._run_git("diff", "--cached", cwd=worktree_path, check=False)
+        if result.stdout.strip():
+            if diff_parts:
+                diff_parts.append("\n# Staged changes:\n")
+            diff_parts.append(result.stdout.strip())
+
+        return "\n".join(diff_parts) if diff_parts else "No changes"
 
     def commit_all_changes(self, task_id: str, message: str = "Agent changes") -> bool:
         """Commit all changes in the worktree."""

@@ -528,14 +528,14 @@ body, .gradio-container, .gradio-container * {
 
 /* Ensure live-output-content has light text */
 #live-stream-box .live-output-content {
-  color: #e2e8f0 !important;
+  color: #e2e8f0;
 }
 
 /* Children without inline colors or syntax classes also get light text */
 #live-stream-box .live-output-content *:not([style*="color"]):not(.keyword):not(.string):not(.comment):not(.function)
 :not(.class-name):not(.number):not(.operator):not(.variable):not(.type):not(.module):not(.builtin)
 :not(.method):not(.property):not(.param):not(.constant):not(code) {
-  color: #e2e8f0 !important;
+  color: #e2e8f0;
 }
 
 /* Code elements (rendered from backticks in Markdown) - bright pink */
@@ -553,21 +553,40 @@ body, .gradio-container, .gradio-container * {
 }
 
 /* Syntax highlighting for code blocks - matches common CLI tools */
-#live-stream-box .keyword { color: #c678dd !important; font-weight: 600; }  /* Purple for keywords */
-#live-stream-box .string { color: #98c379 !important; }  /* Green for strings */
-#live-stream-box .comment { color: #5c6370 !important; font-style: italic; }  /* Grey for comments */
-#live-stream-box .function { color: #61afef !important; }  /* Blue for functions */
-#live-stream-box .class-name { color: #e5c07b !important; }  /* Yellow for classes */
-#live-stream-box .number { color: #d19a66 !important; }  /* Orange for numbers */
-#live-stream-box .operator { color: #56b6c2 !important; }  /* Cyan for operators */
-#live-stream-box .variable { color: #e06c75 !important; }  /* Red for variables */
-#live-stream-box .type { color: #e5c07b !important; }  /* Yellow for types */
-#live-stream-box .module { color: #61afef !important; }  /* Blue for modules */
-#live-stream-box .builtin { color: #56b6c2 !important; }  /* Cyan for builtins */
-#live-stream-box .method { color: #61afef !important; }  /* Blue for methods */
-#live-stream-box .property { color: #d19a66 !important; }  /* Orange for properties */
-#live-stream-box .param { color: #abb2bf !important; }  /* Light grey for params */
-#live-stream-box .constant { color: #d19a66 !important; }  /* Orange for constants */
+#live-stream-box .live-output-content code .keyword,
+#live-stream-box .live-output-content .keyword {
+  color: #c678dd !important; font-weight: 600;
+}  /* Purple for keywords */
+#live-stream-box .live-output-content code .string,
+#live-stream-box .live-output-content .string { color: #98c379 !important; }  /* Green for strings */
+#live-stream-box .live-output-content code .comment,
+#live-stream-box .live-output-content .comment {
+  color: #5c6370 !important; font-style: italic;
+}  /* Grey for comments */
+#live-stream-box .live-output-content code .function,
+#live-stream-box .live-output-content .function { color: #61afef !important; }  /* Blue for functions */
+#live-stream-box .live-output-content code .class-name,
+#live-stream-box .live-output-content .class-name { color: #e5c07b !important; }  /* Yellow for classes */
+#live-stream-box .live-output-content code .number,
+#live-stream-box .live-output-content .number { color: #d19a66 !important; }  /* Orange for numbers */
+#live-stream-box .live-output-content code .operator,
+#live-stream-box .live-output-content .operator { color: #56b6c2 !important; }  /* Cyan for operators */
+#live-stream-box .live-output-content code .variable,
+#live-stream-box .live-output-content .variable { color: #e06c75 !important; }  /* Red for variables */
+#live-stream-box .live-output-content code .type,
+#live-stream-box .live-output-content .type { color: #e5c07b !important; }  /* Yellow for types */
+#live-stream-box .live-output-content code .module,
+#live-stream-box .live-output-content .module { color: #61afef !important; }  /* Blue for modules */
+#live-stream-box .live-output-content code .builtin,
+#live-stream-box .live-output-content .builtin { color: #56b6c2 !important; }  /* Cyan for builtins */
+#live-stream-box .live-output-content code .method,
+#live-stream-box .live-output-content .method { color: #61afef !important; }  /* Blue for methods */
+#live-stream-box .live-output-content code .property,
+#live-stream-box .live-output-content .property { color: #d19a66 !important; }  /* Orange for properties */
+#live-stream-box .live-output-content code .param,
+#live-stream-box .live-output-content .param { color: #abb2bf !important; }  /* Light grey for params */
+#live-stream-box .live-output-content code .constant,
+#live-stream-box .live-output-content .constant { color: #d19a66 !important; }  /* Orange for constants */
 
 /* ANSI colored spans - let them keep their inline colors with brightness boost */
 #live-stream-box .live-output-content span[style*="color"] {
@@ -1998,10 +2017,10 @@ class ChadWebUI:
 
         if verification_agent == self.SAME_AS_CODING:
             model_value = value_or_default(
-                coding_model_value, model_choices, allow_custom=True
+                coding_model_value, model_choices, allow_custom=False
             )
             reasoning_value = value_or_default(
-                coding_reasoning_value, reasoning_choices, allow_custom=True
+                coding_reasoning_value, reasoning_choices, allow_custom=False
             )
         else:
             stored_model = self.security_mgr.get_account_model(actual_account) or "default"
@@ -2065,6 +2084,7 @@ class ChadWebUI:
             show_merge: bool = False,
             merge_summary: str = "",
             branch_choices: list[str] | None = None,
+            diff_full: str = "",
         ):
             """Format output tuple for Gradio with current UI state."""
             display_stream = live_stream
@@ -2103,6 +2123,7 @@ class ChadWebUI:
                 gr.update(visible=show_merge),  # Show/hide merge section
                 gr.update(value=merge_summary),  # Merge changes summary
                 branch_update,  # Branch dropdown choices
+                gr.update(value=diff_full),  # Full diff content
             )
 
         try:
@@ -2563,8 +2584,10 @@ class ChadWebUI:
                         )
                         message_queue.put(("stream", content))
 
+                    # Run verification in worktree so it can see the changes
+                    verification_path = str(session.worktree_path or path_obj)
                     verified, verification_feedback = self._run_verification(
-                        str(path_obj),
+                        verification_path,
                         last_coding_output,
                         verification_account_for_run,
                         on_activity=verification_activity,
@@ -2765,12 +2788,14 @@ class ChadWebUI:
             # Check for worktree changes to show merge section
             has_changes, merge_summary_text = self.check_worktree_changes(session_id)
 
-            # Get available branches for merge target
+            # Get available branches and full diff for merge target
             branches = []
+            full_diff = ""
             if has_changes and session.project_path:
                 try:
                     git_mgr = GitWorktreeManager(Path(session.project_path))
                     branches = git_mgr.get_branches()
+                    full_diff = git_mgr.get_full_diff(session_id)
                 except Exception:
                     branches = ["main"]
 
@@ -2784,6 +2809,7 @@ class ChadWebUI:
                 show_merge=has_changes,
                 merge_summary=merge_summary_text,
                 branch_choices=branches if has_changes else None,
+                diff_full=full_diff,
             )
 
         except Exception as e:  # pragma: no cover - defensive
@@ -3186,8 +3212,12 @@ class ChadWebUI:
                 def verification_activity(activity_type: str, detail: str):
                     pass  # Quiet verification
 
+                # Run verification in worktree so it can see the changes
+                verification_path = str(
+                    session.worktree_path or session.project_path or Path.cwd()
+                )
                 verified, verification_feedback = self._run_verification(
-                    session.project_path or str(Path.cwd()),
+                    verification_path,
                     last_coding_output,
                     verification_account_for_run,
                     on_activity=verification_activity,
@@ -3843,6 +3873,13 @@ class ChadWebUI:
                 "",
                 key=f"changes-summary-{session_id}",
             )
+            with gr.Accordion("View Full Diff", open=False):
+                diff_content = gr.Code(
+                    label="",
+                    language="diff",
+                    value="",
+                    key=f"diff-content-{session_id}",
+                )
             with gr.Row():
                 merge_commit_msg = gr.Textbox(
                     label="Commit Message",
@@ -3998,6 +4035,7 @@ class ChadWebUI:
                 merge_section,
                 changes_summary,
                 merge_target_branch,
+                diff_content,
             ],
         )
 
