@@ -167,7 +167,7 @@ COMPONENT_SELECTORS = {
     "live-view": "#live-stream-box",
     # Providers tab components
     "provider-summary": "#provider-summary-panel",
-    "provider-card": ".gr-group:has(.provider-card__header-text)",  # First visible provider card
+    "provider-card": "#provider-card-0",  # First provider card
     "add-provider": "#add-provider-panel",
 }
 
