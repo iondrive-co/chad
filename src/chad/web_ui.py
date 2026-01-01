@@ -3295,7 +3295,7 @@ class ChadWebUI:
         session_id: str,
         commit_message: str = "",
         target_branch: str = "",
-    ) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update]:
+    ) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update, gr.update]:
         """Attempt to merge worktree changes to a target branch."""
         session = self.get_session(session_id)
         if not session.worktree_path or not session.project_path:
@@ -3303,6 +3303,7 @@ class ChadWebUI:
                 gr.update(visible=False),
                 gr.update(),
                 gr.update(visible=False),
+                gr.update(),
                 gr.update(),
                 gr.update(),
             )
@@ -3319,12 +3320,14 @@ class ChadWebUI:
             session.worktree_path = None
             session.worktree_branch = None
             session.has_worktree_changes = False
+            session.worktree_base_commit = None
             return (
                 gr.update(visible=False),
-                gr.update(value=f"✓ Changes merged to {target_name}."),
+                gr.update(),
                 gr.update(visible=False),
                 gr.update(),
                 gr.update(),
+                gr.update(value=f"✓ Changes merged to {target_name}.", visible=True),
             )
         else:
             session.merge_conflicts = conflicts
@@ -3337,6 +3340,7 @@ class ChadWebUI:
                 gr.update(visible=True),
                 gr.update(value=conflict_msg),
                 gr.update(value=self._render_conflicts_html(conflicts or [])),
+                gr.update(),
             )
 
     def _render_conflicts_html(self, conflicts: list[MergeConflict]) -> str:
@@ -3488,11 +3492,14 @@ class ChadWebUI:
 
     def resolve_all_conflicts(
         self, session_id: str, use_incoming: bool
-    ) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update]:
+    ) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update, gr.update]:
         """Resolve all conflicts by choosing all original or all incoming."""
         session = self.get_session(session_id)
         if not session.project_path:
-            return (gr.update(), gr.update(), gr.update(visible=False), gr.update(), gr.update())
+            return (
+                gr.update(), gr.update(), gr.update(visible=False),
+                gr.update(), gr.update(), gr.update()
+            )
 
         git_mgr = GitWorktreeManager(Path(session.project_path))
         git_mgr.resolve_all_conflicts(use_incoming)
@@ -3504,27 +3511,32 @@ class ChadWebUI:
             session.worktree_branch = None
             session.merge_conflicts = None
             session.has_worktree_changes = False
+            session.worktree_base_commit = None
             return (
                 gr.update(visible=False),
-                gr.update(value="✓ All conflicts resolved. Merge complete."),
+                gr.update(),
                 gr.update(visible=False),
                 gr.update(),
                 gr.update(),
+                gr.update(value="✓ All conflicts resolved. Merge complete.", visible=True),
             )
         else:
             return (
                 gr.update(),
-                gr.update(value="❌ Failed to complete merge."),
                 gr.update(),
                 gr.update(),
                 gr.update(),
+                gr.update(),
+                gr.update(value="❌ Failed to complete merge.", visible=True),
             )
 
-    def abort_merge_action(self, session_id: str) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update]:
+    def abort_merge_action(
+        self, session_id: str
+    ) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update, gr.update]:
         """Abort an in-progress merge."""
         session = self.get_session(session_id)
         if not session.project_path:
-            return (gr.update(), gr.update(), gr.update(visible=False), gr.update(), gr.update())
+            return (gr.update(), gr.update(), gr.update(visible=False), gr.update(), gr.update(), gr.update(value=""))
 
         git_mgr = GitWorktreeManager(Path(session.project_path))
         git_mgr.abort_merge()
@@ -3535,13 +3547,16 @@ class ChadWebUI:
 
         return (
             gr.update(visible=has_changes),
-            gr.update(value=summary if has_changes else "Merge aborted."),
+            gr.update(value=summary if has_changes else ""),
             gr.update(visible=False),
             gr.update(),
             gr.update(),
+            gr.update(value="⚠️ Merge aborted. Changes remain in worktree."),
         )
 
-    def discard_worktree_changes(self, session_id: str) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update]:
+    def discard_worktree_changes(
+        self, session_id: str
+    ) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update, gr.update]:
         """Discard worktree and all changes."""
         session = self.get_session(session_id)
         if session.worktree_path and session.project_path:
@@ -3554,10 +3569,11 @@ class ChadWebUI:
 
         return (
             gr.update(visible=False),
-            gr.update(value="Changes discarded."),
+            gr.update(value=""),
             gr.update(visible=False),
             gr.update(),
             gr.update(),
+            gr.update(value="🗑️ Changes discarded."),
         )
 
     def _build_handoff_context(self, chat_history: list) -> str:
@@ -4043,6 +4059,7 @@ class ChadWebUI:
             conflict_section,
             conflict_info,
             conflicts_html,
+            task_status,
         ]
 
         accept_merge_btn.click(
