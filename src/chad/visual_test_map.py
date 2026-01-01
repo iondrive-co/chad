@@ -24,11 +24,12 @@ from dataclasses import dataclass
 @dataclass
 class UIComponent:
     """Metadata for a UI component's visual test coverage."""
-    tab: str                    # MCP screenshot tab parameter
-    component: str | None       # MCP screenshot component parameter (None = full tab)
-    tests: list[str]            # Test classes that verify this component
-    source_file: str            # Primary source file defining this component
-    keywords: list[str]         # Search terms agents might use to find this
+
+    tab: str  # MCP screenshot tab parameter
+    component: str | None  # MCP screenshot component parameter (None = full tab)
+    tests: list[str]  # Test classes that verify this component
+    source_file: str  # Primary source file defining this component
+    keywords: list[str]  # Search terms agents might use to find this
 
 
 # =============================================================================
@@ -101,7 +102,6 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         source_file="chad/web_ui.py",
         keywords=["project path", "directory", "working directory"],
     ),
-
     # --- Run Tab: Chat Interface ---
     "CHAT_INTERFACE": UIComponent(
         tab="run",
@@ -117,7 +117,6 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         source_file="chad/web_ui.py",
         keywords=["task", "task description", "input", "prompt"],
     ),
-
     # --- Run Tab: Live View ---
     "LIVE_VIEW": UIComponent(
         tab="run",
@@ -126,7 +125,6 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         source_file="chad/web_ui.py",
         keywords=["live view", "activity", "stream", "output", "live activity"],
     ),
-
     # --- Providers Tab ---
     "PROVIDER_CARD": UIComponent(
         tab="providers",
@@ -163,7 +161,6 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         source_file="chad/provider_ui.py",
         keywords=["add provider", "new provider", "add account"],
     ),
-
     # --- Task Tabs ---
     "TASK_TABS": UIComponent(
         tab="run",

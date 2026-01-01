@@ -97,23 +97,17 @@ if __name__ == "__main__":
             color = code_elem.evaluate("elem => getComputedStyle(elem).color")
             classes = code_elem.evaluate("elem => elem.className")
             parent_classes = code_elem.evaluate("elem => elem.parentElement.className")
-            print(
-                f"Code element {i}: text='{text}', color={color}, classes='{classes}', parent='{parent_classes}'"
-            )
+            print(f"Code element {i}: text='{text}', color={color}, classes='{classes}', parent='{parent_classes}'")
 
             # Code should be styled with appropriate colors
             # Either pink (#f0abfc = rgb(240, 171, 252)) for generic code
             # or syntax-specific colors if highlighting is applied
             # Just check it's not the default grey
-            assert color != "rgb(226, 232, 240)", (
-                f"Code should not be default grey color, got {color} for '{text}'"
-            )
+            assert color != "rgb(226, 232, 240)", f"Code should not be default grey color, got {color} for '{text}'"
 
             # Check no background box
             bg = code_elem.evaluate("elem => getComputedStyle(elem).backgroundColor")
-            assert bg in ["transparent", "rgba(0, 0, 0, 0)", "none", ""], (
-                f"Code should have no background, got {bg}"
-            )
+            assert bg in ["transparent", "rgba(0, 0, 0, 0)", "none", ""], f"Code should have no background, got {bg}"
 
     def test_syntax_highlighting_in_code_blocks(self, page: Page):
         """Code blocks should have syntax highlighting for language keywords."""
@@ -197,9 +191,9 @@ def process_data(data):
         inject_live_stream_content(page, self.CLI_OUTPUT_WITH_CODE)
         result = verify_all_text_visible(page)
 
-        assert result.get("allVisible", False), (
-            f"Some code text is too dark. Dark elements: {result.get('darkElements', [])}"
-        )
+        assert result.get(
+            "allVisible", False
+        ), f"Some code text is too dark. Dark elements: {result.get('darkElements', [])}"
 
     def test_actual_syntax_highlighting_applied(self, page: Page):
         """Test that Python code has actual syntax highlighting applied."""

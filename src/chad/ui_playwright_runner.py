@@ -68,6 +68,7 @@ class TempChadEnv:
             os.environ.pop("CHAD_CONFIG")
         try:
             import shutil
+
             shutil.rmtree(self.temp_dir, ignore_errors=True)
         except Exception:
             pass
@@ -86,6 +87,7 @@ def ensure_playwright():
     """Import Playwright, raising a clear error if unavailable."""
     try:
         from playwright.sync_api import sync_playwright  # type: ignore
+
         return sync_playwright
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise PlaywrightUnavailable(
@@ -554,6 +556,7 @@ def get_card_visibility_debug(page: "Page") -> list[dict]:
 @dataclass
 class DeleteProviderResult:
     """Result of a delete provider operation."""
+
     provider_name: str
     existed_before: bool
     confirm_button_appeared: bool
@@ -580,7 +583,7 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
             confirm_clicked=False,
             exists_after=False,
             deleted=False,
-            feedback_message=f"Provider '{provider_name}' not found"
+            feedback_message=f"Provider '{provider_name}' not found",
         )
 
     # Find and click the delete button for this provider (first click)
@@ -606,7 +609,7 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
   return false;
 }
 """,
-        provider_name
+        provider_name,
     )
 
     if not first_click:
@@ -617,7 +620,7 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
             confirm_clicked=False,
             exists_after=provider_exists(page, provider_name),
             deleted=False,
-            feedback_message=f"Could not find delete button for '{provider_name}'"
+            feedback_message=f"Could not find delete button for '{provider_name}'",
         )
 
     # Wait for button to change to tick symbol
@@ -650,7 +653,7 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
             confirm_clicked=False,
             exists_after=provider_exists(page, provider_name),
             deleted=False,
-            feedback_message="Confirm button did not appear after first click"
+            feedback_message="Confirm button did not appear after first click",
         )
 
     # Click the confirm button (second click)
@@ -679,15 +682,18 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
     exists_after = provider_exists(page, provider_name)
 
     # Get feedback message
-    feedback = page.evaluate(
-        """
+    feedback = (
+        page.evaluate(
+            """
 () => {
   // Look for feedback in the provider panel area
   const feedback = document.querySelector('.provider-summary');
   return feedback ? feedback.textContent : '';
 }
 """
-    ) or ""
+        )
+        or ""
+    )
 
     return DeleteProviderResult(
         provider_name=provider_name,
@@ -696,7 +702,7 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
         confirm_clicked=confirm_clicked,
         exists_after=exists_after,
         deleted=existed_before and not exists_after,
-        feedback_message=feedback.strip()
+        feedback_message=feedback.strip(),
     )
 
 
@@ -721,6 +727,7 @@ def chad_page_session(
 @dataclass
 class LiveStreamTestResult:
     """Result of testing live stream content."""
+
     content_visible: bool
     has_colored_spans: bool
     color_is_readable: bool
@@ -761,7 +768,7 @@ def inject_live_stream_content(page: "Page", html_content: str) -> None:
     return true;
 }
 """,
-        html_content
+        html_content,
     )
     page.wait_for_timeout(100)
 
@@ -820,16 +827,16 @@ def check_live_stream_colors(page: "Page") -> LiveStreamTestResult:
             color_is_readable=False,
             has_diff_classes=False,
             raw_html="",
-            computed_colors=[]
+            computed_colors=[],
         )
 
     # Check if colors are readable (not too dark on dark background)
     color_is_readable = True
-    for color_info in result.get('computedColors', []):
-        computed = color_info.get('computedColor', '')
+    for color_info in result.get("computedColors", []):
+        computed = color_info.get("computedColor", "")
         # Parse rgb values and check brightness
-        if 'rgb' in computed:
-            match = re.search(r'rgb\((\d+),\s*(\d+),\s*(\d+)\)', computed)
+        if "rgb" in computed:
+            match = re.search(r"rgb\((\d+),\s*(\d+),\s*(\d+)\)", computed)
             if match:
                 r, g, b = int(match.group(1)), int(match.group(2)), int(match.group(3))
                 # Calculate perceived brightness (ITU-R BT.709)
@@ -841,11 +848,11 @@ def check_live_stream_colors(page: "Page") -> LiveStreamTestResult:
 
     return LiveStreamTestResult(
         content_visible=True,
-        has_colored_spans=result.get('hasColoredSpans', False),
+        has_colored_spans=result.get("hasColoredSpans", False),
         color_is_readable=color_is_readable,
-        has_diff_classes=result.get('hasDiffClasses', False),
-        raw_html=result.get('rawHtml', ''),
-        computed_colors=result.get('computedColors', [])
+        has_diff_classes=result.get("hasDiffClasses", False),
+        raw_html=result.get("rawHtml", ""),
+        computed_colors=result.get("computedColors", []),
     )
 
 
@@ -924,7 +931,7 @@ def verify_all_text_visible(page: "Page", min_brightness: int = 80) -> dict:
     };
 }
 """,
-        min_brightness
+        min_brightness,
     )
     return result or {"error": "evaluation returned null"}
 
@@ -1211,14 +1218,15 @@ def inject_merge_conflict_content(page: "Page") -> bool:
     return { foundMerge, foundConflict };
 }
 """,
-        SAMPLE_MERGE_CONFLICT_HTML
+        SAMPLE_MERGE_CONFLICT_HTML,
     )
-    return result and (result.get('foundMerge') or result.get('foundConflict'))
+    return result and (result.get("foundMerge") or result.get("foundConflict"))
 
 
 @dataclass
 class MergeViewerTestResult:
     """Result of testing merge viewer content."""
+
     conflict_viewer_visible: bool
     has_conflict_files: bool
     has_original_side: bool
@@ -1287,15 +1295,15 @@ def check_merge_viewer(page: "Page") -> MergeViewerTestResult:
             has_incoming_side=False,
             file_headers=[],
             colors_correct=False,
-            raw_html=""
+            raw_html="",
         )
 
     return MergeViewerTestResult(
-        conflict_viewer_visible=result.get('visible', False),
-        has_conflict_files=result.get('hasConflictFiles', False),
-        has_original_side=result.get('hasOriginalSide', False),
-        has_incoming_side=result.get('hasIncomingSide', False),
-        file_headers=result.get('fileHeaders', []),
-        colors_correct=result.get('colorsCorrect', False),
-        raw_html=result.get('rawHtml', '')
+        conflict_viewer_visible=result.get("visible", False),
+        has_conflict_files=result.get("hasConflictFiles", False),
+        has_original_side=result.get("hasOriginalSide", False),
+        has_incoming_side=result.get("hasIncomingSide", False),
+        file_headers=result.get("fileHeaders", []),
+        colors_correct=result.get("colorsCorrect", False),
+        raw_html=result.get("rawHtml", ""),
     )

@@ -71,6 +71,7 @@ ensure_global_mcp_config()
 # Tool 1: VERIFY - Run lint + all tests
 # =============================================================================
 
+
 @SERVER.tool()
 def verify() -> Dict[str, object]:
     """Run linting and ALL tests (unit + integration + visual) to verify no regressions.
@@ -124,6 +125,7 @@ def verify() -> Dict[str, object]:
         for line in test_result.stdout.split("\n"):
             if "passed" in line or "failed" in line:
                 import re
+
                 match = re.search(r"(\d+) passed", line)
                 if match:
                     passed = int(match.group(1))
@@ -167,7 +169,7 @@ COMPONENT_SELECTORS = {
     "live-view": "#live-stream-box",
     # Providers tab components
     "provider-summary": "#provider-summary-panel",
-    "provider-card": "#provider-card-0",  # First provider card
+    "provider-card": ".provider-cards-row .column:has(.provider-card__header-row)",  # First provider card
     "add-provider": "#add-provider-panel",
 }
 
@@ -291,10 +293,7 @@ def hypothesis(
             "tracker_id": tracker.id,
             "hypothesis_id": hypothesis_id,
             "description": description,
-            "checks_to_verify": [
-                {"index": i, "check": c}
-                for i, c in enumerate(check_list)
-            ],
+            "checks_to_verify": [{"index": i, "check": c} for i, c in enumerate(check_list)],
             "message": f"Hypothesis #{hypothesis_id} recorded. File results for each check using check_result().",
         }
     except Exception as exc:
@@ -380,10 +379,7 @@ def report(tracker_id: str, screenshot_before: str = "", screenshot_after: str =
         # Format for easy reading
         formatted_hypotheses = []
         for h in full_report["hypotheses"]:
-            formatted_hypotheses.append(
-                f"{h['status_icon']} H{h['id']}: {h['description']}\n" +
-                "\n".join(h["checks"])
-            )
+            formatted_hypotheses.append(f"{h['status_icon']} H{h['id']}: {h['description']}\n" + "\n".join(h["checks"]))
 
         return {
             "success": True,
@@ -406,6 +402,7 @@ def report(tracker_id: str, screenshot_before: str = "", screenshot_after: str =
 # =============================================================================
 # Bootstrap/Discovery
 # =============================================================================
+
 
 @SERVER.tool()
 def list_tools() -> Dict[str, object]:

@@ -14,17 +14,10 @@ def test_codex_models_from_config_and_sessions(tmp_path: Path):
     (codex_dir / "sessions" / "2025" / "01" / "01").mkdir(parents=True, exist_ok=True)
 
     config = codex_dir / "config.toml"
-    config.write_text(
-        'model = "gpt-5.2-codex"\n'
-        '[notice.model_migrations]\n'
-        '"gpt-old" = "gpt-new"\n'
-    )
+    config.write_text('model = "gpt-5.2-codex"\n' "[notice.model_migrations]\n" '"gpt-old" = "gpt-new"\n')
 
     session = codex_dir / "sessions" / "2025" / "01" / "01" / "session.jsonl"
-    session.write_text(
-        '{"model": "gpt-5.1-codex-max"}\n'
-        '{"payload": {"model": "gpt-4.1"}}\n'
-    )
+    session.write_text('{"model": "gpt-5.1-codex-max"}\n' '{"payload": {"model": "gpt-4.1"}}\n')
 
     catalog = ModelCatalog(home_dir=tmp_path, cache_ttl=0)
     models = catalog.get_models("openai")

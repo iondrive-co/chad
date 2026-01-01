@@ -17,6 +17,7 @@ def _skip_if_no_playwright():
     """Skip test if Playwright is not available."""
     try:
         from playwright.sync_api import sync_playwright  # noqa: F401
+
         return False
     except ImportError:
         return True
@@ -227,9 +228,7 @@ def test_merge_viewer_text_is_readable(chad_with_merge_viewer):
     )
 
     assert result["found"], "Conflict viewer not found"
-    assert result["allReadable"], (
-        f"{result['darkElementCount']} elements have poor contrast: {result['darkElements']}"
-    )
+    assert result["allReadable"], f"{result['darkElementCount']} elements have poor contrast: {result['darkElements']}"
 
 
 @pytest.mark.skipif(_skip_if_no_playwright(), reason="Playwright not available")
