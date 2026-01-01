@@ -4,7 +4,14 @@ import subprocess
 
 import pytest
 
-from chad.git_worktree import GitWorktreeManager, ConflictHunk, MergeConflict
+from chad.git_worktree import (
+    GitWorktreeManager,
+    ConflictHunk,
+    MergeConflict,
+    DiffLine,
+    DiffHunk,
+    FileDiff,
+)
 
 
 @pytest.fixture
@@ -74,11 +81,12 @@ class TestGitWorktreeManager:
         mgr = GitWorktreeManager(git_repo)
         task_id = "test-task-1"
 
-        worktree_path = mgr.create_worktree(task_id)
+        worktree_path, base_commit = mgr.create_worktree(task_id)
 
         assert worktree_path.exists()
         assert worktree_path == git_repo / ".chad-worktrees" / task_id
         assert (worktree_path / "README.md").exists()
+        assert len(base_commit) == 40  # SHA-1 hash length
 
     def test_worktree_exists(self, git_repo):
         """Test checking if worktree exists."""
@@ -94,7 +102,7 @@ class TestGitWorktreeManager:
         mgr = GitWorktreeManager(git_repo)
         task_id = "test-task-3"
 
-        worktree_path = mgr.create_worktree(task_id)
+        worktree_path, _ = mgr.create_worktree(task_id)
         assert worktree_path.exists()
 
         result = mgr.delete_worktree(task_id)
@@ -114,7 +122,7 @@ class TestGitWorktreeManager:
         mgr = GitWorktreeManager(git_repo)
         task_id = "test-task-5"
 
-        worktree_path = mgr.create_worktree(task_id)
+        worktree_path, _ = mgr.create_worktree(task_id)
         (worktree_path / "new_file.txt").write_text("New content")
 
         assert mgr.has_changes(task_id) is True
@@ -124,7 +132,7 @@ class TestGitWorktreeManager:
         mgr = GitWorktreeManager(git_repo)
         task_id = "test-task-6"
 
-        worktree_path = mgr.create_worktree(task_id)
+        worktree_path, _ = mgr.create_worktree(task_id)
         (worktree_path / "new_file.txt").write_text("New content")
 
         # Stage and commit in worktree
@@ -145,7 +153,7 @@ class TestGitWorktreeManager:
         mgr = GitWorktreeManager(git_repo)
         task_id = "test-task-7"
 
-        worktree_path = mgr.create_worktree(task_id)
+        worktree_path, _ = mgr.create_worktree(task_id)
         (worktree_path / "new_file.txt").write_text("New content")
 
         summary = mgr.get_diff_summary(task_id)
@@ -157,7 +165,7 @@ class TestGitWorktreeManager:
         mgr = GitWorktreeManager(git_repo)
         task_id = "test-task-8"
 
-        worktree_path = mgr.create_worktree(task_id)
+        worktree_path, _ = mgr.create_worktree(task_id)
         (worktree_path / "new_file.txt").write_text("New content")
 
         result = mgr.commit_all_changes(task_id, "Test commit")
@@ -178,7 +186,7 @@ class TestGitWorktreeManager:
         mgr = GitWorktreeManager(git_repo)
         task_id = "test-task-9"
 
-        worktree_path = mgr.create_worktree(task_id)
+        worktree_path, _ = mgr.create_worktree(task_id)
         (worktree_path / "new_file.txt").write_text("New content")
 
         # Commit in worktree
@@ -205,7 +213,7 @@ class TestGitWorktreeManager:
         task_id = "test-task-10"
 
         # Create worktree
-        worktree_path = mgr.create_worktree(task_id)
+        worktree_path, _ = mgr.create_worktree(task_id)
 
         # Modify README in worktree and commit
         (worktree_path / "README.md").write_text("# Modified in worktree\n")
@@ -246,7 +254,7 @@ class TestGitWorktreeManager:
         task_id = "test-task-11"
 
         # Create worktree and set up conflict
-        worktree_path = mgr.create_worktree(task_id)
+        worktree_path, _ = mgr.create_worktree(task_id)
         (worktree_path / "README.md").write_text("# Worktree version\n")
         subprocess.run(
             ["git", "add", "."], cwd=worktree_path, check=True, capture_output=True
@@ -290,7 +298,7 @@ class TestGitWorktreeManager:
         task_id = "test-task-12"
 
         # Create conflict scenario
-        worktree_path = mgr.create_worktree(task_id)
+        worktree_path, _ = mgr.create_worktree(task_id)
         (worktree_path / "README.md").write_text("# Worktree\n")
         subprocess.run(
             ["git", "add", "."], cwd=worktree_path, check=True, capture_output=True
@@ -325,7 +333,7 @@ class TestGitWorktreeManager:
         mgr = GitWorktreeManager(git_repo)
         task_id = "test-task-13"
 
-        worktree_path = mgr.create_worktree(task_id)
+        worktree_path, _ = mgr.create_worktree(task_id)
         (worktree_path / "new_file.txt").write_text("Content")
         subprocess.run(
             ["git", "add", "."], cwd=worktree_path, check=True, capture_output=True
@@ -448,3 +456,159 @@ class TestMergeConflictDataClasses:
 
         assert conflict.file_path == "test.py"
         assert len(conflict.hunks) == 1
+
+
+class TestDiffParsing:
+    """Test cases for unified diff parsing."""
+
+    def test_parse_simple_diff(self, git_repo):
+        """Test parsing a simple unified diff."""
+        mgr = GitWorktreeManager(git_repo)
+
+        diff_text = """diff --git a/test.py b/test.py
+index abc123..def456 100644
+--- a/test.py
++++ b/test.py
+@@ -1,3 +1,4 @@
+ line 1
+-old line
++new line
++added line
+ line 3
+"""
+        files = mgr._parse_unified_diff(diff_text)
+
+        assert len(files) == 1
+        assert files[0].old_path == "test.py"
+        assert files[0].new_path == "test.py"
+        assert len(files[0].hunks) == 1
+
+        hunk = files[0].hunks[0]
+        assert hunk.old_start == 1
+        assert hunk.new_start == 1
+        assert len(hunk.lines) == 5
+
+        # Check line types
+        line_types = [(ln.line_type, ln.content) for ln in hunk.lines]
+        assert line_types[0] == ("context", "line 1")
+        assert line_types[1] == ("removed", "old line")
+        assert line_types[2] == ("added", "new line")
+        assert line_types[3] == ("added", "added line")
+        assert line_types[4] == ("context", "line 3")
+
+    def test_parse_new_file_diff(self, git_repo):
+        """Test parsing a diff for a new file."""
+        mgr = GitWorktreeManager(git_repo)
+
+        diff_text = """diff --git a/new_file.py b/new_file.py
+new file mode 100644
+index 0000000..abc123
+--- /dev/null
++++ b/new_file.py
+@@ -0,0 +1,3 @@
++line 1
++line 2
++line 3
+"""
+        files = mgr._parse_unified_diff(diff_text)
+
+        assert len(files) == 1
+        assert files[0].is_new is True
+        assert files[0].new_path == "new_file.py"
+
+    def test_parse_deleted_file_diff(self, git_repo):
+        """Test parsing a diff for a deleted file."""
+        mgr = GitWorktreeManager(git_repo)
+
+        diff_text = """diff --git a/old_file.py b/old_file.py
+deleted file mode 100644
+index abc123..0000000
+--- a/old_file.py
++++ /dev/null
+@@ -1,3 +0,0 @@
+-line 1
+-line 2
+-line 3
+"""
+        files = mgr._parse_unified_diff(diff_text)
+
+        assert len(files) == 1
+        assert files[0].is_deleted is True
+
+    def test_parse_multiple_files_diff(self, git_repo):
+        """Test parsing a diff with multiple files."""
+        mgr = GitWorktreeManager(git_repo)
+
+        diff_text = """diff --git a/file1.py b/file1.py
+index abc123..def456 100644
+--- a/file1.py
++++ b/file1.py
+@@ -1,2 +1,2 @@
+ unchanged
+-old
++new
+diff --git a/file2.py b/file2.py
+index 111111..222222 100644
+--- a/file2.py
++++ b/file2.py
+@@ -1 +1 @@
+-foo
++bar
+"""
+        files = mgr._parse_unified_diff(diff_text)
+
+        assert len(files) == 2
+        assert files[0].new_path == "file1.py"
+        assert files[1].new_path == "file2.py"
+
+
+class TestDiffDataClasses:
+    """Test cases for diff data classes."""
+
+    def test_diff_line_creation(self):
+        """Test creating a DiffLine."""
+        line = DiffLine(
+            content="hello world",
+            line_type="added",
+            old_line_no=None,
+            new_line_no=42,
+        )
+
+        assert line.content == "hello world"
+        assert line.line_type == "added"
+        assert line.old_line_no is None
+        assert line.new_line_no == 42
+
+    def test_diff_hunk_creation(self):
+        """Test creating a DiffHunk."""
+        hunk = DiffHunk(
+            old_start=10,
+            old_count=5,
+            new_start=10,
+            new_count=7,
+            lines=[
+                DiffLine("ctx", "context", 10, 10),
+                DiffLine("old", "removed", 11, None),
+                DiffLine("new", "added", None, 11),
+            ],
+        )
+
+        assert hunk.old_start == 10
+        assert hunk.old_count == 5
+        assert hunk.new_start == 10
+        assert hunk.new_count == 7
+        assert len(hunk.lines) == 3
+
+    def test_file_diff_creation(self):
+        """Test creating a FileDiff."""
+        file_diff = FileDiff(
+            old_path="old.py",
+            new_path="new.py",
+            is_new=True,
+        )
+
+        assert file_diff.old_path == "old.py"
+        assert file_diff.new_path == "new.py"
+        assert file_diff.is_new is True
+        assert file_diff.is_deleted is False
+        assert file_diff.is_binary is False

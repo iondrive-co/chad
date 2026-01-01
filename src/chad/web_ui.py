@@ -25,7 +25,7 @@ from .prompts import (
     parse_verification_response,
     VerificationParseError,
 )
-from .git_worktree import GitWorktreeManager, MergeConflict
+from .git_worktree import GitWorktreeManager, MergeConflict, FileDiff
 
 
 @dataclass
@@ -45,6 +45,7 @@ class Session:
     # Git worktree support
     worktree_path: Path | None = None
     worktree_branch: str | None = None
+    worktree_base_commit: str | None = None  # Commit SHA worktree was created from
     has_worktree_changes: bool = False
     merge_conflicts: list[MergeConflict] | None = None
 
@@ -935,6 +936,132 @@ body, .gradio-container, .gradio-container * {
 
 .conflict-side-content {
   color: #e5e9f0;
+}
+
+/* Side-by-side diff viewer */
+.diff-viewer {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', monospace;
+  font-size: 12px;
+  background: #2e3440;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.diff-file {
+  margin-bottom: 12px;
+  border: 1px solid #4c566a;
+  border-radius: 4px;
+}
+
+.diff-file-header {
+  background: #3b4252;
+  padding: 8px 12px;
+  font-weight: bold;
+  color: #88c0d0;
+  border-bottom: 1px solid #4c566a;
+}
+
+.diff-file-header .new-file {
+  color: #a3be8c;
+  font-weight: normal;
+  margin-left: 8px;
+}
+
+.diff-file-header .deleted-file {
+  color: #bf616a;
+  font-weight: normal;
+  margin-left: 8px;
+}
+
+.diff-hunk {
+  border-top: 1px solid #4c566a;
+}
+
+.diff-hunk:first-child {
+  border-top: none;
+}
+
+.diff-comparison {
+  display: flex;
+}
+
+.diff-side {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.diff-side-left {
+  border-right: 1px solid #4c566a;
+}
+
+.diff-side-header {
+  background: #3b4252;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: #81a1c1;
+  border-bottom: 1px solid #4c566a;
+}
+
+.diff-line {
+  display: flex;
+  min-height: 20px;
+}
+
+.diff-line-no {
+  width: 40px;
+  min-width: 40px;
+  padding: 0 8px;
+  text-align: right;
+  color: #4c566a;
+  background: #2e3440;
+  border-right: 1px solid #3b4252;
+  user-select: none;
+}
+
+.diff-line-content {
+  flex: 1;
+  padding: 0 8px;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.diff-line.added {
+  background: #283b28;
+}
+
+.diff-line.added .diff-line-content {
+  color: #a3be8c;
+}
+
+.diff-line.removed {
+  background: #3b2828;
+}
+
+.diff-line.removed .diff-line-content {
+  color: #bf616a;
+}
+
+.diff-line.context {
+  background: #2e3440;
+}
+
+.diff-line.context .diff-line-content {
+  color: #d8dee9;
+}
+
+.diff-line.empty {
+  background: #3b4252;
+}
+
+.diff-line.empty .diff-line-content {
+  color: #4c566a;
+}
+
+.diff-binary {
+  padding: 12px;
+  color: #ebcb8b;
+  font-style: italic;
 }
 """
 # fmt: on
@@ -2158,9 +2285,10 @@ class ChadWebUI:
 
             # Create worktree for this task
             try:
-                worktree_path = git_mgr.create_worktree(session_id)
+                worktree_path, base_commit = git_mgr.create_worktree(session_id)
                 session.worktree_path = worktree_path
                 session.worktree_branch = git_mgr._branch_name(session_id)
+                session.worktree_base_commit = base_commit
                 session.project_path = str(path_obj)
                 task_working_dir = worktree_path
             except Exception as e:
@@ -2788,14 +2916,17 @@ class ChadWebUI:
             # Check for worktree changes to show merge section
             has_changes, merge_summary_text = self.check_worktree_changes(session_id)
 
-            # Get available branches and full diff for merge target
+            # Get available branches and rendered diff for merge target
             branches = []
-            full_diff = ""
+            diff_html = ""
             if has_changes and session.project_path:
                 try:
                     git_mgr = GitWorktreeManager(Path(session.project_path))
                     branches = git_mgr.get_branches()
-                    full_diff = git_mgr.get_full_diff(session_id)
+                    parsed_diff = git_mgr.get_parsed_diff(
+                        session_id, session.worktree_base_commit
+                    )
+                    diff_html = self._render_diff_html(parsed_diff)
                 except Exception:
                     branches = ["main"]
 
@@ -2809,7 +2940,7 @@ class ChadWebUI:
                 show_merge=has_changes,
                 merge_summary=merge_summary_text,
                 branch_choices=branches if has_changes else None,
-                diff_full=full_diff,
+                diff_full=diff_html,
             )
 
         except Exception as e:  # pragma: no cover - defensive
@@ -3372,7 +3503,7 @@ class ChadWebUI:
         session.has_worktree_changes = has_changes
 
         if has_changes:
-            summary = git_mgr.get_diff_summary(session_id)
+            summary = git_mgr.get_diff_summary(session_id, session.worktree_base_commit)
             return True, summary
         return False, ""
 
@@ -3486,6 +3617,103 @@ class ChadWebUI:
             html_parts.append('</div>')  # conflict-file
 
         html_parts.append('</div>')  # conflict-viewer
+        return '\n'.join(html_parts)
+
+    def _render_diff_html(self, file_diffs: list[FileDiff]) -> str:
+        """Render file diffs as side-by-side HTML."""
+        if not file_diffs:
+            return "<p style='color: #d8dee9;'>No changes to display.</p>"
+
+        html_parts = ['<div class="diff-viewer">']
+
+        for file_diff in file_diffs:
+            html_parts.append('<div class="diff-file">')
+
+            # File header
+            file_path_escaped = html.escape(file_diff.new_path)
+            header_extra = ""
+            if file_diff.is_new:
+                header_extra = '<span class="new-file">(new file)</span>'
+            elif file_diff.is_deleted:
+                header_extra = '<span class="deleted-file">(deleted)</span>'
+
+            html_parts.append(
+                f'<div class="diff-file-header">{file_path_escaped} {header_extra}</div>'
+            )
+
+            if file_diff.is_binary:
+                html_parts.append('<div class="diff-binary">Binary file changed</div>')
+                html_parts.append('</div>')
+                continue
+
+            # Render each hunk side-by-side
+            for hunk in file_diff.hunks:
+                html_parts.append('<div class="diff-hunk">')
+                html_parts.append('<div class="diff-comparison">')
+
+                # Build side-by-side lines
+                left_lines: list[tuple[int | None, str, str]] = []  # (line_no, content, type)
+                right_lines: list[tuple[int | None, str, str]] = []
+
+                # Process lines to build left/right sides
+                for diff_line in hunk.lines:
+                    if diff_line.line_type == "context":
+                        left_lines.append(
+                            (diff_line.old_line_no, diff_line.content, "context")
+                        )
+                        right_lines.append(
+                            (diff_line.new_line_no, diff_line.content, "context")
+                        )
+                    elif diff_line.line_type == "removed":
+                        left_lines.append(
+                            (diff_line.old_line_no, diff_line.content, "removed")
+                        )
+                    elif diff_line.line_type == "added":
+                        right_lines.append(
+                            (diff_line.new_line_no, diff_line.content, "added")
+                        )
+
+                # Pad shorter side to match
+                max_len = max(len(left_lines), len(right_lines))
+                while len(left_lines) < max_len:
+                    left_lines.append((None, "", "empty"))
+                while len(right_lines) < max_len:
+                    right_lines.append((None, "", "empty"))
+
+                # Left side (original)
+                html_parts.append('<div class="diff-side diff-side-left">')
+                html_parts.append('<div class="diff-side-header">Original</div>')
+                for line_no, content, line_type in left_lines:
+                    line_no_str = str(line_no) if line_no else ""
+                    content_escaped = html.escape(content)
+                    html_parts.append(
+                        f'<div class="diff-line {line_type}">'
+                        f'<span class="diff-line-no">{line_no_str}</span>'
+                        f'<span class="diff-line-content">{content_escaped}</span>'
+                        f'</div>'
+                    )
+                html_parts.append('</div>')
+
+                # Right side (modified)
+                html_parts.append('<div class="diff-side diff-side-right">')
+                html_parts.append('<div class="diff-side-header">Modified</div>')
+                for line_no, content, line_type in right_lines:
+                    line_no_str = str(line_no) if line_no else ""
+                    content_escaped = html.escape(content)
+                    html_parts.append(
+                        f'<div class="diff-line {line_type}">'
+                        f'<span class="diff-line-no">{line_no_str}</span>'
+                        f'<span class="diff-line-content">{content_escaped}</span>'
+                        f'</div>'
+                    )
+                html_parts.append('</div>')
+
+                html_parts.append('</div>')  # diff-comparison
+                html_parts.append('</div>')  # diff-hunk
+
+            html_parts.append('</div>')  # diff-file
+
+        html_parts.append('</div>')  # diff-viewer
         return '\n'.join(html_parts)
 
     def resolve_all_conflicts(
@@ -3873,12 +4101,10 @@ class ChadWebUI:
                 "",
                 key=f"changes-summary-{session_id}",
             )
-            with gr.Accordion("View Full Diff", open=False):
-                diff_content = gr.Code(
-                    label="",
-                    language="diff",
+            with gr.Accordion("View Changes", open=False):
+                diff_content = gr.HTML(
                     value="",
-                    key=f"diff-content-{session_id}",
+                    elem_id=f"diff-content-{session_id}",
                 )
             with gr.Row():
                 merge_commit_msg = gr.Textbox(
