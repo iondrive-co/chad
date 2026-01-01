@@ -182,7 +182,7 @@ def _wait_for_port(process: subprocess.Popen[str], timeout: int = 30) -> int:
     raise ChadLaunchError("Timed out waiting for CHAD_PORT announcement")
 
 
-def _wait_for_ready(port: int, timeout: int = 30) -> None:
+def _wait_for_ready(port: int, timeout: int = 60) -> None:
     """Wait until the web UI responds with Gradio content."""
     import urllib.request
 
@@ -751,8 +751,23 @@ def inject_live_stream_content(page: "Page", html_content: str) -> None:
 (htmlContent) => {
     const box = document.querySelector('#live-stream-box');
     if (!box) return false;
+    let node = box;
+    while (node) {
+        if (node.classList) {
+            node.classList.remove('hide-container');
+        }
+        if (node.style) {
+            node.style.setProperty('display', 'block', 'important');
+            node.style.setProperty('visibility', 'visible', 'important');
+            node.style.setProperty('opacity', '1', 'important');
+            node.style.setProperty('height', 'auto', 'important');
+        }
+        if (node.hasAttribute && node.hasAttribute('hidden')) {
+            node.removeAttribute('hidden');
+        }
+        node = node.parentElement;
+    }
     // Make the box visible and prominent
-    box.style.display = 'block';
     box.style.minHeight = '300px';
     // Find the markdown content area or create one
     let contentDiv = box.querySelector('.live-output-content');

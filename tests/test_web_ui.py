@@ -367,6 +367,20 @@ class TestPortResolution:
         assert "background: none" in code_block or "background: transparent" in code_block
         assert "padding: 0" in code_block
 
+    def test_live_stream_box_visibility_not_forced_globally(self):
+        """Live stream box should not be forced visible in normal UI CSS."""
+        from chad import web_ui
+
+        box_css_match = re.search(
+            r"#live-stream-box\\s*\\{([^}]*)\\}",
+            web_ui.PROVIDER_PANEL_CSS,
+        )
+        assert box_css_match, "Expected live stream box style block"
+
+        box_block = box_css_match.group(1)
+        assert "display:" not in box_block
+        assert "visibility:" not in box_block
+
 
 class TestChadWebUITaskExecution:
     """Test cases for task execution in ChadWebUI."""
