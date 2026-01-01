@@ -3295,17 +3295,20 @@ class ChadWebUI:
         session_id: str,
         commit_message: str = "",
         target_branch: str = "",
-    ) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update, gr.update]:
-        """Attempt to merge worktree changes to a target branch."""
+    ) -> tuple:
+        """Attempt to merge worktree changes to a target branch.
+
+        Returns 11 values for merge_outputs:
+        [merge_section, changes_summary, conflict_section, conflict_info, conflicts_html,
+         task_status, chatbot, start_btn, cancel_btn, live_stream, followup_row]
+        """
         session = self.get_session(session_id)
+        no_change = gr.update()
         if not session.worktree_path or not session.project_path:
             return (
-                gr.update(visible=False),
-                gr.update(),
-                gr.update(visible=False),
-                gr.update(),
-                gr.update(),
-                gr.update(),
+                gr.update(visible=False), no_change, gr.update(visible=False),
+                no_change, no_change, no_change,
+                no_change, no_change, no_change, no_change, no_change,
             )
 
         git_mgr = GitWorktreeManager(Path(session.project_path))
@@ -3321,26 +3324,33 @@ class ChadWebUI:
             session.worktree_branch = None
             session.has_worktree_changes = False
             session.worktree_base_commit = None
+            # Full reset - return tab to initial state
             return (
-                gr.update(visible=False),
-                gr.update(),
-                gr.update(visible=False),
-                gr.update(),
-                gr.update(),
-                gr.update(value=f"✓ Changes merged to {target_name}.", visible=True),
+                gr.update(visible=False),                    # merge_section
+                gr.update(value=""),                         # changes_summary
+                gr.update(visible=False),                    # conflict_section
+                gr.update(value=""),                         # conflict_info
+                gr.update(value=""),                         # conflicts_html
+                gr.update(value=f"✓ Changes merged to {target_name}.", visible=True),  # task_status
+                gr.update(value=[]),                         # chatbot - clear
+                gr.update(interactive=True),                 # start_btn - enable
+                gr.update(interactive=False),                # cancel_btn - disable
+                gr.update(value=""),                         # live_stream - clear
+                gr.update(visible=False),                    # followup_row - hide
             )
         else:
             session.merge_conflicts = conflicts
             conflict_count = sum(len(c.hunks) for c in (conflicts or []))
             file_count = len(conflicts or [])
-            conflict_msg = f"**{file_count} file(s)** with " f"**{conflict_count} conflict(s)** need resolution."
+            conflict_msg = f"**{file_count} file(s)** with **{conflict_count} conflict(s)** need resolution."
             return (
-                gr.update(visible=False),
-                gr.update(),
-                gr.update(visible=True),
-                gr.update(value=conflict_msg),
-                gr.update(value=self._render_conflicts_html(conflicts or [])),
-                gr.update(),
+                gr.update(visible=False),                    # merge_section
+                no_change,                                   # changes_summary
+                gr.update(visible=True),                     # conflict_section
+                gr.update(value=conflict_msg),               # conflict_info
+                gr.update(value=self._render_conflicts_html(conflicts or [])),  # conflicts_html
+                no_change,                                   # task_status
+                no_change, no_change, no_change, no_change, no_change,  # no reset on conflict
             )
 
     def _render_conflicts_html(self, conflicts: list[MergeConflict]) -> str:
@@ -3490,15 +3500,18 @@ class ChadWebUI:
         html_parts.append("</div>")  # diff-viewer
         return "\n".join(html_parts)
 
-    def resolve_all_conflicts(
-        self, session_id: str, use_incoming: bool
-    ) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update, gr.update]:
-        """Resolve all conflicts by choosing all original or all incoming."""
+    def resolve_all_conflicts(self, session_id: str, use_incoming: bool) -> tuple:
+        """Resolve all conflicts by choosing all original or all incoming.
+
+        Returns 11 values for merge_outputs.
+        """
         session = self.get_session(session_id)
+        no_change = gr.update()
         if not session.project_path:
             return (
-                gr.update(), gr.update(), gr.update(visible=False),
-                gr.update(), gr.update(), gr.update()
+                no_change, no_change, gr.update(visible=False),
+                no_change, no_change, no_change,
+                no_change, no_change, no_change, no_change, no_change,
             )
 
         git_mgr = GitWorktreeManager(Path(session.project_path))
@@ -3512,52 +3525,63 @@ class ChadWebUI:
             session.merge_conflicts = None
             session.has_worktree_changes = False
             session.worktree_base_commit = None
+            # Full reset - return tab to initial state
             return (
-                gr.update(visible=False),
-                gr.update(),
-                gr.update(visible=False),
-                gr.update(),
-                gr.update(),
+                gr.update(visible=False),                    # merge_section
+                gr.update(value=""),                         # changes_summary
+                gr.update(visible=False),                    # conflict_section
+                gr.update(value=""),                         # conflict_info
+                gr.update(value=""),                         # conflicts_html
                 gr.update(value="✓ All conflicts resolved. Merge complete.", visible=True),
+                gr.update(value=[]),                         # chatbot - clear
+                gr.update(interactive=True),                 # start_btn - enable
+                gr.update(interactive=False),                # cancel_btn - disable
+                gr.update(value=""),                         # live_stream - clear
+                gr.update(visible=False),                    # followup_row - hide
             )
         else:
             return (
-                gr.update(),
-                gr.update(),
-                gr.update(),
-                gr.update(),
-                gr.update(),
+                no_change, no_change, no_change, no_change, no_change,
                 gr.update(value="❌ Failed to complete merge.", visible=True),
+                no_change, no_change, no_change, no_change, no_change,
             )
 
-    def abort_merge_action(
-        self, session_id: str
-    ) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update, gr.update]:
-        """Abort an in-progress merge."""
+    def abort_merge_action(self, session_id: str) -> tuple:
+        """Abort an in-progress merge, return to merge section.
+
+        Returns 11 values for merge_outputs.
+        """
         session = self.get_session(session_id)
+        no_change = gr.update()
         if not session.project_path:
-            return (gr.update(), gr.update(), gr.update(visible=False), gr.update(), gr.update(), gr.update(value=""))
+            return (
+                no_change, no_change, gr.update(visible=False),
+                no_change, no_change, no_change,
+                no_change, no_change, no_change, no_change, no_change,
+            )
 
         git_mgr = GitWorktreeManager(Path(session.project_path))
         git_mgr.abort_merge()
         session.merge_conflicts = None
 
-        # Check if worktree still has changes
+        # Check if worktree still has changes - show merge section if so
         has_changes, summary = self.check_worktree_changes(session_id)
 
         return (
-            gr.update(visible=has_changes),
-            gr.update(value=summary if has_changes else ""),
-            gr.update(visible=False),
-            gr.update(),
-            gr.update(),
-            gr.update(value="⚠️ Merge aborted. Changes remain in worktree."),
+            gr.update(visible=has_changes),              # merge_section
+            gr.update(value=summary if has_changes else ""),  # changes_summary
+            gr.update(visible=False),                    # conflict_section
+            no_change,                                   # conflict_info
+            no_change,                                   # conflicts_html
+            gr.update(value="⚠️ Merge aborted. Changes remain in worktree.", visible=True),
+            no_change, no_change, no_change, no_change, no_change,  # no tab reset on abort
         )
 
-    def discard_worktree_changes(
-        self, session_id: str
-    ) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update, gr.update]:
-        """Discard worktree and all changes."""
+    def discard_worktree_changes(self, session_id: str) -> tuple:
+        """Discard worktree and all changes, reset tab to initial state.
+
+        Returns 11 values for merge_outputs.
+        """
         session = self.get_session(session_id)
         if session.worktree_path and session.project_path:
             git_mgr = GitWorktreeManager(Path(session.project_path))
@@ -3566,14 +3590,21 @@ class ChadWebUI:
             session.worktree_branch = None
             session.has_worktree_changes = False
             session.merge_conflicts = None
+            session.worktree_base_commit = None
 
+        # Full reset - return tab to initial state
         return (
-            gr.update(visible=False),
-            gr.update(value=""),
-            gr.update(visible=False),
-            gr.update(),
-            gr.update(),
-            gr.update(value="🗑️ Changes discarded."),
+            gr.update(visible=False),                    # merge_section
+            gr.update(value=""),                         # changes_summary
+            gr.update(visible=False),                    # conflict_section
+            gr.update(value=""),                         # conflict_info
+            gr.update(value=""),                         # conflicts_html
+            gr.update(value="🗑️ Changes discarded.", visible=True),  # task_status
+            gr.update(value=[]),                         # chatbot - clear
+            gr.update(interactive=True),                 # start_btn - enable
+            gr.update(interactive=False),                # cancel_btn - disable
+            gr.update(value=""),                         # live_stream - clear
+            gr.update(visible=False),                    # followup_row - hide
         )
 
     def _build_handoff_context(self, chat_history: list) -> str:
@@ -4053,13 +4084,19 @@ class ChadWebUI:
         def abort_wrapper():
             return self.abort_merge_action(session_id)
 
+        # Full reset outputs - includes components needed to reset tab to initial state
         merge_outputs = [
-            merge_section,
-            changes_summary,
-            conflict_section,
-            conflict_info,
-            conflicts_html,
-            task_status,
+            merge_section,      # 0: Hide merge section
+            changes_summary,    # 1: Clear summary
+            conflict_section,   # 2: Hide conflict section
+            conflict_info,      # 3: Clear conflict info
+            conflicts_html,     # 4: Clear conflicts display
+            task_status,        # 5: Show status message
+            chatbot,            # 6: Clear chat history
+            start_btn,          # 7: Re-enable start button
+            cancel_btn,         # 8: Disable cancel button
+            live_stream,        # 9: Clear live stream
+            followup_row,       # 10: Hide followup row
         ]
 
         accept_merge_btn.click(
