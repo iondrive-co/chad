@@ -3852,7 +3852,7 @@ class ChadWebUI:
             )
 
         # Live activity stream - below agent communication
-        live_stream = gr.Markdown("", elem_id="live-stream-box" if is_first else None)
+        live_stream = gr.HTML("", elem_id="live-stream-box" if is_first else None)
 
         with gr.Row(visible=False, key=f"followup-row-{session_id}") as followup_row:
             followup_input = gr.TextArea(
