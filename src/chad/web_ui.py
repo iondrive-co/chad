@@ -3481,7 +3481,7 @@ class ChadWebUI:
             git_mgr = GitWorktreeManager(Path(session.project_path))
             msg = commit_message.strip() if commit_message else None
             branch = target_branch.strip() if target_branch else None
-            success, conflicts = git_mgr.merge_to_main(session_id, msg, branch)
+            success, conflicts, error_msg = git_mgr.merge_to_main(session_id, msg, branch)
 
             target_name = branch or git_mgr.get_main_branch()
             if success:
@@ -3505,7 +3505,7 @@ class ChadWebUI:
                     gr.update(value=""),                         # live_stream - clear
                     gr.update(visible=False),                    # followup_row - hide
                 )
-            else:
+            elif conflicts:
                 session.merge_conflicts = conflicts
                 conflict_count = sum(len(c.hunks) for c in (conflicts or []))
                 file_count = len(conflicts or [])
@@ -3517,6 +3517,17 @@ class ChadWebUI:
                     gr.update(value=conflict_msg),               # conflict_info
                     gr.update(value=self._render_conflicts_html(conflicts or [])),
                     no_change,                                   # task_status
+                    no_change, no_change, no_change, no_change, no_change,
+                )
+            else:
+                error_detail = error_msg or "Merge failed. Check git status and commit hooks."
+                return (
+                    gr.update(visible=True),                     # merge_section remains visible
+                    no_change,                                   # changes_summary unchanged
+                    gr.update(visible=False),                    # conflict_section hidden
+                    gr.update(value=""),                         # conflict_info cleared
+                    gr.update(value=""),                         # conflicts_html cleared
+                    gr.update(value=f"❌ {error_detail}", visible=True),
                     no_change, no_change, no_change, no_change, no_change,
                 )
         except Exception as e:

@@ -125,6 +125,13 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         source_file="chad/web_ui.py",
         keywords=["live view", "activity", "stream", "output", "live activity"],
     ),
+    "MERGE_CONTROLS": UIComponent(
+        tab="run",
+        component=None,
+        tests=["TestMergeViewerVisual"],
+        source_file="chad/web_ui.py",
+        keywords=["accept & merge", "merge section", "discard changes", "conflict resolution"],
+    ),
     # --- Providers Tab ---
     "PROVIDER_CARD": UIComponent(
         tab="providers",
