@@ -261,7 +261,7 @@ def _get_or_create_tracker(tracker_id: str | None = None) -> HypothesisTracker:
 def hypothesis(
     description: str,
     checks: str,
-    tracker_id: str = "",
+    tracker_id: str | None = None,
 ) -> Dict[str, object]:
     """Record a hypothesis with binary rejection checks.
 
@@ -272,7 +272,7 @@ def hypothesis(
         description: Your theory about what's causing the issue
         checks: Comma-separated list of binary checks that would reject this hypothesis
                 Example: "CSS is being applied,Element exists in DOM,No JS errors"
-        tracker_id: Optional - resume an existing tracker
+        tracker_id: Optional - resume an existing tracker (omit or pass None to start a new one)
 
     Returns:
         tracker_id to use for subsequent calls
@@ -280,7 +280,7 @@ def hypothesis(
         List of checks that need to be verified
     """
     try:
-        tracker = _get_or_create_tracker(tracker_id if tracker_id else None)
+        tracker = _get_or_create_tracker(tracker_id or None)
         check_list = [c.strip() for c in checks.split(",") if c.strip()]
 
         if not check_list:

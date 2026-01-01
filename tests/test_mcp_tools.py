@@ -240,6 +240,18 @@ class TestHypothesisMCPTools:
         assert result["success"] is False
         assert "At least one check" in result["error"]
 
+    def test_hypothesis_accepts_none_tracker(self, tmp_path, monkeypatch):
+        from chad.mcp_playwright import hypothesis
+        import chad.mcp_playwright as mcp_module
+
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
+        mcp_module._current_tracker = None
+
+        result = hypothesis(description="No tracker id", checks="Check A", tracker_id=None)
+
+        assert result["success"] is True
+        assert "tracker_id" in result
+
 
 class TestCheckResult:
     """Test the check_result() tool."""
@@ -361,3 +373,51 @@ class TestReport:
 
         assert result["success"] is False
         assert "not found" in result["error"]
+
+
+class TestMCPCodeMode:
+    """Test the code-mode wrappers for MCP tools."""
+
+    def test_list_servers_and_tools(self):
+        from chad.mcp_code_mode import list_servers, list_tools
+
+        servers = list_servers()
+        assert "chad-ui-playwright" in servers
+
+        tools = list_tools()
+        assert set(tools) == {"check_result", "hypothesis", "report", "screenshot", "verify"}
+
+    def test_call_tool_routes_to_mcp_playwright(self, monkeypatch):
+        from chad import mcp_playwright
+        from chad.mcp_code_mode import call_tool
+
+        called = {}
+
+        def fake_verify() -> dict:
+            called["verify"] = True
+            return {"ok": True}
+
+        monkeypatch.setattr(mcp_playwright, "verify", fake_verify)
+
+        result = call_tool("verify")
+
+        assert result == {"ok": True}
+        assert called["verify"] is True
+
+    def test_record_hypothesis_normalizes_checks(self, monkeypatch):
+        from chad import mcp_playwright
+        from chad.mcp_code_mode.servers.chad_ui_playwright import hypothesis as code_hypothesis
+
+        captured = {}
+
+        def fake_hypothesis(**kwargs):
+            captured.update(kwargs)
+            return {"checks": kwargs["checks"]}
+
+        monkeypatch.setattr(mcp_playwright, "hypothesis", fake_hypothesis)
+
+        result = code_hypothesis.record_hypothesis("desc", [" A ", "B "], tracker_id=None)
+
+        assert result["checks"] == "A,B"
+        assert captured["checks"] == "A,B"
+        assert captured["tracker_id"] is None
