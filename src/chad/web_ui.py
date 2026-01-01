@@ -3379,56 +3379,90 @@ class ChadWebUI:
             )
 
     def _render_conflicts_html(self, conflicts: list[MergeConflict]) -> str:
-        """Render conflicts as HTML for side-by-side display."""
+        """Render conflicts as HTML for side-by-side display with inline styles."""
         if not conflicts:
-            return "<p>No conflicts to display.</p>"
+            return "<p style='color: #d8dee9;'>No conflicts to display.</p>"
 
-        html_parts = ['<div class="conflict-viewer">']
+        # Inline styles for conflict viewer (ensures visibility regardless of CSS loading)
+        styles = {
+            "viewer": "font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; "
+            "border: 1px solid #3b4252; border-radius: 8px; overflow: hidden; margin: 12px 0;",
+            "file": "border-bottom: 1px solid #3b4252;",
+            "file_header": "background: #2e3440; padding: 8px 12px; margin: 0; "
+            "font-size: 0.9rem; color: #88c0d0; border-bottom: 1px solid #3b4252;",
+            "hunk": "margin: 0; border-bottom: 1px solid #4c566a;",
+            "context": "padding: 4px 12px; background: #2e3440; color: #d8dee9;",
+            "comparison": "display: flex;",
+            "side": "flex: 1; padding: 8px 12px; overflow-x: auto; min-width: 0;",
+            "original": "background: #3b2828; border-right: 1px solid #4c566a;",
+            "incoming": "background: #283b28;",
+            "side_header": "font-weight: bold; margin-bottom: 8px; padding-bottom: 4px; "
+            "border-bottom: 1px solid #4c566a;",
+            "original_header": "color: #bf616a;",
+            "incoming_header": "color: #a3be8c;",
+            "content": "color: #e5e9f0;",
+            "pre": "margin: 2px 0; white-space: pre-wrap; word-break: break-all;",
+        }
+
+        html_parts = [f'<div class="conflict-viewer" style="{styles["viewer"]}">']
 
         for conflict in conflicts:
-            html_parts.append('<div class="conflict-file">')
+            html_parts.append(f'<div class="conflict-file" style="{styles["file"]}">')
             file_path_escaped = html.escape(conflict.file_path)
-            html_parts.append(f'<h4 class="conflict-file-header">{file_path_escaped}</h4>')
+            html_parts.append(
+                f'<h4 class="conflict-file-header" style="{styles["file_header"]}">'
+                f"{file_path_escaped}</h4>"
+            )
 
             for hunk in conflict.hunks:
                 hunk_attrs = f'data-file="{file_path_escaped}" data-hunk="{hunk.hunk_index}"'
-                html_parts.append(f'<div class="conflict-hunk" {hunk_attrs}>')
+                html_parts.append(f'<div class="conflict-hunk" style="{styles["hunk"]}" {hunk_attrs}>')
 
                 # Context before
                 if hunk.context_before:
-                    html_parts.append('<div class="conflict-context">')
+                    html_parts.append(f'<div class="conflict-context" style="{styles["context"]}">')
                     for line in hunk.context_before:
-                        html_parts.append(f"<pre>{html.escape(line)}</pre>")
+                        html_parts.append(f'<pre style="{styles["pre"]}">{html.escape(line)}</pre>')
                     html_parts.append("</div>")
 
                 # Side-by-side comparison
-                html_parts.append('<div class="conflict-comparison">')
+                html_parts.append(f'<div class="conflict-comparison" style="{styles["comparison"]}">')
 
                 # Original (HEAD) side
-                html_parts.append('<div class="conflict-side conflict-original">')
-                html_parts.append('<div class="conflict-side-header">Original (HEAD)</div>')
-                html_parts.append('<div class="conflict-side-content">')
+                html_parts.append(
+                    f'<div class="conflict-side conflict-original" '
+                    f'style="{styles["side"]} {styles["original"]}">'
+                )
+                html_parts.append(
+                    f'<div class="conflict-side-header" '
+                    f'style="{styles["side_header"]} {styles["original_header"]}">Original (HEAD)</div>'
+                )
+                html_parts.append(f'<div class="conflict-side-content" style="{styles["content"]}">')
                 for line in hunk.original_lines:
-                    html_parts.append(f"<pre>{html.escape(line)}</pre>")
-                html_parts.append("</div>")
-                html_parts.append("</div>")
+                    html_parts.append(f'<pre style="{styles["pre"]}">{html.escape(line)}</pre>')
+                html_parts.append("</div></div>")
 
                 # Incoming (worktree) side
-                html_parts.append('<div class="conflict-side conflict-incoming">')
-                html_parts.append('<div class="conflict-side-header">Incoming (Task Changes)</div>')
-                html_parts.append('<div class="conflict-side-content">')
+                html_parts.append(
+                    f'<div class="conflict-side conflict-incoming" '
+                    f'style="{styles["side"]} {styles["incoming"]}">'
+                )
+                html_parts.append(
+                    f'<div class="conflict-side-header" '
+                    f'style="{styles["side_header"]} {styles["incoming_header"]}">Incoming (Changes)</div>'
+                )
+                html_parts.append(f'<div class="conflict-side-content" style="{styles["content"]}">')
                 for line in hunk.incoming_lines:
-                    html_parts.append(f"<pre>{html.escape(line)}</pre>")
-                html_parts.append("</div>")
-                html_parts.append("</div>")
+                    html_parts.append(f'<pre style="{styles["pre"]}">{html.escape(line)}</pre>')
+                html_parts.append("</div></div>")
 
                 html_parts.append("</div>")  # conflict-comparison
 
                 # Context after
                 if hunk.context_after:
-                    html_parts.append('<div class="conflict-context">')
+                    html_parts.append(f'<div class="conflict-context" style="{styles["context"]}">')
                     for line in hunk.context_after:
-                        html_parts.append(f"<pre>{html.escape(line)}</pre>")
+                        html_parts.append(f'<pre style="{styles["pre"]}">{html.escape(line)}</pre>')
                     html_parts.append("</div>")
 
                 html_parts.append("</div>")  # conflict-hunk

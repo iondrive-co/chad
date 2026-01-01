@@ -59,15 +59,13 @@ Please verify the work by:
 4. If the coding agent already ran tests and they passed, you do NOT need to re-run them.
 Trust the coding agent's test output unless you have specific concerns about the implementation.
 
-You MUST respond with valid JSON in exactly this format:
-
+You MUST respond with only valid JSON and nothing else, for example:
 ```json
 {{
   "passed": true,
   "summary": "Brief explanation of what was checked and why it looks correct"
 }}
 ```
-
 Or if issues were found:
 
 ```json
@@ -80,7 +78,6 @@ Or if issues were found:
   ]
 }}
 ```
-
 Output ONLY the JSON block, no other text.
 """
 
