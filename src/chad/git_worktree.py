@@ -138,6 +138,10 @@ class GitWorktreeManager:
         worktree_path = self._worktree_path(task_id)
         branch_name = self._branch_name(task_id)
 
+        # Clean up any existing worktree/branch from previous runs
+        if self.worktree_exists(task_id):
+            self.delete_worktree(task_id)
+
         # Ensure worktree base directory exists
         self.worktree_base.mkdir(parents=True, exist_ok=True)
 
@@ -167,15 +171,18 @@ class GitWorktreeManager:
         worktree_path = self._worktree_path(task_id)
         branch_name = self._branch_name(task_id)
 
-        if not worktree_path.exists():
-            return True
+        # Remove worktree if it exists
+        if worktree_path.exists():
+            result = self._run_git(
+                "worktree", "remove", "--force", str(worktree_path), check=False
+            )
+            if result.returncode != 0:
+                # Try to prune and remove directory manually
+                self._run_git("worktree", "prune", check=False)
+                import shutil
+                shutil.rmtree(worktree_path, ignore_errors=True)
 
-        # Remove worktree
-        result = self._run_git("worktree", "remove", "--force", str(worktree_path), check=False)
-        if result.returncode != 0:
-            return False
-
-        # Delete the branch
+        # Always try to delete the branch (it might exist without the worktree)
         self._run_git("branch", "-D", branch_name, check=False)
 
         return True
