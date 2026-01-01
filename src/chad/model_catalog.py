@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -69,6 +71,11 @@ class ModelCatalog:
         if provider == "openai":
             models |= self._codex_config_models()
             models |= self._codex_session_models()
+
+        if provider == "openai":
+            plan_type = self._codex_plan_type(account_name)
+            if plan_type and plan_type.lower() != "team":
+                models = {m for m in models if "codex" not in m.lower()}
 
         models.add("default")
         resolved = sorted(models, key=lambda m: (m == "default", m))
@@ -168,3 +175,33 @@ class ModelCatalog:
                 return str(payload_model)
 
         return None
+
+    def _codex_home(self, account_name: str) -> Path:
+        temp_home = os.environ.get("CHAD_TEMP_HOME")
+        base = Path(temp_home) if temp_home else self.home_dir
+        return base / ".chad" / "codex-homes" / account_name
+
+    def _codex_plan_type(self, account_name: str | None) -> str | None:
+        if not account_name:
+            return None
+
+        auth_file = self._codex_home(account_name) / ".codex" / "auth.json"
+        if not auth_file.exists():
+            return None
+
+        try:
+            data = json.loads(auth_file.read_text())
+            token = data.get("tokens", {}).get("access_token")
+            if not token:
+                return None
+
+            payload = token.split(".")[1]
+            if payload:
+                payload += "=" * (-len(payload) % 4)
+            decoded = base64.urlsafe_b64decode(payload or "")
+            jwt_data = json.loads(decoded)
+            auth_info = jwt_data.get("https://api.openai.com/auth", {})
+            plan_type = auth_info.get("chatgpt_plan_type")
+            return str(plan_type).lower() if plan_type else None
+        except Exception:
+            return None

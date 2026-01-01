@@ -421,12 +421,6 @@ body, .gradio-container, .gradio-container * {
 }
 
 /* Hide empty provider cards - groups are hidden via CSS, columns via JavaScript */
-.gr-group:has(.provider-card__header-row)
-  :not(:has(.provider-card__header-text))
-  :not(:has(.provider-card__header-text-secondary)) {
-  display: none !important;
-}
-
 /* Two-column layout for provider cards */
 .provider-cards-row {
   display: flex !important;
@@ -4324,7 +4318,7 @@ class ChadWebUI:
                     usage_text = ""
 
                 card_group_classes = ["provider-card"] if visible else ["provider-card", "provider-card-empty"]
-                with gr.Column(visible=True, scale=1) as card_column:
+                with gr.Column(visible=visible, scale=1) as card_column:
                     card_elem_id = f"provider-card-{idx}"
                     with gr.Group(elem_id=card_elem_id, elem_classes=card_group_classes) as card_group:
                         with gr.Row(elem_classes=["provider-card__header-row"]):

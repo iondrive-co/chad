@@ -407,6 +407,15 @@ class TestProvidersTab:
             font_weight = 700 if font_weight_raw.lower() == "bold" else 400
         assert font_weight >= 600, f"Expected font weight >= 600, got {font_weight_raw}"
 
+    def test_provider_usage_visible(self, page: Page):
+        """Provider usage boxes should render with content."""
+        page.get_by_role("tab", name="⚙️ Providers").click()
+        usage = page.locator(".provider-usage").first
+        expect(usage).to_be_visible(timeout=5000)
+
+        text = usage.text_content() or ""
+        assert text.strip(), "Usage text should not be empty"
+
 
 class TestSubtaskTabs:
     """Test subtask tab filtering (integration with mock provider)."""

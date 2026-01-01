@@ -25,7 +25,7 @@ chad
 
 ### How is this better than $Grug?
 
--> Gradio UI to manage multiple coding agents, select preferred models, monitor usage quotas, and run tasks:
+-> Gradio UI to manage multiple coding agents, monitor usage quotas, run multiple tasks in parallel and merge results:
 <details open>
 <summary><b>Screenshots</b></summary>
 
@@ -40,9 +40,6 @@ chad
 
 #### Run multiple tasks in parallel
 <img src="docs/screenshot-task-tabs.png" width="800" alt="Multiple task tabs">
-
-#### View changes with side-by-side diff before merging
-<img src="docs/screenshot-diff-viewer.png" width="800" alt="Side-by-side diff viewer">
 
 #### Resolve merge conflicts with side-by-side diff view
 <img src="docs/screenshot-merge-conflicts.png" width="800" alt="Merge conflict resolution">
