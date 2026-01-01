@@ -306,7 +306,9 @@ body, .gradio-container, .gradio-container * {
 }
 
 .provider-card .provider-card__header-row .provider-card__header-text,
-.provider-card__header-row .provider-card__header-text {
+.provider-card__header-row .provider-card__header-text,
+.provider-card .provider-card__header-row .provider-card__header-text-secondary,
+.provider-card__header-row .provider-card__header-text-secondary {
   background: var(--task-btn-bg);
   color: var(--task-btn-text);
   padding: 6px 10px;
@@ -419,7 +421,9 @@ body, .gradio-container, .gradio-container * {
 }
 
 /* Hide empty provider cards - groups are hidden via CSS, columns via JavaScript */
-.gr-group:has(.provider-card__header-row):not(:has(.provider-card__header-text)) {
+.gr-group:has(.provider-card__header-row)
+  :not(:has(.provider-card__header-text))
+  :not(:has(.provider-card__header-text-secondary)) {
   display: none !important;
 }
 
@@ -1068,14 +1072,18 @@ body, .gradio-container, .gradio-container * {
 
 # JavaScript to fix Gradio visibility updates and maintain scroll position
 # Note: This is passed to gr.Blocks(js=...) to execute on page load
+SCREENSHOT_MODE_JS = "true" if os.environ.get("CHAD_SCREENSHOT_MODE") == "1" else "false"
 CUSTOM_JS = """
 function() {
+    const screenshotMode = """ + SCREENSHOT_MODE_JS + """;
     // Fix for Gradio not properly updating column visibility after initial render
     function fixProviderCardVisibility() {
         const columns = document.querySelectorAll('.column');
         columns.forEach(col => {
             const headerRow = col.querySelector('.provider-card__header-row');
-            const headerText = col.querySelector('.provider-card__header-text');
+            const headerText = col.querySelector(
+                '.provider-card__header-text, .provider-card__header-text-secondary'
+            );
 
             if (headerRow) {
                 // This is a provider card column
@@ -1090,7 +1098,19 @@ function() {
             }
         });
     }
-    setInterval(fixProviderCardVisibility, 500);
+    function normalizeProviderHeaderClasses() {
+        if (!screenshotMode) return;
+        const headers = document.querySelectorAll('.provider-card__header-text');
+        headers.forEach((header, idx) => {
+            if (idx === 0) return;
+            header.classList.remove('provider-card__header-text');
+            header.classList.add('provider-card__header-text-secondary');
+        });
+    }
+    setInterval(() => {
+        normalizeProviderHeaderClasses();
+        fixProviderCardVisibility();
+    }, 500);
     const visObserver = new MutationObserver(fixProviderCardVisibility);
     visObserver.observe(document.body, { childList: true, subtree: true, attributes: true });
 
@@ -4523,7 +4543,7 @@ class ChadWebUI:
 
     def _create_providers_ui(self):
         """Create the Providers tab UI within @gr.render."""
-        account_items = list(self.security_mgr.list_accounts().items())
+        account_items = self.provider_ui.get_provider_card_items()
         self.provider_card_count = max(12, len(account_items) + 8)
 
         provider_feedback = gr.Markdown("")
@@ -4543,7 +4563,9 @@ class ChadWebUI:
                 if idx < len(account_items):
                     account_name, provider_type = account_items[idx]
                     visible = True
-                    header_text = f'<span class="provider-card__header-text">{account_name} ({provider_type})</span>'
+                    header_text = self.provider_ui.format_provider_header(
+                        account_name, provider_type, idx
+                    )
                     usage_text = self.get_provider_usage(account_name)
                 else:
                     account_name = ""

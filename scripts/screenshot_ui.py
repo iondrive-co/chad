@@ -59,8 +59,10 @@ DEFAULT_OUTPUT = Path("/tmp/chad/screenshot.png")
 def screenshot_element(page, selector: str, output_path: Path) -> Path:
     """Screenshot a specific element by CSS selector."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    element = page.locator(selector)
-    element.wait_for(state="visible", timeout=10000)
+    page.wait_for_selector(selector, state="visible", timeout=10000)
+    element = page.query_selector(selector)
+    if element is None:
+        raise RuntimeError(f"Selector did not resolve to an element: {selector}")
     element.screenshot(path=os.fspath(output_path))
     return output_path
 

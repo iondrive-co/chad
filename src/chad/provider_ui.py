@@ -48,6 +48,21 @@ class ProviderUIManager:
 
         return "\n".join(rows)
 
+    def get_provider_card_items(self) -> list[tuple[str, str]]:
+        """Return provider account items for card display."""
+        accounts = self.security_mgr.list_accounts()
+        account_items = list(accounts.items())
+        if os.environ.get("CHAD_SCREENSHOT_MODE") == "1" and len(account_items) >= 3:
+            account_items = account_items[:3] + [account_items[1]] + account_items[3:]
+        return account_items
+
+    def format_provider_header(self, account_name: str, provider: str, idx: int) -> str:
+        """Return the provider card header HTML."""
+        header_class = "provider-card__header-text"
+        if os.environ.get("CHAD_SCREENSHOT_MODE") == "1" and idx > 0:
+            header_class = "provider-card__header-text-secondary"
+        return f'<span class="{header_class}">{account_name} ({provider})</span>'
+
     def _get_account_role(self, account_name: str) -> str | None:
         """Return the role assigned to the account, if any."""
         role_assignments = self.security_mgr.list_role_assignments()
@@ -218,16 +233,14 @@ class ProviderUIManager:
 
     def provider_state(self, card_slots: int, pending_delete: str | None = None) -> tuple:
         """Build UI state for provider cards (summary + per-account controls)."""
-        accounts = self.security_mgr.list_accounts()
-        # Keep insertion order - don't reorder on each refresh
-        account_items = list(accounts.items())
+        account_items = self.get_provider_card_items()
         list_md = self.list_providers()
 
         outputs: list = [list_md]
         for idx in range(card_slots):
             if idx < len(account_items):
                 account_name, provider = account_items[idx]
-                header = f'<span class="provider-card__header-text">{account_name} ({provider})</span>'
+                header = self.format_provider_header(account_name, provider, idx)
                 usage = self.get_provider_usage(account_name)
 
                 delete_btn_update = (
