@@ -403,32 +403,40 @@ class GitWorktreeManager:
 
         return files
 
-    def commit_all_changes(self, task_id: str, message: str = "Agent changes") -> bool:
-        """Commit all changes in the worktree."""
+    def commit_all_changes(self, task_id: str, message: str = "Agent changes") -> tuple[bool, str | None]:
+        """Commit all changes in the worktree and return success plus any error detail."""
         worktree_path = self._worktree_path(task_id)
         if not worktree_path.exists():
-            return False
+            return False, "Worktree not found"
 
         # Stage all changes
-        result = self._run_git("add", "-A", cwd=worktree_path, check=False)
-        if result.returncode != 0:
-            return False
+        add_result = self._run_git("add", "-A", cwd=worktree_path, check=False)
+        if add_result.returncode != 0:
+            detail = add_result.stderr.strip() or add_result.stdout.strip() or "git add failed"
+            return False, detail
 
         # Check if there's anything to commit
-        result = self._run_git("diff", "--cached", "--quiet", cwd=worktree_path, check=False)
-        if result.returncode == 0:
-            return True  # Nothing to commit
+        diff_result = self._run_git("diff", "--cached", "--quiet", cwd=worktree_path, check=False)
+        if diff_result.returncode == 0:
+            return True, None  # Nothing to commit
+        if diff_result.returncode not in (0, 1):
+            detail = diff_result.stderr.strip() or diff_result.stdout.strip() or "git diff failed"
+            return False, detail
 
         # Commit
-        result = self._run_git("commit", "-m", message, cwd=worktree_path, check=False)
-        return result.returncode == 0
+        commit_result = self._run_git("commit", "-m", message, cwd=worktree_path, check=False)
+        if commit_result.returncode != 0:
+            detail = commit_result.stderr.strip() or commit_result.stdout.strip() or "git commit failed"
+            return False, detail
+
+        return True, None
 
     def merge_to_main(
         self,
         task_id: str,
         commit_message: str | None = None,
         target_branch: str | None = None,
-    ) -> tuple[bool, list[MergeConflict] | None]:
+    ) -> tuple[bool, list[MergeConflict] | None, str | None]:
         """Attempt to merge worktree changes to a target branch.
 
         Args:
@@ -436,26 +444,35 @@ class GitWorktreeManager:
             commit_message: Custom commit message for the merge
             target_branch: Branch to merge into (defaults to main/master)
 
-        Returns (success, conflicts) where conflicts is None on success
-        or a list of MergeConflict objects on failure.
+        Returns (success, conflicts, error_message) where conflicts is None on success
+        or a list of MergeConflict objects on failure. error_message is populated for
+        non-conflict failures (e.g., commit hooks preventing commits).
         """
         worktree_path = self._worktree_path(task_id)
         branch_name = self._branch_name(task_id)
         merge_target = target_branch or self.get_main_branch()
 
         if not worktree_path.exists():
-            return False, None
+            return False, None, "Worktree not found"
 
         # First commit any uncommitted changes in the worktree
         pre_merge_msg = commit_message or "Agent changes"
-        self.commit_all_changes(task_id, pre_merge_msg)
+        commit_ok, commit_error = self.commit_all_changes(task_id, pre_merge_msg)
+        if not commit_ok:
+            status_result = self._run_git("status", "--short", cwd=worktree_path, check=False)
+            status = status_result.stdout.strip()
+            detail = commit_error or status or "Failed to commit worktree changes"
+            if commit_error and status:
+                detail = f"{commit_error}: {status}"
+            return False, None, detail
 
         # Switch to target branch in the main repo
         current_branch = self.get_current_branch()
         if current_branch != merge_target:
             result = self._run_git("checkout", merge_target, check=False)
             if result.returncode != 0:
-                return False, None
+                detail = result.stderr.strip() or result.stdout.strip() or "Failed to checkout target branch"
+                return False, None, detail
 
         # Build merge message
         merge_msg = commit_message or f"Merge {branch_name}"
@@ -464,15 +481,16 @@ class GitWorktreeManager:
         result = self._run_git("merge", "--no-ff", branch_name, "-m", merge_msg, check=False)
 
         if result.returncode == 0:
-            return True, None
+            return True, None, None
 
         # Check for conflicts
         if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
             conflicts = self._parse_conflicts()
-            return False, conflicts
+            return False, conflicts, None
 
         # Other error
-        return False, None
+        detail = result.stderr.strip() or result.stdout.strip() or "Merge failed"
+        return False, None, detail
 
     def _parse_conflicts(self) -> list[MergeConflict]:
         """Parse conflict markers from conflicted files."""

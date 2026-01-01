@@ -166,8 +166,9 @@ class TestGitWorktreeManager:
         worktree_path, _ = mgr.create_worktree(task_id)
         (worktree_path / "new_file.txt").write_text("New content")
 
-        result = mgr.commit_all_changes(task_id, "Test commit")
-        assert result is True
+        success, error = mgr.commit_all_changes(task_id, "Test commit")
+        assert success is True
+        assert error is None
 
         # Verify file is no longer showing as uncommitted
         status_result = subprocess.run(
@@ -196,12 +197,43 @@ class TestGitWorktreeManager:
             capture_output=True,
         )
 
-        success, conflicts = mgr.merge_to_main(task_id)
+        success, conflicts, error = mgr.merge_to_main(task_id)
         assert success is True
         assert conflicts is None
+        assert error is None
 
         # Verify file exists in main repo
         assert (git_repo / "new_file.txt").exists()
+
+    def test_merge_to_main_stops_on_commit_error(self, git_repo):
+        """Merge should not clean up or report success when commit hooks fail."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-task-hook-fail"
+
+        # Add a failing pre-commit hook
+        hook = git_repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+
+        worktree_path, _ = mgr.create_worktree(task_id)
+        (worktree_path / "blocked.txt").write_text("Blocked content")
+
+        success, conflicts, error = mgr.merge_to_main(task_id)
+
+        assert success is False
+        assert conflicts is None
+        assert error
+        assert worktree_path.exists()
+        assert not (git_repo / "blocked.txt").exists()
+
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=worktree_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert "blocked.txt" in status.stdout
 
     def test_merge_to_main_with_conflict(self, git_repo):
         """Test merge with conflicts."""
@@ -231,9 +263,10 @@ class TestGitWorktreeManager:
             capture_output=True,
         )
 
-        success, conflicts = mgr.merge_to_main(task_id)
+        success, conflicts, error = mgr.merge_to_main(task_id)
         assert success is False
         assert conflicts is not None
+        assert error is None
         assert len(conflicts) > 0
         assert any(c.file_path == "README.md" for c in conflicts)
 
@@ -266,8 +299,9 @@ class TestGitWorktreeManager:
         )
 
         # Attempt merge (will conflict)
-        success, conflicts = mgr.merge_to_main(task_id)
+        success, conflicts, error = mgr.merge_to_main(task_id)
         assert success is False
+        assert error is None
 
         # Resolve with ours (main version)
         mgr.resolve_all_conflicts(use_incoming=False)
@@ -305,7 +339,11 @@ class TestGitWorktreeManager:
             capture_output=True,
         )
 
-        mgr.merge_to_main(task_id)
+        success, conflicts, error = mgr.merge_to_main(task_id)
+        assert success is False
+        assert error is None
+        assert conflicts is not None
+
         result = mgr.abort_merge()
         assert result is True
 
@@ -327,7 +365,11 @@ class TestGitWorktreeManager:
             capture_output=True,
         )
 
-        mgr.merge_to_main(task_id)
+        success, conflicts, error = mgr.merge_to_main(task_id)
+        assert success is True
+        assert error is None
+        assert conflicts is None
+
         result = mgr.cleanup_after_merge(task_id)
         assert result is True
         assert not worktree_path.exists()

@@ -3,8 +3,11 @@
 import re
 import socket
 import subprocess
+from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 import pytest
+
+from chad.git_worktree import GitWorktreeManager
 
 
 @pytest.fixture
@@ -224,6 +227,32 @@ class TestChadWebUI:
 
         assert "❌" in result
         assert "no provider selected" in result.lower()
+
+    def test_attempt_merge_handles_commit_error(self, web_ui, git_repo, monkeypatch):
+        """Attempting merge should surface commit errors without clearing state."""
+        session_id = "merge-error"
+        session = web_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = Path(git_repo / ".chad-worktrees" / session_id)
+        session.worktree_path.mkdir(parents=True, exist_ok=True)
+        session.worktree_branch = f"chad-task-{session_id}"
+        session.worktree_base_commit = "deadbeef"
+
+        def fake_merge(self, task_id, commit_message=None, target_branch=None):
+            assert task_id == session_id
+            return False, None, "Commit hook failed"
+
+        monkeypatch.setattr(GitWorktreeManager, "merge_to_main", fake_merge)
+
+        outputs = web_ui.attempt_merge(session_id, "msg", "main")
+
+        merge_section_update = outputs[0]
+        task_status = outputs[5]
+
+        assert merge_section_update.get("visible") is True
+        assert task_status["value"].startswith("❌ Commit hook failed")
+        assert session.worktree_path is not None
+        assert session.worktree_path.exists()
 
     def test_set_reasoning_success(self, web_ui, mock_security_mgr):
         """Test setting reasoning level for an account."""
