@@ -782,27 +782,71 @@ class OpenAICodexProvider(AIProvider):
                     if item_type == "reasoning":
                         text = item.get("text", "")
                         if text:
-                            return f"*{text}*\n"
+                            # Strip markdown bold/italics markers for clean display
+                            clean = text.replace("**", "").replace("*", "").strip()
+                            if clean:
+                                # Use dim cyan for reasoning/thinking
+                                return f"\033[36m• {clean}\033[0m\n"
+                        return None
                     elif item_type == "agent_message":
-                        return item.get("text", "") + "\n"
+                        text = item.get("text", "")
+                        if not text:
+                            return None
+                        # Filter out internal tool invocations and raw bash output
+                        lines = text.split("\n")
+                        filtered = []
+                        for line in lines:
+                            stripped = line.strip()
+                            # Skip raw bash commands (often prefixed with $ or contain shell paths)
+                            if stripped.startswith("$ ") or stripped.startswith("$/"):
+                                continue
+                            # Skip internal markers (***...*** patterns)
+                            if stripped.startswith("***") and stripped.endswith("***"):
+                                continue
+                            # Skip lines that look like grep/find output (path:line:content)
+                            if re.match(r"^\d+:\s*", stripped) or re.match(r"^[a-zA-Z_/].*:\d+:", stripped):
+                                continue
+                            if stripped:
+                                filtered.append(line)
+                        if filtered:
+                            return "\n".join(filtered) + "\n"
+                        return None
                     elif item_type == "mcp_tool_call":
                         tool = item.get("tool", "tool")
-                        result = item.get("result", {})
-                        if result:
-                            content = result.get("content", [])
-                            if content and isinstance(content, list):
-                                text = content[0].get("text", "")[:200] if content else ""
-                                return f"[{tool}]: {text}...\n" if len(text) >= 200 else f"[{tool}]: {text}\n"
-                        return f"[{tool}]\n"
+                        # Human-readable tool descriptions
+                        tool_descriptions = {
+                            "read_file": "Reading",
+                            "Read": "Reading",
+                            "write_file": "Writing",
+                            "Write": "Writing",
+                            "edit_file": "Editing",
+                            "Edit": "Editing",
+                            "search": "Searching",
+                            "Grep": "Searching",
+                            "Glob": "Finding files",
+                            "Bash": "Running command",
+                        }
+                        params = item.get("params", {})
+                        path = params.get("path", params.get("file_path", ""))
+                        desc = tool_descriptions.get(tool, f"Using {tool}")
+                        if path:
+                            # Show green for file operations
+                            return f"\033[32m• {desc}: {path}\033[0m\n"
+                        return f"\033[32m• {desc}\033[0m\n"
                     elif item_type == "command_execution":
-                        cmd = item.get("command", "")[:60]
+                        cmd = item.get("command", "")[:80]
                         output = item.get("aggregated_output", "")
-                        # Show command and abbreviated output
-                        lines = output.strip().split("\n")
-                        preview = "\n".join(lines[:3]) if lines else ""
-                        if len(lines) > 3:
-                            preview += f"\n... ({len(lines) - 3} more lines)"
-                        return f"$ {cmd}\n{preview}\n" if preview else f"$ {cmd}\n"
+                        # Use purple/magenta for commands
+                        result = f"\033[35m$ {cmd}\033[0m\n"
+                        if output.strip():
+                            lines = output.strip().split("\n")
+                            # Show first few lines of output in dim gray
+                            preview_lines = lines[:5]
+                            for line in preview_lines:
+                                result += f"\033[90m  {line[:100]}\033[0m\n"
+                            if len(lines) > 5:
+                                result += f"\033[90m  ... ({len(lines) - 5} more lines)\033[0m\n"
+                        return result
 
                 return None
 
