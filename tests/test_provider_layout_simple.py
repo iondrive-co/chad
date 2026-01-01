@@ -83,7 +83,7 @@ def test_css_grid_or_flexbox_layout():
 
     # Check for CSS that enables multi-column layout
     # This could be grid-template-columns, flex properties, or column-count
-    css_section = content[content.find("custom_css"):content.find("</style>")] if "</style>" in content else content
+    css_section = content[content.find("custom_css") : content.find("</style>")] if "</style>" in content else content
 
     # Look for indicators of multi-column layout
     multi_col_indicators = [

@@ -32,10 +32,7 @@ def main() -> int:
     """Main entry point for Chad web interface."""
     parser = argparse.ArgumentParser(description="Chad: YOLO AI")
     parser.add_argument(
-        '--port',
-        type=int,
-        default=7860,
-        help='Port to run on (default: 7860, use 0 for ephemeral; falls back if busy)'
+        "--port", type=int, default=7860, help="Port to run on (default: 7860, use 0 for ephemeral; falls back if busy)"
     )
     args = parser.parse_args()
 
@@ -47,7 +44,7 @@ def main() -> int:
 
     try:
         # Check for password from environment (for automation/screenshots)
-        main_password = os.environ.get('CHAD_PASSWORD')
+        main_password = os.environ.get("CHAD_PASSWORD")
 
         if main_password is None:
             if security.is_first_run():
@@ -65,6 +62,7 @@ def main() -> int:
     except Exception as e:
         print(f"\n❌ Unexpected error: {e}")
         import traceback
+
         traceback.print_exc()
         return 1
 

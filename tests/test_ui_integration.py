@@ -89,13 +89,13 @@ class TestUIElements:
 
     def test_start_button_present(self, page: Page):
         """Start Task button should be present."""
-        button = page.locator('#start-task-btn')
+        button = page.locator("#start-task-btn")
         expect(button).to_be_visible()
 
     def test_cancel_button_disabled_initially(self, page: Page):
         """Cancel button should be disabled before task starts."""
         # The cancel button should exist but not be interactive/enabled
-        cancel_btn = page.locator('#cancel-task-btn')
+        cancel_btn = page.locator("#cancel-task-btn")
         expect(cancel_btn).to_be_visible()
         # Check that button is disabled (has disabled attribute or class)
         is_disabled = page.evaluate(
@@ -135,7 +135,7 @@ class TestReadyStatus:
     def test_ready_status_shows_model_info(self, page: Page):
         """Ready status should include model assignment info."""
         # In tab-based UI, the first session is shown by default
-        status = page.locator('#role-config-status')
+        status = page.locator("#role-config-status")
         expect(status).to_be_visible(timeout=10000)
 
         # Should contain model assignment info
@@ -165,14 +165,12 @@ class TestCodingAgentLayout:
         cancel_box = cancel_btn.bounding_box()
         project_box = project_path.bounding_box()
 
-        assert status_box and row_box and cancel_box and project_box, (
-            "Missing bounding box data for layout assertions"
-        )
+        assert status_box and row_box and cancel_box and project_box, "Missing bounding box data for layout assertions"
 
         # Status should sit below project path within the top row column
-        assert status_box["y"] >= project_box["y"] + project_box["height"] - 2, (
-            "Status row should appear below the project path input"
-        )
+        assert (
+            status_box["y"] >= project_box["y"] + project_box["height"] - 2
+        ), "Status row should appear below the project path input"
 
         # Status should align to project path column rather than the cancel column
         assert status_box["x"] <= project_box["x"] + 4
@@ -223,25 +221,25 @@ class TestCodingAgentLayout:
             and verification_reasoning_box
         )
 
-        assert status_box["y"] >= project_box["y"] + project_box["height"] - 2, (
-            "Status should appear beneath the Project Path field"
-        )
-        assert log_box["y"] >= project_box["y"] + project_box["height"] - 2, (
-            "Session log button should appear beneath the Project Path field"
-        )
+        assert (
+            status_box["y"] >= project_box["y"] + project_box["height"] - 2
+        ), "Status should appear beneath the Project Path field"
+        assert (
+            log_box["y"] >= project_box["y"] + project_box["height"] - 2
+        ), "Session log button should appear beneath the Project Path field"
 
-        assert model_box["y"] >= coding_box["y"] + coding_box["height"] - 2, (
-            "Preferred Model should stack beneath Coding Agent"
-        )
-        assert coding_reasoning_box["y"] >= model_box["y"] + model_box["height"] - 2, (
-            "Coding Reasoning should stack beneath Preferred Model"
-        )
-        assert verification_model_box["y"] >= verification_box["y"] + verification_box["height"] - 2, (
-            "Verification Preferred Model should stack beneath Verification Agent"
-        )
-        assert verification_reasoning_box["y"] >= verification_model_box["y"] + verification_model_box["height"] - 2, (
-            "Verification Reasoning should stack beneath Verification Preferred Model"
-        )
+        assert (
+            model_box["y"] >= coding_box["y"] + coding_box["height"] - 2
+        ), "Preferred Model should stack beneath Coding Agent"
+        assert (
+            coding_reasoning_box["y"] >= model_box["y"] + model_box["height"] - 2
+        ), "Coding Reasoning should stack beneath Preferred Model"
+        assert (
+            verification_model_box["y"] >= verification_box["y"] + verification_box["height"] - 2
+        ), "Verification Preferred Model should stack beneath Verification Agent"
+        assert (
+            verification_reasoning_box["y"] >= verification_model_box["y"] + verification_model_box["height"] - 2
+        ), "Verification Reasoning should stack beneath Verification Preferred Model"
 
         assert abs(model_box["x"] - coding_box["x"]) <= 4
         assert abs(model_box["width"] - coding_box["width"]) <= 4
@@ -315,18 +313,16 @@ class TestCodingAgentLayout:
         for metrics in measurements.values():
             assert metrics is not None, "Cancel button should be present"
             # Check actual rendered width for visibility
-            assert metrics["width"] >= 60, (
-                f"Cancel button should be wide enough to read, got {metrics['width']}px"
-            )
+            assert metrics["width"] >= 60, f"Cancel button should be wide enough to read, got {metrics['width']}px"
             # Disabled buttons (cancel starts disabled) have reduced opacity (~50%),
             # which is acceptable - just check it's visible at all
             assert metrics["effectiveTextAlpha"] >= 0.4, "Cancel button text should be visible"
-            assert abs(metrics["bgBrightness"] - metrics["bodyBrightness"]) >= 40, (
-                "Cancel button background should contrast with the surrounding area"
-            )
-            assert abs(metrics["bgBrightness"] - metrics["textBrightness"]) >= 60, (
-                "Cancel button text should contrast with its background"
-            )
+            assert (
+                abs(metrics["bgBrightness"] - metrics["bodyBrightness"]) >= 40
+            ), "Cancel button background should contrast with the surrounding area"
+            assert (
+                abs(metrics["bgBrightness"] - metrics["textBrightness"]) >= 60
+            ), "Cancel button text should contrast with its background"
 
 
 class TestModelReasoningDropdowns:
@@ -417,7 +413,7 @@ class TestSubtaskTabs:
 
     def test_subtask_tabs_hidden_initially(self, page: Page):
         """Subtask tabs should be hidden before a task starts."""
-        tabs = page.locator('#subtask-tabs')
+        tabs = page.locator("#subtask-tabs")
         # Should either not exist or be hidden
         if tabs.count() > 0:
             expect(tabs).to_be_hidden()
@@ -492,9 +488,9 @@ class TestTaskTabs:
         )
 
         assert not layout.get("error"), f"Session log lookup failed: {layout.get('error')}"
-        assert layout["whiteSpace"] == "nowrap", (
-            f"Expected session log button to stay on one line, got whiteSpace={layout['whiteSpace']}"
-        )
+        assert (
+            layout["whiteSpace"] == "nowrap"
+        ), f"Expected session log button to stay on one line, got whiteSpace={layout['whiteSpace']}"
 
     def test_click_plus_twice_reveals_task_3(self, page: Page):
         """Clicking + twice should reveal Task 2 then Task 3."""
@@ -521,7 +517,7 @@ class TestLiveActivityFormat:
     def test_live_stream_box_exists(self, page: Page):
         """Live stream box should exist (may be hidden when empty)."""
         # Wait for the element to be attached to DOM (it may take a moment to render)
-        box = page.locator('#live-stream-box')
+        box = page.locator("#live-stream-box")
         box.wait_for(state="attached", timeout=5000)
         assert box.count() > 0, "live-stream-box should exist in DOM"
 
@@ -531,7 +527,7 @@ class TestNoStatusBox:
 
     def test_no_status_box(self, page: Page):
         """Status box should not exist in the DOM."""
-        status_box = page.locator('#status-box')
+        status_box = page.locator("#status-box")
         assert status_box.count() == 0, "status_box should be completely removed"
 
 
@@ -540,7 +536,7 @@ class TestTaskStatusHeader:
 
     def test_task_status_header_hidden_initially(self, page: Page):
         """Task status header should be hidden before task starts."""
-        header = page.locator('#task-status-header')
+        header = page.locator("#task-status-header")
         # Should either not exist or be hidden
         if header.count() > 0:
             expect(header).to_be_hidden()
@@ -584,8 +580,7 @@ class TestDeleteProvider:
         # Verify the two-step flow worked
         assert result.existed_before, f"Provider '{provider_to_delete}' should exist before deletion"
         assert result.confirm_button_appeared, (
-            f"Confirm button should appear after first click. "
-            f"feedback='{result.feedback_message}'"
+            f"Confirm button should appear after first click. " f"feedback='{result.feedback_message}'"
         )
         assert result.confirm_clicked, "Confirm button should be clickable"
 
@@ -616,7 +611,7 @@ class TestDeleteProvider:
         """
         # Get card visibility before any deletion
         cards_before = get_card_visibility_debug(page)
-        visible_cards_before = [c for c in cards_before if c['hasHeaderSpan']]
+        visible_cards_before = [c for c in cards_before if c["hasHeaderSpan"]]
 
         if len(visible_cards_before) < 1:
             pytest.skip("No visible provider cards to test deletion")
@@ -634,8 +629,8 @@ class TestDeleteProvider:
         cards_after = get_card_visibility_debug(page)
 
         # Count visible vs empty cards
-        visible_cards_after = [c for c in cards_after if c['hasHeaderSpan']]
-        empty_cards_after = [c for c in cards_after if not c['hasHeaderSpan']]
+        visible_cards_after = [c for c in cards_after if c["hasHeaderSpan"]]
+        empty_cards_after = [c for c in cards_after if not c["hasHeaderSpan"]]
 
         # Verify there's one less visible card
         assert len(visible_cards_after) == len(visible_cards_before) - 1, (
@@ -645,7 +640,7 @@ class TestDeleteProvider:
 
         # Verify empty cards are actually hidden (display: none)
         for empty_card in empty_cards_after:
-            assert empty_card['cardDisplay'] == 'none' or empty_card['columnDisplay'] == 'none', (
+            assert empty_card["cardDisplay"] == "none" or empty_card["columnDisplay"] == "none", (
                 f"Empty card should be hidden but has cardDisplay={empty_card['cardDisplay']}, "
                 f"columnDisplay={empty_card['columnDisplay']}. Card: {empty_card}"
             )
@@ -693,7 +688,7 @@ class TestLiveViewFormat:
         # Check that colors are boosted by CSS brightness filter
         for color_info in result.computed_colors:
             # Verify the filter is applied (brightness should be boosted)
-            computed = color_info.get('computedColor', '')
+            computed = color_info.get("computedColor", "")
             print(f"Color: {computed} for text: {color_info.get('text', '')[:30]}")
 
     def test_dark_grey_text_is_visible(self, page: Page):
@@ -706,7 +701,7 @@ class TestLiveViewFormat:
         assert result.has_colored_spans, "Should detect colored span"
         # The CSS should boost this dark color
         if result.computed_colors:
-            color = result.computed_colors[0].get('computedColor', '')
+            color = result.computed_colors[0].get("computedColor", "")
             print(f"Dark grey computed to: {color}")
 
     def test_diff_classes_render_correctly(self, page: Page):
@@ -714,9 +709,7 @@ class TestLiveViewFormat:
         inject_live_stream_content(page, self.DIFF_TEST_HTML)
         result = check_live_stream_colors(page)
 
-        assert result.has_diff_classes, (
-            f"Should detect diff classes in content. HTML: {result.raw_html[:200]}"
-        )
+        assert result.has_diff_classes, f"Should detect diff classes in content. HTML: {result.raw_html[:200]}"
 
     def test_plain_text_with_newlines_renders_on_multiple_lines(self, page: Page):
         """Plain text with newlines (Claude-style) should render on multiple lines, not one long line."""
@@ -732,7 +725,7 @@ Line 4: Fourth line"""
         inject_live_stream_content(page, html_wrapped)
 
         # Get the rendered content element - use .last since inject creates it
-        content_box = page.locator('#live-stream-box .live-output-content').last
+        content_box = page.locator("#live-stream-box .live-output-content").last
 
         # Check that content is visible
         assert content_box.is_visible(), "Live output content should be visible"
@@ -749,9 +742,11 @@ Line 4: Fourth line"""
 
         # Also check that the white-space CSS property is set to preserve newlines
         white_space = content_box.evaluate("el => getComputedStyle(el).whiteSpace")
-        assert white_space in ('pre-wrap', 'pre', 'pre-line'), (
-            f"white-space should preserve newlines, got: {white_space}"
-        )
+        assert white_space in (
+            "pre-wrap",
+            "pre",
+            "pre-line",
+        ), f"white-space should preserve newlines, got: {white_space}"
 
 
 class TestRealisticLiveContent:
@@ -777,23 +772,21 @@ class TestRealisticLiveContent:
         inject_live_stream_content(page, self.REALISTIC_CLI_HTML)
         result = verify_all_text_visible(page)
 
-        assert 'error' not in result, f"Error checking visibility: {result.get('error')}"
+        assert "error" not in result, f"Error checking visibility: {result.get('error')}"
 
         # Print sample colors for debugging
         print("Sample computed colors:")
-        for sample in result.get('sampleColors', []):
+        for sample in result.get("sampleColors", []):
             print(f"  {sample['text'][:30]}: {sample['color']} (brightness={sample['brightness']:.1f})")
 
         # Critical assertion: no dark elements
-        dark = result.get('darkElements', [])
+        dark = result.get("darkElements", [])
         if dark:
             print("DARK ELEMENTS FOUND (FAIL):")
             for elem in dark:
                 print(f"  {elem['text']}: {elem['color']} (brightness={elem['brightness']:.1f})")
 
-        assert result.get('allVisible', False), (
-            f"Some text is too dark to read. Dark elements: {dark}"
-        )
+        assert result.get("allVisible", False), f"Some text is too dark to read. Dark elements: {dark}"
 
     def test_screenshot_live_content_proof(self, page: Page, tmp_path):
         """Take screenshot of live stream with realistic content as proof of visibility."""
@@ -807,7 +800,7 @@ class TestRealisticLiveContent:
 
         # Also verify visibility
         result = verify_all_text_visible(page)
-        assert result.get('allVisible', False), f"Text not visible in screenshot: {result}"
+        assert result.get("allVisible", False), f"Text not visible in screenshot: {result}"
 
 
 # Screenshot tests for visual verification
