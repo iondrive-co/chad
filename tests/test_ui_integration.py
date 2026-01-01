@@ -758,6 +758,60 @@ Line 4: Fourth line"""
             "pre-line",
         ), f"white-space should preserve newlines, got: {white_space}"
 
+    def test_task_2_live_stream_has_multiline_formatting(self, page: Page):
+        """Task 2 live stream should keep styled multiline formatting like Task 1."""
+        # Create Task 2 via + tab and ensure it's active
+        plus_tab = page.get_by_role("tab", name="➕")
+        plus_tab.click()
+        task2_tab = page.get_by_role("tab", name="Task 2")
+        expect(task2_tab).to_be_visible(timeout=5000)
+        task2_tab.click()
+        expect(task2_tab).to_have_attribute("aria-selected", "true")
+
+        panel_id = task2_tab.get_attribute("aria-controls")
+        assert panel_id, "Task 2 tab should reference a tabpanel via aria-controls"
+        panel_selector = f"#{panel_id}"
+        panel = page.locator(panel_selector)
+        expect(panel).to_be_visible(timeout=5000)
+
+        multiline_content = """Line 1: Task 2 output
+Line 2: Still on its own line
+Line 3: With colors and spacing"""
+        html_wrapped = f'<div class="live-output-content">{multiline_content}</div>'
+        inject_live_stream_content(page, html_wrapped, container_selector=panel_selector)
+
+        content_box = panel.locator(".live-output-content").last
+        assert content_box.is_visible(), "Task 2 live output content should be visible"
+
+        white_space = content_box.evaluate("el => getComputedStyle(el).whiteSpace")
+        assert white_space in ("pre-wrap", "pre", "pre-line"), (
+            f"Task 2 live view should preserve newlines, got: {white_space}"
+        )
+
+    def test_inject_requires_live_stream_box(self, page: Page):
+        """Inject helper should not create content when live stream box is missing."""
+        page.evaluate(
+            """
+() => {
+    const container = document.createElement('div');
+    container.id = 'fake-live-container';
+    container.textContent = 'placeholder';
+    document.body.appendChild(container);
+}
+"""
+        )
+        inject_live_stream_content(page, "<p>Should not inject</p>", container_selector="#fake-live-container")
+        content_count = page.evaluate(
+            """
+() => {
+    const container = document.querySelector('#fake-live-container');
+    if (!container) return -1;
+    return container.querySelectorAll('.live-output-content').length;
+}
+"""
+        )
+        assert content_count == 0, "Inject helper should not create live-output-content in non-live containers"
+
 
 class TestRealisticLiveContent:
     """Test live view with realistic CLI-like content to verify all text is visible."""
