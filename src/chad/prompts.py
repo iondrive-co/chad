@@ -99,10 +99,7 @@ def build_coding_prompt(task: str, project_docs: str | None = None) -> str:
     if project_docs:
         docs_section = f"# Project Instructions\n\n{project_docs}\n\n"
 
-    return CODING_AGENT_PROMPT.format(
-        project_docs=docs_section,
-        task=task
-    )
+    return CODING_AGENT_PROMPT.format(project_docs=docs_section, task=task)
 
 
 def get_verification_prompt(coding_output: str) -> str:
@@ -119,6 +116,7 @@ def get_verification_prompt(coding_output: str) -> str:
 
 class VerificationParseError(Exception):
     """Raised when verification response cannot be parsed."""
+
     pass
 
 
@@ -138,7 +136,7 @@ def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
     import re
 
     # Extract JSON from the response (may be wrapped in ```json ... ```)
-    json_match = re.search(r'```json\s*(\{.*?\})\s*```', response, re.DOTALL)
+    json_match = re.search(r"```json\s*(\{.*?\})\s*```", response, re.DOTALL)
     if json_match:
         json_str = json_match.group(1)
     else:

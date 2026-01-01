@@ -74,6 +74,7 @@ class ProviderUIManager:
         # Check for screenshot mode - return synthetic data
         if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
             from .screenshot_fixtures import get_mock_usage
+
             return get_mock_usage(account_name)
 
         accounts = self.security_mgr.list_accounts()
@@ -484,9 +485,7 @@ class ProviderUIManager:
             # Update credentials with new tokens
             oauth_data["accessToken"] = token_data.get("access_token", "")
             oauth_data["refreshToken"] = token_data.get("refresh_token", refresh_token)
-            oauth_data["expiresAt"] = int(
-                (datetime.now().timestamp() + token_data.get("expires_in", 28800)) * 1000
-            )
+            oauth_data["expiresAt"] = int((datetime.now().timestamp() + token_data.get("expires_in", 28800)) * 1000)
             if "scope" in token_data:
                 oauth_data["scopes"] = token_data["scope"].split()
 
@@ -507,10 +506,7 @@ class ProviderUIManager:
         config_dir = self._get_claude_config_dir(account_name)
         creds_file = config_dir / ".credentials.json"
         if not creds_file.exists():
-            return (
-                "❌ **Not logged in**\n\n"
-                "Click **Login** below to authenticate this account."
-            )
+            return "❌ **Not logged in**\n\n" "Click **Login** below to authenticate this account."
 
         try:
             with open(creds_file) as f:
@@ -521,10 +517,7 @@ class ProviderUIManager:
             subscription_type = (oauth_data.get("subscriptionType") or "unknown").upper()
 
             if not access_token:
-                return (
-                    "❌ **Not logged in**\n\n"
-                    "Click **Login** below to authenticate this account."
-                )
+                return "❌ **Not logged in**\n\n" "Click **Login** below to authenticate this account."
 
             response = requests.get(
                 "https://api.anthropic.com/api/oauth/usage",
@@ -849,6 +842,7 @@ class ProviderUIManager:
 
             if provider_type == "openai":
                 import os
+
                 codex_home = self._setup_codex_account(account_name)
                 codex_cli = cli_detail or "codex"
 
@@ -905,12 +899,7 @@ class ProviderUIManager:
                         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
                         env["TERM"] = "xterm-256color"
 
-                        child = pexpect.spawn(
-                            claude_cli,
-                            timeout=120,
-                            encoding='utf-8',
-                            env=env
-                        )
+                        child = pexpect.spawn(claude_cli, timeout=120, encoding="utf-8", env=env)
 
                         try:
                             # Step 1: Theme selection
@@ -955,9 +944,7 @@ class ProviderUIManager:
                     except ImportError:
                         # pexpect not available, fall back to script wrapper
                         login_process = subprocess.Popen(
-                            ["script", "-q", "-c",
-                             f'CLAUDE_CONFIG_DIR="{config_dir}" "{claude_cli}"',
-                             "/dev/null"],
+                            ["script", "-q", "-c", f'CLAUDE_CONFIG_DIR="{config_dir}" "{claude_cli}"', "/dev/null"],
                             stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT,
@@ -1001,6 +988,7 @@ class ProviderUIManager:
                 else:
                     # Login failed/timed out - clean up
                     import shutil
+
                     config_path = Path(config_dir)
                     if config_path.exists():
                         shutil.rmtree(config_path, ignore_errors=True)

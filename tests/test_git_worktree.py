@@ -136,9 +136,7 @@ class TestGitWorktreeManager:
         (worktree_path / "new_file.txt").write_text("New content")
 
         # Stage and commit in worktree
-        subprocess.run(
-            ["git", "add", "."], cwd=worktree_path, check=True, capture_output=True
-        )
+        subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "Add new file"],
             cwd=worktree_path,
@@ -190,9 +188,7 @@ class TestGitWorktreeManager:
         (worktree_path / "new_file.txt").write_text("New content")
 
         # Commit in worktree
-        subprocess.run(
-            ["git", "add", "."], cwd=worktree_path, check=True, capture_output=True
-        )
+        subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "Add new file"],
             cwd=worktree_path,
@@ -217,9 +213,7 @@ class TestGitWorktreeManager:
 
         # Modify README in worktree and commit
         (worktree_path / "README.md").write_text("# Modified in worktree\n")
-        subprocess.run(
-            ["git", "add", "."], cwd=worktree_path, check=True, capture_output=True
-        )
+        subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "Modify README in worktree"],
             cwd=worktree_path,
@@ -229,9 +223,7 @@ class TestGitWorktreeManager:
 
         # Modify README in main and commit
         (git_repo / "README.md").write_text("# Modified in main\n")
-        subprocess.run(
-            ["git", "add", "."], cwd=git_repo, check=True, capture_output=True
-        )
+        subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "Modify README in main"],
             cwd=git_repo,
@@ -256,9 +248,7 @@ class TestGitWorktreeManager:
         # Create worktree and set up conflict
         worktree_path, _ = mgr.create_worktree(task_id)
         (worktree_path / "README.md").write_text("# Worktree version\n")
-        subprocess.run(
-            ["git", "add", "."], cwd=worktree_path, check=True, capture_output=True
-        )
+        subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "Worktree change"],
             cwd=worktree_path,
@@ -267,9 +257,7 @@ class TestGitWorktreeManager:
         )
 
         (git_repo / "README.md").write_text("# Main version\n")
-        subprocess.run(
-            ["git", "add", "."], cwd=git_repo, check=True, capture_output=True
-        )
+        subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "Main change"],
             cwd=git_repo,
@@ -300,9 +288,7 @@ class TestGitWorktreeManager:
         # Create conflict scenario
         worktree_path, _ = mgr.create_worktree(task_id)
         (worktree_path / "README.md").write_text("# Worktree\n")
-        subprocess.run(
-            ["git", "add", "."], cwd=worktree_path, check=True, capture_output=True
-        )
+        subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "Worktree"],
             cwd=worktree_path,
@@ -311,9 +297,7 @@ class TestGitWorktreeManager:
         )
 
         (git_repo / "README.md").write_text("# Main\n")
-        subprocess.run(
-            ["git", "add", "."], cwd=git_repo, check=True, capture_output=True
-        )
+        subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "Main"],
             cwd=git_repo,
@@ -335,9 +319,7 @@ class TestGitWorktreeManager:
 
         worktree_path, _ = mgr.create_worktree(task_id)
         (worktree_path / "new_file.txt").write_text("Content")
-        subprocess.run(
-            ["git", "add", "."], cwd=worktree_path, check=True, capture_output=True
-        )
+        subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "Add file"],
             cwd=worktree_path,

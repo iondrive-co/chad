@@ -1,4 +1,5 @@
 "Tests for AI providers."
+
 from unittest.mock import Mock, patch
 import pytest
 from chad.providers import (
@@ -376,9 +377,9 @@ class TestClaudeCodeProvider:
         assert provider.process is None
         assert provider.project_path is None
 
-    @patch('chad.providers.ClaudeCodeProvider._ensure_mcp_permissions')
-    @patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/claude'))
-    @patch('subprocess.Popen')
+    @patch("chad.providers.ClaudeCodeProvider._ensure_mcp_permissions")
+    @patch("chad.providers._ensure_cli_tool", return_value=(True, "/bin/claude"))
+    @patch("subprocess.Popen")
     def test_start_session_success(self, mock_popen, mock_ensure, mock_permissions):
         mock_process = Mock()
         mock_process.stdin = Mock()
@@ -396,9 +397,9 @@ class TestClaudeCodeProvider:
         called_cmd = mock_popen.call_args.args[0]
         assert called_cmd[0] == "/bin/claude"
 
-    @patch('chad.providers.ClaudeCodeProvider._ensure_mcp_permissions')
-    @patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/claude'))
-    @patch('subprocess.Popen')
+    @patch("chad.providers.ClaudeCodeProvider._ensure_mcp_permissions")
+    @patch("chad.providers._ensure_cli_tool", return_value=(True, "/bin/claude"))
+    @patch("subprocess.Popen")
     def test_start_session_failure(self, mock_popen, mock_ensure, mock_permissions):
         mock_popen.side_effect = FileNotFoundError("command not found")
 
@@ -412,6 +413,7 @@ class TestClaudeCodeProvider:
 
     def test_send_message(self):
         import json
+
         config = ModelConfig(provider="anthropic", model_name="claude-3")
         provider = ClaudeCodeProvider(config)
 
@@ -423,14 +425,8 @@ class TestClaudeCodeProvider:
         provider.send_message("Hello")
 
         # Should send JSON-formatted message
-        expected_msg = {
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": [{"type": "text", "text": "Hello"}]
-            }
-        }
-        mock_stdin.write.assert_called_once_with(json.dumps(expected_msg) + '\n')
+        expected_msg = {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "Hello"}]}}
+        mock_stdin.write.assert_called_once_with(json.dumps(expected_msg) + "\n")
         mock_stdin.flush.assert_called_once()
 
     def test_is_alive_true(self):
@@ -482,21 +478,21 @@ class TestClaudeCodeProvider:
         assert mock_process.wait.call_count == 2
         mock_process.kill.assert_called_once()
 
-    @patch('select.select')
+    @patch("select.select")
     def test_start_session_with_system_prompt(self, mock_select):
         """Test that system prompt is sent immediately after session start."""
         config = ModelConfig(provider="anthropic", model_name="claude-3")
         provider = ClaudeCodeProvider(config)
 
-        with patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/claude')) as mock_ensure:
-            with patch('chad.providers.ClaudeCodeProvider._ensure_mcp_permissions') as mock_permissions:
-                with patch('subprocess.Popen') as mock_popen:
+        with patch("chad.providers._ensure_cli_tool", return_value=(True, "/bin/claude")) as mock_ensure:
+            with patch("chad.providers.ClaudeCodeProvider._ensure_mcp_permissions") as mock_permissions:
+                with patch("subprocess.Popen") as mock_popen:
                     mock_process = Mock()
                     mock_process.stdin = Mock()
                     mock_popen.return_value = mock_process
 
                     # Mock provider.send_message to verify system prompt is sent
-                    with patch.object(provider, 'send_message') as mock_send:
+                    with patch.object(provider, "send_message") as mock_send:
                         result = provider.start_session("/tmp/test_project", "System prompt here")
 
                         assert result is True
@@ -504,11 +500,12 @@ class TestClaudeCodeProvider:
                         mock_ensure.assert_called_once_with("claude", provider._notify_activity)
                         mock_permissions.assert_called_once()
 
-    @patch('select.select')
-    @patch('time.time')
+    @patch("select.select")
+    @patch("time.time")
     def test_get_response_accumulates_text_from_multiple_chunks(self, mock_time, mock_select):
         """Test that get_response accumulates text over multiple chunks."""
         import json
+
         config = ModelConfig(provider="anthropic", model_name="claude-3")
         provider = ClaudeCodeProvider(config)
 
@@ -528,9 +525,9 @@ class TestClaudeCodeProvider:
         messages = [
             json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "First chunk"}]}}),
             json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": " Second chunk"}]}}),
-            json.dumps({"type": "result", "result": "Complete response"})
+            json.dumps({"type": "result", "result": "Complete response"}),
         ]
-        mock_stdout.readline.side_effect = messages + ['']
+        mock_stdout.readline.side_effect = messages + [""]
 
         result = provider.get_response(timeout=30.0)
 
@@ -540,11 +537,12 @@ class TestClaudeCodeProvider:
         assert provider.accumulated_text[0] == "First chunk"
         assert provider.accumulated_text[1] == " Second chunk"
 
-    @patch('select.select')
-    @patch('time.time')
+    @patch("select.select")
+    @patch("time.time")
     def test_get_response_callback_called_on_tool_use(self, mock_time, mock_select):
         """Test that activity callbacks are triggered on tool use with proper detail extraction."""
         import json
+
         config = ModelConfig(provider="anthropic", model_name="claude-3")
         provider = ClaudeCodeProvider(config)
 
@@ -562,37 +560,47 @@ class TestClaudeCodeProvider:
         mock_select.return_value = ([mock_stdout], [], [])
 
         # Mock tool use messages
-        read_tool = json.dumps({
-            "type": "assistant",
-            "message": {"content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "/test/file.py"}}]}
-        })
-        bash_tool = json.dumps({
-            "type": "assistant",
-            "message": {"content": [{
-                "type": "tool_use", "name": "Bash",
-                "input": {"command": "ls -la very long command here that should be truncated"}
-            }]}
-        })
+        read_tool = json.dumps(
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "/test/file.py"}}]},
+            }
+        )
+        bash_tool = json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": "ls -la very long command here that should be truncated"},
+                        }
+                    ]
+                },
+            }
+        )
         result_msg = json.dumps({"type": "result", "result": "Done"})
 
-        mock_stdout.readline.side_effect = [read_tool, bash_tool, result_msg, '']
+        mock_stdout.readline.side_effect = [read_tool, bash_tool, result_msg, ""]
 
         result = provider.get_response(timeout=30.0)
 
         assert result == "Done"
         # Check activity callbacks were called with correct tool info
-        tool_calls = [call for call in activity_calls if call[0] == 'tool']
+        tool_calls = [call for call in activity_calls if call[0] == "tool"]
         assert len(tool_calls) == 2
-        assert tool_calls[0] == ('tool', 'Read: /test/file.py')
+        assert tool_calls[0] == ("tool", "Read: /test/file.py")
         # Truncated at 50 chars
-        expected = ('tool', 'Bash: ls -la very long command here that should be trunc')
+        expected = ("tool", "Bash: ls -la very long command here that should be trunc")
         assert tool_calls[1] == expected
 
-    @patch('select.select')
-    @patch('time.time')
+    @patch("select.select")
+    @patch("time.time")
     def test_get_response_mixed_text_and_tool_in_single_message(self, mock_time, mock_select):
         """Test message contains both text and tool_use items."""
         import json
+
         config = ModelConfig(provider="anthropic", model_name="claude-3")
         provider = ClaudeCodeProvider(config)
 
@@ -606,18 +614,20 @@ class TestClaudeCodeProvider:
         mock_select.return_value = ([mock_stdout], [], [])
 
         # Message with both text and tool
-        mixed_message = json.dumps({
-            "type": "assistant",
-            "message": {
-                "content": [
-                    {"type": "text", "text": "Let me read the file"},
-                    {"type": "tool_use", "name": "Read", "input": {"file_path": "/test.py"}}
-                ]
+        mixed_message = json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "Let me read the file"},
+                        {"type": "tool_use", "name": "Read", "input": {"file_path": "/test.py"}},
+                    ]
+                },
             }
-        })
+        )
         result_msg = json.dumps({"type": "result", "result": "Response"})
 
-        mock_stdout.readline.side_effect = [mixed_message, result_msg, '']
+        mock_stdout.readline.side_effect = [mixed_message, result_msg, ""]
 
         result = provider.get_response(timeout=30.0)
 
@@ -625,11 +635,12 @@ class TestClaudeCodeProvider:
         assert len(provider.accumulated_text) == 1
         assert provider.accumulated_text[0] == "Let me read the file"
 
-    @patch('select.select')
-    @patch('time.time')
+    @patch("select.select")
+    @patch("time.time")
     def test_get_response_unknown_tool_type(self, mock_time, mock_select):
         """Test unknown tool type gets empty detail."""
         import json
+
         config = ModelConfig(provider="anthropic", model_name="claude-3")
         provider = ClaudeCodeProvider(config)
 
@@ -646,23 +657,25 @@ class TestClaudeCodeProvider:
         mock_select.return_value = ([mock_stdout], [], [])
 
         # Unknown tool
-        unknown_tool = json.dumps({
-            "type": "assistant",
-            "message": {"content": [{"type": "tool_use", "name": "UnknownTool", "input": {"some_param": "value"}}]}
-        })
+        unknown_tool = json.dumps(
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "tool_use", "name": "UnknownTool", "input": {"some_param": "value"}}]},
+            }
+        )
         result_msg = json.dumps({"type": "result", "result": "Done"})
 
-        mock_stdout.readline.side_effect = [unknown_tool, result_msg, '']
+        mock_stdout.readline.side_effect = [unknown_tool, result_msg, ""]
 
         result = provider.get_response(timeout=30.0)
 
         assert result == "Done"
-        tool_calls = [call for call in activity_calls if call[0] == 'tool']
+        tool_calls = [call for call in activity_calls if call[0] == "tool"]
         assert len(tool_calls) == 1
-        assert tool_calls[0] == ('tool', 'UnknownTool: ')  # Empty detail
+        assert tool_calls[0] == ("tool", "UnknownTool: ")  # Empty detail
 
-    @patch('select.select')
-    @patch('time.time')
+    @patch("select.select")
+    @patch("time.time")
     def test_get_response_timeout_exact_boundary(self, mock_time, mock_select):
         """Test timeout at exact second boundary."""
         config = ModelConfig(provider="anthropic", model_name="claude-3")
@@ -677,17 +690,18 @@ class TestClaudeCodeProvider:
         # Mock time to hit exact timeout boundary
         mock_time.side_effect = [0, 29.9, 30.0, 30.1]  # Timeout is 30.0
         mock_select.return_value = ([mock_stdout], [], [])
-        mock_stdout.readline.return_value = ''  # No data
+        mock_stdout.readline.return_value = ""  # No data
 
         result = provider.get_response(timeout=30.0)
 
         assert result == ""  # Should return empty on timeout
 
-    @patch('select.select')
-    @patch('time.time')
+    @patch("select.select")
+    @patch("time.time")
     def test_get_response_result_field_only(self, mock_time, mock_select):
         """Test that response is only sent when 'result' message type is received."""
         import json
+
         config = ModelConfig(provider="anthropic", model_name="claude-3")
         provider = ClaudeCodeProvider(config)
 
@@ -704,9 +718,9 @@ class TestClaudeCodeProvider:
         messages = [
             json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Working"}]}}),
             json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Still working"}]}}),
-            json.dumps({"type": "result", "result": "Final result"})
+            json.dumps({"type": "result", "result": "Final result"}),
         ]
-        mock_stdout.readline.side_effect = messages + ['']
+        mock_stdout.readline.side_effect = messages + [""]
 
         result = provider.get_response(timeout=30.0)
 
@@ -729,7 +743,7 @@ class TestClaudeCodeProvider:
         # Verify write was attempted
         mock_stdin.write.assert_called_once()
 
-    @patch('pathlib.Path.home')
+    @patch("pathlib.Path.home")
     def test_get_claude_config_dir_with_account(self, mock_home, tmp_path):
         """Config directory uses account name when set."""
         mock_home.return_value = tmp_path
@@ -740,7 +754,7 @@ class TestClaudeCodeProvider:
         config_dir = provider._get_claude_config_dir()
         assert config_dir == str(tmp_path / ".chad" / "claude-configs" / "my-account")
 
-    @patch('pathlib.Path.home')
+    @patch("pathlib.Path.home")
     def test_get_claude_config_dir_without_account(self, mock_home, tmp_path):
         """Config directory defaults to ~/.claude when no account name."""
         mock_home.return_value = tmp_path
@@ -751,7 +765,7 @@ class TestClaudeCodeProvider:
         config_dir = provider._get_claude_config_dir()
         assert config_dir == str(tmp_path / ".claude")
 
-    @patch('pathlib.Path.home')
+    @patch("pathlib.Path.home")
     def test_get_env_includes_config_dir(self, mock_home, tmp_path):
         """Environment includes CLAUDE_CONFIG_DIR."""
         mock_home.return_value = tmp_path
@@ -763,9 +777,9 @@ class TestClaudeCodeProvider:
         assert "CLAUDE_CONFIG_DIR" in env
         assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / ".chad" / "claude-configs" / "test-account")
 
-    @patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/claude'))
-    @patch('subprocess.Popen')
-    @patch('pathlib.Path.home')
+    @patch("chad.providers._ensure_cli_tool", return_value=(True, "/bin/claude"))
+    @patch("subprocess.Popen")
+    @patch("pathlib.Path.home")
     def test_start_session_uses_isolated_config(self, mock_home, mock_popen, mock_ensure, tmp_path):
         """Start session passes CLAUDE_CONFIG_DIR to subprocess."""
         mock_home.return_value = tmp_path
@@ -790,7 +804,7 @@ class TestClaudeCodeProvider:
 class TestOpenAICodexProvider:
     """Test cases for OpenAICodexProvider."""
 
-    @patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/codex'))
+    @patch("chad.providers._ensure_cli_tool", return_value=(True, "/bin/codex"))
     def test_start_session_success(self, mock_ensure):
         config = ModelConfig(provider="openai", model_name="codex")
         provider = OpenAICodexProvider(config)
@@ -801,7 +815,7 @@ class TestOpenAICodexProvider:
         assert provider.cli_path == "/bin/codex"
         mock_ensure.assert_called_once_with("codex", provider._notify_activity)
 
-    @patch('chad.providers._ensure_cli_tool', return_value=(True, '/bin/codex'))
+    @patch("chad.providers._ensure_cli_tool", return_value=(True, "/bin/codex"))
     def test_start_session_with_system_prompt(self, mock_ensure):
         config = ModelConfig(provider="openai", model_name="codex")
         provider = OpenAICodexProvider(config)
@@ -823,11 +837,11 @@ class TestOpenAICodexProvider:
         provider.send_message("Hello")
         assert provider.current_message == "Hello"
 
-    @patch('chad.providers.select.select')
-    @patch('chad.providers.os.read')
-    @patch('chad.providers.os.close')
-    @patch('chad.providers.pty.openpty')
-    @patch('subprocess.Popen')
+    @patch("chad.providers.select.select")
+    @patch("chad.providers.os.read")
+    @patch("chad.providers.os.close")
+    @patch("chad.providers.pty.openpty")
+    @patch("subprocess.Popen")
     def test_get_response_success(self, mock_popen, mock_openpty, mock_close, mock_read, mock_select):
         # Setup PTY mock
         mock_openpty.return_value = (10, 11)  # master_fd, slave_fd
@@ -856,12 +870,12 @@ class TestOpenAICodexProvider:
         mock_stdin.write.assert_called_once_with(b"What is 2+2?")
         mock_stdin.close.assert_called_once()
 
-    @patch('chad.providers.select.select')
-    @patch('chad.providers.os.read')
-    @patch('chad.providers.os.close')
-    @patch('chad.providers.pty.openpty')
-    @patch('time.time')
-    @patch('subprocess.Popen')
+    @patch("chad.providers.select.select")
+    @patch("chad.providers.os.read")
+    @patch("chad.providers.os.close")
+    @patch("chad.providers.pty.openpty")
+    @patch("time.time")
+    @patch("subprocess.Popen")
     def test_get_response_timeout(self, mock_popen, mock_time, mock_openpty, mock_close, mock_read, mock_select):
         mock_openpty.return_value = (10, 11)
 
@@ -889,9 +903,9 @@ class TestOpenAICodexProvider:
         assert provider.current_message is None
         mock_process.kill.assert_called_once()
 
-    @patch('chad.providers.os.close')
-    @patch('chad.providers.pty.openpty')
-    @patch('subprocess.Popen')
+    @patch("chad.providers.os.close")
+    @patch("chad.providers.pty.openpty")
+    @patch("subprocess.Popen")
     def test_get_response_file_not_found(self, mock_popen, mock_openpty, mock_close):
         mock_openpty.return_value = (10, 11)
         mock_popen.side_effect = FileNotFoundError("codex not found")
@@ -913,8 +927,8 @@ class TestOpenAICodexProvider:
         response = provider.get_response()
         assert response == ""
 
-    @patch('chad.providers._stream_pty_output', return_value=("", False))
-    @patch('chad.providers._start_pty_process')
+    @patch("chad.providers._stream_pty_output", return_value=("", False))
+    @patch("chad.providers._start_pty_process")
     def test_get_response_exec_includes_network_access(self, mock_start, mock_stream):
         mock_process = Mock()
         mock_process.stdin = Mock()
@@ -929,11 +943,11 @@ class TestOpenAICodexProvider:
         provider.get_response(timeout=1.0)
 
         cmd = mock_start.call_args.args[0]
-        assert '-c' in cmd
+        assert "-c" in cmd
         assert 'network_access="enabled"' in cmd
 
-    @patch('chad.providers._stream_pty_output', return_value=("", False))
-    @patch('chad.providers._start_pty_process')
+    @patch("chad.providers._stream_pty_output", return_value=("", False))
+    @patch("chad.providers._start_pty_process")
     def test_get_response_resume_includes_network_access(self, mock_start, mock_stream):
         mock_process = Mock()
         mock_process.stdin = Mock()
@@ -949,7 +963,7 @@ class TestOpenAICodexProvider:
         provider.get_response(timeout=1.0)
 
         cmd = mock_start.call_args.args[0]
-        assert '-c' in cmd
+        assert "-c" in cmd
         assert 'network_access="enabled"' in cmd
 
 
@@ -971,8 +985,8 @@ class TestCodexJsonEventParsing:
 
         # Process events as the provider would
         for event in json_events:
-            if event.get('type') == 'thread.started' and 'thread_id' in event:
-                provider.thread_id = event['thread_id']
+            if event.get("type") == "thread.started" and "thread_id" in event:
+                provider.thread_id = event["thread_id"]
 
         assert provider.thread_id == "019b6517-74ba-7d80-959b-d133057a7938"
 
@@ -1054,15 +1068,20 @@ class TestOpenAICodexProviderIntegration:
             read_fd, write_fd = os.pipe()
 
             # Write mock JSON output
-            json_output = json.dumps({
-                "type": "item.completed",
-                "item": {"type": "message", "content": [{"type": "text", "text": "The answer is 4"}]}
-            }) + "\n"
+            json_output = (
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {"type": "message", "content": [{"type": "text", "text": "The answer is 4"}]},
+                    }
+                )
+                + "\n"
+            )
             os.write(write_fd, json_output.encode())
             os.close(write_fd)
 
-            with patch('chad.providers._start_pty_process', return_value=(mock_process, read_fd)):
-                with patch('chad.providers.find_cli_executable', return_value='/usr/bin/codex'):
+            with patch("chad.providers._start_pty_process", return_value=(mock_process, read_fd)):
+                with patch("chad.providers.find_cli_executable", return_value="/usr/bin/codex"):
                     response = provider.get_response(timeout=5)
 
             assert "4" in response, f"Expected '4' in response, got: {response}"
@@ -1112,11 +1131,11 @@ class TestGeminiCodeAssistProvider:
         assert "system" in provider.current_message
         assert "hello" in provider.current_message
 
-    @patch('chad.providers.select.select')
-    @patch('chad.providers.os.read')
-    @patch('chad.providers.os.close')
-    @patch('chad.providers.pty.openpty')
-    @patch('subprocess.Popen')
+    @patch("chad.providers.select.select")
+    @patch("chad.providers.os.read")
+    @patch("chad.providers.os.close")
+    @patch("chad.providers.pty.openpty")
+    @patch("subprocess.Popen")
     def test_get_response_success(self, mock_popen, mock_openpty, mock_close, mock_read, mock_select):
         mock_openpty.return_value = (10, 11)
 
@@ -1138,12 +1157,12 @@ class TestGeminiCodeAssistProvider:
         mock_popen.assert_called_once()
         assert provider.current_message is None
 
-    @patch('chad.providers.select.select')
-    @patch('chad.providers.os.read')
-    @patch('chad.providers.os.close')
-    @patch('chad.providers.pty.openpty')
-    @patch('time.time')
-    @patch('subprocess.Popen')
+    @patch("chad.providers.select.select")
+    @patch("chad.providers.os.read")
+    @patch("chad.providers.os.close")
+    @patch("chad.providers.pty.openpty")
+    @patch("time.time")
+    @patch("subprocess.Popen")
     def test_get_response_timeout(self, mock_popen, mock_time, mock_openpty, mock_close, mock_read, mock_select):
         mock_openpty.return_value = (10, 11)
 
@@ -1164,9 +1183,9 @@ class TestGeminiCodeAssistProvider:
         assert "timed out" in response
         assert provider.current_message is None
 
-    @patch('chad.providers.os.close')
-    @patch('chad.providers.pty.openpty')
-    @patch('subprocess.Popen')
+    @patch("chad.providers.os.close")
+    @patch("chad.providers.pty.openpty")
+    @patch("subprocess.Popen")
     def test_get_response_missing_cli(self, mock_popen, mock_openpty, mock_close):
         mock_openpty.return_value = (10, 11)
         mock_popen.side_effect = FileNotFoundError("missing")

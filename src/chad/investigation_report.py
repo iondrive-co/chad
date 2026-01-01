@@ -73,21 +73,21 @@ class HypothesisTracker:
             hypothesis_id (1-indexed)
         """
         hypothesis_id = len(self._data["hypotheses"]) + 1
-        self._data["hypotheses"].append({
-            "id": hypothesis_id,
-            "description": description,
-            "checks": [
-                {"description": check, "passed": None, "notes": None}
-                for check in checks
-            ],
-            "status": "pending",  # pending, confirmed, rejected
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        })
+        self._data["hypotheses"].append(
+            {
+                "id": hypothesis_id,
+                "description": description,
+                "checks": [{"description": check, "passed": None, "notes": None} for check in checks],
+                "status": "pending",  # pending, confirmed, rejected
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         self._save()
         return hypothesis_id
 
-    def update_hypothesis(self, hypothesis_id: int, description: str | None = None,
-                          add_checks: list[str] | None = None) -> bool:
+    def update_hypothesis(
+        self, hypothesis_id: int, description: str | None = None, add_checks: list[str] | None = None
+    ) -> bool:
         """Update an existing hypothesis description or add more checks."""
         for h in self._data["hypotheses"]:
             if h["id"] == hypothesis_id:
@@ -100,8 +100,7 @@ class HypothesisTracker:
                 return True
         return False
 
-    def file_check_result(self, hypothesis_id: int, check_index: int,
-                          passed: bool, notes: str = "") -> dict[str, Any]:
+    def file_check_result(self, hypothesis_id: int, check_index: int, passed: bool, notes: str = "") -> dict[str, Any]:
         """File the result of a binary check.
 
         Args:
@@ -156,13 +155,15 @@ class HypothesisTracker:
                     checks_summary.append(f"      → {c['notes']}")
 
             status_icon = {"pending": "⏳", "confirmed": "✓", "rejected": "✗"}.get(h["status"], "?")
-            hypotheses_summary.append({
-                "id": h["id"],
-                "status": h["status"],
-                "status_icon": status_icon,
-                "description": h["description"],
-                "checks": checks_summary,
-            })
+            hypotheses_summary.append(
+                {
+                    "id": h["id"],
+                    "status": h["status"],
+                    "status_icon": status_icon,
+                    "description": h["description"],
+                    "checks": checks_summary,
+                }
+            )
 
         pending = [h for h in self._data["hypotheses"] if h["status"] == "pending"]
         confirmed = [h for h in self._data["hypotheses"] if h["status"] == "confirmed"]
@@ -197,12 +198,14 @@ class HypothesisTracker:
         for h in self._data["hypotheses"]:
             for i, c in enumerate(h["checks"]):
                 if c["passed"] is None:
-                    pending.append({
-                        "hypothesis_id": h["id"],
-                        "hypothesis": h["description"],
-                        "check_index": i,
-                        "check": c["description"],
-                    })
+                    pending.append(
+                        {
+                            "hypothesis_id": h["id"],
+                            "hypothesis": h["description"],
+                            "check_index": i,
+                            "check": c["description"],
+                        }
+                    )
         return pending
 
     @classmethod
@@ -215,13 +218,15 @@ class HypothesisTracker:
                 with open(f) as fp:
                     data = json.load(fp)
                 confirmed = len([h for h in data["hypotheses"] if h["status"] == "confirmed"])
-                trackers.append({
-                    "id": data["id"],
-                    "file_path": str(f),
-                    "created_at": data["created_at"],
-                    "hypotheses": len(data["hypotheses"]),
-                    "confirmed": confirmed,
-                })
+                trackers.append(
+                    {
+                        "id": data["id"],
+                        "file_path": str(f),
+                        "created_at": data["created_at"],
+                        "hypotheses": len(data["hypotheses"]),
+                        "confirmed": confirmed,
+                    }
+                )
             except (json.JSONDecodeError, KeyError):
                 continue
         return trackers[:10]  # Last 10
