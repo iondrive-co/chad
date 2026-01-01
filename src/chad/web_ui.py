@@ -2049,6 +2049,17 @@ class ChadWebUI:
             session.provider.stop_session()
             session.provider = None
         session.config = None
+
+        # Clean up worktree if it exists
+        if session.worktree_path and session.project_path:
+            try:
+                git_mgr = GitWorktreeManager(Path(session.project_path))
+                git_mgr.delete_worktree(session_id)
+            except Exception:
+                pass  # Best effort cleanup
+            session.worktree_path = None
+            session.worktree_base_commit = None
+
         return "🛑 Task cancelled"
 
     def _resolve_verification_preferences(
