@@ -371,15 +371,43 @@ class TestPortResolution:
         """Live stream box should not be forced visible in normal UI CSS."""
         from chad import web_ui
 
-        box_css_match = re.search(
-            r"#live-stream-box\\s*\\{([^}]*)\\}",
-            web_ui.PROVIDER_PANEL_CSS,
-        )
-        assert box_css_match, "Expected live stream box style block"
+        css = web_ui.PROVIDER_PANEL_CSS
+        start_idx = css.find("#live-stream-box")
+        assert start_idx != -1, "Expected live stream box style block"
+        brace_idx = css.find("{", start_idx)
+        end_idx = css.find("}", brace_idx)
+        assert brace_idx != -1 and end_idx != -1, "Expected live stream box style block"
 
-        box_block = box_css_match.group(1)
+        box_block = css[brace_idx + 1 : end_idx]
         assert "display:" not in box_block
         assert "visibility:" not in box_block
+
+
+def test_live_stream_display_buffer_trims_to_tail():
+    """Live stream display buffer should keep only the most recent content."""
+    from chad.web_ui import LiveStreamDisplayBuffer
+
+    buffer = LiveStreamDisplayBuffer(max_chars=100)
+    buffer.append("a" * 60)
+    buffer.append("b" * 60)
+
+    assert len(buffer.content) == 100
+    assert buffer.content == ("a" * 40) + ("b" * 60)
+
+
+def test_live_stream_render_state_resets_for_rerender():
+    """Resetting render state should allow re-rendering the same output."""
+    from chad.web_ui import LiveStreamRenderState
+
+    state = LiveStreamRenderState()
+    rendered = "<div>output</div>"
+
+    assert state.should_render(rendered) is True
+    state.record(rendered)
+    assert state.should_render(rendered) is False
+
+    state.reset()
+    assert state.should_render(rendered) is True
 
 
 class TestChadWebUITaskExecution:
