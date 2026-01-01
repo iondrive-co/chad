@@ -307,3 +307,182 @@ def test_merge_viewer_file_headers_visible(chad_with_merge_viewer):
     header_texts = [h["text"] for h in result["headers"]]
     assert "src/auth/login.py" in header_texts, "login.py header not found"
     assert "tests/test_auth.py" in header_texts, "test_auth.py header not found"
+
+
+@pytest.fixture
+def chad_with_diff_viewer(tmp_path):
+    """Set up Chad server and inject side-by-side diff content for testing."""
+    if _skip_if_no_playwright():
+        pytest.skip("Playwright not available")
+
+    from chad.ui_playwright_runner import (
+        create_temp_env,
+        start_chad,
+        stop_chad,
+        open_playwright_page,
+        SAMPLE_DIFF_HTML,
+    )
+
+    env = create_temp_env(screenshot_mode=False)
+    instance = start_chad(env)
+
+    try:
+        with open_playwright_page(
+            instance.port,
+            tab="run",
+            headless=True,
+            viewport={"width": 1400, "height": 900},
+        ) as page:
+            # Inject the diff HTML into the page
+            page.evaluate(
+                """
+(html) => {
+    const container = document.createElement('div');
+    container.id = 'diff-viewer-test';
+    container.style.padding = '20px';
+    container.style.backgroundColor = '#2e3440';
+    container.innerHTML = `
+        <h2 style="color: #eceff4; margin-bottom: 16px;">Changes to Merge</h2>
+        <p style="color: #d8dee9; margin-bottom: 16px;">
+            2 files changed, 15 insertions(+), 4 deletions(-)
+        </p>
+        ${html}
+    `;
+    document.body.appendChild(container);
+    return true;
+}
+""",
+                SAMPLE_DIFF_HTML,
+            )
+
+            page.wait_for_timeout(500)
+            yield page, instance
+
+    finally:
+        stop_chad(instance)
+        env.cleanup()
+
+
+@pytest.mark.skipif(_skip_if_no_playwright(), reason="Playwright not available")
+def test_diff_viewer_has_side_by_side_structure(chad_with_diff_viewer):
+    """Test that diff viewer renders with proper side-by-side structure."""
+    page, _ = chad_with_diff_viewer
+
+    result = page.evaluate(
+        """
+() => {
+    const viewer = document.querySelector('.diff-viewer');
+    if (!viewer) return { found: false };
+
+    const files = viewer.querySelectorAll('.diff-file');
+    const comparisons = viewer.querySelectorAll('.diff-comparison');
+    const leftSides = viewer.querySelectorAll('.diff-side-left');
+    const rightSides = viewer.querySelectorAll('.diff-side-right');
+
+    // Check for side-by-side layout
+    let isSideBySide = false;
+    for (const comparison of comparisons) {
+        const style = window.getComputedStyle(comparison);
+        if (style.display === 'flex') {
+            isSideBySide = true;
+            break;
+        }
+    }
+
+    return {
+        found: true,
+        fileCount: files.length,
+        comparisonCount: comparisons.length,
+        leftSideCount: leftSides.length,
+        rightSideCount: rightSides.length,
+        isSideBySide: isSideBySide,
+    };
+}
+"""
+    )
+
+    assert result["found"], "Diff viewer not found in DOM"
+    assert result["fileCount"] == 2, f"Expected 2 files, got {result['fileCount']}"
+    assert result["leftSideCount"] >= 1, "No left sides found"
+    assert result["rightSideCount"] >= 1, "No right sides found"
+    assert result["isSideBySide"], "Diff comparison not using flex layout (side-by-side)"
+
+
+@pytest.mark.skipif(_skip_if_no_playwright(), reason="Playwright not available")
+def test_diff_viewer_has_correct_line_colors(chad_with_diff_viewer):
+    """Test that added/removed/context lines have correct styling."""
+    page, _ = chad_with_diff_viewer
+
+    result = page.evaluate(
+        """
+() => {
+    const viewer = document.querySelector('.diff-viewer');
+    if (!viewer) return { found: false };
+
+    const addedLines = viewer.querySelectorAll('.diff-line.added');
+    const removedLines = viewer.querySelectorAll('.diff-line.removed');
+    const contextLines = viewer.querySelectorAll('.diff-line.context');
+
+    let addedBg = '';
+    let removedBg = '';
+
+    if (addedLines.length > 0) {
+        addedBg = window.getComputedStyle(addedLines[0]).backgroundColor;
+    }
+    if (removedLines.length > 0) {
+        removedBg = window.getComputedStyle(removedLines[0]).backgroundColor;
+    }
+
+    return {
+        found: true,
+        addedCount: addedLines.length,
+        removedCount: removedLines.length,
+        contextCount: contextLines.length,
+        addedBackground: addedBg,
+        removedBackground: removedBg,
+        colorsAreDifferent: addedBg !== removedBg,
+    };
+}
+"""
+    )
+
+    assert result["found"], "Diff viewer not found"
+    assert result["addedCount"] > 0, "No added lines found"
+    assert result["removedCount"] > 0, "No removed lines found"
+    assert result["colorsAreDifferent"], (
+        f"Added and removed should have different backgrounds: "
+        f"added={result['addedBackground']}, removed={result['removedBackground']}"
+    )
+
+
+@pytest.mark.skipif(_skip_if_no_playwright(), reason="Playwright not available")
+def test_diff_viewer_screenshot(chad_with_diff_viewer):
+    """Take a screenshot of the diff viewer for visual verification."""
+    page, _ = chad_with_diff_viewer
+
+    # Scroll to make diff viewer visible
+    page.evaluate(
+        """
+() => {
+    const viewer = document.querySelector('#diff-viewer-test');
+    if (viewer) {
+        viewer.scrollIntoView({ behavior: 'instant', block: 'start' });
+    }
+}
+"""
+    )
+    page.wait_for_timeout(300)
+
+    screenshot_dir = Path(tempfile.gettempdir())
+    screenshot_path = screenshot_dir / "chad_diff_viewer_test.png"
+
+    element = page.query_selector("#diff-viewer-test")
+    if element:
+        element.screenshot(path=str(screenshot_path))
+    else:
+        page.screenshot(path=str(screenshot_path))
+
+    assert screenshot_path.exists(), f"Screenshot not created at {screenshot_path}"
+    assert screenshot_path.stat().st_size > 1000, "Screenshot file too small"
+
+    print(f"\nScreenshot saved to: {screenshot_path}")

@@ -923,7 +923,7 @@ def verify_all_text_visible(page: "Page", min_brightness: int = 80) -> dict:
     return result or {"error": "evaluation returned null"}
 
 
-# Sample merge conflict HTML for testing the merge viewer
+# Sample merge conflict HTML for testing the merge viewer (side-by-side layout)
 SAMPLE_MERGE_CONFLICT_HTML = '''
 <div class="conflict-viewer">
   <div class="conflict-file">
@@ -934,26 +934,32 @@ SAMPLE_MERGE_CONFLICT_HTML = '''
         <pre>from .database import get_user</pre>
         <pre></pre>
       </div>
-      <div class="conflict-side conflict-original">
-        <div class="conflict-side-header">◀ Original (main)</div>
-        <pre>def authenticate(username, password):</pre>
-        <pre>    user = get_user(username)</pre>
-        <pre>    if user and user.check_password(password):</pre>
-        <pre>        return create_session(user)</pre>
-        <pre>    return None</pre>
-      </div>
-      <div class="conflict-side conflict-incoming">
-        <div class="conflict-side-header">Incoming (task branch) ▶</div>
-        <pre>def authenticate(username: str, password: str) -> Session | None:</pre>
-        <pre>    """Authenticate user with rate limiting."""</pre>
-        <pre>    if is_rate_limited(username):</pre>
-        <pre>        raise RateLimitError("Too many attempts")</pre>
-        <pre>    user = get_user(username)</pre>
-        <pre>    if user and user.verify_password(password):</pre>
-        <pre>        log_login_attempt(username, success=True)</pre>
-        <pre>        return create_session(user, remember=True)</pre>
-        <pre>    log_login_attempt(username, success=False)</pre>
-        <pre>    return None</pre>
+      <div class="conflict-comparison">
+        <div class="conflict-side conflict-original">
+          <div class="conflict-side-header">Original (HEAD)</div>
+          <div class="conflict-side-content">
+            <pre>def authenticate(username, password):</pre>
+            <pre>    user = get_user(username)</pre>
+            <pre>    if user and user.check_password(password):</pre>
+            <pre>        return create_session(user)</pre>
+            <pre>    return None</pre>
+          </div>
+        </div>
+        <div class="conflict-side conflict-incoming">
+          <div class="conflict-side-header">Incoming (Task Changes)</div>
+          <div class="conflict-side-content">
+            <pre>def authenticate(username: str, password: str) -> Session | None:</pre>
+            <pre>    """Authenticate user with rate limiting."""</pre>
+            <pre>    if is_rate_limited(username):</pre>
+            <pre>        raise RateLimitError("Too many attempts")</pre>
+            <pre>    user = get_user(username)</pre>
+            <pre>    if user and user.verify_password(password):</pre>
+            <pre>        log_login_attempt(username, success=True)</pre>
+            <pre>        return create_session(user, remember=True)</pre>
+            <pre>    log_login_attempt(username, success=False)</pre>
+            <pre>    return None</pre>
+          </div>
+        </div>
       </div>
       <div class="conflict-context">
         <pre></pre>
@@ -970,22 +976,156 @@ SAMPLE_MERGE_CONFLICT_HTML = '''
         <pre>from auth.login import authenticate</pre>
         <pre></pre>
       </div>
-      <div class="conflict-side conflict-original">
-        <div class="conflict-side-header">◀ Original (main)</div>
-        <pre>def test_valid_login():</pre>
-        <pre>    result = authenticate("admin", "secret")</pre>
-        <pre>    assert result is not None</pre>
-      </div>
-      <div class="conflict-side conflict-incoming">
-        <div class="conflict-side-header">Incoming (task branch) ▶</div>
-        <pre>def test_valid_login(mock_user):</pre>
-        <pre>    result = authenticate("admin", "secret123")</pre>
-        <pre>    assert result is not None</pre>
-        <pre>    assert result.user_id == mock_user.id</pre>
+      <div class="conflict-comparison">
+        <div class="conflict-side conflict-original">
+          <div class="conflict-side-header">Original (HEAD)</div>
+          <div class="conflict-side-content">
+            <pre>def test_valid_login():</pre>
+            <pre>    result = authenticate("admin", "secret")</pre>
+            <pre>    assert result is not None</pre>
+          </div>
+        </div>
+        <div class="conflict-side conflict-incoming">
+          <div class="conflict-side-header">Incoming (Task Changes)</div>
+          <div class="conflict-side-content">
+            <pre>def test_valid_login(mock_user):</pre>
+            <pre>    result = authenticate("admin", "secret123")</pre>
+            <pre>    assert result is not None</pre>
+            <pre>    assert result.user_id == mock_user.id</pre>
+          </div>
+        </div>
       </div>
       <div class="conflict-context">
         <pre></pre>
         <pre>def test_invalid_password():</pre>
+      </div>
+    </div>
+  </div>
+</div>
+'''
+
+# Sample side-by-side diff HTML for testing the diff viewer (no conflicts)
+SAMPLE_DIFF_HTML = '''
+<div class="diff-viewer">
+  <div class="diff-file">
+    <div class="diff-file-header">src/config.py <span class="new-file">(new file)</span></div>
+    <div class="diff-hunk">
+      <div class="diff-comparison">
+        <div class="diff-side diff-side-left">
+          <div class="diff-side-header">Original</div>
+          <div class="diff-line empty">
+            <span class="diff-line-no"></span>
+            <span class="diff-line-content"></span>
+          </div>
+          <div class="diff-line empty">
+            <span class="diff-line-no"></span>
+            <span class="diff-line-content"></span>
+          </div>
+          <div class="diff-line empty">
+            <span class="diff-line-no"></span>
+            <span class="diff-line-content"></span>
+          </div>
+        </div>
+        <div class="diff-side diff-side-right">
+          <div class="diff-side-header">Modified</div>
+          <div class="diff-line added">
+            <span class="diff-line-no">1</span>
+            <span class="diff-line-content">TIMEOUT = 30</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">2</span>
+            <span class="diff-line-content">MAX_RETRIES = 3</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">3</span>
+            <span class="diff-line-content">DEBUG = False</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="diff-file">
+    <div class="diff-file-header">src/providers.py</div>
+    <div class="diff-hunk">
+      <div class="diff-comparison">
+        <div class="diff-side diff-side-left">
+          <div class="diff-side-header">Original</div>
+          <div class="diff-line context">
+            <span class="diff-line-no">10</span>
+            <span class="diff-line-content">class Provider:</span>
+          </div>
+          <div class="diff-line removed">
+            <span class="diff-line-no">11</span>
+            <span class="diff-line-content">    timeout = 10</span>
+          </div>
+          <div class="diff-line context">
+            <span class="diff-line-no">12</span>
+            <span class="diff-line-content">    </span>
+          </div>
+          <div class="diff-line removed">
+            <span class="diff-line-no">13</span>
+            <span class="diff-line-content">    def connect(self):</span>
+          </div>
+          <div class="diff-line removed">
+            <span class="diff-line-no">14</span>
+            <span class="diff-line-content">        pass</span>
+          </div>
+          <div class="diff-line context">
+            <span class="diff-line-no">15</span>
+            <span class="diff-line-content"></span>
+          </div>
+        </div>
+        <div class="diff-side diff-side-right">
+          <div class="diff-side-header">Modified</div>
+          <div class="diff-line context">
+            <span class="diff-line-no">10</span>
+            <span class="diff-line-content">class Provider:</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">11</span>
+            <span class="diff-line-content">    timeout = 30  # increased timeout</span>
+          </div>
+          <div class="diff-line context">
+            <span class="diff-line-no">12</span>
+            <span class="diff-line-content">    </span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">13</span>
+            <span class="diff-line-content">    def connect(self, retries: int = 3):</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">14</span>
+            <span class="diff-line-content">        """Connect with retry logic."""</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">15</span>
+            <span class="diff-line-content">        for attempt in range(retries):</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">16</span>
+            <span class="diff-line-content">            try:</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">17</span>
+            <span class="diff-line-content">                return self._do_connect()</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">18</span>
+            <span class="diff-line-content">            except TimeoutError:</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">19</span>
+            <span class="diff-line-content">                if attempt == retries - 1:</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">20</span>
+            <span class="diff-line-content">                    raise</span>
+          </div>
+          <div class="diff-line context">
+            <span class="diff-line-no">21</span>
+            <span class="diff-line-content"></span>
+          </div>
+        </div>
       </div>
     </div>
   </div>

@@ -27,6 +27,39 @@ class MergeConflict:
     hunks: list[ConflictHunk] = field(default_factory=list)
 
 
+@dataclass
+class DiffLine:
+    """A single line in a diff with its type."""
+
+    content: str
+    line_type: str  # "added", "removed", "context"
+    old_line_no: int | None = None
+    new_line_no: int | None = None
+
+
+@dataclass
+class DiffHunk:
+    """A hunk from a unified diff."""
+
+    old_start: int
+    old_count: int
+    new_start: int
+    new_count: int
+    lines: list[DiffLine] = field(default_factory=list)
+
+
+@dataclass
+class FileDiff:
+    """Diff for a single file."""
+
+    old_path: str
+    new_path: str
+    hunks: list[DiffHunk] = field(default_factory=list)
+    is_new: bool = False
+    is_deleted: bool = False
+    is_binary: bool = False
+
+
 class GitWorktreeManager:
     """Manages git worktrees for Chad tasks."""
 
@@ -93,11 +126,14 @@ class GitWorktreeManager:
         """Get the branch name for a task."""
         return f"chad-task-{task_id}"
 
-    def create_worktree(self, task_id: str) -> Path:
+    def create_worktree(self, task_id: str) -> tuple[Path, str]:
         """Create a new worktree for a task.
 
         Creates branch: chad-task-{task_id}
         Creates worktree at: .chad-worktrees/{task_id}
+
+        Returns:
+            Tuple of (worktree_path, base_commit_sha)
         """
         worktree_path = self._worktree_path(task_id)
         branch_name = self._branch_name(task_id)
@@ -119,7 +155,7 @@ class GitWorktreeManager:
             base_commit,
         )
 
-        return worktree_path
+        return worktree_path, base_commit
 
     def worktree_exists(self, task_id: str) -> bool:
         """Check if a worktree exists for a task."""
@@ -164,24 +200,30 @@ class GitWorktreeManager:
         ahead_count = int(result.stdout.strip()) if result.stdout.strip() else 0
         return ahead_count > 0
 
-    def get_diff_summary(self, task_id: str) -> str:
-        """Get a summary of changes in the worktree."""
+    def get_diff_summary(self, task_id: str, base_commit: str | None = None) -> str:
+        """Get a summary of changes in the worktree.
+
+        Args:
+            task_id: The task ID
+            base_commit: Commit SHA to compare against (default: main branch)
+        """
         worktree_path = self._worktree_path(task_id)
         if not worktree_path.exists():
             return ""
 
-        main_branch = self.get_main_branch()
+        # Use provided base commit or fall back to main
+        base = base_commit or self.get_main_branch()
         branch_name = self._branch_name(task_id)
 
-        # Get diff stat against main
+        # Get diff stat against base
         result = self._run_git(
-            "diff", "--stat", f"{main_branch}...{branch_name}", cwd=worktree_path, check=False
+            "diff", "--stat", f"{base}...{branch_name}", cwd=worktree_path, check=False
         )
         stat = result.stdout.strip()
 
         # Get list of changed files
         result = self._run_git(
-            "diff", "--name-status", f"{main_branch}...{branch_name}",
+            "diff", "--name-status", f"{base}...{branch_name}",
             cwd=worktree_path, check=False
         )
         files = result.stdout.strip()
@@ -198,20 +240,26 @@ class GitWorktreeManager:
 
         return "\n\n".join(summary_parts) if summary_parts else "No changes detected"
 
-    def get_full_diff(self, task_id: str) -> str:
-        """Get the full diff content for the worktree changes."""
+    def get_full_diff(self, task_id: str, base_commit: str | None = None) -> str:
+        """Get the full diff content for the worktree changes.
+
+        Args:
+            task_id: The task ID
+            base_commit: Commit SHA to compare against (default: main branch)
+        """
         worktree_path = self._worktree_path(task_id)
         if not worktree_path.exists():
             return ""
 
-        main_branch = self.get_main_branch()
+        # Use provided base commit or fall back to main
+        base = base_commit or self.get_main_branch()
         branch_name = self._branch_name(task_id)
 
         diff_parts = []
 
         # Get committed diff
         result = self._run_git(
-            "diff", f"{main_branch}...{branch_name}", cwd=worktree_path, check=False
+            "diff", f"{base}...{branch_name}", cwd=worktree_path, check=False
         )
         if result.stdout.strip():
             diff_parts.append(result.stdout.strip())
@@ -231,6 +279,138 @@ class GitWorktreeManager:
             diff_parts.append(result.stdout.strip())
 
         return "\n".join(diff_parts) if diff_parts else "No changes"
+
+    def get_parsed_diff(
+        self, task_id: str, base_commit: str | None = None
+    ) -> list[FileDiff]:
+        """Get structured diff data for the worktree changes.
+
+        Args:
+            task_id: The task ID
+            base_commit: Commit SHA to compare against (default: main branch)
+
+        Returns:
+            List of FileDiff objects for side-by-side rendering
+        """
+        worktree_path = self._worktree_path(task_id)
+        if not worktree_path.exists():
+            return []
+
+        base = base_commit or self.get_main_branch()
+        branch_name = self._branch_name(task_id)
+
+        # Collect all diffs
+        all_diff_text = []
+
+        # Committed changes
+        result = self._run_git(
+            "diff", f"{base}...{branch_name}", cwd=worktree_path, check=False
+        )
+        if result.stdout.strip():
+            all_diff_text.append(result.stdout)
+
+        # Uncommitted changes (staged and unstaged)
+        result = self._run_git("diff", "HEAD", cwd=worktree_path, check=False)
+        if result.stdout.strip():
+            all_diff_text.append(result.stdout)
+
+        if not all_diff_text:
+            return []
+
+        return self._parse_unified_diff("\n".join(all_diff_text))
+
+    def _parse_unified_diff(self, diff_text: str) -> list[FileDiff]:
+        """Parse unified diff output into structured FileDiff objects."""
+        import re
+
+        files: list[FileDiff] = []
+        current_file: FileDiff | None = None
+        current_hunk: DiffHunk | None = None
+        old_line_no = 0
+        new_line_no = 0
+
+        for line in diff_text.split("\n"):
+            # Match diff header
+            if line.startswith("diff --git"):
+                if current_file is not None:
+                    files.append(current_file)
+                # Extract paths from "diff --git a/path b/path"
+                match = re.match(r"diff --git a/(.*) b/(.*)", line)
+                if match:
+                    current_file = FileDiff(old_path=match.group(1), new_path=match.group(2))
+                    current_hunk = None
+                continue
+
+            if current_file is None:
+                continue
+
+            # Check for new/deleted file markers
+            if line.startswith("new file"):
+                current_file.is_new = True
+            elif line.startswith("deleted file"):
+                current_file.is_deleted = True
+            elif line.startswith("Binary files"):
+                current_file.is_binary = True
+
+            # Match hunk header
+            hunk_match = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
+            if hunk_match:
+                old_start = int(hunk_match.group(1))
+                old_count = int(hunk_match.group(2) or 1)
+                new_start = int(hunk_match.group(3))
+                new_count = int(hunk_match.group(4) or 1)
+
+                current_hunk = DiffHunk(
+                    old_start=old_start,
+                    old_count=old_count,
+                    new_start=new_start,
+                    new_count=new_count,
+                )
+                current_file.hunks.append(current_hunk)
+                old_line_no = old_start
+                new_line_no = new_start
+                continue
+
+            if current_hunk is None:
+                continue
+
+            # Parse diff lines
+            if line.startswith("+") and not line.startswith("+++"):
+                current_hunk.lines.append(
+                    DiffLine(
+                        content=line[1:],
+                        line_type="added",
+                        old_line_no=None,
+                        new_line_no=new_line_no,
+                    )
+                )
+                new_line_no += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                current_hunk.lines.append(
+                    DiffLine(
+                        content=line[1:],
+                        line_type="removed",
+                        old_line_no=old_line_no,
+                        new_line_no=None,
+                    )
+                )
+                old_line_no += 1
+            elif line.startswith(" "):
+                current_hunk.lines.append(
+                    DiffLine(
+                        content=line[1:],
+                        line_type="context",
+                        old_line_no=old_line_no,
+                        new_line_no=new_line_no,
+                    )
+                )
+                old_line_no += 1
+                new_line_no += 1
+
+        if current_file is not None:
+            files.append(current_file)
+
+        return files
 
     def commit_all_changes(self, task_id: str, message: str = "Agent changes") -> bool:
         """Commit all changes in the worktree."""
