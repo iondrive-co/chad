@@ -3749,11 +3749,14 @@ class ChadWebUI:
 
     def resolve_all_conflicts(
         self, session_id: str, use_incoming: bool
-    ) -> tuple[gr.update, gr.update, gr.update, gr.update]:
+    ) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update]:
         """Resolve all conflicts by choosing all original or all incoming."""
         session = self.get_session(session_id)
         if not session.project_path:
-            return (gr.update(), gr.update(), gr.update(visible=False), gr.update())
+            return (
+                gr.update(), gr.update(), gr.update(visible=False),
+                gr.update(), gr.update()
+            )
 
         git_mgr = GitWorktreeManager(Path(session.project_path))
         git_mgr.resolve_all_conflicts(use_incoming)
@@ -3770,6 +3773,7 @@ class ChadWebUI:
                 gr.update(value="✓ All conflicts resolved. Merge complete."),
                 gr.update(visible=False),
                 gr.update(),
+                gr.update(),
             )
         else:
             return (
@@ -3777,15 +3781,19 @@ class ChadWebUI:
                 gr.update(value="❌ Failed to complete merge."),
                 gr.update(),
                 gr.update(),
+                gr.update(),
             )
 
     def abort_merge_action(
         self, session_id: str
-    ) -> tuple[gr.update, gr.update, gr.update, gr.update]:
+    ) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update]:
         """Abort an in-progress merge."""
         session = self.get_session(session_id)
         if not session.project_path:
-            return (gr.update(), gr.update(), gr.update(visible=False), gr.update())
+            return (
+                gr.update(), gr.update(), gr.update(visible=False),
+                gr.update(), gr.update()
+            )
 
         git_mgr = GitWorktreeManager(Path(session.project_path))
         git_mgr.abort_merge()
@@ -3799,11 +3807,12 @@ class ChadWebUI:
             gr.update(value=summary if has_changes else "Merge aborted."),
             gr.update(visible=False),
             gr.update(),
+            gr.update(),
         )
 
     def discard_worktree_changes(
         self, session_id: str
-    ) -> tuple[gr.update, gr.update, gr.update, gr.update]:
+    ) -> tuple[gr.update, gr.update, gr.update, gr.update, gr.update]:
         """Discard worktree and all changes."""
         session = self.get_session(session_id)
         if session.worktree_path and session.project_path:
@@ -3818,6 +3827,7 @@ class ChadWebUI:
             gr.update(visible=False),
             gr.update(value="Changes discarded."),
             gr.update(visible=False),
+            gr.update(),
             gr.update(),
         )
 
@@ -4173,7 +4183,7 @@ class ChadWebUI:
                 "",
                 key=f"conflict-info-{session_id}",
             )
-            gr.HTML(
+            conflicts_html = gr.HTML(
                 "",
                 key=f"conflict-display-{session_id}",
             )
@@ -4335,30 +4345,38 @@ class ChadWebUI:
         def abort_wrapper():
             return self.abort_merge_action(session_id)
 
+        merge_outputs = [
+            merge_section,
+            changes_summary,
+            conflict_section,
+            conflict_info,
+            conflicts_html,
+        ]
+
         accept_merge_btn.click(
             merge_wrapper,
             inputs=[merge_commit_msg, merge_target_branch],
-            outputs=[merge_section, changes_summary, conflict_section, conflict_info],
+            outputs=merge_outputs,
         )
 
         discard_btn.click(
             discard_wrapper,
-            outputs=[merge_section, changes_summary, conflict_section, conflict_info],
+            outputs=merge_outputs,
         )
 
         accept_all_ours_btn.click(
             accept_ours_wrapper,
-            outputs=[merge_section, changes_summary, conflict_section, conflict_info],
+            outputs=merge_outputs,
         )
 
         accept_all_theirs_btn.click(
             accept_theirs_wrapper,
-            outputs=[merge_section, changes_summary, conflict_section, conflict_info],
+            outputs=merge_outputs,
         )
 
         abort_merge_btn.click(
             abort_wrapper,
-            outputs=[merge_section, changes_summary, conflict_section, conflict_info],
+            outputs=merge_outputs,
         )
 
         # Handler for coding agent selection change

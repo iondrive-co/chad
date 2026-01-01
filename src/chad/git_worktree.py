@@ -463,7 +463,8 @@ class GitWorktreeManager:
             return False, None
 
         # First commit any uncommitted changes in the worktree
-        self.commit_all_changes(task_id, "Agent changes before merge")
+        pre_merge_msg = commit_message or "Agent changes"
+        self.commit_all_changes(task_id, pre_merge_msg)
 
         # Switch to target branch in the main repo
         current_branch = self.get_current_branch()
