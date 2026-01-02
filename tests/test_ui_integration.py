@@ -70,6 +70,16 @@ class TestUIElements:
         tab = page.get_by_role("tab", name="Task 1")
         expect(tab).to_be_visible()
 
+    def test_additional_task_tabs_hidden_initially(self, page: Page):
+        """Task 2 and beyond should be hidden until created via + button."""
+        # Task 2 should not be visible initially
+        task2_tab = page.get_by_role("tab", name="Task 2")
+        expect(task2_tab).to_be_hidden()
+
+        # Task 3 should not be visible initially
+        task3_tab = page.get_by_role("tab", name="Task 3")
+        expect(task3_tab).to_be_hidden()
+
     def test_providers_tab_visible(self, page: Page):
         """Providers tab should be visible."""
         tab = page.get_by_role("tab", name="⚙️ Providers")
@@ -115,9 +125,10 @@ class TestUIElements:
 
     def test_add_task_tab_visible(self, page: Page):
         """Add Task tab (+) should be visible."""
-        # The "+" is now a top-level tab
-        tab = page.get_by_role("tab", name="➕")
-        expect(tab).to_be_visible()
+        # Check for the main plus tab within the tab container
+        main_tabs = page.locator("#main-tabs")
+        plus_tab = main_tabs.get_by_role("tab", name="➕")
+        expect(plus_tab).to_be_visible()
 
     def test_task_1_is_selected_by_default(self, page: Page):
         """Task 1 tab should be selected by default."""
@@ -435,7 +446,8 @@ class TestTaskTabs:
     def test_click_plus_reveals_task_2(self, page: Page):
         """Clicking + tab should auto-create and switch to Task 2."""
         # Click the + tab - JS auto-clicks the Add button
-        plus_tab = page.get_by_role("tab", name="➕")
+        main_tabs = page.locator("#main-tabs")
+        plus_tab = main_tabs.get_by_role("tab", name="➕")
         plus_tab.click()
 
         # Wait for Task 2 tab to appear (auto-created by JS)
@@ -449,7 +461,8 @@ class TestTaskTabs:
     def test_task_2_has_content(self, page: Page):
         """Task 2 should have proper UI content when created."""
         # Click + tab to auto-create Task 2
-        plus_tab = page.get_by_role("tab", name="➕")
+        main_tabs = page.locator("#main-tabs")
+        plus_tab = main_tabs.get_by_role("tab", name="➕")
         plus_tab.click()
 
         # Wait for Task 2 tab to appear
@@ -465,7 +478,8 @@ class TestTaskTabs:
 
     def test_task_2_session_log_stays_single_line(self, page: Page):
         """Task 2 session log button should keep icon and filename on one line."""
-        plus_tab = page.get_by_role("tab", name="➕")
+        main_tabs = page.locator("#main-tabs")
+        plus_tab = main_tabs.get_by_role("tab", name="➕")
         plus_tab.click()
 
         task2_tab = page.get_by_role("tab", name="Task 2")
@@ -504,7 +518,8 @@ class TestTaskTabs:
 
     def test_click_plus_twice_reveals_task_3(self, page: Page):
         """Clicking + twice should reveal Task 2 then Task 3."""
-        plus_tab = page.get_by_role("tab", name="➕")
+        main_tabs = page.locator("#main-tabs")
+        plus_tab = main_tabs.get_by_role("tab", name="➕")
 
         # First click - auto-creates Task 2
         plus_tab.click()
@@ -762,11 +777,17 @@ Line 4: Fourth line"""
         """Task 2 live stream should keep styled multiline formatting like Task 1."""
         # Create Task 2 via + tab and ensure it's active
         try:
-            plus_tab = page.get_by_role("tab", name="➕")
+            main_tabs = page.locator("#main-tabs")
+            plus_tab = main_tabs.get_by_role("tab", name="➕")
             plus_tab.click()
         except Exception:
-            fallback_tab = page.locator("#static-plus-tab")
-            fallback_tab.click()
+            # Try fallback tabs if the main plus tab isn't clickable
+            try:
+                fallback_tab = page.locator("#initial-static-plus-tab")
+                fallback_tab.click()
+            except Exception:
+                fallback_tab = page.locator("#fallback-plus-tab")
+                fallback_tab.click()
         task2_tab = page.get_by_role("tab", name="Task 2")
         expect(task2_tab).to_be_visible(timeout=5000)
         task2_tab.click()
