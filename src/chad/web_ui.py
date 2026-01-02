@@ -66,6 +66,8 @@ class VerificationDropdownState:
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\][^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")
 
 DEFAULT_CODING_TIMEOUT = 1800.0
+DEFAULT_VERIFICATION_TIMEOUT = 600.0
+MAX_VERIFICATION_PROMPT_CHARS = 6000
 
 
 def _find_free_port() -> int:
@@ -1926,6 +1928,24 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
     return {"role": role, "content": formatted}
 
 
+def _truncate_verification_output(text: str, limit: int = MAX_VERIFICATION_PROMPT_CHARS) -> str:
+    """Compact the coding agent output for verification prompts."""
+    cleaned = text.strip()
+    if len(cleaned) <= limit:
+        return cleaned
+
+    indicator = f"...[truncated {len(cleaned) - limit} chars]..."
+    keep = max(limit - len(indicator) - 4, 0)
+    head_len = int(keep * 0.6)
+    tail_len = keep - head_len
+    head = cleaned[:head_len].rstrip()
+    tail = cleaned[-tail_len:].lstrip() if tail_len > 0 else ""
+    parts = [head, indicator]
+    if tail:
+        parts.append(tail)
+    return "\n\n".join(part for part in parts if part)
+
+
 class ChadWebUI:
     """Web interface for Chad using Gradio."""
 
@@ -2044,7 +2064,7 @@ class ChadWebUI:
         task_description: str,
         verification_account: str,
         on_activity: callable = None,
-        timeout: float = 300.0,
+        timeout: float = DEFAULT_VERIFICATION_TIMEOUT,
         verification_model: str | None = None,
         verification_reasoning: str | None = None,
     ) -> tuple[bool | None, str]:
@@ -2089,7 +2109,8 @@ class ChadWebUI:
                           "Rerun after capturing the coding response.")
 
         change_summary = extract_coding_summary(coding_output)
-        verification_prompt = get_verification_prompt(coding_output, task_description, change_summary)
+        trimmed_output = _truncate_verification_output(coding_output)
+        verification_prompt = get_verification_prompt(trimmed_output, task_description, change_summary)
 
         try:
             verifier = create_provider(verification_config)
