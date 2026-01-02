@@ -2,12 +2,13 @@
 
 import glob
 import os
-import pty
 import re
 import select
 import shutil
 import subprocess
 import time
+import threading
+import queue
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,13 @@ from typing import Callable
 from .installer import AIToolInstaller
 from .installer import DEFAULT_TOOLS_DIR
 from .mcp_config import ensure_global_mcp_config
+
+try:
+    import pty
+except ImportError:  # pragma: no cover - only hit on Windows
+    pty = None
+
+_HAS_PTY = pty is not None
 
 CODEX_IDLE_TIMEOUT = 180.0
 
@@ -325,21 +333,34 @@ def _close_master_fd(master_fd: int | None) -> None:
         pass
 
 
-def _start_pty_process(cmd: list[str], cwd: str | None = None, env: dict | None = None) -> tuple[subprocess.Popen, int]:
-    """Start a subprocess with a PTY attached for streaming output."""
-    master_fd, slave_fd = pty.openpty()
+def _start_pty_process(
+    cmd: list[str], cwd: str | None = None, env: dict | None = None
+) -> tuple[subprocess.Popen, int | None]:
+    """Start a subprocess with a PTY attached for streaming output when available."""
+    if _HAS_PTY:
+        master_fd, slave_fd = pty.openpty()
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            cwd=cwd,
+            env=env,
+            close_fds=True,
+            start_new_session=True,  # Run in own process group for clean termination
+        )
+        os.close(slave_fd)
+        return process, master_fd
+
     process = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
-        stdout=slave_fd,
-        stderr=slave_fd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         cwd=cwd,
         env=env,
-        close_fds=True,
-        start_new_session=True,  # Run in own process group for clean termination
     )
-    os.close(slave_fd)
-    return process, master_fd
+    return process, None
 
 
 def _drain_pty(master_fd: int, output_chunks: list[str], on_chunk: Callable[[str], None] | None) -> None:
@@ -360,14 +381,90 @@ def _drain_pty(master_fd: int, output_chunks: list[str], on_chunk: Callable[[str
         return
 
 
+def _stream_pipe_output(
+    process: subprocess.Popen,
+    on_chunk: Callable[[str], None] | None,
+    timeout: float,
+    idle_timeout: float | None = None,
+) -> tuple[str, bool, bool]:
+    """Stream output from a pipe-backed process until completion or timeout."""
+    output_chunks: list[str] = []
+    start_time = time.time()
+    last_activity = start_time
+    idle_stalled = False
+    output_queue: queue.Queue = queue.Queue()
+    stop_event = threading.Event()
+
+    def _reader() -> None:
+        try:
+            if process.stdout is None:
+                return
+            while not stop_event.is_set():
+                chunk = process.stdout.read(4096)
+                if not chunk:
+                    break
+                output_queue.put(chunk)
+        finally:
+            stop_event.set()
+
+    reader_thread = threading.Thread(target=_reader, daemon=True)
+    reader_thread.start()
+
+    try:
+        while time.time() - start_time < timeout:
+            if process.poll() is not None and output_queue.empty() and stop_event.is_set():
+                break
+
+            try:
+                chunk = output_queue.get(timeout=0.1)
+            except queue.Empty:
+                chunk = None
+
+            if chunk:
+                decoded = chunk.decode("utf-8", errors="replace")
+                output_chunks.append(decoded)
+                if on_chunk:
+                    on_chunk(decoded)
+                start_time = time.time()
+                last_activity = start_time
+
+            if idle_timeout and (time.time() - last_activity) >= idle_timeout:
+                idle_stalled = True
+                break
+
+        timed_out = process.poll() is None and not idle_stalled
+        if timed_out or idle_stalled:
+            try:
+                process.kill()
+            except Exception:
+                pass
+        try:
+            process.wait(timeout=0.1)
+        except Exception:
+            pass
+    finally:
+        stop_event.set()
+        if process.stdout:
+            try:
+                process.stdout.close()
+            except Exception:
+                pass
+        reader_thread.join(timeout=0.1)
+
+    return "".join(output_chunks), timed_out, idle_stalled
+
+
 def _stream_pty_output(
     process: subprocess.Popen,
-    master_fd: int,
+    master_fd: int | None,
     on_chunk: Callable[[str], None] | None,
     timeout: float,
     idle_timeout: float | None = None,
 ) -> tuple[str, bool, bool]:
     """Stream output from a PTY-backed process until completion or timeout."""
+    if master_fd is None:
+        return _stream_pipe_output(process, on_chunk, timeout, idle_timeout=idle_timeout)
+
     output_chunks: list[str] = []
     start_time = time.time()
     last_activity = start_time
