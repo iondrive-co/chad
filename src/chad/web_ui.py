@@ -4783,12 +4783,144 @@ class ChadWebUI:
                 """
 <button role="tab" id="initial-static-plus-tab" aria-label="➕" style="position:fixed;top:8px;right:8px;z-index:9999;
 padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
+<script>
+(function() {
+  const getRoot = () => {
+    const app = document.querySelector('gradio-app');
+    return (app && app.shadowRoot) ? app.shadowRoot : document;
+  };
+  const isPlus = (el) => {
+    const label = (el.textContent || el.getAttribute('aria-label') || '').trim();
+    return label === '➕';
+  };
+  const hideButton = (btn) => {
+    btn.style.visibility = 'hidden';
+    btn.style.opacity = '0';
+  };
+  const triggerAdd = () => {
+    let attempts = 0;
+    const tick = () => {
+      const root = getRoot();
+      const btn = root.querySelector('#add-new-task-btn');
+      if (btn) {
+        hideButton(btn);
+        btn.click();
+        return;
+      }
+      if (attempts++ < 15) setTimeout(tick, 80);
+    };
+    tick();
+  };
+  const wirePlus = () => {
+    const root = getRoot();
+    const tabs = [
+      ...root.querySelectorAll('[role=\"tab\"]'),
+      ...document.querySelectorAll('#initial-static-plus-tab, #fallback-plus-tab, #static-plus-tab')
+    ];
+    tabs.forEach((tab) => {
+      if (!tab || tab._plusClickSetup || !isPlus(tab)) return;
+      tab._plusClickSetup = true;
+      tab.addEventListener('click', () => setTimeout(triggerAdd, 60));
+    });
+    const activePlus = tabs.find((tab) => tab && isPlus(tab) && tab.getAttribute('aria-selected') === 'true');
+    if (activePlus) triggerAdd();
+    const btn = root.querySelector('#add-new-task-btn');
+    if (btn) hideButton(btn);
+  };
+  setInterval(wirePlus, 400);
+  setTimeout(wirePlus, 80);
+})();
+</script>
 """
             )
 
             # JavaScript injection moved back to launch() parameter
 
             # Custom JavaScript is now passed to launch() in Gradio 6.x
+            interface.load(
+                fn=None,
+                js="""
+                () => {
+                  const getRoot = () => {
+                    const app = document.querySelector('gradio-app');
+                    return (app && app.shadowRoot) ? app.shadowRoot : document;
+                  };
+                  const isPlus = (el) => ((el.textContent || el.getAttribute('aria-label') || '').trim() === '➕');
+                  const hideButton = (btn) => {
+                    btn.style.visibility = 'hidden';
+                    btn.style.opacity = '0';
+                  };
+                  const fixAriaLinks = () => {
+                    const root = getRoot();
+                    const tabs = Array.from(root.querySelectorAll('[role=\"tab\"][data-tab-id]'));
+                    const panels = Array.from(root.querySelectorAll('.tabitem'));
+                    const textOf = (el) => (el.textContent || '').trim();
+                    const addPanel = panels.find((p) => textOf(p).includes('Add New Task'));
+                    const taskPanels = panels.filter((p) => textOf(p).includes('Task Description'));
+                    let taskIdx = 0;
+
+                    tabs.forEach((tab, idx) => {
+                      const label = textOf(tab);
+                      let panel = null;
+                      if (isPlus(tab) && addPanel) {
+                        panel = addPanel;
+                      } else if (label.startsWith('Task') && taskPanels.length) {
+                        panel = taskPanels[Math.min(taskIdx, taskPanels.length - 1)];
+                        taskIdx += 1;
+                      } else {
+                        panel = panels.length ? panels[idx % panels.length] : null;
+                      }
+                      if (!panel) return;
+                      const dataId = tab.getAttribute('data-tab-id') || idx;
+                      const panelId = panel.id && panel.id.trim() ? panel.id : `tabpanel-${dataId}`;
+                      const tabId = tab.id && tab.id.trim() ? tab.id : `tab-${dataId}`;
+                      panel.id = panelId;
+                      panel.setAttribute('role', 'tabpanel');
+                      tab.id = tabId;
+                      tab.setAttribute('aria-controls', panelId);
+                      panel.setAttribute('aria-labelledby', tabId);
+                    });
+                  };
+                  const triggerAdd = () => {
+                    let attempts = 0;
+                    const tick = () => {
+                      const root = getRoot();
+                      const btn = root.querySelector('#add-new-task-btn');
+                      if (btn) {
+                        hideButton(btn);
+                        btn.click();
+                        return;
+                      }
+                      if (attempts++ < 15) setTimeout(tick, 80);
+                    };
+                    tick();
+                  };
+                  const wirePlus = () => {
+                    const root = getRoot();
+                    const tabs = [
+                      ...root.querySelectorAll('[role="tab"]'),
+                      ...document.querySelectorAll('#initial-static-plus-tab, #fallback-plus-tab, #static-plus-tab')
+                    ];
+                    tabs.forEach((tab) => {
+                      if (!tab || tab._plusClickSetup || !isPlus(tab)) return;
+                      tab._plusClickSetup = true;
+                      tab.addEventListener('click', () => setTimeout(triggerAdd, 60));
+                    });
+                    const activePlus = tabs.find((tab) => tab && isPlus(tab) &&
+                        tab.getAttribute('aria-selected') === 'true');
+                    if (activePlus) triggerAdd();
+                    const btn = root.querySelector('#add-new-task-btn');
+                    if (btn) hideButton(btn);
+                  };
+                  const tickAll = () => {
+                    wirePlus();
+                    fixAriaLinks();
+                  };
+                  setInterval(tickAll, 400);
+                  setTimeout(tickAll, 80);
+                }
+                """,
+            )
 
             # Maximum number of task tabs we can have
             MAX_TASKS = 10
@@ -4923,37 +5055,67 @@ def launch_web_ui(password: str = None, port: int = 7860) -> tuple[None, int]:
         quiet=False,
         js="""
         function() {
-            console.log('Chad JavaScript starting via launch...');
-
-            // Auto-click "Add New Task" button when + tab is clicked
-            function setupPlusTabAutoClick() {
-                console.log('setupPlusTabAutoClick running...');
-                const tabButtons = document.querySelectorAll('button[role="tab"]');
-                console.log('Found ' + tabButtons.length + ' tab buttons');
-                tabButtons.forEach((tab, idx) => {
-                    if (tab.textContent.trim() === '➕' && !tab._plusClickSetup) {
-                        console.log('Setting up plus tab click handler for tab ' + idx);
-                        tab._plusClickSetup = true;
-                        tab.addEventListener('click', () => {
-                            console.log('Plus tab clicked!');
-                            // Small delay to let tab panel become visible
-                            setTimeout(() => {
-                                const addBtn = document.getElementById('add-new-task-btn');
-                                console.log('Add btn found:', !!addBtn);
-                                if (addBtn) {
-                                    console.log('Clicking add task button...');
-                                    addBtn.click();
-                                }
-                            }, 50);
-                        });
+            const getRoot = () => {
+                const app = document.querySelector('gradio-app');
+                return (app && app.shadowRoot) ? app.shadowRoot : document;
+            };
+            const isPlus = (el) => {
+                const label = (el.textContent || el.getAttribute('aria-label') || '').trim();
+                return label === '➕';
+            };
+            const hideButton = (btn) => {
+                btn.style.visibility = 'hidden';
+                btn.style.opacity = '0';
+            };
+            const clickAddTask = () => {
+                const root = getRoot();
+                let attempts = 0;
+                const tryClick = () => {
+                    const btn = root.querySelector('#add-new-task-btn');
+                    if (btn) {
+                        hideButton(btn);
+                        btn.click();
+                        return true;
                     }
+                    attempts += 1;
+                    if (attempts <= 15) setTimeout(tryClick, 80);
+                    return false;
+                };
+                return tryClick();
+            };
+            const isPlusSelected = () => {
+                const root = getRoot();
+                return Array.from(root.querySelectorAll('[role=\"tab\"]')).some(
+                    (tab) => isPlus(tab) && tab.getAttribute('aria-selected') === 'true'
+                );
+            };
+            const wirePlusButtons = () => {
+                const root = getRoot();
+                const candidates = [
+                    ...root.querySelectorAll('[role=\"tab\"]'),
+                    ...document.querySelectorAll('#initial-static-plus-tab, #fallback-plus-tab, #static-plus-tab')
+                ];
+                candidates.forEach((tab) => {
+                    if (!tab || tab._plusClickSetup || !isPlus(tab)) return;
+                    tab._plusClickSetup = true;
+                    tab.addEventListener('click', () => setTimeout(clickAddTask, 60));
                 });
+                if (isPlusSelected()) setTimeout(clickAddTask, 60);
+                const addBtn = root.querySelector('#add-new-task-btn');
+                if (addBtn) hideButton(addBtn);
+            };
+
+            const observer = new MutationObserver(() => {
+                if (isPlusSelected()) clickAddTask();
+            });
+            observer.observe(document, { childList: true, subtree: true });
+            const rootObserverTarget = getRoot();
+            if (rootObserverTarget && rootObserverTarget !== document) {
+                observer.observe(rootObserverTarget, { childList: true, subtree: true });
             }
 
-            // Run setup periodically to catch dynamically added tabs
-            console.log('Starting plus tab auto-click setup...');
-            setInterval(setupPlusTabAutoClick, 500);
-            setTimeout(setupPlusTabAutoClick, 100);
+            setInterval(wirePlusButtons, 400);
+            setTimeout(wirePlusButtons, 80);
         }
         """,
     )
