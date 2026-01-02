@@ -1,3 +1,6 @@
+import os
+
+
 def test_ensure_global_mcp_config_creates_file(tmp_path, monkeypatch):
     import tomllib
 
@@ -138,3 +141,27 @@ def test_env_override_sets_project_root(tmp_path, monkeypatch):
     assert result["project_root"] == str(alt_root)
     assert env_cfg["CHAD_PROJECT_ROOT"] == str(alt_root)
     assert env_cfg["CHAD_PROJECT_ROOT_REASON"].startswith("env:")
+
+
+def test_ensure_project_root_env_sets_env(monkeypatch, tmp_path):
+    from chad.mcp_config import ensure_project_root_env
+
+    monkeypatch.delenv("CHAD_PROJECT_ROOT", raising=False)
+    result = ensure_project_root_env(tmp_path)
+
+    assert result["changed"] is True
+    assert os.environ["CHAD_PROJECT_ROOT"] == str(tmp_path)
+    assert os.environ["CHAD_PROJECT_ROOT_REASON"] == "argument"
+
+
+def test_ensure_project_root_env_respects_existing(monkeypatch, tmp_path):
+    from chad.mcp_config import ensure_project_root_env
+
+    monkeypatch.setenv("CHAD_PROJECT_ROOT", "/already/set")
+    monkeypatch.delenv("CHAD_PROJECT_ROOT_REASON", raising=False)
+
+    result = ensure_project_root_env(tmp_path)
+
+    assert result["changed"] is True  # reason added
+    assert os.environ["CHAD_PROJECT_ROOT"] == "/already/set"
+    assert os.environ["CHAD_PROJECT_ROOT_REASON"].startswith("env:/already/set")
