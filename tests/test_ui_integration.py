@@ -773,6 +773,73 @@ Line 4: Fourth line"""
             "pre-line",
         ), f"white-space should preserve newlines, got: {white_space}"
 
+    def test_live_view_does_not_autoscroll_on_new_entries(self, page: Page):
+        """Live view should keep the current scroll position when new content arrives."""
+        long_text = "\n".join([f"Line {idx}: output" for idx in range(120)])
+        inject_live_stream_content(page, long_text)
+
+        scroll_metrics = page.evaluate(
+            """
+() => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    if (!box) return null;
+    const container = box.querySelector('.live-output-content') || box;
+    return {
+        scrollTop: container.scrollTop,
+        scrollHeight: container.scrollHeight,
+        clientHeight: container.clientHeight
+    };
+}
+"""
+        )
+        assert scroll_metrics, "Live view container should exist"
+        assert scroll_metrics["scrollHeight"] > scroll_metrics["clientHeight"], (
+            "Test requires scrollable live view content."
+        )
+
+        page.evaluate(
+            """
+() => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    if (!box) return false;
+    const container = box.querySelector('.live-output-content') || box;
+    container.scrollTop = 0;
+    if (window._liveStreamScroll && window._liveStreamScroll.has(container)) {
+        const state = window._liveStreamScroll.get(container);
+        state.userScrolledUp = false;
+        state.savedScrollTop = 0;
+    }
+    return true;
+}
+"""
+        )
+
+        page.evaluate(
+            """
+() => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    if (!box) return false;
+    const container = box.querySelector('.live-output-content') || box;
+    container.insertAdjacentHTML('beforeend', '<div>New entry</div>');
+    return true;
+}
+"""
+        )
+        page.wait_for_timeout(250)
+
+        scroll_after = page.evaluate(
+            """
+() => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    if (!box) return null;
+    const container = box.querySelector('.live-output-content') || box;
+    return container.scrollTop;
+}
+"""
+        )
+        assert scroll_after is not None, "Live view scrollTop should be readable"
+        assert scroll_after <= 1, f"Live view auto-scrolled on new content (scrollTop={scroll_after})"
+
     def test_task_2_live_stream_has_multiline_formatting(self, page: Page):
         """Task 2 live stream should keep styled multiline formatting like Task 1."""
         # Create Task 2 via + tab and ensure it's active
