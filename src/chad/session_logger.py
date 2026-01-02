@@ -29,6 +29,7 @@ class SessionLogger:
             "task_description": None,
             "project_path": None,
             "conversation": [],
+            "verification_attempts": [],
         }
 
         with open(filepath, "w") as f:
@@ -58,6 +59,7 @@ class SessionLogger:
             "success": None,
             "completion_reason": None,
             "conversation": [],
+            "verification_attempts": [],
         }
 
         with open(filepath, "w") as f:
@@ -88,6 +90,7 @@ class SessionLogger:
             "success": None,
             "completion_reason": None,
             "conversation": [],
+            "verification_attempts": [],
         }
 
         with open(filepath, "w") as f:
@@ -104,6 +107,7 @@ class SessionLogger:
         success: bool | None = None,
         completion_reason: str | None = None,
         status: str = "running",
+        verification_attempts: list | None = None,
     ) -> None:
         """Update an existing session log with new data.
 
@@ -121,6 +125,8 @@ class SessionLogger:
 
             session_data["conversation"] = list(chat_history)
             session_data["status"] = status
+            if verification_attempts is not None:
+                session_data["verification_attempts"] = verification_attempts
 
             # Store the full streaming transcript if provided
             if streaming_transcript is not None:

@@ -17,12 +17,16 @@ def _config_path(home: Path | None = None) -> Path:
 
 def _strip_dangling_chad_entries(text: str) -> tuple[str, bool]:
     """Remove stray chad.mcp_playwright lines that are not inside a TOML table."""
-    cleaned, count = re.subn(
+    patterns = [
         r'\n\["-m", "chad\.mcp_playwright"\]\n(?:cwd = .*\n)?(?:env = .*\n)?',
-        "\n",
-        text,
-    )
-    return cleaned, count > 0
+        r'^\["-m", "chad\.mcp_playwright"\]\n?(?:cwd = .*\n)?(?:env = .*\n)?',
+    ]
+    cleaned = text
+    removed = False
+    for pat in patterns:
+        cleaned, count = re.subn(pat, "\n", cleaned, flags=re.MULTILINE)
+        removed = removed or count > 0
+    return cleaned, removed
 
 
 def _server_block(project_root: Path) -> str:
