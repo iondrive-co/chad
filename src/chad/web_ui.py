@@ -4824,6 +4824,7 @@ class ChadWebUI:
         for card in provider_cards:
             provider_outputs.extend(
                 [
+                    card["column"],
                     card["group"],
                     card["header"],
                     card["account_state"],

@@ -27,8 +27,8 @@ def test_screenshot_mode_duplicates_fourth_provider_card(monkeypatch):
 
         card_names = []
         for idx in range(4):
-            base = 1 + idx * 5
-            card_names.append(state[base + 2])
+            base = 1 + idx * 6
+            card_names.append(state[base + 3])
 
         assert len(card_names) == 4
         assert len(set(card_names)) == 3

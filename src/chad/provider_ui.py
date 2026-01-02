@@ -276,7 +276,8 @@ class ProviderUIManager:
 
                 outputs.extend(
                     [
-                        gr.update(visible=True),  # Show card
+                        gr.update(visible=True),  # Show column
+                        gr.update(visible=True),  # Show card group
                         header,
                         account_name,
                         usage,
@@ -286,7 +287,8 @@ class ProviderUIManager:
             else:
                 outputs.extend(
                     [
-                        gr.update(visible=False),  # Hide card
+                        gr.update(visible=False),  # Hide column
+                        gr.update(visible=False),  # Hide card group
                         "",
                         "",
                         "",

@@ -19,7 +19,7 @@ class SessionLogger:
 
         The file will be populated later when the task actually starts.
         """
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         filename = f"chad_session_{timestamp}.json"
         filepath = self.base_dir / filename
 
@@ -74,7 +74,7 @@ class SessionLogger:
         coding_provider: str,
     ) -> Path:
         """Create a new session log and return its path."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         filename = f"chad_session_{timestamp}.json"
         filepath = self.base_dir / filename
 
