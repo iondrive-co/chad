@@ -268,12 +268,19 @@ class TestChadWebUI:
         outputs = web_ui.discard_worktree_changes(session_id)
 
         # Index 11 should be task_description update (no_change to preserve it)
-        assert len(outputs) >= 12, "Discard should return 12 outputs including task_description"
+        # Note: 14 outputs total (includes merge_visibility_state and merge_section_header)
+        assert len(outputs) >= 14, "Discard should return 14 outputs including visibility controls"
         task_desc_update = outputs[11]
         # no_change is gr.update() which returns an empty dict
         assert task_desc_update == {} or task_desc_update.get("value") is None, (
             "Task description should be preserved (no_change) for retry"
         )
+
+        # Verify visibility state outputs for JS workaround
+        visibility_state = outputs[12]
+        header_text = outputs[13]
+        assert visibility_state == "hidden", "Visibility state should be 'hidden' after discard"
+        assert header_text == "", "Header should be cleared after discard"
 
     def test_merge_clears_task_description_on_success(self, web_ui, git_repo, monkeypatch):
         """Successful merge should clear the task description input."""
@@ -298,13 +305,20 @@ class TestChadWebUI:
         outputs = web_ui.attempt_merge(session_id, "msg", "main")
 
         # Index 11 should be task_description update (direct value "" or gr.update)
-        assert len(outputs) >= 12, "Merge should return 12 outputs including task_description"
+        # Note: 14 outputs total (includes merge_visibility_state and merge_section_header)
+        assert len(outputs) >= 14, "Merge should return 14 outputs including visibility controls"
         task_desc_update = outputs[11]
         # Handle both direct value "" and gr.update(value="")
         if isinstance(task_desc_update, str):
             assert task_desc_update == "", "Task description should be cleared"
         else:
             assert task_desc_update.get("value") == "", "Task description should be cleared"
+
+        # Verify visibility state outputs for JS workaround
+        visibility_state = outputs[12]
+        header_text = outputs[13]
+        assert visibility_state == "hidden", "Visibility state should be 'hidden' after merge"
+        assert header_text == "", "Header should be cleared after merge"
 
     def test_set_reasoning_success(self, web_ui, mock_security_mgr):
         """Test setting reasoning level for an account."""
