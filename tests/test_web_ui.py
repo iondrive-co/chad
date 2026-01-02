@@ -1914,6 +1914,15 @@ class TestVerificationPrompt:
         assert "Full response:" in prompt
         assert "Full response content" in prompt
 
+    def test_truncation_keeps_indicator_and_fits_limit(self):
+        """Verification payloads should be compact and annotated when truncated."""
+        from chad.web_ui import _truncate_verification_output, MAX_VERIFICATION_PROMPT_CHARS
+
+        long_text = "a" * (MAX_VERIFICATION_PROMPT_CHARS + 500)
+        truncated = _truncate_verification_output(long_text)
+        assert "[truncated" in truncated
+        assert len(truncated) <= MAX_VERIFICATION_PROMPT_CHARS + 20
+
     def test_run_verification_aborts_without_required_inputs(self, monkeypatch, tmp_path):
         """Verification should abort before contacting providers when inputs are missing."""
         from chad.web_ui import ChadWebUI

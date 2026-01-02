@@ -63,6 +63,17 @@ def _failure(message: str) -> Dict[str, object]:
     return {"success": False, "error": message}
 
 
+def _log_debug(message: str) -> None:
+    """Write a small debug line for MCP server behavior."""
+    try:
+        path = Path("/tmp/chad_mcp_playwright.log")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as logf:
+            logf.write(f"{message}\n")
+    except Exception:
+        pass
+
+
 # Ensure Codex global config has this MCP server
 ensure_global_mcp_config()
 
@@ -73,16 +84,18 @@ ensure_global_mcp_config()
 
 
 @SERVER.tool()
-def verify() -> Dict[str, object]:
+def verify(lint_only: bool = False) -> Dict[str, object]:
     """Run linting and ALL tests (unit + integration + visual) to verify no regressions.
 
     Call this tool to:
     - Verify changes haven't broken anything
     - Check code quality before completing work
+    - Run only linting by setting lint_only=True when you just need flake8
 
     Returns results from each phase: lint, unit tests, visual tests.
     """
     try:
+        _log_debug(f"verify start (lint_only={lint_only})")
         project_root = _project_root()
         env = {**os.environ, "PYTHONPATH": str(project_root / "src")}
         results: Dict[str, object] = {"phases": {}}
@@ -102,10 +115,14 @@ def verify() -> Dict[str, object]:
             "issues": lint_issues[:20],  # First 20 issues
         }
 
-        if lint_result.returncode != 0:
-            results["success"] = False
-            results["failed_phase"] = "lint"
-            results["message"] = f"Lint failed with {len(lint_issues)} issues"
+        if lint_result.returncode != 0 or lint_only:
+            results["success"] = lint_result.returncode == 0
+            results["failed_phase"] = "lint" if lint_result.returncode != 0 else None
+            results["message"] = (
+                f"Lint failed with {len(lint_issues)} issues"
+                if lint_result.returncode != 0
+                else "Lint-only run completed"
+            )
             return results
 
         # Phase 2: All tests (unit + integration + visual)
@@ -151,8 +168,10 @@ def verify() -> Dict[str, object]:
         return results
 
     except subprocess.TimeoutExpired as e:
+        _log_debug(f"verify timeout: {e}")
         return _failure(f"Verification timed out: {e}")
     except Exception as exc:
+        _log_debug(f"verify error: {exc}")
         return _failure(f"Verification error: {exc}")
 
 
@@ -203,40 +222,45 @@ def screenshot(
         screenshot(tab="run", component="project-path") - Just the project path panel
         screenshot(tab="providers", component="provider-card") - A single provider card
     """
-    normalized = tab.lower().strip()
-    tab_name = "providers" if normalized.startswith("p") else "run"
+    try:
+        _log_debug(f"screenshot start tab={tab} component={component} label={label}")
+        normalized = tab.lower().strip()
+        tab_name = "providers" if normalized.startswith("p") else "run"
 
-    # Resolve component to selector
-    selector = None
-    if component:
-        component_key = component.lower().strip().replace("_", "-")
-        selector = COMPONENT_SELECTORS.get(component_key)
-        if not selector:
-            available = ", ".join(COMPONENT_SELECTORS.keys())
-            return _failure(f"Unknown component '{component}'. Available: {available}")
+        # Resolve component to selector
+        selector = None
+        if component:
+            component_key = component.lower().strip().replace("_", "-")
+            selector = COMPONENT_SELECTORS.get(component_key)
+            if not selector:
+                available = ", ".join(COMPONENT_SELECTORS.keys())
+                return _failure(f"Unknown component '{component}'. Available: {available}")
 
-    result = run_screenshot_subprocess(
-        tab=tab_name,
-        headless=True,
-        viewport={"width": 1280, "height": 900},
-        label=label if label else None,
-        selector=selector,
-    )
+        result = run_screenshot_subprocess(
+            tab=tab_name,
+            headless=True,
+            viewport={"width": 1280, "height": 900},
+            label=label if label else None,
+            selector=selector,
+        )
 
-    if result.get("success"):
-        screenshots = result.get("screenshots") or [result.get("screenshot")]
-        component_info = f" (component: {component})" if component else ""
-        return {
-            "success": True,
-            "tab": tab_name,
-            "component": component or "(full tab)",
-            "selector": selector or "(none)",
-            "label": label or "(none)",
-            "screenshot": result.get("screenshot"),
-            "screenshots": screenshots,
-            "message": f"Screenshots saved{component_info}: {', '.join(screenshots)}",
-        }
-    return _failure(result.get("stderr") or result.get("stdout") or "Screenshot failed")
+        if result.get("success"):
+            screenshots = result.get("screenshots") or [result.get("screenshot")]
+            component_info = f" (component: {component})" if component else ""
+            return {
+                "success": True,
+                "tab": tab_name,
+                "component": component or "(full tab)",
+                "selector": selector or "(none)",
+                "label": label or "(none)",
+                "screenshot": result.get("screenshot"),
+                "screenshots": screenshots,
+                "message": f"Screenshots saved{component_info}: {', '.join(screenshots)}",
+            }
+        return _failure(result.get("stderr") or result.get("stdout") or "Screenshot failed")
+    except Exception as exc:  # pragma: no cover - defensive for MCP stability
+        _log_debug(f"screenshot error: {exc}")
+        return _failure(str(exc))
 
 
 # =============================================================================
@@ -442,4 +466,9 @@ def list_tools() -> Dict[str, object]:
 
 
 if __name__ == "__main__":
-    SERVER.run()
+    _log_debug("starting chad.mcp_playwright server")
+    try:
+        SERVER.run()
+    except Exception as exc:  # pragma: no cover - ensure transport stays open with error info
+        _log_debug(f"server crash: {exc}")
+        raise
