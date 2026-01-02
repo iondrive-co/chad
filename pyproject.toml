@@ -27,7 +27,10 @@ dependencies = [
     "bcrypt>=4.0.0",
     "cryptography>=41.0.0",
     "gradio>=4.0.0",
-    "pexpect>=4.9.0",
+    "pexpect>=4.9.0; platform_system != 'Windows'",
+    "cffi>=1.17.1,<2.0.0",
+    "hf-xet==1.1.0",
+    "huggingface-hub>=0.16.4,<1.0.0",
 ]
 
 [project.optional-dependencies]

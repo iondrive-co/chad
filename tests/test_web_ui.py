@@ -1517,9 +1517,9 @@ class TestRemainingUsage:
     def test_claude_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
         """Claude not logged in returns 0.0."""
         mock_home.return_value = tmp_path
-        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".chad" / "claude-configs" / "claude-1").mkdir(parents=True)
 
-        result = web_ui._get_claude_remaining_usage()
+        result = web_ui._get_claude_remaining_usage("claude-1")
         assert result == 0.0
 
     @patch("pathlib.Path.home")
@@ -1529,8 +1529,8 @@ class TestRemainingUsage:
         import json
 
         mock_home.return_value = tmp_path
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
+        claude_dir = tmp_path / ".chad" / "claude-configs" / "claude-1"
+        claude_dir.mkdir(parents=True)
         creds = {"claudeAiOauth": {"accessToken": "test-token", "subscriptionType": "PRO"}}
         (claude_dir / ".credentials.json").write_text(json.dumps(creds))
 
@@ -1539,7 +1539,7 @@ class TestRemainingUsage:
         mock_response.json.return_value = {"five_hour": {"utilization": 25}}
         mock_get.return_value = mock_response
 
-        result = web_ui._get_claude_remaining_usage()
+        result = web_ui._get_claude_remaining_usage("claude-1")
         assert result == 0.75  # 1.0 - 0.25
 
     @patch("pathlib.Path.home")

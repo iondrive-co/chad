@@ -1,6 +1,7 @@
 """Tests for AI providers."""
 
 import json
+import sys
 from unittest.mock import Mock, patch
 
 import pytest
@@ -1045,6 +1046,22 @@ class TestOpenAICodexProvider:
 
         with pytest.raises(RuntimeError, match="stalled"):
             provider.get_response(timeout=1.0)
+
+
+def test_stream_output_without_pty(monkeypatch):
+    import chad.providers as providers
+
+    monkeypatch.setattr(providers, "_HAS_PTY", False)
+    monkeypatch.setattr(providers, "pty", None)
+
+    process, master_fd = providers._start_pty_process(
+        [sys.executable, "-c", "print('hello from pipe')"]
+    )
+    output, timed_out, idle_stalled = providers._stream_pty_output(process, master_fd, None, timeout=5.0)
+
+    assert "hello from pipe" in output
+    assert timed_out is False
+    assert idle_stalled is False
 
 
 class TestCodexJsonEventParsing:
