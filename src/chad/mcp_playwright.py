@@ -49,14 +49,14 @@ from mcp.server.fastmcp import FastMCP
 
 from .investigation_report import HypothesisTracker
 from .ui_playwright_runner import run_screenshot_subprocess
-from .mcp_config import ensure_global_mcp_config
+from .mcp_config import ensure_global_mcp_config, resolve_project_root
 
 SERVER = FastMCP("chad-ui-playwright")
 
 
 def _project_root() -> Path:
     """Get the project root directory."""
-    return Path(__file__).parents[2]
+    return resolve_project_root()[0]
 
 
 def _failure(message: str) -> Dict[str, object]:
@@ -95,10 +95,21 @@ def verify(lint_only: bool = False) -> Dict[str, object]:
     Returns results from each phase: lint, unit tests, visual tests.
     """
     try:
-        _log_debug(f"verify start (lint_only={lint_only})")
-        project_root = _project_root()
-        env = {**os.environ, "PYTHONPATH": str(project_root / "src")}
-        results: Dict[str, object] = {"phases": {}}
+        project_root, root_reason = resolve_project_root()
+        _log_debug(f"verify start (lint_only={lint_only}) root={project_root} reason={root_reason}")
+        env = {
+            **os.environ,
+            "PYTHONPATH": str(project_root / "src"),
+            "CHAD_PROJECT_ROOT": str(project_root),
+            "CHAD_PROJECT_ROOT_REASON": root_reason,
+        }
+        preflight_note = f"Using project root: {project_root} (source={root_reason})"
+        results: Dict[str, object] = {
+            "phases": {},
+            "project_root": str(project_root),
+            "project_root_reason": root_reason,
+            "preflight": preflight_note,
+        }
 
         # Phase 1: Lint (typically <1 second)
         lint_result = subprocess.run(
@@ -115,13 +126,15 @@ def verify(lint_only: bool = False) -> Dict[str, object]:
             "issues": lint_issues[:20],  # First 20 issues
         }
 
+        message_prefix = f"{preflight_note}. "
+
         if lint_result.returncode != 0 or lint_only:
             results["success"] = lint_result.returncode == 0
             results["failed_phase"] = "lint" if lint_result.returncode != 0 else None
             results["message"] = (
-                f"Lint failed with {len(lint_issues)} issues"
+                f"{message_prefix}Lint failed with {len(lint_issues)} issues"
                 if lint_result.returncode != 0
-                else "Lint-only run completed"
+                else f"{message_prefix}Lint-only run completed"
             )
             return results
 
@@ -160,11 +173,11 @@ def verify(lint_only: bool = False) -> Dict[str, object]:
         if test_result.returncode != 0:
             results["success"] = False
             results["failed_phase"] = "tests"
-            results["message"] = f"Tests failed: {failed} failed, {passed} passed"
+            results["message"] = f"{message_prefix}Tests failed: {failed} failed, {passed} passed"
             return results
 
         results["success"] = True
-        results["message"] = f"All checks passed: lint clean, {passed} tests passed"
+        results["message"] = f"{message_prefix}All checks passed: lint clean, {passed} tests passed"
         return results
 
     except subprocess.TimeoutExpired as e:

@@ -196,7 +196,7 @@ def parse_codex_output(raw_output: str | None) -> str:  # noqa: C901
     formatted = []
 
     # Add consolidated thinking as a compact italic block
-    if thinking_parts:
+    if thinking_parts and _thinking_enabled():
         # Show last few thinking steps, not all
         recent_thoughts = thinking_parts[-5:] if len(thinking_parts) > 5 else thinking_parts
         thinking_summary = " → ".join(recent_thoughts)
@@ -277,6 +277,20 @@ ActivityCallback = Callable[[str, str], None] | None
 
 _ANSI_ESCAPE = re.compile(r"[\x1b\u241b]\[[0-9;]*[a-zA-Z]?")
 CLI_INSTALLER = AIToolInstaller()
+_BOOLEAN_TRUE = {"1", "true", "yes", "on"}
+
+
+def _thinking_enabled() -> bool:
+    """Gate verbose thinking traces behind an opt-in flag."""
+    hide_flag = os.environ.get("CHAD_HIDE_THINKING", "").strip().lower()
+    if hide_flag in _BOOLEAN_TRUE:
+        return False
+
+    explicit_flag = os.environ.get("CHAD_THINKING", "").strip().lower()
+    if explicit_flag:
+        return explicit_flag in _BOOLEAN_TRUE
+
+    return True
 
 
 def _ensure_cli_tool(tool_key: str, activity_cb: ActivityCallback = None) -> tuple[bool, str]:

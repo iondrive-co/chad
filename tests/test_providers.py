@@ -158,6 +158,18 @@ Here is the summary.
         assert "4,481" not in result
         assert "Here is the summary." in result
 
+    def test_thinking_can_be_suppressed(self, monkeypatch):
+        raw_output = """thinking
+First thought
+
+codex
+Here is the answer.
+"""
+        monkeypatch.setenv("CHAD_HIDE_THINKING", "1")
+        result = parse_codex_output(raw_output)
+        assert "*Thinking:" not in result
+        assert "Here is the answer." in result
+
 
 class TestExtractFinalCodexResponse:
     """Test cases for extract_final_codex_response function."""

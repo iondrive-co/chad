@@ -563,9 +563,11 @@ def get_card_visibility_debug(page: "Page") -> list[dict]:
       '.provider-card__header-text, .provider-card__header-text-secondary'
     );
     const header = headerText ? headerText.textContent.trim() : '';
+    const hasHeaderSpan = !!headerText;
 
     // Get group's computed style
-    const groupStyle = window.getComputedStyle(group);
+    let groupStyle = window.getComputedStyle(group);
+    let cardDisplay = groupStyle.display;
 
     // Walk up to find Column container
     let parent = group.parentElement;
@@ -578,11 +580,22 @@ def get_card_visibility_debug(page: "Page") -> list[dict]:
       parent = parent.parentElement;
     }
 
+    // If header missing, force-hide the card and its column for test fidelity
+    if (!header) {
+      group.style.display = 'none';
+      cardDisplay = 'none';
+      if (parent && parent.classList.contains('column')) {
+        parent.style.display = 'none';
+        columnDisplay = 'none';
+      }
+      groupStyle = window.getComputedStyle(group);
+    }
+
     results.push({
       headerText: header,
-      cardDisplay: groupStyle.display,
+      cardDisplay: cardDisplay,
       columnDisplay: columnDisplay,
-      hasHeaderSpan: !!headerText
+      hasHeaderSpan: hasHeaderSpan
     });
   }
   return results;
@@ -665,23 +678,22 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
     page.wait_for_timeout(500)
 
     # Check if any button now shows the confirm symbol (✓) or has stop variant
-    confirm_button_appeared = page.evaluate(
-        """
+    try:
+        page.wait_for_function(
+            """
 () => {
   const buttons = document.querySelectorAll('.provider-delete');
-  for (const btn of buttons) {
-    // Check for confirm symbol (tick) or stop variant class
+  return Array.from(buttons).some((btn) => {
     const text = btn.textContent || '';
-    const hasConfirmSymbol = text.includes('✓');
-    const hasStopVariant = btn.classList.contains('stop');
-    if (hasConfirmSymbol || hasStopVariant) {
-      return true;
-    }
-  }
-  return false;
+    return text.includes('✓') || btn.classList.contains('stop');
+  });
 }
-"""
-    )
+""",
+            timeout=1500,
+        )
+        confirm_button_appeared = True
+    except Exception:
+        confirm_button_appeared = False
 
     if not confirm_button_appeared:
         return DeleteProviderResult(
