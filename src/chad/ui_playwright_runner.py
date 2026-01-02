@@ -1381,3 +1381,173 @@ def check_merge_viewer(page: "Page") -> MergeViewerTestResult:
         colors_correct=result.get("colorsCorrect", False),
         raw_html=result.get("rawHtml", ""),
     )
+
+
+@dataclass
+class DiscardResetTestResult:
+    """Result of testing discard reset behavior."""
+
+    merge_section_was_visible: bool
+    discard_button_clicked: bool
+    task_description_before: str
+    task_description_after: str
+    chatbot_messages_before: int
+    chatbot_messages_after: int
+    merge_section_visible_after: bool
+    status_message: str
+    task_description_cleared: bool
+    chatbot_cleared: bool
+    merge_section_hidden: bool
+
+
+def setup_merge_section_for_test(page: "Page") -> dict:
+    """Set up the merge section with test content for reset testing.
+
+    Makes merge section visible, adds content to task description and chatbot.
+    Returns dict with setup info.
+    """
+    result = page.evaluate(
+        """
+() => {
+    // Find and populate task description
+    const taskTextarea = document.querySelector('[key*="task-desc"]') ||
+                        document.querySelector('textarea[aria-label*="Task"]') ||
+                        document.querySelector('#component-\\\\d+ textarea');
+
+    let taskDescBefore = '';
+    if (taskTextarea) {
+        taskTextarea.value = 'Test task for reset verification';
+        taskDescBefore = taskTextarea.value;
+        // Trigger input event to update Gradio state
+        taskTextarea.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    // Find merge section and make it visible
+    const columns = document.querySelectorAll('.column, [class*="Column"]');
+    let mergeSectionVisible = false;
+
+    for (const col of columns) {
+        const key = col.getAttribute('key') || col.getAttribute('id') || '';
+        if (key.includes('merge-section')) {
+            col.style.display = 'block';
+            col.style.visibility = 'visible';
+            // Also remove any Gradio-set hidden class
+            col.classList.remove('hidden');
+            mergeSectionVisible = true;
+        }
+    }
+
+    // Count chatbot messages
+    const chatMessages = document.querySelectorAll('.message, [class*="chat-message"]');
+
+    return {
+        taskDescBefore,
+        mergeSectionVisible,
+        chatbotMessageCount: chatMessages.length
+    };
+}
+"""
+    )
+    return result or {}
+
+
+def click_discard_and_check_reset(page: "Page") -> DiscardResetTestResult:
+    """Click the Discard button and verify the tab resets correctly.
+
+    Returns detailed result of what happened.
+    """
+    # First set up the test state
+    setup_result = setup_merge_section_for_test(page)
+
+    # Find and click the discard button
+    click_result = page.evaluate(
+        """
+() => {
+    // Find the discard button by looking for button with "Discard" text
+    const buttons = document.querySelectorAll('button');
+    let discardBtn = null;
+    for (const btn of buttons) {
+        if (btn.textContent && btn.textContent.includes('Discard')) {
+            discardBtn = btn;
+            break;
+        }
+    }
+
+    // Also try by key attribute
+    if (!discardBtn) {
+        discardBtn = document.querySelector('[key*="discard"]');
+    }
+
+    if (discardBtn) {
+        discardBtn.click();
+        return { clicked: true };
+    }
+    return { clicked: false, error: 'Discard button not found' };
+}
+"""
+    )
+
+    # Wait for Gradio to process the update
+    page.wait_for_timeout(1000)
+
+    # Check the state after clicking
+    after_result = page.evaluate(
+        """
+() => {
+    // Check task description
+    const taskTextarea = document.querySelector('[key*="task-desc"]') ||
+                        document.querySelector('textarea[aria-label*="Task"]');
+    const taskDescAfter = taskTextarea ? taskTextarea.value : '';
+
+    // Check chatbot messages
+    const chatMessages = document.querySelectorAll('.message, [class*="chat-message"]');
+    const chatbotCount = chatMessages.length;
+
+    // Check merge section visibility
+    const columns = document.querySelectorAll('.column, [class*="Column"]');
+    let mergeSectionVisible = false;
+    for (const col of columns) {
+        const key = col.getAttribute('key') || col.getAttribute('id') || '';
+        if (key.includes('merge-section')) {
+            const style = window.getComputedStyle(col);
+            mergeSectionVisible = style.display !== 'none' && style.visibility !== 'hidden';
+        }
+    }
+
+    // Check status message
+    const statusElements = document.querySelectorAll('[key*="task-status"], .task-status');
+    let statusMessage = '';
+    for (const el of statusElements) {
+        if (el.textContent && el.textContent.includes('discarded')) {
+            statusMessage = el.textContent;
+            break;
+        }
+    }
+
+    return {
+        taskDescAfter,
+        chatbotCount,
+        mergeSectionVisible,
+        statusMessage
+    };
+}
+"""
+    )
+    after_result = after_result or {}
+
+    return DiscardResetTestResult(
+        merge_section_was_visible=setup_result.get("mergeSectionVisible", False),
+        discard_button_clicked=click_result.get("clicked", False) if click_result else False,
+        task_description_before=setup_result.get("taskDescBefore", ""),
+        task_description_after=after_result.get("taskDescAfter", ""),
+        chatbot_messages_before=setup_result.get("chatbotMessageCount", 0),
+        chatbot_messages_after=after_result.get("chatbotCount", 0),
+        merge_section_visible_after=after_result.get("mergeSectionVisible", True),
+        status_message=after_result.get("statusMessage", ""),
+        task_description_cleared=(
+            setup_result.get("taskDescBefore", "") != ""
+            and after_result.get("taskDescAfter", "") == ""
+        ),
+        chatbot_cleared=after_result.get("chatbotCount", 0) == 0,
+        merge_section_hidden=not after_result.get("mergeSectionVisible", True),
+    )

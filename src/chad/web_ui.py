@@ -3685,20 +3685,23 @@ class ChadWebUI:
                 session.worktree_branch = None
                 session.has_worktree_changes = False
                 session.worktree_base_commit = None
+                session.task_description = ""
+                session.chat_history = []
                 # Full reset - return tab to initial state
+                # Use direct values where possible to match working make_yield pattern
                 return (
                     gr.update(visible=False),                    # merge_section
-                    gr.update(value=""),                         # changes_summary
+                    "",                                          # changes_summary - direct value
                     gr.update(visible=False),                    # conflict_section
-                    gr.update(value=""),                         # conflict_info
-                    gr.update(value=""),                         # conflicts_html
+                    "",                                          # conflict_info - direct value
+                    "",                                          # conflicts_html - direct value
                     gr.update(value=f"✓ Changes merged to {target_name}.", visible=True),
-                    gr.update(value=[]),                         # chatbot - clear
+                    [],                                          # chatbot - direct empty list
                     gr.update(interactive=True),                 # start_btn - enable
                     gr.update(interactive=False),                # cancel_btn - disable
-                    gr.update(value=""),                         # live_stream - clear
+                    "",                                          # live_stream - direct value
                     gr.update(visible=False),                    # followup_row - hide
-                    gr.update(value=""),                         # task_description - clear
+                    "",                                          # task_description - direct value
                 )
             elif conflicts:
                 session.merge_conflicts = conflicts
@@ -3939,20 +3942,23 @@ class ChadWebUI:
                 session.merge_conflicts = None
                 session.has_worktree_changes = False
                 session.worktree_base_commit = None
+                session.task_description = ""
+                session.chat_history = []
                 # Full reset - return tab to initial state
+                # Use direct values where possible to match working make_yield pattern
                 return (
                     gr.update(visible=False),                    # merge_section
-                    gr.update(value=""),                         # changes_summary
+                    "",                                          # changes_summary - direct value
                     gr.update(visible=False),                    # conflict_section
-                    gr.update(value=""),                         # conflict_info
-                    gr.update(value=""),                         # conflicts_html
+                    "",                                          # conflict_info - direct value
+                    "",                                          # conflicts_html - direct value
                     gr.update(value="✓ All conflicts resolved. Merge complete.", visible=True),
-                    gr.update(value=[]),                         # chatbot - clear
+                    [],                                          # chatbot - direct empty list
                     gr.update(interactive=True),                 # start_btn - enable
                     gr.update(interactive=False),                # cancel_btn - disable
-                    gr.update(value=""),                         # live_stream - clear
+                    "",                                          # live_stream - direct value
                     gr.update(visible=False),                    # followup_row - hide
-                    gr.update(value=""),                         # task_description - clear
+                    "",                                          # task_description - direct value
                 )
             else:
                 return (
@@ -3999,11 +4005,13 @@ class ChadWebUI:
         )
 
     def discard_worktree_changes(self, session_id: str) -> tuple:
-        """Discard worktree and all changes, reset tab to initial state.
+        """Discard worktree and all changes, reset merge UI but keep task description.
 
-        Returns 12 values for merge_outputs.
+        Returns 12 values for merge_outputs. Task description is preserved so user
+        can retry the task with the same description.
         """
         session = self.get_session(session_id)
+        no_change = gr.update()
         if session.worktree_path and session.project_path:
             git_mgr = GitWorktreeManager(Path(session.project_path))
             git_mgr.delete_worktree(session_id)
@@ -4012,21 +4020,23 @@ class ChadWebUI:
             session.has_worktree_changes = False
             session.merge_conflicts = None
             session.worktree_base_commit = None
+            session.chat_history = []
 
-        # Full reset - return tab to initial state
+        # Reset merge UI but keep task description for retry
+        # Use direct values where possible to match working make_yield pattern
         return (
             gr.update(visible=False),                    # merge_section
-            gr.update(value=""),                         # changes_summary
+            "",                                          # changes_summary - direct value
             gr.update(visible=False),                    # conflict_section
-            gr.update(value=""),                         # conflict_info
-            gr.update(value=""),                         # conflicts_html
+            "",                                          # conflict_info - direct value
+            "",                                          # conflicts_html - direct value
             gr.update(value="🗑️ Changes discarded.", visible=True),  # task_status
-            gr.update(value=[]),                         # chatbot - clear
+            [],                                          # chatbot - direct empty list
             gr.update(interactive=True),                 # start_btn - enable
             gr.update(interactive=False),                # cancel_btn - disable
-            gr.update(value=""),                         # live_stream - clear
+            "",                                          # live_stream - direct value
             gr.update(visible=False),                    # followup_row - hide
-            gr.update(value=""),                         # task_description - clear
+            no_change,                                   # task_description - keep for retry
         )
 
     def _build_handoff_context(self, chat_history: list) -> str:
