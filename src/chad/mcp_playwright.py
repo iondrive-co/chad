@@ -49,18 +49,29 @@ from mcp.server.fastmcp import FastMCP
 
 from .investigation_report import HypothesisTracker
 from .ui_playwright_runner import run_screenshot_subprocess
-from .mcp_config import ensure_global_mcp_config
+from .mcp_config import ensure_global_mcp_config, resolve_project_root
 
 SERVER = FastMCP("chad-ui-playwright")
 
 
 def _project_root() -> Path:
     """Get the project root directory."""
-    return Path(__file__).parents[2]
+    return resolve_project_root()[0]
 
 
 def _failure(message: str) -> Dict[str, object]:
     return {"success": False, "error": message}
+
+
+def _log_debug(message: str) -> None:
+    """Write a small debug line for MCP server behavior."""
+    try:
+        path = Path("/tmp/chad_mcp_playwright.log")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as logf:
+            logf.write(f"{message}\n")
+    except Exception:
+        pass
 
 
 # Ensure Codex global config has this MCP server
@@ -71,28 +82,55 @@ ensure_global_mcp_config()
 # Tool 1: VERIFY - Run lint + all tests
 # =============================================================================
 
+
 @SERVER.tool()
-def verify() -> Dict[str, object]:
+def verify(lint_only: bool = False, project_root: str | None = None) -> Dict[str, object]:
     """Run linting and ALL tests (unit + integration + visual) to verify no regressions.
 
     Call this tool to:
     - Verify changes haven't broken anything
     - Check code quality before completing work
+    - Run only linting by setting lint_only=True when you just need flake8
 
     Returns results from each phase: lint, unit tests, visual tests.
     """
     try:
-        project_root = _project_root()
-        env = {**os.environ, "PYTHONPATH": str(project_root / "src")}
-        results: Dict[str, object] = {"phases": {}}
+        resolved_root = Path(project_root).expanduser() if project_root else None
+        if resolved_root:
+            if not resolved_root.exists() or not resolved_root.is_dir():
+                return _failure(f"Project root does not exist or is not a directory: {resolved_root}")
+            pyproject = resolved_root / "pyproject.toml"
+            if not pyproject.exists():
+                return _failure(f"Project root missing pyproject.toml: {resolved_root}")
+            project_root, root_reason = resolved_root, "param:project_root"
+        else:
+            project_root, root_reason = resolve_project_root()
+        _log_debug(f"verify start (lint_only={lint_only}) root={project_root} reason={root_reason}")
+        env = {
+            **os.environ,
+            "PYTHONPATH": str(project_root / "src"),
+            "CHAD_PROJECT_ROOT": str(project_root),
+            "CHAD_PROJECT_ROOT_REASON": root_reason,
+        }
+        # Prefer existing environment; avoid network installs during verify
+        env.setdefault("PIP_NO_INDEX", "1")
+        env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+        env.setdefault("PIP_PREFER_BINARY", "1")
+        preflight_note = f"Using project root: {project_root} (source={root_reason})"
+        results: Dict[str, object] = {
+            "phases": {},
+            "project_root": str(project_root),
+            "project_root_reason": root_reason,
+            "preflight": preflight_note,
+        }
 
-        # Phase 1: Lint
+        # Phase 1: Lint (typically <1 second)
         lint_result = subprocess.run(
             [sys.executable, "-m", "flake8", ".", "--max-line-length=120"],
             capture_output=True,
             text=True,
             cwd=str(project_root),
-            timeout=60,
+            timeout=30,
         )
         lint_issues = [line for line in lint_result.stdout.split("\n") if line.strip()]
         results["phases"]["lint"] = {
@@ -101,20 +139,47 @@ def verify() -> Dict[str, object]:
             "issues": lint_issues[:20],  # First 20 issues
         }
 
-        if lint_result.returncode != 0:
-            results["success"] = False
-            results["failed_phase"] = "lint"
-            results["message"] = f"Lint failed with {len(lint_issues)} issues"
+        message_prefix = f"{preflight_note}. "
+
+        if lint_result.returncode != 0 or lint_only:
+            results["success"] = lint_result.returncode == 0
+            results["failed_phase"] = "lint" if lint_result.returncode != 0 else None
+            results["message"] = (
+                f"{message_prefix}Lint failed with {len(lint_issues)} issues"
+                if lint_result.returncode != 0
+                else f"{message_prefix}Lint-only run completed"
+            )
             return results
 
-        # Phase 2: All tests (unit + integration + visual)
-        test_result = subprocess.run(
-            [sys.executable, "-m", "pytest", "-v", "--tb=short"],
+        # Phase 2: pip check to catch dependency conflicts early
+        pip_check = subprocess.run(
+            [sys.executable, "-m", "pip", "check"],
             capture_output=True,
             text=True,
             cwd=str(project_root),
             env=env,
-            timeout=600,  # 10 minutes for all tests including visual
+            timeout=60,
+        )
+        results["phases"]["pip_check"] = {
+            "success": pip_check.returncode == 0,
+            "issues": pip_check.stdout.strip().splitlines()[:20],
+        }
+        if pip_check.returncode != 0:
+            results["success"] = False
+            results["failed_phase"] = "pip_check"
+            results["message"] = f"{message_prefix}Dependency check failed ({pip_check.returncode})"
+            return results
+
+        # Phase 3: All tests (unit + integration + visual)
+        # Use pytest-xdist for parallel execution (-n auto uses all CPU cores)
+        # Tests typically complete in ~15 seconds parallel, 2 min timeout is plenty
+        test_result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-v", "--tb=short", "-n", "auto"],
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+            env=env,
+            timeout=120,
         )
 
         # Parse test counts
@@ -122,6 +187,7 @@ def verify() -> Dict[str, object]:
         for line in test_result.stdout.split("\n"):
             if "passed" in line or "failed" in line:
                 import re
+
                 match = re.search(r"(\d+) passed", line)
                 if match:
                     passed = int(match.group(1))
@@ -139,16 +205,18 @@ def verify() -> Dict[str, object]:
         if test_result.returncode != 0:
             results["success"] = False
             results["failed_phase"] = "tests"
-            results["message"] = f"Tests failed: {failed} failed, {passed} passed"
+            results["message"] = f"{message_prefix}Tests failed: {failed} failed, {passed} passed"
             return results
 
         results["success"] = True
-        results["message"] = f"All checks passed: lint clean, {passed} tests passed"
+        results["message"] = f"{message_prefix}All checks passed: lint clean, {passed} tests passed"
         return results
 
     except subprocess.TimeoutExpired as e:
+        _log_debug(f"verify timeout: {e}")
         return _failure(f"Verification timed out: {e}")
     except Exception as exc:
+        _log_debug(f"verify error: {exc}")
         return _failure(f"Verification error: {exc}")
 
 
@@ -160,12 +228,12 @@ def verify() -> Dict[str, object]:
 # Note: Use IDs where available, CSS class selectors as fallback
 COMPONENT_SELECTORS = {
     # Run tab components
-    "project-path": "#run-top-inputs",
+    "project-path": "#run-top-row",
     "agent-communication": "#agent-chatbot",
     "live-view": "#live-stream-box",
     # Providers tab components
     "provider-summary": "#provider-summary-panel",
-    "provider-card": ".gr-group:has(.provider-card__header-text)",  # First visible provider card
+    "provider-card": ".provider-cards-row .column:has(.provider-card__header-row)",  # First provider card
     "add-provider": "#add-provider-panel",
 }
 
@@ -199,40 +267,45 @@ def screenshot(
         screenshot(tab="run", component="project-path") - Just the project path panel
         screenshot(tab="providers", component="provider-card") - A single provider card
     """
-    normalized = tab.lower().strip()
-    tab_name = "providers" if normalized.startswith("p") else "run"
+    try:
+        _log_debug(f"screenshot start tab={tab} component={component} label={label}")
+        normalized = tab.lower().strip()
+        tab_name = "providers" if normalized.startswith("p") else "run"
 
-    # Resolve component to selector
-    selector = None
-    if component:
-        component_key = component.lower().strip().replace("_", "-")
-        selector = COMPONENT_SELECTORS.get(component_key)
-        if not selector:
-            available = ", ".join(COMPONENT_SELECTORS.keys())
-            return _failure(f"Unknown component '{component}'. Available: {available}")
+        # Resolve component to selector
+        selector = None
+        if component:
+            component_key = component.lower().strip().replace("_", "-")
+            selector = COMPONENT_SELECTORS.get(component_key)
+            if not selector:
+                available = ", ".join(COMPONENT_SELECTORS.keys())
+                return _failure(f"Unknown component '{component}'. Available: {available}")
 
-    result = run_screenshot_subprocess(
-        tab=tab_name,
-        headless=True,
-        viewport={"width": 1280, "height": 900},
-        label=label if label else None,
-        selector=selector,
-    )
+        result = run_screenshot_subprocess(
+            tab=tab_name,
+            headless=True,
+            viewport={"width": 1280, "height": 900},
+            label=label if label else None,
+            selector=selector,
+        )
 
-    if result.get("success"):
-        screenshots = result.get("screenshots") or [result.get("screenshot")]
-        component_info = f" (component: {component})" if component else ""
-        return {
-            "success": True,
-            "tab": tab_name,
-            "component": component or "(full tab)",
-            "selector": selector or "(none)",
-            "label": label or "(none)",
-            "screenshot": result.get("screenshot"),
-            "screenshots": screenshots,
-            "message": f"Screenshots saved{component_info}: {', '.join(screenshots)}",
-        }
-    return _failure(result.get("stderr") or result.get("stdout") or "Screenshot failed")
+        if result.get("success"):
+            screenshots = result.get("screenshots") or [result.get("screenshot")]
+            component_info = f" (component: {component})" if component else ""
+            return {
+                "success": True,
+                "tab": tab_name,
+                "component": component or "(full tab)",
+                "selector": selector or "(none)",
+                "label": label or "(none)",
+                "screenshot": result.get("screenshot"),
+                "screenshots": screenshots,
+                "message": f"Screenshots saved{component_info}: {', '.join(screenshots)}",
+            }
+        return _failure(result.get("stderr") or result.get("stdout") or "Screenshot failed")
+    except Exception as exc:  # pragma: no cover - defensive for MCP stability
+        _log_debug(f"screenshot error: {exc}")
+        return _failure(str(exc))
 
 
 # =============================================================================
@@ -257,7 +330,7 @@ def _get_or_create_tracker(tracker_id: str | None = None) -> HypothesisTracker:
 def hypothesis(
     description: str,
     checks: str,
-    tracker_id: str = "",
+    tracker_id: str | None = None,
 ) -> Dict[str, object]:
     """Record a hypothesis with binary rejection checks.
 
@@ -268,7 +341,7 @@ def hypothesis(
         description: Your theory about what's causing the issue
         checks: Comma-separated list of binary checks that would reject this hypothesis
                 Example: "CSS is being applied,Element exists in DOM,No JS errors"
-        tracker_id: Optional - resume an existing tracker
+        tracker_id: Optional - resume an existing tracker (omit or pass None to start a new one)
 
     Returns:
         tracker_id to use for subsequent calls
@@ -276,7 +349,7 @@ def hypothesis(
         List of checks that need to be verified
     """
     try:
-        tracker = _get_or_create_tracker(tracker_id if tracker_id else None)
+        tracker = _get_or_create_tracker(tracker_id or None)
         check_list = [c.strip() for c in checks.split(",") if c.strip()]
 
         if not check_list:
@@ -289,10 +362,7 @@ def hypothesis(
             "tracker_id": tracker.id,
             "hypothesis_id": hypothesis_id,
             "description": description,
-            "checks_to_verify": [
-                {"index": i, "check": c}
-                for i, c in enumerate(check_list)
-            ],
+            "checks_to_verify": [{"index": i, "check": c} for i, c in enumerate(check_list)],
             "message": f"Hypothesis #{hypothesis_id} recorded. File results for each check using check_result().",
         }
     except Exception as exc:
@@ -378,10 +448,7 @@ def report(tracker_id: str, screenshot_before: str = "", screenshot_after: str =
         # Format for easy reading
         formatted_hypotheses = []
         for h in full_report["hypotheses"]:
-            formatted_hypotheses.append(
-                f"{h['status_icon']} H{h['id']}: {h['description']}\n" +
-                "\n".join(h["checks"])
-            )
+            formatted_hypotheses.append(f"{h['status_icon']} H{h['id']}: {h['description']}\n" + "\n".join(h["checks"]))
 
         return {
             "success": True,
@@ -404,6 +471,7 @@ def report(tracker_id: str, screenshot_before: str = "", screenshot_after: str =
 # =============================================================================
 # Bootstrap/Discovery
 # =============================================================================
+
 
 @SERVER.tool()
 def list_tools() -> Dict[str, object]:
@@ -443,4 +511,9 @@ def list_tools() -> Dict[str, object]:
 
 
 if __name__ == "__main__":
-    SERVER.run()
+    _log_debug("starting chad.mcp_playwright server")
+    try:
+        SERVER.run()
+    except Exception as exc:  # pragma: no cover - ensure transport stays open with error info
+        _log_debug(f"server crash: {exc}")
+        raise

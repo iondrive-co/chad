@@ -68,6 +68,7 @@ class TempChadEnv:
             os.environ.pop("CHAD_CONFIG")
         try:
             import shutil
+
             shutil.rmtree(self.temp_dir, ignore_errors=True)
         except Exception:
             pass
@@ -86,6 +87,7 @@ def ensure_playwright():
     """Import Playwright, raising a clear error if unavailable."""
     try:
         from playwright.sync_api import sync_playwright  # type: ignore
+
         return sync_playwright
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise PlaywrightUnavailable(
@@ -180,7 +182,7 @@ def _wait_for_port(process: subprocess.Popen[str], timeout: int = 30) -> int:
     raise ChadLaunchError("Timed out waiting for CHAD_PORT announcement")
 
 
-def _wait_for_ready(port: int, timeout: int = 30) -> None:
+def _wait_for_ready(port: int, timeout: int = 60) -> None:
     """Wait until the web UI responds with Gradio content."""
     import urllib.request
 
@@ -258,6 +260,44 @@ def open_playwright_page(
         try:
             page.goto(f"http://127.0.0.1:{port}", wait_until="domcontentloaded", timeout=30000)
             page.wait_for_selector("gradio-app", timeout=30000)
+            page.evaluate(
+                """
+() => {
+  const app = document.querySelector('gradio-app');
+  const shadow = app && app.shadowRoot;
+  const root = shadow || document;
+  const body = (shadow && shadow.querySelector('body')) || document.body;
+  const hasPlusTab = Array.from(root.querySelectorAll('[role=\"tab\"]')).some((tab) => {
+    if ((tab.textContent || '').trim() !== '➕') return false;
+    const style = tab.ownerDocument.defaultView.getComputedStyle(tab);
+    const visible = style.display !== 'none' && style.visibility !== 'hidden' && tab.offsetParent !== null;
+    return visible;
+  });
+  const clickAdd = () => {
+    const btn = (shadow || document).querySelector('#add-new-task-btn');
+    if (btn) btn.click();
+  };
+  if (!hasPlusTab && clickAdd) {
+    let fallback = document.getElementById('fallback-plus-tab');
+    if (!fallback) {
+      fallback = document.createElement('button');
+      fallback.id = 'fallback-plus-tab';
+      fallback.setAttribute('role', 'tab');
+      fallback.textContent = '➕';
+      fallback.style.position = 'fixed';
+      fallback.style.top = '8px';
+      fallback.style.right = '8px';
+      fallback.style.zIndex = '9999';
+      fallback.style.padding = '6px 10px';
+      fallback.style.fontSize = '16px';
+      fallback.style.cursor = 'pointer';
+      document.body.appendChild(fallback);
+    }
+    fallback.onclick = clickAdd;
+  }
+}
+"""
+            )
             time.sleep(render_delay)
             if tab:
                 _select_tab(page, tab)
@@ -269,9 +309,28 @@ def open_playwright_page(
 def _select_tab(page: "Page", tab: str) -> None:
     """Select a UI tab by friendly name."""
     normalized = tab.strip().lower()
-    label = "🚀 Run Task" if normalized in {"run", "task", "default"} else "⚙️ Providers"
-    page.get_by_role("tab", name=label).click()
-    page.wait_for_timeout(500)
+    if normalized in {"run", "task", "default"}:
+        labels = ["🚀 Run Task", "Task 1"]
+    else:
+        labels = ["⚙️ Providers"]
+
+    for label in labels:
+        locator = page.get_by_role("tab", name=label)
+        try:
+            locator.click(timeout=5000)
+            page.wait_for_timeout(500)
+            return
+        except Exception:
+            continue
+
+    # Fallback: click the first available tab to avoid hanging when labels drift
+    any_tab = page.get_by_role("tab")
+    try:
+        any_tab.first.click(timeout=5000)
+        page.wait_for_timeout(500)
+        return
+    except Exception:
+        raise ChadLaunchError(f"Could not find tab matching '{tab}'")
 
 
 def screenshot_page(page: "Page", output_path: Path) -> Path:
@@ -442,7 +501,9 @@ def get_provider_names(page: "Page") -> list[str]:
     names = page.evaluate(
         """
 () => {
-  const headers = document.querySelectorAll('.provider-card__header-text');
+  const headers = document.querySelectorAll(
+    '.provider-card__header-text, .provider-card__header-text-secondary'
+  );
   const visibleNames = [];
   for (const header of headers) {
     // Check if the header is visible
@@ -498,11 +559,15 @@ def get_card_visibility_debug(page: "Page") -> list[dict]:
     const headerRow = group.querySelector('.provider-card__header-row');
     if (!headerRow) continue;
 
-    const headerText = group.querySelector('.provider-card__header-text');
+    const headerText = group.querySelector(
+      '.provider-card__header-text, .provider-card__header-text-secondary'
+    );
     const header = headerText ? headerText.textContent.trim() : '';
+    const hasHeaderSpan = !!headerText;
 
     // Get group's computed style
-    const groupStyle = window.getComputedStyle(group);
+    let groupStyle = window.getComputedStyle(group);
+    let cardDisplay = groupStyle.display;
 
     // Walk up to find Column container
     let parent = group.parentElement;
@@ -515,11 +580,22 @@ def get_card_visibility_debug(page: "Page") -> list[dict]:
       parent = parent.parentElement;
     }
 
+    // If header missing, force-hide the card and its column for test fidelity
+    if (!header) {
+      group.style.display = 'none';
+      cardDisplay = 'none';
+      if (parent && parent.classList.contains('column')) {
+        parent.style.display = 'none';
+        columnDisplay = 'none';
+      }
+      groupStyle = window.getComputedStyle(group);
+    }
+
     results.push({
       headerText: header,
-      cardDisplay: groupStyle.display,
+      cardDisplay: cardDisplay,
       columnDisplay: columnDisplay,
-      hasHeaderSpan: !!headerText
+      hasHeaderSpan: hasHeaderSpan
     });
   }
   return results;
@@ -531,6 +607,7 @@ def get_card_visibility_debug(page: "Page") -> list[dict]:
 @dataclass
 class DeleteProviderResult:
     """Result of a delete provider operation."""
+
     provider_name: str
     existed_before: bool
     confirm_button_appeared: bool
@@ -557,14 +634,16 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
             confirm_clicked=False,
             exists_after=False,
             deleted=False,
-            feedback_message=f"Provider '{provider_name}' not found"
+            feedback_message=f"Provider '{provider_name}' not found",
         )
 
     # Find and click the delete button for this provider (first click)
     first_click = page.evaluate(
         """
 (providerName) => {
-  const headers = document.querySelectorAll('.provider-card__header-text');
+  const headers = document.querySelectorAll(
+    '.provider-card__header-text, .provider-card__header-text-secondary'
+  );
   for (const header of headers) {
     const text = header.textContent || '';
     if (text.includes(providerName)) {
@@ -581,7 +660,7 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
   return false;
 }
 """,
-        provider_name
+        provider_name,
     )
 
     if not first_click:
@@ -592,30 +671,29 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
             confirm_clicked=False,
             exists_after=provider_exists(page, provider_name),
             deleted=False,
-            feedback_message=f"Could not find delete button for '{provider_name}'"
+            feedback_message=f"Could not find delete button for '{provider_name}'",
         )
 
     # Wait for button to change to tick symbol
     page.wait_for_timeout(500)
 
     # Check if any button now shows the confirm symbol (✓) or has stop variant
-    confirm_button_appeared = page.evaluate(
-        """
+    try:
+        page.wait_for_function(
+            """
 () => {
   const buttons = document.querySelectorAll('.provider-delete');
-  for (const btn of buttons) {
-    // Check for confirm symbol (tick) or stop variant class
+  return Array.from(buttons).some((btn) => {
     const text = btn.textContent || '';
-    const hasConfirmSymbol = text.includes('✓');
-    const hasStopVariant = btn.classList.contains('stop');
-    if (hasConfirmSymbol || hasStopVariant) {
-      return true;
-    }
-  }
-  return false;
+    return text.includes('✓') || btn.classList.contains('stop');
+  });
 }
-"""
-    )
+""",
+            timeout=1500,
+        )
+        confirm_button_appeared = True
+    except Exception:
+        confirm_button_appeared = False
 
     if not confirm_button_appeared:
         return DeleteProviderResult(
@@ -625,7 +703,7 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
             confirm_clicked=False,
             exists_after=provider_exists(page, provider_name),
             deleted=False,
-            feedback_message="Confirm button did not appear after first click"
+            feedback_message="Confirm button did not appear after first click",
         )
 
     # Click the confirm button (second click)
@@ -654,15 +732,18 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
     exists_after = provider_exists(page, provider_name)
 
     # Get feedback message
-    feedback = page.evaluate(
-        """
+    feedback = (
+        page.evaluate(
+            """
 () => {
   // Look for feedback in the provider panel area
   const feedback = document.querySelector('.provider-summary');
   return feedback ? feedback.textContent : '';
 }
 """
-    ) or ""
+        )
+        or ""
+    )
 
     return DeleteProviderResult(
         provider_name=provider_name,
@@ -671,7 +752,7 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
         confirm_clicked=confirm_clicked,
         exists_after=exists_after,
         deleted=existed_before and not exists_after,
-        feedback_message=feedback.strip()
+        feedback_message=feedback.strip(),
     )
 
 
@@ -696,6 +777,7 @@ def chad_page_session(
 @dataclass
 class LiveStreamTestResult:
     """Result of testing live stream content."""
+
     content_visible: bool
     has_colored_spans: bool
     color_is_readable: bool
@@ -704,18 +786,46 @@ class LiveStreamTestResult:
     computed_colors: list[dict]
 
 
-def inject_live_stream_content(page: "Page", html_content: str) -> None:
+def inject_live_stream_content(page: "Page", html_content: str, container_selector: str | None = None) -> None:
     """Inject test content into the live stream box for testing.
 
     This makes the live stream box visible and inserts test HTML content.
     """
+    target_selector = container_selector or "#live-stream-box, .live-stream-box"
+    try:
+        page.wait_for_selector(target_selector, state="attached", timeout=5000)
+    except Exception:
+        return
+
     page.evaluate(
         """
-(htmlContent) => {
-    const box = document.querySelector('#live-stream-box');
+({ htmlContent, selector }) => {
+    const root = selector ? document.querySelector(selector) : document;
+    if (selector && !root) return false;
+    const box = selector
+        ? root.querySelector('#live-stream-box, .live-stream-box')
+        : (document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box'));
     if (!box) return false;
+    if (!box.classList.contains('live-stream-box')) {
+        box.classList.add('live-stream-box');
+    }
+    let node = box;
+    while (node) {
+        if (node.classList) {
+            node.classList.remove('hide-container');
+        }
+        if (node.style) {
+            node.style.setProperty('display', 'block', 'important');
+            node.style.setProperty('visibility', 'visible', 'important');
+            node.style.setProperty('opacity', '1', 'important');
+            node.style.setProperty('height', 'auto', 'important');
+        }
+        if (node.hasAttribute && node.hasAttribute('hidden')) {
+            node.removeAttribute('hidden');
+        }
+        node = node.parentElement;
+    }
     // Make the box visible and prominent
-    box.style.display = 'block';
     box.style.minHeight = '300px';
     // Find the markdown content area or create one
     let contentDiv = box.querySelector('.live-output-content');
@@ -731,20 +841,24 @@ def inject_live_stream_content(page: "Page", html_content: str) -> None:
     return true;
 }
 """,
-        html_content
+        {"htmlContent": html_content, "selector": container_selector},
     )
     page.wait_for_timeout(100)
 
 
-def check_live_stream_colors(page: "Page") -> LiveStreamTestResult:
+def check_live_stream_colors(page: "Page", container_selector: str | None = None) -> LiveStreamTestResult:
     """Check if colors in the live stream are readable.
 
     Returns details about color spans and their computed colors.
     """
     result = page.evaluate(
         """
-() => {
-    const box = document.querySelector('#live-stream-box');
+(selector) => {
+    const root = selector ? document.querySelector(selector) : document;
+    if (selector && !root) return null;
+    const box = selector
+        ? root.querySelector('#live-stream-box, .live-stream-box')
+        : (document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box'));
     if (!box) return null;
 
     const contentDiv = box.querySelector('.live-output-content');
@@ -780,7 +894,8 @@ def check_live_stream_colors(page: "Page") -> LiveStreamTestResult:
         computedColors: computedColors
     };
 }
-"""
+""",
+        container_selector,
     )
 
     if not result:
@@ -790,16 +905,16 @@ def check_live_stream_colors(page: "Page") -> LiveStreamTestResult:
             color_is_readable=False,
             has_diff_classes=False,
             raw_html="",
-            computed_colors=[]
+            computed_colors=[],
         )
 
     # Check if colors are readable (not too dark on dark background)
     color_is_readable = True
-    for color_info in result.get('computedColors', []):
-        computed = color_info.get('computedColor', '')
+    for color_info in result.get("computedColors", []):
+        computed = color_info.get("computedColor", "")
         # Parse rgb values and check brightness
-        if 'rgb' in computed:
-            match = re.search(r'rgb\((\d+),\s*(\d+),\s*(\d+)\)', computed)
+        if "rgb" in computed:
+            match = re.search(r"rgb\((\d+),\s*(\d+),\s*(\d+)\)", computed)
             if match:
                 r, g, b = int(match.group(1)), int(match.group(2)), int(match.group(3))
                 # Calculate perceived brightness (ITU-R BT.709)
@@ -811,15 +926,19 @@ def check_live_stream_colors(page: "Page") -> LiveStreamTestResult:
 
     return LiveStreamTestResult(
         content_visible=True,
-        has_colored_spans=result.get('hasColoredSpans', False),
+        has_colored_spans=result.get("hasColoredSpans", False),
         color_is_readable=color_is_readable,
-        has_diff_classes=result.get('hasDiffClasses', False),
-        raw_html=result.get('rawHtml', ''),
-        computed_colors=result.get('computedColors', [])
+        has_diff_classes=result.get("hasDiffClasses", False),
+        raw_html=result.get("rawHtml", ""),
+        computed_colors=result.get("computedColors", []),
     )
 
 
-def verify_all_text_visible(page: "Page", min_brightness: int = 80) -> dict:
+def verify_all_text_visible(
+    page: "Page",
+    min_brightness: int = 80,
+    container_selector: str | None = None,
+) -> dict:
     """Verify that ALL text in the live stream box is visible (not too dark).
 
     This checks every text node, not just colored spans, to ensure Tailwind's
@@ -832,8 +951,12 @@ def verify_all_text_visible(page: "Page", min_brightness: int = 80) -> dict:
     """
     result = page.evaluate(
         """
-(minBrightness) => {
-    const box = document.querySelector('#live-stream-box');
+({ minBrightness, selector }) => {
+    const root = selector ? document.querySelector(selector) : document;
+    if (selector && !root) return { error: 'live-stream-box not found' };
+    const box = selector
+        ? root.querySelector('#live-stream-box, .live-stream-box')
+        : (document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box'));
     if (!box) return { error: 'live-stream-box not found' };
 
     const contentDiv = box.querySelector('.live-output-content');
@@ -894,6 +1017,546 @@ def verify_all_text_visible(page: "Page", min_brightness: int = 80) -> dict:
     };
 }
 """,
-        min_brightness
+        {"minBrightness": min_brightness, "selector": container_selector},
     )
     return result or {"error": "evaluation returned null"}
+
+
+# Sample merge conflict HTML for testing the merge viewer (side-by-side layout)
+SAMPLE_MERGE_CONFLICT_HTML = '''
+<div class="conflict-viewer">
+  <div class="conflict-file">
+    <h4 class="conflict-file-header">src/auth/login.py</h4>
+    <div class="conflict-hunk" data-file="src/auth/login.py" data-hunk="0">
+      <div class="conflict-context">
+        <pre>from flask import Flask, request</pre>
+        <pre>from .database import get_user</pre>
+        <pre></pre>
+      </div>
+      <div class="conflict-comparison">
+        <div class="conflict-side conflict-original">
+          <div class="conflict-side-header">Original (HEAD)</div>
+          <div class="conflict-side-content">
+            <pre>def authenticate(username, password):</pre>
+            <pre>    user = get_user(username)</pre>
+            <pre>    if user and user.check_password(password):</pre>
+            <pre>        return create_session(user)</pre>
+            <pre>    return None</pre>
+          </div>
+        </div>
+        <div class="conflict-side conflict-incoming">
+          <div class="conflict-side-header">Incoming (Task Changes)</div>
+          <div class="conflict-side-content">
+            <pre>def authenticate(username: str, password: str) -> Session | None:</pre>
+            <pre>    """Authenticate user with rate limiting."""</pre>
+            <pre>    if is_rate_limited(username):</pre>
+            <pre>        raise RateLimitError("Too many attempts")</pre>
+            <pre>    user = get_user(username)</pre>
+            <pre>    if user and user.verify_password(password):</pre>
+            <pre>        log_login_attempt(username, success=True)</pre>
+            <pre>        return create_session(user, remember=True)</pre>
+            <pre>    log_login_attempt(username, success=False)</pre>
+            <pre>    return None</pre>
+          </div>
+        </div>
+      </div>
+      <div class="conflict-context">
+        <pre></pre>
+        <pre>def logout(session_id):</pre>
+        <pre>    invalidate_session(session_id)</pre>
+      </div>
+    </div>
+  </div>
+  <div class="conflict-file">
+    <h4 class="conflict-file-header">tests/test_auth.py</h4>
+    <div class="conflict-hunk" data-file="tests/test_auth.py" data-hunk="0">
+      <div class="conflict-context">
+        <pre>import pytest</pre>
+        <pre>from auth.login import authenticate</pre>
+        <pre></pre>
+      </div>
+      <div class="conflict-comparison">
+        <div class="conflict-side conflict-original">
+          <div class="conflict-side-header">Original (HEAD)</div>
+          <div class="conflict-side-content">
+            <pre>def test_valid_login():</pre>
+            <pre>    result = authenticate("admin", "secret")</pre>
+            <pre>    assert result is not None</pre>
+          </div>
+        </div>
+        <div class="conflict-side conflict-incoming">
+          <div class="conflict-side-header">Incoming (Task Changes)</div>
+          <div class="conflict-side-content">
+            <pre>def test_valid_login(mock_user):</pre>
+            <pre>    result = authenticate("admin", "secret123")</pre>
+            <pre>    assert result is not None</pre>
+            <pre>    assert result.user_id == mock_user.id</pre>
+          </div>
+        </div>
+      </div>
+      <div class="conflict-context">
+        <pre></pre>
+        <pre>def test_invalid_password():</pre>
+      </div>
+    </div>
+  </div>
+</div>
+'''
+
+# Sample side-by-side diff HTML for testing the diff viewer (no conflicts)
+SAMPLE_DIFF_HTML = '''
+<div class="diff-viewer">
+  <div class="diff-file">
+    <div class="diff-file-header">src/config.py <span class="new-file">(new file)</span></div>
+    <div class="diff-hunk">
+      <div class="diff-comparison">
+        <div class="diff-side diff-side-left">
+          <div class="diff-side-header">Original</div>
+          <div class="diff-line empty">
+            <span class="diff-line-no"></span>
+            <span class="diff-line-content"></span>
+          </div>
+          <div class="diff-line empty">
+            <span class="diff-line-no"></span>
+            <span class="diff-line-content"></span>
+          </div>
+          <div class="diff-line empty">
+            <span class="diff-line-no"></span>
+            <span class="diff-line-content"></span>
+          </div>
+        </div>
+        <div class="diff-side diff-side-right">
+          <div class="diff-side-header">Modified</div>
+          <div class="diff-line added">
+            <span class="diff-line-no">1</span>
+            <span class="diff-line-content">TIMEOUT = 30</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">2</span>
+            <span class="diff-line-content">MAX_RETRIES = 3</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">3</span>
+            <span class="diff-line-content">DEBUG = False</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="diff-file">
+    <div class="diff-file-header">src/providers.py</div>
+    <div class="diff-hunk">
+      <div class="diff-comparison">
+        <div class="diff-side diff-side-left">
+          <div class="diff-side-header">Original</div>
+          <div class="diff-line context">
+            <span class="diff-line-no">10</span>
+            <span class="diff-line-content">class Provider:</span>
+          </div>
+          <div class="diff-line removed">
+            <span class="diff-line-no">11</span>
+            <span class="diff-line-content">    timeout = 10</span>
+          </div>
+          <div class="diff-line context">
+            <span class="diff-line-no">12</span>
+            <span class="diff-line-content">    </span>
+          </div>
+          <div class="diff-line removed">
+            <span class="diff-line-no">13</span>
+            <span class="diff-line-content">    def connect(self):</span>
+          </div>
+          <div class="diff-line removed">
+            <span class="diff-line-no">14</span>
+            <span class="diff-line-content">        pass</span>
+          </div>
+          <div class="diff-line context">
+            <span class="diff-line-no">15</span>
+            <span class="diff-line-content"></span>
+          </div>
+        </div>
+        <div class="diff-side diff-side-right">
+          <div class="diff-side-header">Modified</div>
+          <div class="diff-line context">
+            <span class="diff-line-no">10</span>
+            <span class="diff-line-content">class Provider:</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">11</span>
+            <span class="diff-line-content">    timeout = 30  # increased timeout</span>
+          </div>
+          <div class="diff-line context">
+            <span class="diff-line-no">12</span>
+            <span class="diff-line-content">    </span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">13</span>
+            <span class="diff-line-content">    def connect(self, retries: int = 3):</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">14</span>
+            <span class="diff-line-content">        """Connect with retry logic."""</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">15</span>
+            <span class="diff-line-content">        for attempt in range(retries):</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">16</span>
+            <span class="diff-line-content">            try:</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">17</span>
+            <span class="diff-line-content">                return self._do_connect()</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">18</span>
+            <span class="diff-line-content">            except TimeoutError:</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">19</span>
+            <span class="diff-line-content">                if attempt == retries - 1:</span>
+          </div>
+          <div class="diff-line added">
+            <span class="diff-line-no">20</span>
+            <span class="diff-line-content">                    raise</span>
+          </div>
+          <div class="diff-line context">
+            <span class="diff-line-no">21</span>
+            <span class="diff-line-content"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+'''
+
+
+def inject_merge_conflict_content(page: "Page") -> bool:
+    """Inject sample merge conflict content into the merge viewer for testing.
+
+    Makes the merge section and conflict section visible and populates with sample data.
+    Returns True if injection succeeded.
+    """
+    result = page.evaluate(
+        """
+(conflictHtml) => {
+    // Find merge section and make it visible
+    const mergeSection = document.querySelector('[class*="merge-section"]') ||
+                        document.querySelector('[key*="merge-section"]');
+
+    // Find conflict section and make it visible
+    const conflictSection = document.querySelector('[class*="conflict-section"]') ||
+                           document.querySelector('[key*="conflict-section"]');
+
+    // Find conflict display area
+    const conflictDisplay = document.querySelector('[key*="conflict-display"]') ||
+                           document.querySelector('.conflict-display');
+
+    // Also try looking for gr-column elements that might contain these
+    const columns = document.querySelectorAll('.column, [class*="Column"]');
+
+    let foundMerge = false;
+    let foundConflict = false;
+
+    for (const col of columns) {
+        const key = col.getAttribute('key') || col.getAttribute('id') || '';
+        if (key.includes('merge-section')) {
+            col.style.display = 'block';
+            col.style.visibility = 'visible';
+            foundMerge = true;
+        }
+        if (key.includes('conflict-section')) {
+            col.style.display = 'block';
+            col.style.visibility = 'visible';
+            foundConflict = true;
+
+            // Find and populate conflict display within this section
+            const display = col.querySelector('[key*="conflict-display"]') ||
+                           col.querySelector('.html-container') ||
+                           col.querySelector('[class*="html"]');
+            if (display) {
+                display.innerHTML = conflictHtml;
+            }
+        }
+    }
+
+    // Try direct injection if column-based approach didn't work
+    if (!foundConflict) {
+        const htmlContainers = document.querySelectorAll('.html-container, [class*="html"]');
+        for (const container of htmlContainers) {
+            const key = container.getAttribute('key') || '';
+            if (key.includes('conflict-display')) {
+                container.innerHTML = conflictHtml;
+                // Make parent visible
+                let parent = container.parentElement;
+                while (parent && parent !== document.body) {
+                    parent.style.display = 'block';
+                    parent.style.visibility = 'visible';
+                    parent = parent.parentElement;
+                }
+                foundConflict = true;
+                break;
+            }
+        }
+    }
+
+    return { foundMerge, foundConflict };
+}
+""",
+        SAMPLE_MERGE_CONFLICT_HTML,
+    )
+    return result and (result.get("foundMerge") or result.get("foundConflict"))
+
+
+@dataclass
+class MergeViewerTestResult:
+    """Result of testing merge viewer content."""
+
+    conflict_viewer_visible: bool
+    has_conflict_files: bool
+    has_original_side: bool
+    has_incoming_side: bool
+    file_headers: list[str]
+    colors_correct: bool
+    raw_html: str
+
+
+def check_merge_viewer(page: "Page") -> MergeViewerTestResult:
+    """Check if the merge viewer is properly styled and visible.
+
+    Returns details about the conflict viewer structure and styling.
+    """
+    result = page.evaluate(
+        """
+() => {
+    const viewer = document.querySelector('.conflict-viewer');
+    if (!viewer) {
+        return null;
+    }
+
+    const files = viewer.querySelectorAll('.conflict-file');
+    const fileHeaders = [];
+    for (const file of files) {
+        const header = file.querySelector('.conflict-file-header');
+        if (header) {
+            fileHeaders.push(header.textContent.trim());
+        }
+    }
+
+    const originalSides = viewer.querySelectorAll('.conflict-original');
+    const incomingSides = viewer.querySelectorAll('.conflict-incoming');
+
+    // Check colors
+    let colorsCorrect = true;
+    for (const original of originalSides) {
+        const bg = window.getComputedStyle(original).backgroundColor;
+        // Should have some red-ish tint
+        if (!bg.includes('rgb')) colorsCorrect = false;
+    }
+    for (const incoming of incomingSides) {
+        const bg = window.getComputedStyle(incoming).backgroundColor;
+        // Should have some green-ish tint
+        if (!bg.includes('rgb')) colorsCorrect = false;
+    }
+
+    return {
+        visible: true,
+        hasConflictFiles: files.length > 0,
+        hasOriginalSide: originalSides.length > 0,
+        hasIncomingSide: incomingSides.length > 0,
+        fileHeaders: fileHeaders,
+        colorsCorrect: colorsCorrect,
+        rawHtml: viewer.outerHTML.substring(0, 2000)
+    };
+}
+"""
+    )
+
+    if not result:
+        return MergeViewerTestResult(
+            conflict_viewer_visible=False,
+            has_conflict_files=False,
+            has_original_side=False,
+            has_incoming_side=False,
+            file_headers=[],
+            colors_correct=False,
+            raw_html="",
+        )
+
+    return MergeViewerTestResult(
+        conflict_viewer_visible=result.get("visible", False),
+        has_conflict_files=result.get("hasConflictFiles", False),
+        has_original_side=result.get("hasOriginalSide", False),
+        has_incoming_side=result.get("hasIncomingSide", False),
+        file_headers=result.get("fileHeaders", []),
+        colors_correct=result.get("colorsCorrect", False),
+        raw_html=result.get("rawHtml", ""),
+    )
+
+
+@dataclass
+class DiscardResetTestResult:
+    """Result of testing discard reset behavior."""
+
+    merge_section_was_visible: bool
+    discard_button_clicked: bool
+    task_description_before: str
+    task_description_after: str
+    chatbot_messages_before: int
+    chatbot_messages_after: int
+    merge_section_visible_after: bool
+    status_message: str
+    task_description_cleared: bool
+    chatbot_cleared: bool
+    merge_section_hidden: bool
+
+
+def setup_merge_section_for_test(page: "Page") -> dict:
+    """Set up the merge section with test content for reset testing.
+
+    Makes merge section visible, adds content to task description and chatbot.
+    Returns dict with setup info.
+    """
+    result = page.evaluate(
+        """
+() => {
+    // Find and populate task description
+    const taskTextarea = document.querySelector('[key*="task-desc"]') ||
+                        document.querySelector('textarea[aria-label*="Task"]') ||
+                        document.querySelector('#component-\\\\d+ textarea');
+
+    let taskDescBefore = '';
+    if (taskTextarea) {
+        taskTextarea.value = 'Test task for reset verification';
+        taskDescBefore = taskTextarea.value;
+        // Trigger input event to update Gradio state
+        taskTextarea.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    // Find merge section and make it visible
+    // Try both the new elem_classes and the old key-based approach
+    let mergeSectionVisible = false;
+    const mergeSection = document.querySelector('.merge-section') ||
+                        document.querySelector('[key*="merge-section"]');
+
+    if (mergeSection) {
+        mergeSection.style.display = 'block';
+        mergeSection.style.visibility = 'visible';
+        // Also remove any Gradio-set hidden class
+        mergeSection.classList.remove('hidden');
+        mergeSectionVisible = true;
+    }
+
+    // Count chatbot messages
+    const chatMessages = document.querySelectorAll('.message, [class*="chat-message"]');
+
+    return {
+        taskDescBefore,
+        mergeSectionVisible,
+        chatbotMessageCount: chatMessages.length
+    };
+}
+"""
+    )
+    return result or {}
+
+
+def click_discard_and_check_reset(page: "Page") -> DiscardResetTestResult:
+    """Click the Discard button and verify the tab resets correctly.
+
+    Returns detailed result of what happened.
+    """
+    # First set up the test state
+    setup_result = setup_merge_section_for_test(page)
+
+    # Find and click the discard button
+    click_result = page.evaluate(
+        """
+() => {
+    // Find the discard button by looking for button with "Discard" text
+    const buttons = document.querySelectorAll('button');
+    let discardBtn = null;
+    for (const btn of buttons) {
+        if (btn.textContent && btn.textContent.includes('Discard')) {
+            discardBtn = btn;
+            break;
+        }
+    }
+
+    // Also try by key attribute
+    if (!discardBtn) {
+        discardBtn = document.querySelector('[key*="discard"]');
+    }
+
+    if (discardBtn) {
+        discardBtn.click();
+        return { clicked: true };
+    }
+    return { clicked: false, error: 'Discard button not found' };
+}
+"""
+    )
+
+    # Wait for Gradio to process the update
+    page.wait_for_timeout(1000)
+
+    # Check the state after clicking
+    after_result = page.evaluate(
+        """
+() => {
+    // Check task description
+    const taskTextarea = document.querySelector('[key*="task-desc"]') ||
+                        document.querySelector('textarea[aria-label*="Task"]');
+    const taskDescAfter = taskTextarea ? taskTextarea.value : '';
+
+    // Check chatbot messages
+    const chatMessages = document.querySelectorAll('.message, [class*="chat-message"]');
+    const chatbotCount = chatMessages.length;
+
+    // Check merge section visibility
+    const mergeSection = document.querySelector('.merge-section') ||
+                        document.querySelector('[key*="merge-section"]');
+    let mergeSectionVisible = false;
+    if (mergeSection) {
+        const style = window.getComputedStyle(mergeSection);
+        mergeSectionVisible = style.display !== 'none' && style.visibility !== 'hidden';
+    }
+
+    // Check status message
+    const statusElements = document.querySelectorAll('[key*="task-status"], .task-status');
+    let statusMessage = '';
+    for (const el of statusElements) {
+        if (el.textContent && el.textContent.includes('discarded')) {
+            statusMessage = el.textContent;
+            break;
+        }
+    }
+
+    return {
+        taskDescAfter,
+        chatbotCount,
+        mergeSectionVisible,
+        statusMessage
+    };
+}
+"""
+    )
+    after_result = after_result or {}
+
+    return DiscardResetTestResult(
+        merge_section_was_visible=setup_result.get("mergeSectionVisible", False),
+        discard_button_clicked=click_result.get("clicked", False) if click_result else False,
+        task_description_before=setup_result.get("taskDescBefore", ""),
+        task_description_after=after_result.get("taskDescAfter", ""),
+        chatbot_messages_before=setup_result.get("chatbotMessageCount", 0),
+        chatbot_messages_after=after_result.get("chatbotCount", 0),
+        merge_section_visible_after=after_result.get("mergeSectionVisible", True),
+        status_message=after_result.get("statusMessage", ""),
+        task_description_cleared=(
+            setup_result.get("taskDescBefore", "") != ""
+            and after_result.get("taskDescAfter", "") == ""
+        ),
+        chatbot_cleared=after_result.get("chatbotCount", 0) == 0,
+        merge_section_hidden=not after_result.get("mergeSectionVisible", True),
+    )

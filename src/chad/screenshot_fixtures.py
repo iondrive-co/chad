@@ -121,6 +121,7 @@ MOCK_ACCOUNTS = {
 # Usage Text Generators
 # =============================================================================
 
+
 def _progress_bar(utilization_pct: float, width: int = 20) -> str:
     """Create a text progress bar."""
     filled = int(max(0.0, min(100.0, utilization_pct)) / (100 / width))
@@ -299,10 +300,7 @@ LIVE_VIEW_CONTENT = """<div class="live-output-content">
 # =============================================================================
 
 CHAT_HISTORY = [
-    {
-        "role": "user",
-        "content": "Add a feature to show remaining API capacity for each provider"
-    },
+    {"role": "user", "content": "Add a feature to show remaining API capacity for each provider"},
     {
         "role": "assistant",
         "content": """I'll implement a capacity tracking feature for the provider panel.
@@ -330,7 +328,7 @@ The capacity indicator now shows next to each provider with color coding:
 - 🟡 Yellow: 20-50% remaining
 - 🔴 Red: <20% remaining
 
-Ready for follow-up requests."""
+Ready for follow-up requests.""",
     },
 ]
 
@@ -338,6 +336,7 @@ Ready for follow-up requests."""
 # =============================================================================
 # Setup Functions
 # =============================================================================
+
 
 def setup_mock_accounts(security_mgr, password: str) -> None:
     """Register all mock accounts with the security manager."""
@@ -347,7 +346,7 @@ def setup_mock_accounts(security_mgr, password: str) -> None:
             account_data["provider"],
             "",  # No real API key needed for mock
             password,
-            account_data.get("model", "default")
+            account_data.get("model", "default"),
         )
         reasoning = account_data.get("reasoning", "default")
         if reasoning != "default":
@@ -367,13 +366,9 @@ def create_mock_codex_auth(home_dir: Path, account_data: dict) -> None:
     # Create a mock JWT payload (not a real token, just structured data)
     exp_timestamp = int((datetime.now() + timedelta(days=7)).timestamp())
     jwt_payload = {
-        "https://api.openai.com/auth": {
-            "chatgpt_plan_type": account_data.get("plan", "plus").lower()
-        },
-        "https://api.openai.com/profile": {
-            "email": account_data.get("email", "user@example.com")
-        },
-        "exp": exp_timestamp
+        "https://api.openai.com/auth": {"chatgpt_plan_type": account_data.get("plan", "plus").lower()},
+        "https://api.openai.com/profile": {"email": account_data.get("email", "user@example.com")},
+        "exp": exp_timestamp,
     }
 
     # Create fake JWT (header.payload.signature)
@@ -381,12 +376,7 @@ def create_mock_codex_auth(home_dir: Path, account_data: dict) -> None:
     payload = base64.urlsafe_b64encode(json.dumps(jwt_payload).encode()).decode().rstrip("=")
     fake_token = f"{header}.{payload}.fake_signature"
 
-    auth_data = {
-        "tokens": {
-            "access_token": fake_token,
-            "refresh_token": "mock_refresh_token"
-        }
-    }
+    auth_data = {"tokens": {"access_token": fake_token, "refresh_token": "mock_refresh_token"}}
 
     with open(codex_dir / "auth.json", "w") as f:
         json.dump(auth_data, f)
@@ -402,7 +392,7 @@ def create_mock_claude_creds(config_dir: Path, account_data: dict) -> None:
             "accessToken": "mock_access_token",
             "refreshToken": "mock_refresh_token",
             "subscriptionType": plan.lower(),
-            "expiresAt": int((datetime.now() + timedelta(hours=8)).timestamp() * 1000)
+            "expiresAt": int((datetime.now() + timedelta(hours=8)).timestamp() * 1000),
         }
     }
 
@@ -414,12 +404,7 @@ def create_mock_gemini_creds(gemini_dir: Path) -> None:
     """Create mock Gemini OAuth credentials."""
     gemini_dir.mkdir(parents=True, exist_ok=True)
 
-    creds = {
-        "installed": {
-            "client_id": "mock_client_id",
-            "client_secret": "mock_secret"
-        }
-    }
+    creds = {"installed": {"client_id": "mock_client_id", "client_secret": "mock_secret"}}
 
     with open(gemini_dir / "oauth_creds.json", "w") as f:
         json.dump(creds, f)

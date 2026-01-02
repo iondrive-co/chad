@@ -2,12 +2,13 @@
 
 import glob
 import os
-import pty
 import re
 import select
 import shutil
 import subprocess
 import time
+import threading
+import queue
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,15 @@ from typing import Callable
 from .installer import AIToolInstaller
 from .installer import DEFAULT_TOOLS_DIR
 from .mcp_config import ensure_global_mcp_config
+
+try:
+    import pty
+except ImportError:  # pragma: no cover - only hit on Windows
+    pty = None
+
+_HAS_PTY = pty is not None
+
+CODEX_IDLE_TIMEOUT = 180.0
 
 
 def find_cli_executable(name: str) -> str:
@@ -41,7 +51,7 @@ def find_cli_executable(name: str) -> str:
         return found
 
     # Common locations for Node.js tools (nvm, fnm, etc.)
-    home = os.path.expanduser('~')
+    home = os.path.expanduser("~")
     search_patterns = [
         f"{home}/.nvm/versions/node/*/bin/{name}",
         f"{home}/.fnm/node-versions/*/installation/bin/{name}",
@@ -76,7 +86,7 @@ def parse_codex_output(raw_output: str | None) -> str:  # noqa: C901
     if not raw_output:
         return ""
 
-    lines = raw_output.split('\n')
+    lines = raw_output.split("\n")
     result_parts = []
     in_thinking = False
     in_response = False
@@ -89,35 +99,45 @@ def parse_codex_output(raw_output: str | None) -> str:  # noqa: C901
         stripped = line.strip()
 
         # Skip header block (OpenAI Codex version info)
-        if line.startswith('OpenAI Codex') or line.startswith('--------'):
+        if line.startswith("OpenAI Codex") or line.startswith("--------"):
             i += 1
             continue
 
         # Skip metadata lines
-        if any(stripped.startswith(prefix) for prefix in [
-            'workdir:', 'model:', 'provider:', 'approval:', 'sandbox:',
-            'reasoning effort:', 'reasoning summaries:', 'session id:',
-            'mcp startup:', 'tokens used'
-        ]):
+        if any(
+            stripped.startswith(prefix)
+            for prefix in [
+                "workdir:",
+                "model:",
+                "provider:",
+                "approval:",
+                "sandbox:",
+                "reasoning effort:",
+                "reasoning summaries:",
+                "session id:",
+                "mcp startup:",
+                "tokens used",
+            ]
+        ):
             i += 1
             continue
 
         # Skip standalone numbers (token counts) - including comma-separated like "4,481"
-        if stripped.replace(',', '').isdigit() and len(stripped) <= 10:
+        if stripped.replace(",", "").isdigit() and len(stripped) <= 10:
             i += 1
             continue
 
         # Skip 'user' marker lines
-        if stripped == 'user':
+        if stripped == "user":
             i += 1
             continue
 
         # Handle exec blocks - skip until next known marker
-        if stripped.startswith('exec'):
+        if stripped.startswith("exec"):
             in_exec = True
             # Save current thinking section before exec
             if in_thinking and current_section:
-                result_parts.append(('thinking', '\n'.join(current_section)))
+                result_parts.append(("thinking", "\n".join(current_section)))
                 current_section = []
             in_thinking = False
             i += 1
@@ -125,7 +145,7 @@ def parse_codex_output(raw_output: str | None) -> str:  # noqa: C901
 
         # End exec block on next marker
         if in_exec:
-            if stripped in ('thinking', 'codex'):
+            if stripped in ("thinking", "codex"):
                 in_exec = False
                 # Fall through to handle the marker
             else:
@@ -133,11 +153,11 @@ def parse_codex_output(raw_output: str | None) -> str:  # noqa: C901
                 continue
 
         # Capture thinking sections
-        if stripped == 'thinking':
+        if stripped == "thinking":
             # Save previous section if any
             if current_section:
-                section_type = 'response' if in_response else 'thinking'
-                result_parts.append((section_type, '\n'.join(current_section)))
+                section_type = "response" if in_response else "thinking"
+                result_parts.append((section_type, "\n".join(current_section)))
             in_thinking = True
             in_response = False
             current_section = []
@@ -145,11 +165,11 @@ def parse_codex_output(raw_output: str | None) -> str:  # noqa: C901
             continue
 
         # Capture codex response (final answer)
-        if stripped == 'codex':
+        if stripped == "codex":
             # Save previous section if any
             if current_section:
-                section_type = 'response' if in_response else 'thinking'
-                result_parts.append((section_type, '\n'.join(current_section)))
+                section_type = "response" if in_response else "thinking"
+                result_parts.append((section_type, "\n".join(current_section)))
             in_thinking = False
             in_response = True
             current_section = []
@@ -169,42 +189,42 @@ def parse_codex_output(raw_output: str | None) -> str:  # noqa: C901
 
     # Add final section
     if current_section:
-        section_type = 'response' if in_response else 'thinking'
-        result_parts.append((section_type, '\n'.join(current_section)))
+        section_type = "response" if in_response else "thinking"
+        result_parts.append((section_type, "\n".join(current_section)))
 
     # Format output - consolidate thinking, preserve response formatting
     thinking_parts = []
     response_parts = []
 
     for section_type, content in result_parts:
-        if section_type == 'thinking':
+        if section_type == "thinking":
             # Collect all thinking for a compact summary
-            thinking_parts.append(content.replace('\n', ' ').strip())
+            thinking_parts.append(content.replace("\n", " ").strip())
         else:
             response_parts.append(content)
 
     formatted = []
 
     # Add consolidated thinking as a compact italic block
-    if thinking_parts:
+    if thinking_parts and _thinking_enabled():
         # Show last few thinking steps, not all
         recent_thoughts = thinking_parts[-5:] if len(thinking_parts) > 5 else thinking_parts
-        thinking_summary = ' → '.join(recent_thoughts)
+        thinking_summary = " → ".join(recent_thoughts)
         formatted.append(f"*Thinking: {thinking_summary}*")
 
     # Add response content with preserved formatting
     for content in response_parts:
         # Clean up excessive blank lines but preserve structure
-        lines = content.split('\n')
+        lines = content.split("\n")
         cleaned_lines = []
         for i, line in enumerate(lines):
             if line.strip() or (i > 0 and lines[i - 1].strip()):
                 cleaned_lines.append(line)
-        cleaned = '\n'.join(cleaned_lines)
+        cleaned = "\n".join(cleaned_lines)
         if cleaned.strip():
             formatted.append(cleaned.strip())
 
-    return '\n\n'.join(formatted) if formatted else raw_output
+    return "\n\n".join(formatted) if formatted else raw_output
 
 
 def extract_final_codex_response(raw_output: str | None) -> str:
@@ -216,12 +236,12 @@ def extract_final_codex_response(raw_output: str | None) -> str:
     if not raw_output:
         return ""
 
-    lines = raw_output.split('\n')
+    lines = raw_output.split("\n")
     last_codex_index = -1
 
     # Find the last 'codex' marker
     for i, line in enumerate(lines):
-        if line.strip() == 'codex':
+        if line.strip() == "codex":
             last_codex_index = i
 
     if last_codex_index == -1:
@@ -233,17 +253,17 @@ def extract_final_codex_response(raw_output: str | None) -> str:
         stripped = lines[i].strip()
 
         # Stop at next section marker
-        if stripped in ('thinking', 'codex', 'exec'):
+        if stripped in ("thinking", "codex", "exec"):
             break
 
         # Skip token counts and metadata - including comma-separated like "4,481"
-        if stripped.startswith('tokens used') or (stripped.replace(',', '').isdigit() and len(stripped) <= 10):
+        if stripped.startswith("tokens used") or (stripped.replace(",", "").isdigit() and len(stripped) <= 10):
             continue
 
         if stripped:
             final_response.append(stripped)
 
-    return '\n'.join(final_response) if final_response else raw_output
+    return "\n".join(final_response) if final_response else raw_output
 
 
 @dataclass
@@ -265,15 +285,29 @@ ActivityCallback = Callable[[str, str], None] | None
 ActivityCallback = Callable[[str, str], None] | None
 
 
-_ANSI_ESCAPE = re.compile(r'[\x1b\u241b]\[[0-9;]*[a-zA-Z]?')
+_ANSI_ESCAPE = re.compile(r"[\x1b\u241b]\[[0-9;]*[a-zA-Z]?")
 CLI_INSTALLER = AIToolInstaller()
+_BOOLEAN_TRUE = {"1", "true", "yes", "on"}
+
+
+def _thinking_enabled() -> bool:
+    """Gate verbose thinking traces behind an opt-in flag."""
+    hide_flag = os.environ.get("CHAD_HIDE_THINKING", "").strip().lower()
+    if hide_flag in _BOOLEAN_TRUE:
+        return False
+
+    explicit_flag = os.environ.get("CHAD_THINKING", "").strip().lower()
+    if explicit_flag:
+        return explicit_flag in _BOOLEAN_TRUE
+
+    return True
 
 
 def _ensure_cli_tool(tool_key: str, activity_cb: ActivityCallback = None) -> tuple[bool, str]:
     """Ensure a provider CLI is installed; optionally notify activity on failure."""
     ok, detail = CLI_INSTALLER.ensure_tool(tool_key)
     if not ok and activity_cb:
-        activity_cb('text', detail)
+        activity_cb("text", detail)
     return ok, detail
 
 
@@ -283,9 +317,9 @@ def _strip_ansi_codes(text: str) -> str:
     Handles both actual escape char (0x1b) and Unicode escape symbol (␛ U+241B).
     Also removes partial/incomplete escape sequences.
     """
-    text = _ANSI_ESCAPE.sub('', text)
+    text = _ANSI_ESCAPE.sub("", text)
     # Also remove incomplete escape sequences that got split across chunks
-    text = re.sub(r'[\x1b\u241b]\[?[0-9;]*$', '', text)
+    text = re.sub(r"[\x1b\u241b]\[?[0-9;]*$", "", text)
     return text
 
 
@@ -299,21 +333,34 @@ def _close_master_fd(master_fd: int | None) -> None:
         pass
 
 
-def _start_pty_process(cmd: list[str], cwd: str | None = None, env: dict | None = None) -> tuple[subprocess.Popen, int]:
-    """Start a subprocess with a PTY attached for streaming output."""
-    master_fd, slave_fd = pty.openpty()
+def _start_pty_process(
+    cmd: list[str], cwd: str | None = None, env: dict | None = None
+) -> tuple[subprocess.Popen, int | None]:
+    """Start a subprocess with a PTY attached for streaming output when available."""
+    if _HAS_PTY:
+        master_fd, slave_fd = pty.openpty()
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            cwd=cwd,
+            env=env,
+            close_fds=True,
+            start_new_session=True,  # Run in own process group for clean termination
+        )
+        os.close(slave_fd)
+        return process, master_fd
+
     process = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
-        stdout=slave_fd,
-        stderr=slave_fd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         cwd=cwd,
         env=env,
-        close_fds=True,
-        start_new_session=True  # Run in own process group for clean termination
     )
-    os.close(slave_fd)
-    return process, master_fd
+    return process, None
 
 
 def _drain_pty(master_fd: int, output_chunks: list[str], on_chunk: Callable[[str], None] | None) -> None:
@@ -326,7 +373,7 @@ def _drain_pty(master_fd: int, output_chunks: list[str], on_chunk: Callable[[str
             chunk = os.read(master_fd, 4096)
             if not chunk:
                 break
-            decoded = chunk.decode('utf-8', errors='replace')
+            decoded = chunk.decode("utf-8", errors="replace")
             output_chunks.append(decoded)
             if on_chunk:
                 on_chunk(decoded)
@@ -334,15 +381,94 @@ def _drain_pty(master_fd: int, output_chunks: list[str], on_chunk: Callable[[str
         return
 
 
-def _stream_pty_output(
+def _stream_pipe_output(
     process: subprocess.Popen,
-    master_fd: int,
     on_chunk: Callable[[str], None] | None,
-    timeout: float
-) -> tuple[str, bool]:
-    """Stream output from a PTY-backed process until completion or timeout."""
+    timeout: float,
+    idle_timeout: float | None = None,
+) -> tuple[str, bool, bool]:
+    """Stream output from a pipe-backed process until completion or timeout."""
     output_chunks: list[str] = []
     start_time = time.time()
+    last_activity = start_time
+    idle_stalled = False
+    output_queue: queue.Queue = queue.Queue()
+    stop_event = threading.Event()
+
+    def _reader() -> None:
+        try:
+            if process.stdout is None:
+                return
+            while not stop_event.is_set():
+                chunk = process.stdout.read(4096)
+                if not chunk:
+                    break
+                output_queue.put(chunk)
+        finally:
+            stop_event.set()
+
+    reader_thread = threading.Thread(target=_reader, daemon=True)
+    reader_thread.start()
+
+    try:
+        while time.time() - start_time < timeout:
+            if process.poll() is not None and output_queue.empty() and stop_event.is_set():
+                break
+
+            try:
+                chunk = output_queue.get(timeout=0.1)
+            except queue.Empty:
+                chunk = None
+
+            if chunk:
+                decoded = chunk.decode("utf-8", errors="replace")
+                output_chunks.append(decoded)
+                if on_chunk:
+                    on_chunk(decoded)
+                start_time = time.time()
+                last_activity = start_time
+
+            if idle_timeout and (time.time() - last_activity) >= idle_timeout:
+                idle_stalled = True
+                break
+
+        timed_out = process.poll() is None and not idle_stalled
+        if timed_out or idle_stalled:
+            try:
+                process.kill()
+            except Exception:
+                pass
+        try:
+            process.wait(timeout=0.1)
+        except Exception:
+            pass
+    finally:
+        stop_event.set()
+        if process.stdout:
+            try:
+                process.stdout.close()
+            except Exception:
+                pass
+        reader_thread.join(timeout=0.1)
+
+    return "".join(output_chunks), timed_out, idle_stalled
+
+
+def _stream_pty_output(
+    process: subprocess.Popen,
+    master_fd: int | None,
+    on_chunk: Callable[[str], None] | None,
+    timeout: float,
+    idle_timeout: float | None = None,
+) -> tuple[str, bool, bool]:
+    """Stream output from a PTY-backed process until completion or timeout."""
+    if master_fd is None:
+        return _stream_pipe_output(process, on_chunk, timeout, idle_timeout=idle_timeout)
+
+    output_chunks: list[str] = []
+    start_time = time.time()
+    last_activity = start_time
+    idle_stalled = False
 
     try:
         while time.time() - start_time < timeout:
@@ -362,13 +488,23 @@ def _stream_pty_output(
                     break
 
                 if chunk:
-                    decoded = chunk.decode('utf-8', errors='replace')
+                    decoded = chunk.decode("utf-8", errors="replace")
                     output_chunks.append(decoded)
                     if on_chunk:
                         on_chunk(decoded)
                     start_time = time.time()
+                    last_activity = start_time
 
-        timed_out = process.poll() is None
+            if idle_timeout and (time.time() - last_activity) >= idle_timeout:
+                idle_stalled = True
+                try:
+                    process.kill()
+                    process.wait()
+                except Exception:
+                    pass
+                break
+
+        timed_out = process.poll() is None and not idle_stalled
         if timed_out:
             process.kill()
             process.wait()
@@ -380,7 +516,7 @@ def _stream_pty_output(
     finally:
         _close_master_fd(master_fd)
 
-    return ''.join(output_chunks), timed_out
+    return "".join(output_chunks), timed_out, idle_stalled
 
 
 class AIProvider(ABC):
@@ -477,6 +613,7 @@ class ClaudeCodeProvider(AIProvider):
     def _get_claude_config_dir(self) -> str:
         """Get the isolated CLAUDE_CONFIG_DIR for this account."""
         from pathlib import Path
+
         if self.config.account_name:
             return str(Path.home() / ".chad" / "claude-configs" / self.config.account_name)
         return str(Path.home() / ".claude")
@@ -490,6 +627,7 @@ class ClaudeCodeProvider(AIProvider):
     def _ensure_mcp_permissions(self) -> None:
         """Ensure Claude config has permissions to auto-approve project MCP servers."""
         import json
+
         config_dir = Path(self._get_claude_config_dir())
         config_dir.mkdir(parents=True, exist_ok=True)
         settings_path = config_dir / "settings.local.json"
@@ -518,16 +656,19 @@ class ClaudeCodeProvider(AIProvider):
         self.project_path = project_path
 
         cmd = [
-            detail or find_cli_executable('claude'),
-            '-p',
-            '--input-format', 'stream-json',
-            '--output-format', 'stream-json',
-            '--permission-mode', 'bypassPermissions',
-            '--verbose'
+            detail or find_cli_executable("claude"),
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--permission-mode",
+            "bypassPermissions",
+            "--verbose",
         ]
 
-        if self.config.model_name and self.config.model_name != 'default':
-            cmd.extend(['--model', self.config.model_name])
+        if self.config.model_name and self.config.model_name != "default":
+            cmd.extend(["--model", self.config.model_name])
 
         try:
             env = self._get_env()
@@ -539,7 +680,7 @@ class ClaudeCodeProvider(AIProvider):
                 text=True,
                 cwd=project_path,
                 bufsize=1,
-                env=env
+                env=env,
             )
 
             if system_prompt:
@@ -547,7 +688,7 @@ class ClaudeCodeProvider(AIProvider):
 
             return True
         except (FileNotFoundError, PermissionError, OSError) as e:
-            self._notify_activity('text', f"Failed to start Claude: {e}")
+            self._notify_activity("text", f"Failed to start Claude: {e}")
             return False
 
     def send_message(self, message: str) -> None:
@@ -556,16 +697,10 @@ class ClaudeCodeProvider(AIProvider):
         if not self.process or not self.process.stdin:
             return
 
-        msg = {
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": [{"type": "text", "text": message}]
-            }
-        }
+        msg = {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": message}]}}
 
         try:
-            self.process.stdin.write(json.dumps(msg) + '\n')
+            self.process.stdin.write(json.dumps(msg) + "\n")
             self.process.stdin.flush()
         except (BrokenPipeError, OSError):
             pass
@@ -602,30 +737,30 @@ class ClaudeCodeProvider(AIProvider):
             try:
                 msg = json.loads(line.strip())
 
-                if msg.get('type') == 'assistant':
-                    content = msg.get('message', {}).get('content', [])
+                if msg.get("type") == "assistant":
+                    content = msg.get("message", {}).get("content", [])
                     for item in content:
-                        if item.get('type') == 'text':
-                            text = item.get('text', '')
+                        if item.get("type") == "text":
+                            text = item.get("text", "")
                             self.accumulated_text.append(text)
                             # Stream the text to UI
-                            self._notify_activity('stream', text + '\n')
-                            self._notify_activity('text', text[:100])
-                        elif item.get('type') == 'tool_use':
-                            tool_name = item.get('name', 'unknown')
-                            tool_input = item.get('input', {})
-                            if tool_name in ('Read', 'Edit', 'Write'):
-                                detail = tool_input.get('file_path', '')
-                            elif tool_name == 'Bash':
-                                detail = tool_input.get('command', '')[:50]
-                            elif tool_name in ('Glob', 'Grep'):
-                                detail = tool_input.get('pattern', '')
+                            self._notify_activity("stream", text + "\n")
+                            self._notify_activity("text", text[:100])
+                        elif item.get("type") == "tool_use":
+                            tool_name = item.get("name", "unknown")
+                            tool_input = item.get("input", {})
+                            if tool_name in ("Read", "Edit", "Write"):
+                                detail = tool_input.get("file_path", "")
+                            elif tool_name == "Bash":
+                                detail = tool_input.get("command", "")[:50]
+                            elif tool_name in ("Glob", "Grep"):
+                                detail = tool_input.get("pattern", "")
                             else:
-                                detail = ''
-                            self._notify_activity('tool', f"{tool_name}: {detail}")
+                                detail = ""
+                            self._notify_activity("tool", f"{tool_name}: {detail}")
 
-                if msg.get('type') == 'result':
-                    result_text = msg.get('result', '')
+                if msg.get("type") == "result":
+                    result_text = msg.get("result", "")
                     break
 
                 start_time = time.time()
@@ -679,6 +814,7 @@ class OpenAICodexProvider(AIProvider):
     def _get_isolated_home(self) -> str:
         """Get the isolated HOME directory for this account."""
         from pathlib import Path
+
         if self.config.account_name:
             return str(Path.home() / ".chad" / "codex-homes" / self.config.account_name)
         return str(Path.home())
@@ -686,9 +822,9 @@ class OpenAICodexProvider(AIProvider):
     def _get_env(self) -> dict:
         """Get environment with isolated HOME for this account."""
         env = os.environ.copy()
-        env['HOME'] = self._get_isolated_home()
-        env['PYTHONUNBUFFERED'] = '1'
-        env['TERM'] = 'xterm-256color'
+        env["HOME"] = self._get_isolated_home()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["TERM"] = "xterm-256color"
         return env
 
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
@@ -710,39 +846,48 @@ class OpenAICodexProvider(AIProvider):
 
     def get_response(self, timeout: float = 1800.0) -> str:  # noqa: C901
         import json
+
         if not self.current_message:
             return ""
 
-        codex_cli = getattr(self, "cli_path", None) or find_cli_executable('codex')
+        codex_cli = getattr(self, "cli_path", None) or find_cli_executable("codex")
 
         # Build command - use resume if we have a thread_id (multi-turn)
         # Flags like --json must come BEFORE the resume subcommand
         if self.thread_id:
             cmd = [
-                codex_cli, 'exec',
-                '--json',  # Must be before 'resume' subcommand
-                '-c', 'sandbox_mode="workspace-write"',  # Match --full-auto sandbox mode
-                '-c', 'approval_policy="on-request"',   # Match --full-auto approval policy
-                '-c', 'network_access="enabled"',
-                'resume', self.thread_id,
-                '-',  # Read prompt from stdin
+                codex_cli,
+                "exec",
+                "--json",  # Must be before 'resume' subcommand
+                "-c",
+                'sandbox_mode="workspace-write"',  # Match --full-auto sandbox mode
+                "-c",
+                'approval_policy="on-request"',  # Match --full-auto approval policy
+                "-c",
+                'network_access="enabled"',
+                "resume",
+                self.thread_id,
+                "-",  # Read prompt from stdin
             ]
         else:
             cmd = [
-                codex_cli, 'exec',
-                '--full-auto',
-                '--skip-git-repo-check',
-                '--json',
-                '-c', 'network_access="enabled"',
-                '-C', self.project_path,
-                '-',  # Read from stdin
+                codex_cli,
+                "exec",
+                "--full-auto",
+                "--skip-git-repo-check",
+                "--json",
+                "-c",
+                'network_access="enabled"',
+                "-C",
+                self.project_path,
+                "-",  # Read from stdin
             ]
 
-            if self.config.model_name and self.config.model_name != 'default':
-                cmd.extend(['-m', self.config.model_name])
+            if self.config.model_name and self.config.model_name != "default":
+                cmd.extend(["-m", self.config.model_name])
 
-            if self.config.reasoning_effort and self.config.reasoning_effort != 'default':
-                cmd.extend(['-c', f'model_reasoning_effort="{self.config.reasoning_effort}"'])
+            if self.config.reasoning_effort and self.config.reasoning_effort != "default":
+                cmd.extend(["-c", f'model_reasoning_effort="{self.config.reasoning_effort}"'])
 
         try:
             env = self._get_env()
@@ -754,45 +899,92 @@ class OpenAICodexProvider(AIProvider):
 
             # Both initial and resume use JSON output
             json_events = []
+            reconnect_seen = [False]
 
             def format_json_event_as_text(event: dict) -> str | None:
                 """Convert a JSON event to human-readable text for streaming."""
-                event_type = event.get('type', '')
+                event_type = event.get("type", "")
 
-                if event_type == 'item.completed':
-                    item = event.get('item', {})
-                    item_type = item.get('type', '')
+                if event_type == "item.completed":
+                    item = event.get("item", {})
+                    item_type = item.get("type", "")
 
-                    if item_type == 'reasoning':
-                        text = item.get('text', '')
+                    if item_type == "reasoning":
+                        text = item.get("text", "")
                         if text:
-                            return f"*{text}*\n"
-                    elif item_type == 'agent_message':
-                        return item.get('text', '') + '\n'
-                    elif item_type == 'mcp_tool_call':
-                        tool = item.get('tool', 'tool')
-                        result = item.get('result', {})
-                        if result:
-                            content = result.get('content', [])
-                            if content and isinstance(content, list):
-                                text = content[0].get('text', '')[:200] if content else ''
-                                return f"[{tool}]: {text}...\n" if len(text) >= 200 else f"[{tool}]: {text}\n"
-                        return f"[{tool}]\n"
-                    elif item_type == 'command_execution':
-                        cmd = item.get('command', '')[:60]
-                        output = item.get('aggregated_output', '')
-                        # Show command and abbreviated output
-                        lines = output.strip().split('\n')
-                        preview = '\n'.join(lines[:3]) if lines else ''
-                        if len(lines) > 3:
-                            preview += f'\n... ({len(lines) - 3} more lines)'
-                        return f"$ {cmd}\n{preview}\n" if preview else f"$ {cmd}\n"
+                            # Strip markdown bold/italics markers for clean display
+                            clean = text.replace("**", "").replace("*", "").strip()
+                            if clean:
+                                # Use dim cyan for reasoning/thinking
+                                return f"\033[36m• {clean}\033[0m\n"
+                        return None
+                    elif item_type == "agent_message":
+                        text = item.get("text", "")
+                        if not text:
+                            return None
+                        # Filter out internal tool invocations and raw bash output
+                        lines = text.split("\n")
+                        filtered = []
+                        for line in lines:
+                            stripped = line.strip()
+                            # Skip raw bash commands (often prefixed with $ or contain shell paths)
+                            if stripped.startswith("$ ") or stripped.startswith("$/"):
+                                continue
+                            # Skip internal markers (***...*** patterns)
+                            if stripped.startswith("***") and stripped.endswith("***"):
+                                continue
+                            # Skip lines that look like grep/find output (path:line:content)
+                            if re.match(r"^\d+:\s*", stripped) or re.match(r"^[a-zA-Z_/].*:\d+:", stripped):
+                                continue
+                            if stripped:
+                                filtered.append(line)
+                        if filtered:
+                            return "\n".join(filtered) + "\n"
+                        return None
+                    elif item_type == "mcp_tool_call":
+                        tool = item.get("tool", "tool")
+                        # Human-readable tool descriptions
+                        tool_descriptions = {
+                            "read_file": "Reading",
+                            "Read": "Reading",
+                            "write_file": "Writing",
+                            "Write": "Writing",
+                            "edit_file": "Editing",
+                            "Edit": "Editing",
+                            "search": "Searching",
+                            "Grep": "Searching",
+                            "Glob": "Finding files",
+                            "Bash": "Running command",
+                        }
+                        params = item.get("params", {})
+                        path = params.get("path", params.get("file_path", ""))
+                        desc = tool_descriptions.get(tool, f"Using {tool}")
+                        if path:
+                            # Show green for file operations
+                            return f"\033[32m• {desc}: {path}\033[0m\n"
+                        return f"\033[32m• {desc}\033[0m\n"
+                    elif item_type == "command_execution":
+                        cmd = item.get("command", "")[:80]
+                        output = item.get("aggregated_output", "")
+                        # Use purple/magenta for commands
+                        result = f"\033[35m$ {cmd}\033[0m\n"
+                        if output.strip():
+                            lines = output.strip().split("\n")
+                            # Show first few lines of output in dim gray
+                            preview_lines = lines[:5]
+                            for line in preview_lines:
+                                result += f"\033[90m  {line[:100]}\033[0m\n"
+                            if len(lines) > 5:
+                                result += f"\033[90m  ... ({len(lines) - 5} more lines)\033[0m\n"
+                        return result
 
                 return None
 
+            api_error = [None]  # Track API errors
+
             def process_chunk(chunk: str) -> None:
                 # Parse JSON events and convert to human-readable text
-                for line in chunk.split('\n'):
+                for line in chunk.split("\n"):
                     line = line.strip()
                     if not line:
                         continue
@@ -802,68 +994,101 @@ class OpenAICodexProvider(AIProvider):
                             continue
                         json_events.append(event)
 
+                        # Check for API errors (model not supported, etc.)
+                        if event.get("type") == "error":
+                            msg = event.get("message", "Unknown API error")
+                            if "reconnecting" in msg.lower():
+                                reconnect_seen[0] = True
+                            else:
+                                api_error[0] = msg
+                        elif event.get("type") == "turn.failed":
+                            error_info = event.get("error", {})
+                            api_error[0] = error_info.get("message", "Turn failed")
+
                         # Extract thread_id from first event
-                        if event.get('type') == 'thread.started' and 'thread_id' in event:
-                            self.thread_id = event['thread_id']
+                        if event.get("type") == "thread.started" and "thread_id" in event:
+                            self.thread_id = event["thread_id"]
+
+                        is_agent_message = (
+                            event.get("type") == "item.completed"
+                            and event.get("item", {}).get("type") == "agent_message"
+                        )
+                        if is_agent_message:
+                            reconnect_seen[0] = False
 
                         # Convert to human-readable and stream
                         readable = format_json_event_as_text(event)
                         if readable:
-                            self._notify_activity('stream', readable)
+                            self._notify_activity("stream", readable)
 
                         # Also send activity notifications for status bar
-                        if event.get('type') == 'item.completed':
-                            item = event.get('item', {})
-                            if item.get('type') == 'reasoning':
-                                self._notify_activity('thinking', item.get('text', '')[:80])
-                            elif item.get('type') == 'agent_message':
-                                self._notify_activity('text', item.get('text', '')[:80])
-                            elif item.get('type') in ('mcp_tool_call', 'command_execution'):
-                                name = item.get('tool', item.get('command', 'tool'))[:50]
-                                self._notify_activity('tool', name)
+                        if event.get("type") == "item.completed":
+                            item = event.get("item", {})
+                            if item.get("type") == "reasoning":
+                                self._notify_activity("thinking", item.get("text", "")[:80])
+                            elif item.get("type") == "agent_message":
+                                self._notify_activity("text", item.get("text", "")[:80])
+                            elif item.get("type") in ("mcp_tool_call", "command_execution"):
+                                name = item.get("tool", item.get("command", "tool"))[:50]
+                                self._notify_activity("tool", name)
                     except json.JSONDecodeError:
                         # Non-JSON line in JSON mode - might be stderr, skip
                         pass
 
-            output, timed_out = _stream_pty_output(
-                self.process,
-                self.master_fd,
-                process_chunk,
-                timeout
+            output, timed_out, idle_stalled = _stream_pty_output(
+                self.process, self.master_fd, process_chunk, timeout, idle_timeout=CODEX_IDLE_TIMEOUT
             )
 
             self.current_message = None
             self.process = None
             self.master_fd = None
 
+            if idle_stalled:
+                raise RuntimeError(
+                    f"Codex stalled waiting for output for {int(CODEX_IDLE_TIMEOUT)}s "
+                    "— process likely waiting for input"
+                )
             if timed_out:
-                return f"Error: Codex execution timed out ({int(timeout / 60)} minutes)"
+                raise RuntimeError(f"Codex execution timed out ({int(timeout / 60)} minutes)")
+
+            # Check for API errors (model not supported, etc.)
+            if api_error[0]:
+                raise RuntimeError(f"Codex API error: {api_error[0]}")
+            if reconnect_seen[0]:
+                raise RuntimeError("Codex connection failed during reconnect attempts")
 
             # Extract response from JSON events
             response_parts = []
             for event in json_events:
-                if event.get('type') == 'item.completed':
-                    item = event.get('item', {})
-                    if item.get('type') == 'agent_message':
-                        response_parts.append(item.get('text', ''))
-                    elif item.get('type') == 'reasoning':
-                        text = item.get('text', '')
+                if event.get("type") == "item.completed":
+                    item = event.get("item", {})
+                    if item.get("type") == "agent_message":
+                        response_parts.append(item.get("text", ""))
+                    elif item.get("type") == "reasoning":
+                        text = item.get("text", "")
                         if text:
                             response_parts.insert(0, f"*Thinking: {text}*\n\n")
 
             if response_parts:
-                return ''.join(response_parts).strip()
+                return "".join(response_parts).strip()
 
             # Fallback to raw output if no JSON events parsed
             output = _strip_ansi_codes(output)
             return output.strip() if output else "No response from Codex"
 
+        except RuntimeError:
+            # API errors (model not supported, timeout) - clean up and re-raise
+            self.current_message = None
+            self.process = None
+            _close_master_fd(self.master_fd)
+            self.master_fd = None
+            raise
         except (FileNotFoundError, PermissionError, OSError) as e:
             self.current_message = None
             self.process = None
             _close_master_fd(self.master_fd)
             self.master_fd = None
-            return (
+            raise RuntimeError(
                 f"Failed to run Codex: {e}\n\n"
                 "Make sure Codex CLI is installed and authenticated.\n"
                 "Run 'codex' to authenticate."
@@ -873,23 +1098,23 @@ class OpenAICodexProvider(AIProvider):
         """Process a streaming chunk for activity notifications."""
         # Pass through raw chunk with ANSI codes preserved for native terminal look
         if chunk.strip():
-            self._notify_activity('stream', chunk)
+            self._notify_activity("stream", chunk)
 
         # Also parse for structured activity updates (using cleaned version)
         clean_chunk = _strip_ansi_codes(chunk)
-        for line in clean_chunk.split('\n'):
+        for line in clean_chunk.split("\n"):
             stripped = line.strip()
             if not stripped:
                 continue
 
-            if stripped == 'thinking':
-                self._notify_activity('thinking', 'Reasoning...')
-            elif stripped == 'codex':
-                self._notify_activity('text', 'Responding...')
-            elif stripped.startswith('exec'):
-                self._notify_activity('tool', f"Running: {stripped[5:65].strip()}")
-            elif stripped.startswith('**') and stripped.endswith('**'):
-                self._notify_activity('text', stripped.strip('*')[:60])
+            if stripped == "thinking":
+                self._notify_activity("thinking", "Reasoning...")
+            elif stripped == "codex":
+                self._notify_activity("text", "Responding...")
+            elif stripped.startswith("exec"):
+                self._notify_activity("tool", f"Running: {stripped[5:65].strip()}")
+            elif stripped.startswith("**") and stripped.endswith("**"):
+                self._notify_activity("text", stripped.strip("*")[:60])
 
     def stop_session(self) -> None:
         self.current_message = None
@@ -900,6 +1125,7 @@ class OpenAICodexProvider(AIProvider):
             try:
                 # Kill entire process group to stop child processes too
                 import signal
+
                 try:
                     os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
                 except (ProcessLookupError, PermissionError):
@@ -955,33 +1181,41 @@ class GeminiCodeAssistProvider(AIProvider):
 
     def get_response(self, timeout: float = 1800.0) -> str:  # noqa: C901
         import json
+
         if not self.current_message:
             return ""
 
-        gemini_cli = getattr(self, "cli_path", None) or find_cli_executable('gemini')
+        gemini_cli = getattr(self, "cli_path", None) or find_cli_executable("gemini")
 
         # Build command - use resume if we have a session_id (multi-turn)
         if self.session_id:
-            cmd = [gemini_cli, '-y', '--output-format', 'stream-json',
-                   '--resume', self.session_id, self.current_message]
+            cmd = [
+                gemini_cli,
+                "-y",
+                "--output-format",
+                "stream-json",
+                "--resume",
+                self.session_id,
+                self.current_message,
+            ]
         else:
-            cmd = [gemini_cli, '-y', '--output-format', 'stream-json']
-            if self.config.model_name and self.config.model_name != 'default':
-                cmd.extend(['-m', self.config.model_name])
+            cmd = [gemini_cli, "-y", "--output-format", "stream-json"]
+            if self.config.model_name and self.config.model_name != "default":
+                cmd.extend(["-m", self.config.model_name])
             cmd.append(self.current_message)
 
         try:
             env = os.environ.copy()
-            env['TERM'] = 'xterm-256color'
+            env["TERM"] = "xterm-256color"
 
             json_events = []
             response_parts = []
 
             def handle_chunk(decoded: str) -> None:
                 # Stream raw output for live display
-                self._notify_activity('stream', decoded)
+                self._notify_activity("stream", decoded)
                 # Parse JSON lines
-                for line in decoded.split('\n'):
+                for line in decoded.split("\n"):
                     line = line.strip()
                     if not line:
                         continue
@@ -991,45 +1225,38 @@ class GeminiCodeAssistProvider(AIProvider):
                             continue
                         json_events.append(event)
                         # Extract session_id from init event
-                        if event.get('type') == 'init' and 'session_id' in event:
-                            self.session_id = event['session_id']
+                        if event.get("type") == "init" and "session_id" in event:
+                            self.session_id = event["session_id"]
                         # Collect response content
-                        if event.get('type') == 'message' and event.get('role') == 'assistant':
-                            content = event.get('content', '')
+                        if event.get("type") == "message" and event.get("role") == "assistant":
+                            content = event.get("content", "")
                             if content:
                                 response_parts.append(content)
-                                self._notify_activity('text', content[:80])
+                                self._notify_activity("text", content[:80])
                     except json.JSONDecodeError:
                         # Non-JSON line (warnings, etc.) - just notify
                         if line and len(line) > 10:
-                            self._notify_activity('text', line[:80])
+                            self._notify_activity("text", line[:80])
 
-            self.process, self.master_fd = _start_pty_process(
-                cmd,
-                cwd=self.project_path,
-                env=env
-            )
+            self.process, self.master_fd = _start_pty_process(cmd, cwd=self.project_path, env=env)
 
             if self.process.stdin:
                 self.process.stdin.close()
 
-            output, timed_out = _stream_pty_output(
-                self.process,
-                self.master_fd,
-                handle_chunk,
-                timeout
-            )
+            output, timed_out, idle_stalled = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
 
             self.current_message = None
             self.process = None
             self.master_fd = None
 
+            if idle_stalled:
+                return f"Error: Gemini execution stalled (no output for {int(timeout)}s)"
             if timed_out:
                 return f"Error: Gemini execution timed out ({int(timeout / 60)} minutes)"
 
             # Return collected response parts if any
             if response_parts:
-                return ''.join(response_parts).strip()
+                return "".join(response_parts).strip()
 
             # Fallback to raw output
             output = _strip_ansi_codes(output)
@@ -1107,47 +1334,40 @@ class MistralVibeProvider(AIProvider):
         if not self.current_message:
             return ""
 
-        vibe_cli = getattr(self, "cli_path", None) or find_cli_executable('vibe')
+        vibe_cli = getattr(self, "cli_path", None) or find_cli_executable("vibe")
 
         # Build command - use --continue if we have an active session
         if self.session_active:
-            cmd = [vibe_cli, '-p', self.current_message, '--output', 'text', '--continue']
+            cmd = [vibe_cli, "-p", self.current_message, "--output", "text", "--continue"]
         else:
-            cmd = [vibe_cli, '-p', self.current_message, '--output', 'text']
+            cmd = [vibe_cli, "-p", self.current_message, "--output", "text"]
 
         try:
-            self._notify_activity('text', 'Starting Vibe...')
+            self._notify_activity("text", "Starting Vibe...")
 
             env = os.environ.copy()
-            env['TERM'] = 'xterm-256color'
+            env["TERM"] = "xterm-256color"
 
             def handle_chunk(decoded: str) -> None:
-                self._notify_activity('stream', decoded)
-                for line in decoded.split('\n'):
+                self._notify_activity("stream", decoded)
+                for line in decoded.split("\n"):
                     stripped = line.strip()
                     if stripped and len(stripped) > 10:
-                        self._notify_activity('text', stripped[:80])
+                        self._notify_activity("text", stripped[:80])
 
-            self.process, self.master_fd = _start_pty_process(
-                cmd,
-                cwd=self.project_path,
-                env=env
-            )
+            self.process, self.master_fd = _start_pty_process(cmd, cwd=self.project_path, env=env)
 
             if self.process.stdin:
                 self.process.stdin.close()
 
-            output, timed_out = _stream_pty_output(
-                self.process,
-                self.master_fd,
-                handle_chunk,
-                timeout
-            )
+            output, timed_out, idle_stalled = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
 
             self.current_message = None
             self.process = None
             self.master_fd = None
 
+            if idle_stalled:
+                return f"Error: Vibe execution stalled (no output for {int(timeout)}s)"
             if timed_out:
                 return f"Error: Vibe execution timed out ({int(timeout / 60)} minutes)"
 
@@ -1210,17 +1430,18 @@ class MockProvider(AIProvider):
 
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         self._alive = True
-        self._notify_activity('text', 'Mock session started')
+        self._notify_activity("text", "Mock session started")
         return True
 
     def send_message(self, message: str) -> None:
         self._messages.append(message)
-        self._notify_activity('tool', 'MockTool: processing')
+        self._notify_activity("tool", "MockTool: processing")
 
     def get_response(self, timeout: float = 30.0) -> str:
         import time
+
         time.sleep(0.1)  # Simulate some processing
-        self._notify_activity('text', 'Mock response ready')
+        self._notify_activity("text", "Mock response ready")
 
         if self._response_queue:
             return self._response_queue.pop(0)
@@ -1255,15 +1476,15 @@ def create_provider(config: ModelConfig) -> AIProvider:
     Raises:
         ValueError: If provider is not supported
     """
-    if config.provider == 'anthropic':
+    if config.provider == "anthropic":
         return ClaudeCodeProvider(config)
-    elif config.provider == 'openai':
+    elif config.provider == "openai":
         return OpenAICodexProvider(config)
-    elif config.provider == 'gemini':
+    elif config.provider == "gemini":
         return GeminiCodeAssistProvider(config)
-    elif config.provider == 'mistral':
+    elif config.provider == "mistral":
         return MistralVibeProvider(config)
-    elif config.provider == 'mock':
+    elif config.provider == "mock":
         return MockProvider(config)
     else:
         raise ValueError(f"Unsupported provider: {config.provider}")

@@ -19,7 +19,7 @@ class SessionLogger:
 
         The file will be populated later when the task actually starts.
         """
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         filename = f"chad_session_{timestamp}.json"
         filepath = self.base_dir / filename
 
@@ -29,6 +29,7 @@ class SessionLogger:
             "task_description": None,
             "project_path": None,
             "conversation": [],
+            "verification_attempts": [],
         }
 
         with open(filepath, "w") as f:
@@ -58,6 +59,7 @@ class SessionLogger:
             "success": None,
             "completion_reason": None,
             "conversation": [],
+            "verification_attempts": [],
         }
 
         with open(filepath, "w") as f:
@@ -72,7 +74,7 @@ class SessionLogger:
         coding_provider: str,
     ) -> Path:
         """Create a new session log and return its path."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         filename = f"chad_session_{timestamp}.json"
         filepath = self.base_dir / filename
 
@@ -88,6 +90,7 @@ class SessionLogger:
             "success": None,
             "completion_reason": None,
             "conversation": [],
+            "verification_attempts": [],
         }
 
         with open(filepath, "w") as f:
@@ -104,6 +107,8 @@ class SessionLogger:
         success: bool | None = None,
         completion_reason: str | None = None,
         status: str = "running",
+        verification_attempts: list | None = None,
+        final_status: str | None = None,
     ) -> None:
         """Update an existing session log with new data.
 
@@ -114,6 +119,7 @@ class SessionLogger:
             success: Whether the task succeeded
             completion_reason: Why the task ended
             status: Current status (running, completed, failed)
+            final_status: Final task status text to surface failures
         """
         try:
             with open(filepath) as f:
@@ -121,6 +127,8 @@ class SessionLogger:
 
             session_data["conversation"] = list(chat_history)
             session_data["status"] = status
+            if verification_attempts is not None:
+                session_data["verification_attempts"] = verification_attempts
 
             # Store the full streaming transcript if provided
             if streaming_transcript is not None:
@@ -130,6 +138,8 @@ class SessionLogger:
                 session_data["success"] = success
             if completion_reason is not None:
                 session_data["completion_reason"] = completion_reason
+            if final_status is not None:
+                session_data["final_status"] = final_status
 
             with open(filepath, "w") as f:
                 json.dump(session_data, f, indent=2)
