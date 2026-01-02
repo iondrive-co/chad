@@ -72,10 +72,11 @@ class ModelCatalog:
             models |= self._codex_config_models(account_name)
             models |= self._codex_session_models(account_name)
 
+        models = {str(m).strip() for m in models if m}
+        models = {m for m in models if m}
+
         if provider == "openai":
-            plan_type = self._codex_plan_type(account_name)
-            if plan_type and plan_type.lower() != "team":
-                models = {m for m in models if "codex" not in m.lower()}
+            models = {m for m in models if m.lower() != "codex"}
 
         models.add("default")
         resolved = sorted(models, key=lambda m: (m == "default", m))
