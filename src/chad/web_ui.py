@@ -1415,6 +1415,61 @@ function() {
     setTimeout(setupPlusTabAutoClick, 100);
     setInterval(ensurePlusTabExists, 500);
     setTimeout(ensurePlusTabExists, 100);
+
+    // Fix for Gradio Column visibility not updating after merge/discard
+    // Since gr.update(visible=False) doesn't work for Columns in Gradio 5.36+,
+    // we watch for status messages and hide/show sections via JavaScript
+    function syncMergeSectionVisibility() {
+        // Find all merge sections in all task panels
+        const mergeSections = document.querySelectorAll('.merge-section');
+        mergeSections.forEach(mergeSection => {
+            const taskPanel = mergeSection.closest('.tabitem, [role="tabpanel"]');
+            if (!taskPanel) return;
+
+            // Check if this panel's status shows merge/discard complete
+            const statusEl = taskPanel.querySelector('[class*="task-status"], [id*="task-status"]');
+            const statusText = statusEl ? (statusEl.textContent || '') : '';
+            const shouldHide = statusText.includes('merged') || statusText.includes('discarded');
+
+            // Check if merge section has content (has been populated by Gradio)
+            const hasContent = mergeSection.querySelector('.markdown, h3, button');
+            const gradioVisibleAttr = mergeSection.style.visibility !== 'hidden' &&
+                                       !mergeSection.classList.contains('hidden');
+
+            if (shouldHide) {
+                // Status indicates merge/discard complete - hide the section
+                mergeSection.style.display = 'none';
+            } else if (hasContent && mergeSection.style.display === 'none') {
+                // Section has content but is hidden - check if it should be shown
+                // Only show if Gradio hasn't explicitly hidden it (no hide class)
+                const changesSummary = taskPanel.querySelector('[id*="changes-summary"], [class*="changes-summary"]');
+                if (changesSummary && changesSummary.textContent.trim()) {
+                    // There's content in the changes summary - show the section
+                    mergeSection.style.display = '';
+                }
+            }
+        });
+
+        // Also handle conflict sections
+        const conflictSections = document.querySelectorAll('.conflict-section');
+        conflictSections.forEach(conflictSection => {
+            const taskPanel = conflictSection.closest('.tabitem, [role="tabpanel"]');
+            if (!taskPanel) return;
+
+            const statusEl = taskPanel.querySelector('[class*="task-status"], [id*="task-status"]');
+            const statusText = statusEl ? (statusEl.textContent || '') : '';
+            const shouldHide = statusText.includes('merged') || statusText.includes('discarded');
+
+            if (shouldHide) {
+                conflictSection.style.display = 'none';
+            }
+        });
+    }
+
+    // Run periodically and on DOM changes
+    setInterval(syncMergeSectionVisibility, 500);
+    const mergeSectionObserver = new MutationObserver(syncMergeSectionVisibility);
+    mergeSectionObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
 }
 """
 )
@@ -4328,7 +4383,8 @@ class ChadWebUI:
             )
 
         # Merge section - shown when worktree has changes
-        with gr.Column(visible=False, key=f"merge-section-{session_id}") as merge_section:
+        with gr.Column(visible=False, key=f"merge-section-{session_id}",
+                       elem_classes=["merge-section"]) as merge_section:
             gr.Markdown("### Changes Ready to Merge")
             changes_summary = gr.Markdown(
                 "",
@@ -4369,7 +4425,8 @@ class ChadWebUI:
                 )
 
         # Conflict resolution section - shown when merge has conflicts
-        with gr.Column(visible=False, key=f"conflict-section-{session_id}") as conflict_section:
+        with gr.Column(visible=False, key=f"conflict-section-{session_id}",
+                       elem_classes=["conflict-section"]) as conflict_section:
             gr.Markdown("### Merge Conflicts Detected")
             conflict_info = gr.Markdown(
                 "",
@@ -5117,6 +5174,15 @@ def launch_web_ui(password: str = None, port: int = 7860) -> tuple[None, int]:
     Returns:
         Tuple of (None, actual_port) where actual_port is the port used
     """
+    # Ensure downstream agents inherit a consistent project root
+    try:
+        from .mcp_config import ensure_project_root_env
+
+        ensure_project_root_env()
+    except Exception:
+        # Non-fatal; continue without forcing env
+        pass
+
     security_mgr = SecurityManager()
 
     # Get or verify password

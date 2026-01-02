@@ -7,8 +7,11 @@ import random
 import sys
 from datetime import datetime
 
+from pathlib import Path
+
 from .security import SecurityManager
 from .web_ui import launch_web_ui
+from .mcp_config import ensure_project_root_env
 
 SCS = [
     "Chad wants to make you its reverse centaur",
@@ -39,6 +42,9 @@ def main() -> int:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     print(f"It is {now} and {random.choice(SCS)}")
     sys.stdout.flush()
+
+    # Ensure all child agents inherit the active project root
+    ensure_project_root_env(Path(__file__).resolve().parents[2])
 
     security = SecurityManager()
 

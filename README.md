@@ -51,10 +51,3 @@ chad
 ### Is this satire? What are you even doing here?
 
 ¯\_(ツ)_/¯
-
-## Developer shortcuts
-
-- MCP tools honor `CHAD_PROJECT_ROOT`; set it (or run `python -m chad.mcp_config`) to point verification at the active worktree. `verify()` now reports the project root before running.
-- Quick tests: `python -m chad.quick_verify -k expr tests/test_web_ui.py` (or `scripts/quick-verify.py`) for a fast pytest pass with the right environment.
-- Sync helper: `python -m chad.sync_worktree --source <worktree> --dest <repo> [--delete] [--dry-run]` to mirror changes between a worktree and the MCP repo path.
-- Noise control: set `CHAD_HIDE_THINKING=1` to hide verbose “Thinking” traces in provider output.

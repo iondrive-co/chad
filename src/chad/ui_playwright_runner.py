@@ -1435,18 +1435,17 @@ def setup_merge_section_for_test(page: "Page") -> dict:
     }
 
     // Find merge section and make it visible
-    const columns = document.querySelectorAll('.column, [class*="Column"]');
+    // Try both the new elem_classes and the old key-based approach
     let mergeSectionVisible = false;
+    const mergeSection = document.querySelector('.merge-section') ||
+                        document.querySelector('[key*="merge-section"]');
 
-    for (const col of columns) {
-        const key = col.getAttribute('key') || col.getAttribute('id') || '';
-        if (key.includes('merge-section')) {
-            col.style.display = 'block';
-            col.style.visibility = 'visible';
-            // Also remove any Gradio-set hidden class
-            col.classList.remove('hidden');
-            mergeSectionVisible = true;
-        }
+    if (mergeSection) {
+        mergeSection.style.display = 'block';
+        mergeSection.style.visibility = 'visible';
+        // Also remove any Gradio-set hidden class
+        mergeSection.classList.remove('hidden');
+        mergeSectionVisible = true;
     }
 
     // Count chatbot messages
@@ -1516,14 +1515,12 @@ def click_discard_and_check_reset(page: "Page") -> DiscardResetTestResult:
     const chatbotCount = chatMessages.length;
 
     // Check merge section visibility
-    const columns = document.querySelectorAll('.column, [class*="Column"]');
+    const mergeSection = document.querySelector('.merge-section') ||
+                        document.querySelector('[key*="merge-section"]');
     let mergeSectionVisible = false;
-    for (const col of columns) {
-        const key = col.getAttribute('key') || col.getAttribute('id') || '';
-        if (key.includes('merge-section')) {
-            const style = window.getComputedStyle(col);
-            mergeSectionVisible = style.display !== 'none' && style.visibility !== 'hidden';
-        }
+    if (mergeSection) {
+        const style = window.getComputedStyle(mergeSection);
+        mergeSectionVisible = style.display !== 'none' && style.visibility !== 'hidden';
     }
 
     // Check status message
