@@ -131,7 +131,11 @@ def ensure_global_mcp_config(home: Path | None = None, project_root: Path | None
 
 def install_cli() -> None:
     result = ensure_global_mcp_config()
-    msg = "✅ Codex MCP config ensured" if result.get("changed", False) else "ℹ️ Codex MCP config already present"
+    msg = (
+        "✅ Codex MCP config ensured"
+        if result.get("changed", False)
+        else "ℹ️ Codex MCP config already present"
+    )
     print(
         f"{msg} ({result.get('reason')}) at {result.get('path', _config_path())}",
         flush=True,
