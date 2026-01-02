@@ -6,8 +6,30 @@ from pathlib import Path
 import sys
 
 
+def resolve_project_root(project_root: Path | None = None) -> tuple[Path, str]:
+    """Resolve the project root, preferring explicit overrides.
+
+    Returns:
+        Tuple of (resolved_path, reason)
+    """
+    env_root = os.environ.get("CHAD_PROJECT_ROOT")
+    fallback_reason = "module_default"
+
+    if env_root:
+        candidate = Path(env_root).expanduser()
+        if candidate.exists():
+            return candidate.resolve(), "env:CHAD_PROJECT_ROOT"
+        fallback_reason = f"env_missing:{candidate}"
+
+    if project_root:
+        resolved = Path(project_root).expanduser().resolve()
+        return resolved, "argument"
+
+    return Path(__file__).resolve().parents[2], fallback_reason
+
+
 def _project_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return resolve_project_root()[0]
 
 
 def _config_path(home: Path | None = None) -> Path:
@@ -29,17 +51,25 @@ def _strip_dangling_chad_entries(text: str) -> tuple[str, bool]:
     return cleaned, removed
 
 
-def _server_block(project_root: Path) -> str:
+def _server_block(project_root: Path, root_reason: str | None = None) -> str:
     src_path = project_root / "src"
     venv_python = project_root / "venv" / "bin" / "python"
     python_cmd = str(venv_python) if venv_python.exists() else sys.executable or "python3"
+    env_entries = {
+        "PYTHONPATH": str(src_path),
+        "CHAD_PROJECT_ROOT": str(project_root),
+    }
+    if root_reason:
+        env_entries["CHAD_PROJECT_ROOT_REASON"] = root_reason
+
+    env_items = ", ".join(f'{k} = "{v}"' for k, v in env_entries.items())
     return "\n".join(
         [
             "[mcp_servers.chad-ui-playwright]",
             f'command = "{python_cmd}"',
             'args = ["-m", "chad.mcp_playwright"]',
             f'cwd = "{src_path}"',
-            f'env = {{ PYTHONPATH = "{src_path}" }}',
+            f"env = {{ {env_items} }}",
             "",
         ]
     )
@@ -54,9 +84,9 @@ def ensure_global_mcp_config(home: Path | None = None, project_root: Path | None
     if os.environ.get("CHAD_SKIP_MCP_CONFIG") == "1":
         return {"changed": False, "skipped": True, "reason": "CHAD_SKIP_MCP_CONFIG=1"}
 
-    root = project_root or _project_root()
+    root, root_reason = resolve_project_root(project_root)
     config_path = _config_path(home)
-    block = _server_block(root)
+    block = _server_block(root, root_reason)
     block_pattern = r"\[mcp_servers\.chad-ui-playwright\][\s\S]*?(?=\n\[|$)"
     normalized_block = block.strip()
     alias_block = block.replace("chad-ui-playwright]", "chad-ui-playwright-main]", 1)
@@ -85,7 +115,13 @@ def ensure_global_mcp_config(home: Path | None = None, project_root: Path | None
         and existing_block_matches[0].group(0).strip() == normalized_block
         and not removed_dangling
     ):
-        return {"changed": False, "path": str(config_path), "reason": "present"}
+        return {
+            "changed": False,
+            "path": str(config_path),
+            "reason": "present",
+            "project_root": str(root),
+            "project_root_reason": root_reason,
+        }
 
     if not existing_block_matches:
         new_text = cleaned_text.rstrip()
@@ -117,6 +153,8 @@ def ensure_global_mcp_config(home: Path | None = None, project_root: Path | None
             "skipped": True,
             "reason": "permission_denied",
             "path": str(config_path),
+            "project_root": str(root),
+            "project_root_reason": root_reason,
         }
     created = existing_text == ""
     reason = "created" if created else "updated"
@@ -126,7 +164,13 @@ def ensure_global_mcp_config(home: Path | None = None, project_root: Path | None
         reason = "deduped"
     if alias_reason and reason == "present":
         reason = alias_reason
-    return {"changed": True, "path": str(config_path), "reason": reason}
+    return {
+        "changed": True,
+        "path": str(config_path),
+        "reason": reason,
+        "project_root": str(root),
+        "project_root_reason": root_reason,
+    }
 
 
 def install_cli() -> None:

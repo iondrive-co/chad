@@ -1,4 +1,6 @@
 def test_ensure_global_mcp_config_creates_file(tmp_path, monkeypatch):
+    import tomllib
+
     from chad.mcp_config import ensure_global_mcp_config, _config_path
 
     # isolate HOME so we don't touch the real config
@@ -8,10 +10,13 @@ def test_ensure_global_mcp_config_creates_file(tmp_path, monkeypatch):
 
     assert result["changed"] is True
     assert cfg_path.exists()
-    text = cfg_path.read_text()
-    assert "[mcp_servers.chad-ui-playwright]" in text
-    assert f'cwd = "{tmp_path / "src"}"' in text
-    assert f'PYTHONPATH = "{tmp_path / "src"}"' in text
+    parsed = tomllib.loads(cfg_path.read_text())
+    server_cfg = parsed["mcp_servers"]["chad-ui-playwright"]
+    env_cfg = server_cfg["env"]
+    assert server_cfg["cwd"] == str(tmp_path / "src")
+    assert env_cfg["PYTHONPATH"] == str(tmp_path / "src")
+    assert env_cfg["CHAD_PROJECT_ROOT"] == str(tmp_path)
+    assert env_cfg["CHAD_PROJECT_ROOT_REASON"] == "argument"
 
 
 def test_ensure_global_mcp_config_idempotent(tmp_path, monkeypatch):
@@ -49,8 +54,10 @@ def test_ensure_global_mcp_config_cleans_dangling_entries(tmp_path, monkeypatch)
 
     assert result["changed"] is True
     server_cfg = parsed["mcp_servers"]["chad-ui-playwright"]
+    env_cfg = server_cfg["env"]
     assert server_cfg["cwd"] == str(tmp_path / "src")
-    assert server_cfg["env"]["PYTHONPATH"] == str(tmp_path / "src")
+    assert env_cfg["PYTHONPATH"] == str(tmp_path / "src")
+    assert env_cfg["CHAD_PROJECT_ROOT"] == str(tmp_path)
 
 
 def test_ensure_global_mcp_config_dedupes_duplicate_blocks(tmp_path, monkeypatch):
@@ -79,8 +86,10 @@ def test_ensure_global_mcp_config_dedupes_duplicate_blocks(tmp_path, monkeypatch
 
     assert result["changed"] is True
     server_cfg = parsed["mcp_servers"]["chad-ui-playwright"]
+    env_cfg = server_cfg["env"]
     assert server_cfg["cwd"] == str(tmp_path / "src")
-    assert server_cfg["env"]["PYTHONPATH"] == str(tmp_path / "src")
+    assert env_cfg["PYTHONPATH"] == str(tmp_path / "src")
+    assert env_cfg["CHAD_PROJECT_ROOT"] == str(tmp_path)
 
 
 def test_alias_block_is_normalized(tmp_path, monkeypatch):
@@ -104,5 +113,28 @@ def test_alias_block_is_normalized(tmp_path, monkeypatch):
 
     assert result["changed"] is True
     alias_cfg = parsed["mcp_servers"]["chad-ui-playwright-main"]
+    env_cfg = alias_cfg["env"]
     assert alias_cfg["cwd"] == str(tmp_path / "src")
-    assert alias_cfg["env"]["PYTHONPATH"] == str(tmp_path / "src")
+    assert env_cfg["PYTHONPATH"] == str(tmp_path / "src")
+    assert env_cfg["CHAD_PROJECT_ROOT"] == str(tmp_path)
+
+
+def test_env_override_sets_project_root(tmp_path, monkeypatch):
+    import tomllib
+
+    from chad.mcp_config import ensure_global_mcp_config, _config_path
+
+    alt_root = tmp_path / "override"
+    alt_root.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CHAD_PROJECT_ROOT", str(alt_root))
+    cfg_path = _config_path()
+
+    result = ensure_global_mcp_config()
+    parsed = tomllib.loads(cfg_path.read_text())
+    server_cfg = parsed["mcp_servers"]["chad-ui-playwright"]
+    env_cfg = server_cfg["env"]
+
+    assert result["project_root"] == str(alt_root)
+    assert env_cfg["CHAD_PROJECT_ROOT"] == str(alt_root)
+    assert env_cfg["CHAD_PROJECT_ROOT_REASON"].startswith("env:")

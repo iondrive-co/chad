@@ -18,7 +18,8 @@ def test_verify_lint_only(monkeypatch):
     result = mcp_playwright.verify(lint_only=True)
 
     assert result["success"] is True
-    assert result["message"] == "Lint-only run completed"
+    assert "Lint-only run completed" in result["message"]
+    assert "Using project root" in result["message"]
     assert len(calls) == 1
     assert "flake8" in calls[0][2]
 
@@ -39,4 +40,5 @@ def test_verify_lint_only_failure(monkeypatch):
 
     assert result["success"] is False
     assert result["failed_phase"] == "lint"
+    assert "Using project root" in result["message"]
     assert len(calls) == 1

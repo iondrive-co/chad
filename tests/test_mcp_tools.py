@@ -93,6 +93,13 @@ class TestMCPHelpers:
         assert root.exists()
         assert (root / "src" / "chad").exists()
 
+    def test_project_root_prefers_env(self, monkeypatch, tmp_path):
+        from chad.mcp_playwright import _project_root
+
+        monkeypatch.setenv("CHAD_PROJECT_ROOT", str(tmp_path))
+        root = _project_root()
+        assert root == tmp_path
+
 
 class TestListTools:
     """Test the list_tools discovery function."""
