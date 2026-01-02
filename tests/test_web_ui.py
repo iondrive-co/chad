@@ -4,7 +4,7 @@ import re
 import socket
 import subprocess
 from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import ANY, Mock, patch, MagicMock
 import pytest
 
 from chad.git_worktree import GitWorktreeManager
@@ -562,6 +562,7 @@ class TestChadWebUITaskExecution:
         def fake_run_verification(
             project_path,
             coding_output,
+            task_description,
             verification_account,
             on_activity=None,
             timeout=300.0,
@@ -1153,6 +1154,7 @@ class TestLaunchWebUI:
             share=False,
             inbrowser=True,
             quiet=False,
+            js=ANY,  # Custom JS passed to launch() in Gradio 6.x
         )
         assert result == (None, 43210)
 

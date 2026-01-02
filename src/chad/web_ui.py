@@ -4783,8 +4783,7 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
 """
             )
 
-            # Execute custom JavaScript on page load
-            interface.load(fn=None, js=CUSTOM_JS)
+            # Custom JavaScript is now passed to launch() in Gradio 6.x
 
             # Maximum number of task tabs we can have
             MAX_TASKS = 10
@@ -4917,6 +4916,7 @@ def launch_web_ui(password: str = None, port: int = 7860) -> tuple[None, int]:
         share=False,
         inbrowser=open_browser,  # Don't open browser for screenshot mode
         quiet=False,
+        js=CUSTOM_JS,  # Custom JS must be passed to launch() in Gradio 6.x
     )
 
     return None, port
