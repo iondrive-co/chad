@@ -254,6 +254,50 @@ class TestChadWebUI:
         assert session.worktree_path is not None
         assert session.worktree_path.exists()
 
+    def test_discard_clears_task_description(self, web_ui, git_repo):
+        """Discard should clear the task description input."""
+        session_id = "discard-test"
+        session = web_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = Path(git_repo / ".chad-worktrees" / session_id)
+        session.worktree_path.mkdir(parents=True, exist_ok=True)
+        session.worktree_branch = f"chad-task-{session_id}"
+        session.task_description = "Test task to be cleared"
+
+        outputs = web_ui.discard_worktree_changes(session_id)
+
+        # Index 11 should be task_description update
+        assert len(outputs) >= 12, "Discard should return 12 outputs including task_description"
+        task_desc_update = outputs[11]
+        assert task_desc_update.get("value") == "", "Task description should be cleared"
+
+    def test_merge_clears_task_description_on_success(self, web_ui, git_repo, monkeypatch):
+        """Successful merge should clear the task description input."""
+        session_id = "merge-clear-test"
+        session = web_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = Path(git_repo / ".chad-worktrees" / session_id)
+        session.worktree_path.mkdir(parents=True, exist_ok=True)
+        session.worktree_branch = f"chad-task-{session_id}"
+        session.task_description = "Test task to be cleared after merge"
+
+        def fake_merge(self, task_id, commit_message=None, target_branch=None):
+            return True, None, None  # success, no conflicts, no error
+
+        def fake_cleanup(self, task_id):
+            pass
+
+        monkeypatch.setattr(GitWorktreeManager, "merge_to_main", fake_merge)
+        monkeypatch.setattr(GitWorktreeManager, "cleanup_after_merge", fake_cleanup)
+        monkeypatch.setattr(GitWorktreeManager, "get_main_branch", lambda self: "main")
+
+        outputs = web_ui.attempt_merge(session_id, "msg", "main")
+
+        # Index 11 should be task_description update
+        assert len(outputs) >= 12, "Merge should return 12 outputs including task_description"
+        task_desc_update = outputs[11]
+        assert task_desc_update.get("value") == "", "Task description should be cleared"
+
     def test_set_reasoning_success(self, web_ui, mock_security_mgr):
         """Test setting reasoning level for an account."""
         result = web_ui.set_reasoning("claude", "high")[0]

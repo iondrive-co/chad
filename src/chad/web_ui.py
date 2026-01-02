@@ -3564,9 +3564,9 @@ class ChadWebUI:
     ) -> tuple:
         """Attempt to merge worktree changes to a target branch.
 
-        Returns 11 values for merge_outputs:
+        Returns 12 values for merge_outputs:
         [merge_section, changes_summary, conflict_section, conflict_info, conflicts_html,
-         task_status, chatbot, start_btn, cancel_btn, live_stream, followup_row]
+         task_status, chatbot, start_btn, cancel_btn, live_stream, followup_row, task_description]
         """
         session = self.get_session(session_id)
         no_change = gr.update()
@@ -3574,7 +3574,7 @@ class ChadWebUI:
             return (
                 gr.update(visible=False), no_change, gr.update(visible=False),
                 no_change, no_change, gr.update(value="❌ No worktree to merge.", visible=True),
-                no_change, no_change, no_change, no_change, no_change,
+                no_change, no_change, no_change, no_change, no_change, no_change,
             )
 
         try:
@@ -3604,6 +3604,7 @@ class ChadWebUI:
                     gr.update(interactive=False),                # cancel_btn - disable
                     gr.update(value=""),                         # live_stream - clear
                     gr.update(visible=False),                    # followup_row - hide
+                    gr.update(value=""),                         # task_description - clear
                 )
             elif conflicts:
                 session.merge_conflicts = conflicts
@@ -3617,7 +3618,7 @@ class ChadWebUI:
                     gr.update(value=conflict_msg),               # conflict_info
                     gr.update(value=self._render_conflicts_html(conflicts or [])),
                     no_change,                                   # task_status
-                    no_change, no_change, no_change, no_change, no_change,
+                    no_change, no_change, no_change, no_change, no_change, no_change,
                 )
             else:
                 error_detail = error_msg or "Merge failed. Check git status and commit hooks."
@@ -3628,13 +3629,13 @@ class ChadWebUI:
                     gr.update(value=""),                         # conflict_info cleared
                     gr.update(value=""),                         # conflicts_html cleared
                     gr.update(value=f"❌ {error_detail}", visible=True),
-                    no_change, no_change, no_change, no_change, no_change,
+                    no_change, no_change, no_change, no_change, no_change, no_change,
                 )
         except Exception as e:
             return (
                 no_change, no_change, no_change, no_change, no_change,
                 gr.update(value=f"❌ Merge error: {e}", visible=True),
-                no_change, no_change, no_change, no_change, no_change,
+                no_change, no_change, no_change, no_change, no_change, no_change,
             )
 
     def _render_conflicts_html(self, conflicts: list[MergeConflict]) -> str:
@@ -3821,7 +3822,7 @@ class ChadWebUI:
     def resolve_all_conflicts(self, session_id: str, use_incoming: bool) -> tuple:
         """Resolve all conflicts by choosing all original or all incoming.
 
-        Returns 11 values for merge_outputs.
+        Returns 12 values for merge_outputs.
         """
         session = self.get_session(session_id)
         no_change = gr.update()
@@ -3829,7 +3830,7 @@ class ChadWebUI:
             return (
                 no_change, no_change, gr.update(visible=False),
                 no_change, no_change, gr.update(value="❌ No project path set.", visible=True),
-                no_change, no_change, no_change, no_change, no_change,
+                no_change, no_change, no_change, no_change, no_change, no_change,
             )
 
         try:
@@ -3857,24 +3858,25 @@ class ChadWebUI:
                     gr.update(interactive=False),                # cancel_btn - disable
                     gr.update(value=""),                         # live_stream - clear
                     gr.update(visible=False),                    # followup_row - hide
+                    gr.update(value=""),                         # task_description - clear
                 )
             else:
                 return (
                     no_change, no_change, no_change, no_change, no_change,
                     gr.update(value="❌ Failed to complete merge. Check git status.", visible=True),
-                    no_change, no_change, no_change, no_change, no_change,
+                    no_change, no_change, no_change, no_change, no_change, no_change,
                 )
         except Exception as e:
             return (
                 no_change, no_change, no_change, no_change, no_change,
                 gr.update(value=f"❌ Error resolving conflicts: {e}", visible=True),
-                no_change, no_change, no_change, no_change, no_change,
+                no_change, no_change, no_change, no_change, no_change, no_change,
             )
 
     def abort_merge_action(self, session_id: str) -> tuple:
         """Abort an in-progress merge, return to merge section.
 
-        Returns 11 values for merge_outputs.
+        Returns 12 values for merge_outputs.
         """
         session = self.get_session(session_id)
         no_change = gr.update()
@@ -3882,7 +3884,7 @@ class ChadWebUI:
             return (
                 no_change, no_change, gr.update(visible=False),
                 no_change, no_change, no_change,
-                no_change, no_change, no_change, no_change, no_change,
+                no_change, no_change, no_change, no_change, no_change, no_change,
             )
 
         git_mgr = GitWorktreeManager(Path(session.project_path))
@@ -3899,13 +3901,13 @@ class ChadWebUI:
             no_change,                                   # conflict_info
             no_change,                                   # conflicts_html
             gr.update(value="⚠️ Merge aborted. Changes remain in worktree.", visible=True),
-            no_change, no_change, no_change, no_change, no_change,  # no tab reset on abort
+            no_change, no_change, no_change, no_change, no_change, no_change,  # no tab reset on abort
         )
 
     def discard_worktree_changes(self, session_id: str) -> tuple:
         """Discard worktree and all changes, reset tab to initial state.
 
-        Returns 11 values for merge_outputs.
+        Returns 12 values for merge_outputs.
         """
         session = self.get_session(session_id)
         if session.worktree_path and session.project_path:
@@ -3930,6 +3932,7 @@ class ChadWebUI:
             gr.update(interactive=False),                # cancel_btn - disable
             gr.update(value=""),                         # live_stream - clear
             gr.update(visible=False),                    # followup_row - hide
+            gr.update(value=""),                         # task_description - clear
         )
 
     def _build_handoff_context(self, chat_history: list) -> str:
@@ -4425,6 +4428,7 @@ class ChadWebUI:
             cancel_btn,         # 8: Disable cancel button
             live_stream,        # 9: Clear live stream
             followup_row,       # 10: Hide followup row
+            task_description,   # 11: Clear task description
         ]
 
         accept_merge_btn.click(
