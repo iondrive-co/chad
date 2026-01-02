@@ -49,7 +49,7 @@ Here is the coding agents output for that task:
 ---
 
 Please verify the work by:
-1. Checking that what was actually modified on disk (use Read/Glob tools) matches the coding agents output
+1. Checking that what was actually modified on disk matches the coding agents output
 2. Checking that the coding agents output addresses everything the user asked for
 3. Reviewing the changes for correctness and completeness
 

@@ -104,6 +104,7 @@ class SessionLogger:
         chat_history: Iterable,
         *,
         streaming_transcript: str | None = None,
+        streaming_history: list[tuple[str, str]] | None = None,
         success: bool | None = None,
         completion_reason: str | None = None,
         status: str = "running",
@@ -115,7 +116,8 @@ class SessionLogger:
         Args:
             filepath: Path to the session log file
             chat_history: Structured chat messages (for backward compatibility)
-            streaming_transcript: Full streaming output from the session
+            streaming_transcript: Full streaming output from the session (flat text)
+            streaming_history: Structured streaming output as (ai_name, chunk) tuples
             success: Whether the task succeeded
             completion_reason: Why the task ended
             status: Current status (running, completed, failed)
@@ -130,8 +132,14 @@ class SessionLogger:
             if verification_attempts is not None:
                 session_data["verification_attempts"] = verification_attempts
 
-            # Store the full streaming transcript if provided
-            if streaming_transcript is not None:
+            # Store structured streaming history with AI names preserved
+            if streaming_history is not None:
+                session_data["streaming_history"] = [
+                    {"agent": agent, "content": content} for agent, content in streaming_history
+                ]
+                # Also create flat transcript for backward compatibility
+                session_data["streaming_transcript"] = "".join(chunk for _, chunk in streaming_history)
+            elif streaming_transcript is not None:
                 session_data["streaming_transcript"] = streaming_transcript
 
             if success is not None:

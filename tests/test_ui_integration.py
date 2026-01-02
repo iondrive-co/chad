@@ -803,11 +803,12 @@ Line 4: Fourth line"""
     const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
     if (!box) return false;
     const container = box.querySelector('.live-output-content') || box;
+    // Simulate user scrolling to top: scrollTop=0 and savedScrollTop=0 (not null)
     container.scrollTop = 0;
     if (window._liveStreamScroll && window._liveStreamScroll.has(container)) {
         const state = window._liveStreamScroll.get(container);
-        state.userScrolledUp = false;
-        state.savedScrollTop = 0;
+        state.userScrolledUp = true;  // User actively scrolled away from bottom
+        state.savedScrollTop = 0;  // User's scroll position (0 = top of content)
     }
     return true;
 }

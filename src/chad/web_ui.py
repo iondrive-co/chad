@@ -1312,7 +1312,7 @@ function() {
         if (!scrollStates.has(container)) {
             scrollStates.set(container, {
                 userScrolledUp: false,
-                savedScrollTop: 0,
+                savedScrollTop: null,  // null = no user scroll yet, number = user's scroll position
                 lastUserScrollTime: 0,
                 ignoreNextScroll: false
             });
@@ -1351,8 +1351,10 @@ function() {
         if (!container || !state) return;
         state.ignoreNextScroll = true;
         requestAnimationFrame(() => {
+            // null = user hasn't scrolled, use container's current position (allow auto-scroll)
+            // number = user scrolled to that position, restore it (including 0 for top)
             const targetScrollTop =
-                state.savedScrollTop > 0 ? state.savedScrollTop : container.scrollTop;
+                state.savedScrollTop !== null ? state.savedScrollTop : container.scrollTop;
             container.scrollTop = targetScrollTop;
             setTimeout(() => { state.ignoreNextScroll = false; }, 100);
         });
@@ -3186,17 +3188,13 @@ class ChadWebUI:
                     failure_msg += f"\n\n*{completion_reason[0]}*"
                 chat_history.append({"role": "user", "content": failure_msg})
 
-            streaming_transcript = "".join(chunk for _, chunk in full_history) if full_history else ""
             if final_status:
-                marker = f"[FINAL STATUS] {final_status}"
-                streaming_transcript = (
-                    f"{streaming_transcript.rstrip()}\n\n{marker}" if streaming_transcript else marker
-                )
+                full_history.append(("SYSTEM", f"\n\n[FINAL STATUS] {final_status}"))
 
             self.session_logger.update_log(
                 session.log_path,
                 chat_history,
-                streaming_transcript=streaming_transcript,
+                streaming_history=full_history if full_history else None,
                 success=task_success[0],
                 completion_reason=completion_reason[0],
                 status="completed" if task_success[0] else "failed",
@@ -3496,7 +3494,8 @@ class ChadWebUI:
         # Stream updates while waiting
         import time as time_module
 
-        full_history = []
+        full_history = []  # List of (ai_name, content) tuples
+        current_ai = "CODING AI"
         display_buffer = LiveStreamDisplayBuffer()
         last_yield_time = 0.0
         min_yield_interval = 0.05
@@ -3510,7 +3509,7 @@ class ChadWebUI:
                 if msg_type == "stream":
                     chunk = msg[1]
                     if chunk.strip():
-                        full_history.append(chunk)
+                        full_history.append((current_ai, chunk))
                         display_buffer.append(chunk)
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
@@ -4232,7 +4231,7 @@ class ChadWebUI:
         self,
         session: Session,
         chat_history: list,
-        streaming_history: list = None,
+        streaming_history: list[tuple[str, str]] | None = None,
         verification_attempts: list | None = None,
     ):
         """Update the session log with current state.
@@ -4240,14 +4239,13 @@ class ChadWebUI:
         Args:
             session: The session to update
             chat_history: Current chat history
-            streaming_history: Optional streaming transcript chunks
+            streaming_history: Optional streaming history as (ai_name, content) tuples
         """
         if session.log_path:
-            streaming_transcript = "".join(streaming_history) if streaming_history else None
             self.session_logger.update_log(
                 session.log_path,
                 chat_history,
-                streaming_transcript=streaming_transcript,
+                streaming_history=streaming_history,
                 status="continued",
                 verification_attempts=verification_attempts,
             )
