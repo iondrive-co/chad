@@ -999,9 +999,10 @@ class TestMergeDiscardReset:
         """
         )
 
-        # If there's no status element, skip this test
-        if not result.get("statusFound"):
-            pytest.skip("No status element found in DOM")
+        # Status element should now always be in DOM (visible=True with CSS hiding)
+        assert result.get("statusFound"), (
+            "Status element should be in DOM - task_status has visible=True and elem_classes=['task-status-header']"
+        )
 
         # The JavaScript fix should have hidden the merge section
         assert result.get("mergeSectionHidden", True), (

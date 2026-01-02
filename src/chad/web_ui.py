@@ -366,6 +366,22 @@ body, .gradio-container, .gradio-container * {
   display: none !important;
 }
 
+/* Hide merge/conflict sections completely when merged/discarded */
+.merge-section-hidden,
+.conflict-section-hidden {
+  display: none !important;
+  visibility: hidden !important;
+  height: 0 !important;
+  overflow: hidden !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+/* Hide task status when empty (keeps element in DOM for JS detection) */
+.task-status-header:empty {
+  display: none !important;
+}
+
 /* Auto-hide provider cards with empty headers (fallback for when JavaScript doesn't work) */
 .provider-card:has(.provider-card__header-text:empty),
 .provider-card:has(.provider-card__header-text-secondary:empty),
@@ -1427,25 +1443,32 @@ function() {
             if (!taskPanel) return;
 
             // Check if this panel's status shows merge/discard complete
-            const statusEl = taskPanel.querySelector('[class*="task-status"], [id*="task-status"]');
+            // Look for the status element with multiple selectors
+            const statusEl = taskPanel.querySelector('.task-status-header') ||
+                            taskPanel.querySelector('[id*="task-status"]') ||
+                            taskPanel.querySelector('[class*="task-status"]');
             const statusText = statusEl ? (statusEl.textContent || '') : '';
             const shouldHide = statusText.includes('merged') || statusText.includes('discarded');
 
-            // Check if merge section has content (has been populated by Gradio)
-            const hasContent = mergeSection.querySelector('.markdown, h3, button');
-            const gradioVisibleAttr = mergeSection.style.visibility !== 'hidden' &&
-                                       !mergeSection.classList.contains('hidden');
-
             if (shouldHide) {
-                // Status indicates merge/discard complete - hide the section
-                mergeSection.style.display = 'none';
-            } else if (hasContent && mergeSection.style.display === 'none') {
-                // Section has content but is hidden - check if it should be shown
-                // Only show if Gradio hasn't explicitly hidden it (no hide class)
+                // Status indicates merge/discard complete - hide the section completely
+                // Use CSS class for maximum specificity (!important rules)
+                mergeSection.classList.add('merge-section-hidden');
+                // Also clear inline styles that might interfere
+                mergeSection.style.cssText = 'display: none !important; visibility: hidden !important;';
+                // Hide all child accordions explicitly
+                mergeSection.querySelectorAll('.accordion, [class*="accordion"]').forEach(acc => {
+                    acc.style.cssText = 'display: none !important;';
+                });
+            } else if (mergeSection.classList.contains('merge-section-hidden')) {
+                // Status changed - check if we should show again
                 const changesSummary = taskPanel.querySelector('[id*="changes-summary"], [class*="changes-summary"]');
                 if (changesSummary && changesSummary.textContent.trim()) {
-                    // There's content in the changes summary - show the section
-                    mergeSection.style.display = '';
+                    mergeSection.classList.remove('merge-section-hidden');
+                    mergeSection.style.cssText = '';
+                    mergeSection.querySelectorAll('.accordion, [class*="accordion"]').forEach(acc => {
+                        acc.style.cssText = '';
+                    });
                 }
             }
         });
@@ -1456,12 +1479,18 @@ function() {
             const taskPanel = conflictSection.closest('.tabitem, [role="tabpanel"]');
             if (!taskPanel) return;
 
-            const statusEl = taskPanel.querySelector('[class*="task-status"], [id*="task-status"]');
+            const statusEl = taskPanel.querySelector('.task-status-header') ||
+                            taskPanel.querySelector('[id*="task-status"]') ||
+                            taskPanel.querySelector('[class*="task-status"]');
             const statusText = statusEl ? (statusEl.textContent || '') : '';
             const shouldHide = statusText.includes('merged') || statusText.includes('discarded');
 
             if (shouldHide) {
-                conflictSection.style.display = 'none';
+                conflictSection.classList.add('conflict-section-hidden');
+                conflictSection.style.cssText = 'display: none !important; visibility: hidden !important;';
+            } else if (conflictSection.classList.contains('conflict-section-hidden')) {
+                conflictSection.classList.remove('conflict-section-hidden');
+                conflictSection.style.cssText = '';
             }
         });
     }
@@ -2494,7 +2523,8 @@ class ChadWebUI:
             return (
                 display_history,
                 display_stream,
-                gr.update(value=status if is_error else "", visible=is_error),
+                # Task status - always visible in DOM, CSS :empty hides when blank
+                gr.update(value=status if is_error else ""),
                 gr.update(value=project_path, interactive=interactive),
                 gr.update(value=task_description, interactive=interactive),
                 gr.update(interactive=interactive),
@@ -4329,12 +4359,14 @@ class ChadWebUI:
                 scale=0,
             )
 
-        # Task status header
+        # Task status header - always in DOM but CSS hides when empty
+        # This ensures JavaScript can find it for merge section visibility logic
         task_status = gr.Markdown(
             "",
-            visible=False,
+            visible=True,
             key=f"task-status-{session_id}",
             elem_id="task-status-header" if is_first else None,
+            elem_classes=["task-status-header"],
         )
 
         # Agent communication view
