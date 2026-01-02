@@ -7,11 +7,18 @@ flawlessly working features.
 
 ## Before making changes
 
-Firstly, write a test which should fail until the issue is fixed or feature is implemented. For any UI-affecting work,
-take a "before" screenshot with `mcp__chad-ui-playwright__screenshot`. Use the `component` parameter to capture just
-the affected UI component, or omit it to capture the full tab. MCP screenshots are saved to a temp directory like
-`/tmp/chad_visual_xxxxx/` with filenames derived from the label/tab (e.g., `before_run.png`). Review the screenshot
-to confirm you understand the issue/current state.
+**For UI work, first search `src/chad/visual_test_map.py` for keywords from your task** (e.g., "reasoning effort",
+"verification agent"). The `UI_COMPONENT_MAP` tells you which screenshot component to use and which tests cover it:
+```python
+# Example: Task mentions "reasoning effort dropdown"
+# Search visual_test_map.py for "reasoning" → finds REASONING_EFFORT_DROPDOWN:
+#   tab="run", component="project-path", tests=["TestCodingAgentLayout"]
+```
+
+Then write a test which should fail until the issue is fixed or feature is implemented. Take a "before" screenshot
+with `mcp__chad-ui-playwright__screenshot` using the component from the map. MCP screenshots are saved to a temp
+directory like `/tmp/chad_visual_xxxxx/` with filenames derived from the label/tab (e.g., `before_run.png`). Review
+the screenshot to confirm you understand the issue/current state.
 
 When designing new code, never make fallback code to handle paths other than the happy one, instead spend as much effort
 as necessary to make sure that everyone using your feature sees the same happy path you tested. Similarly don't provide
@@ -34,6 +41,8 @@ Follow this MCP workflow for every task:
 2. For UI changes add any new display functionality to `visual_test_map.py`.
 3. As each check outcome is known, file it immediately with `check_result(tracker_id, hypothesis_id, check_index, passed, notes?)`.
 4. Iterate on hypotheses and keep the work focused on the happy path; refine checks when new evidence appears.
+- Start new trackers with `hypothesis(description, checks)`; omit `tracker_id` unless you are resuming an existing tracker (empty/None will create a new tracker).
+- Prefer MCP code-mode wrappers when available to keep tool definitions/results out of context. See `src/chad/mcp_code_mode/servers/chad_ui_playwright/` for callable wrappers like `verify()`, `record_hypothesis(...)`, and `file_check_result(...)`.
 
 ## After making changes
 
@@ -42,6 +51,8 @@ Follow this MCP workflow for every task:
 - Ensure every recorded check has a filed result via `check_result`, then call `report(tracker_id, screenshot_before?, screenshot_after?)` to generate the summary you will share with the user.
 - Perform a critical self-review of your changes and note any outstanding issues.
 
+**CRITICAL: All tests must pass - no skipping allowed.** Never use `@pytest.mark.skip` or skip tests for any reason. If a test fails, fix the code or the test - do not skip it. If you encounter tests that were previously skipped, unskip them and make them pass. Skipped tests hide regressions and are unacceptable in this codebase.
+
 ## MCP Tools
 
 ### verify
@@ -49,12 +60,14 @@ Run lint + all tests. Required once per task.
 ```
 mcp__chad-ui-playwright__verify()
 ```
+- Code-mode alternative: `from chad.mcp_code_mode.servers.chad_ui_playwright import verify`
 
 ### screenshot
 Capture UI tab or specific component. Use for before/after visual verification.
 ```
 mcp__chad-ui-playwright__screenshot(tab, component?, label?)
 ```
+- Code-mode alternative: `from chad.mcp_code_mode.servers.chad_ui_playwright import screenshot`
 
 **Parameters:**
 - `tab`: "run" or "providers"
@@ -85,18 +98,21 @@ Record hypotheses with binary rejection checks.
 ```
 mcp__chad-ui-playwright__hypothesis(description, checks, tracker_id?)
 ```
+- Code-mode alternative: `from chad.mcp_code_mode.servers.chad_ui_playwright import record_hypothesis`
 
 ### check_result
 File pass/fail for each check.
 ```
 mcp__chad-ui-playwright__check_result(tracker_id, hypothesis_id, check_index, passed, notes?)
 ```
+- Code-mode alternative: `from chad.mcp_code_mode.servers.chad_ui_playwright import file_check_result`
 
 ### report
 Get final summary with all hypotheses and results.
 ```
 mcp__chad-ui-playwright__report(tracker_id, screenshot_before?, screenshot_after?)
 ```
+- Code-mode alternative: `from chad.mcp_code_mode.servers.chad_ui_playwright import report`
 
 ### list_tools
 List available MCP tools and their purposes.
@@ -155,6 +171,7 @@ src/chad/
 ├── security.py       # Password hashing, API key encryption
 ├── session_logger.py # Session log management
 ├── web_ui.py         # Gradio web interface
+├── mcp_code_mode/    # Code-mode wrappers for MCP tools (reduces prompt context)
 ├── mcp_playwright.py # MCP tools (verify, screenshot, hypothesis)
 └── model_catalog.py  # Model discovery per provider
 ```

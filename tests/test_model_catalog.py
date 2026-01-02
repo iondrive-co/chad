@@ -1,37 +1,76 @@
-"""Tests for model discovery helper."""
-
+import base64
+import json
 from pathlib import Path
 
-import pytest
-
-from chad import model_catalog
 from chad.model_catalog import ModelCatalog
 
 
-@pytest.mark.skipif(model_catalog.tomllib is None, reason="TOML parser not available")
-def test_codex_models_from_config_and_sessions(tmp_path: Path):
-    codex_dir = tmp_path / ".codex"
-    (codex_dir / "sessions" / "2025" / "01" / "01").mkdir(parents=True, exist_ok=True)
+def _write_auth(auth_file: Path, plan_type: str) -> None:
+    payload = {"https://api.openai.com/auth": {"chatgpt_plan_type": plan_type}}
+    encoded_payload = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    token = f"hdr.{encoded_payload}.sig"
 
-    config = codex_dir / "config.toml"
-    config.write_text(
-        'model = "gpt-5.2-codex"\n'
-        '[notice.model_migrations]\n'
-        '"gpt-old" = "gpt-new"\n'
-    )
+    auth_file.parent.mkdir(parents=True, exist_ok=True)
+    auth_file.write_text(json.dumps({"tokens": {"access_token": token}}))
 
-    session = codex_dir / "sessions" / "2025" / "01" / "01" / "session.jsonl"
-    session.write_text(
-        '{"model": "gpt-5.1-codex-max"}\n'
-        '{"payload": {"model": "gpt-4.1"}}\n'
-    )
 
-    catalog = ModelCatalog(home_dir=tmp_path, cache_ttl=0)
-    models = catalog.get_models("openai")
+def _write_codex_session(home: Path, model: str) -> None:
+    session = home / ".codex" / "sessions" / "2025" / "01" / "01" / "session.jsonl"
+    session.parent.mkdir(parents=True, exist_ok=True)
+    session.write_text(json.dumps({"model": model}))
 
-    assert "gpt-5.2-codex" in models
+
+def _write_codex_config(home: Path, model: str, migrations: dict[str, str] | None = None) -> None:
+    config = home / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f'model = "{model}"']
+    if migrations:
+        lines.append("")
+        lines.append("[notice.model_migrations]")
+        for old, new in migrations.items():
+            lines.append(f'"{old}" = "{new}"')
+    config.write_text("\n".join(lines))
+
+
+def test_openai_models_keep_codex_variants_for_chatgpt(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHAD_TEMP_HOME", str(tmp_path))
+    home = tmp_path / ".chad" / "codex-homes" / "codex-home"
+    _write_auth(home / ".codex" / "auth.json", "plus")
+    _write_codex_session(home, "gpt-5.1-codex-max")
+    _write_codex_session(home, "codex")
+    _write_codex_config(home, "gpt-5.1-codex-max", {"codex": "gpt-5.2-codex"})
+
+    catalog = ModelCatalog(home_dir=tmp_path)
+    models = catalog.get_models("openai", "codex-home")
+
     assert "gpt-5.1-codex-max" in models
-    assert "gpt-4.1" in models
-    assert "gpt-old" in models
-    assert "gpt-new" in models
-    assert "default" in models
+    assert "gpt-5.2-codex" in models
+    assert "codex" not in {model.lower() for model in models}
+
+
+def test_openai_models_strip_literal_codex_for_team(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHAD_TEMP_HOME", str(tmp_path))
+    home = tmp_path / ".chad" / "codex-homes" / "codex-work"
+    _write_auth(home / ".codex" / "auth.json", "team")
+    _write_codex_session(home, "gpt-5.1-codex-max")
+    _write_codex_session(home, "codex")
+    _write_codex_config(home, "gpt-5.1-codex-max", {"codex": "gpt-5.2-codex"})
+
+    catalog = ModelCatalog(home_dir=tmp_path)
+    models = catalog.get_models("openai", "codex-work")
+
+    assert "gpt-5.1-codex-max" in models
+    assert "gpt-5.2-codex" in models
+    assert "codex" not in {model.lower() for model in models}
+
+
+def test_openai_models_use_isolated_codex_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHAD_TEMP_HOME", str(tmp_path))
+    home = tmp_path / ".chad" / "codex-homes" / "codex-home"
+    _write_auth(home / ".codex" / "auth.json", "plus")
+    _write_codex_session(home, "o3-mini")
+
+    catalog = ModelCatalog(home_dir=tmp_path)
+    models = catalog.get_models("openai", "codex-home")
+
+    assert "o3-mini" in models

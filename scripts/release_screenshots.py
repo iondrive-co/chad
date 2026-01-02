@@ -50,7 +50,8 @@ def screenshot_page(page, output_path: Path) -> Path:
 
 def inject_followup_visible(page):
     """Make the follow-up input row visible for the conversation screenshot."""
-    page.evaluate("""
+    page.evaluate(
+        """
     () => {
         // Show the follow-up row - handle Gradio's visibility
         const followupRow = document.getElementById('followup-row');
@@ -93,7 +94,8 @@ def inject_followup_visible(page):
             followupRow.scrollIntoView({ behavior: 'instant', block: 'end' });
         }
     }
-    """)
+    """
+    )
 
 
 def main():
@@ -158,12 +160,14 @@ def main():
             # Capture both chatbot and follow-up row by taking full page
             # then we'll crop to just the relevant area
             # First, scroll to ensure chatbot area is visible
-            page.evaluate("""
+            page.evaluate(
+                """
             () => {
                 const chatbot = document.getElementById('agent-chatbot');
                 if (chatbot) chatbot.scrollIntoView({ behavior: 'instant', block: 'start' });
             }
-            """)
+            """
+            )
             page.wait_for_timeout(200)
 
             # Take full page screenshot then crop to conversation area
@@ -189,10 +193,11 @@ def main():
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
     finally:
-        if 'instance' in locals():
+        if "instance" in locals():
             stop_chad(instance)
         env.cleanup()
 

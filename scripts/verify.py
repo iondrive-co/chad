@@ -53,19 +53,12 @@ def run_command(cmd: list[str], description: str, cwd: Path = PROJECT_ROOT) -> b
 
 def run_lint() -> bool:
     """Run flake8 linting."""
-    return run_command(
-        [sys.executable, "-m", "flake8", "."],
-        "Linting (flake8)"
-    )
+    return run_command([sys.executable, "-m", "flake8", "."], "Linting (flake8)")
 
 
 def run_unit_tests(test_file: str | None = None, match: str | None = None) -> bool:
     """Run unit tests (excluding UI integration tests)."""
-    cmd = [
-        sys.executable, "-m", "pytest",
-        "-v", "--tb=short",
-        "--ignore=tests/test_ui_integration.py"
-    ]
+    cmd = [sys.executable, "-m", "pytest", "-v", "--tb=short", "--ignore=tests/test_ui_integration.py"]
 
     if test_file:
         cmd.append(test_file)
@@ -76,18 +69,13 @@ def run_unit_tests(test_file: str | None = None, match: str | None = None) -> bo
     full_cmd = ["env", env_prefix] + cmd
 
     return run_command(
-        full_cmd,
-        f"Unit Tests{f' ({test_file})' if test_file else ''}{f' (matching {match})' if match else ''}"
+        full_cmd, f"Unit Tests{f' ({test_file})' if test_file else ''}{f' (matching {match})' if match else ''}"
     )
 
 
 def run_ui_tests(test_file: str | None = None, match: str | None = None) -> bool:
     """Run UI integration tests with Playwright."""
-    cmd = [
-        sys.executable, "-m", "pytest",
-        "-v", "--tb=short",
-        "tests/test_ui_integration.py"
-    ]
+    cmd = [sys.executable, "-m", "pytest", "-v", "--tb=short", "tests/test_ui_integration.py"]
 
     if match:
         cmd.extend(["-k", match])
@@ -95,17 +83,12 @@ def run_ui_tests(test_file: str | None = None, match: str | None = None) -> bool
     env_prefix = f"PYTHONPATH={SRC_DIR}"
     full_cmd = ["env", env_prefix] + cmd
 
-    return run_command(
-        full_cmd,
-        f"UI Integration Tests{f' (matching {match})' if match else ''}"
-    )
+    return run_command(full_cmd, f"UI Integration Tests{f' (matching {match})' if match else ''}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run Chad verification checks",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__
+        description="Run Chad verification checks", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__
     )
     parser.add_argument("--lint", action="store_true", help="Run linting only")
     parser.add_argument("--unit", action="store_true", help="Run unit tests only")

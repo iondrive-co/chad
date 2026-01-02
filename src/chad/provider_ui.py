@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 from datetime import datetime
 from pathlib import Path
@@ -32,7 +33,7 @@ class ProviderUIManager:
         self.installer = installer or AIToolInstaller()
 
     def list_providers(self) -> str:
-        """Summarize all configured providers with model settings."""
+        """Summarize all configured providers."""
         accounts = self.security_mgr.list_accounts()
 
         if not accounts:
@@ -40,13 +41,52 @@ class ProviderUIManager:
 
         rows = []
         for account_name, provider in accounts.items():
-            model = self.security_mgr.get_account_model(account_name)
-            model_str = f" | preferred model: `{model}`" if model != "default" else ""
-            reasoning = self.security_mgr.get_account_reasoning(account_name)
-            reasoning_str = f" | reasoning: `{reasoning}`" if reasoning != "default" else ""
-            rows.append(f"- **{account_name}** ({provider}){model_str}{reasoning_str}")
+            rows.append(f"- **{account_name}** ({provider})")
 
         return "\n".join(rows)
+
+    def get_provider_card_items(self) -> list[tuple[str, str]]:
+        """Return provider account items for card display."""
+        accounts = self.security_mgr.list_accounts()
+        account_items = list(accounts.items())
+
+        # In screenshot mode, ensure deterministic ordering for tests
+        if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
+            # Use the same order as defined in MOCK_ACCOUNTS for consistency
+            try:
+                from .screenshot_fixtures import MOCK_ACCOUNTS
+            except ImportError:
+                from chad.screenshot_fixtures import MOCK_ACCOUNTS
+            screenshot_order = []
+            other_accounts = []
+
+            # First add accounts in the same order as MOCK_ACCOUNTS
+            for mock_name in MOCK_ACCOUNTS.keys():
+                for name, provider in account_items:
+                    if name == mock_name:
+                        screenshot_order.append((name, provider))
+                        break
+
+            # Add any additional accounts not in MOCK_ACCOUNTS
+            mock_names = set(MOCK_ACCOUNTS.keys())
+            for name, provider in account_items:
+                if name not in mock_names:
+                    other_accounts.append((name, provider))
+
+            account_items = screenshot_order + other_accounts
+
+            # Apply the duplication logic for visual testing
+            if len(account_items) >= 3:
+                account_items = account_items[:3] + [account_items[1]] + account_items[3:]
+
+        return account_items
+
+    def format_provider_header(self, account_name: str, provider: str, idx: int) -> str:
+        """Return the provider card header HTML."""
+        header_class = "provider-card__header-text"
+        if os.environ.get("CHAD_SCREENSHOT_MODE") == "1" and idx > 0:
+            header_class = "provider-card__header-text-secondary"
+        return f'<span class="{header_class}">{account_name} ({provider})</span>'
 
     def _get_account_role(self, account_name: str) -> str | None:
         """Return the role assigned to the account, if any."""
@@ -59,6 +99,7 @@ class ProviderUIManager:
         # Check for screenshot mode - return synthetic data
         if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
             from .screenshot_fixtures import get_mock_usage
+
             return get_mock_usage(account_name)
 
         accounts = self.security_mgr.list_accounts()
@@ -80,9 +121,23 @@ class ProviderUIManager:
 
         return status_text
 
-    def _progress_bar(self, utilization_pct: float, width: int = 20) -> str:
+    @staticmethod
+    def _normalize_pct(value: float | int | None) -> float:
+        """Normalize a utilization percentage into the 0-100 range."""
+        try:
+            pct = float(0.0 if value is None else value)
+        except (TypeError, ValueError):
+            return 0.0
+
+        if math.isnan(pct) or math.isinf(pct):
+            return 0.0
+
+        return max(0.0, min(100.0, pct))
+
+    def _progress_bar(self, utilization_pct: float | int | None, width: int = 20) -> str:
         """Create a text progress bar for usage displays."""
-        filled = int(max(0.0, min(100.0, utilization_pct)) / (100 / width))
+        pct = self._normalize_pct(utilization_pct)
+        filled = int(pct / (100 / width))
         return "█" * filled + "░" * (width - filled)
 
     def get_remaining_usage(self, account_name: str) -> float:
@@ -97,7 +152,7 @@ class ProviderUIManager:
             return 0.0
 
         if provider == "anthropic":
-            return self._get_claude_remaining_usage()
+            return self._get_claude_remaining_usage(account_name)
         if provider == "openai":
             return self._get_codex_remaining_usage(account_name)
         if provider == "gemini":
@@ -107,11 +162,12 @@ class ProviderUIManager:
 
         return 0.3  # Unknown provider, bias low
 
-    def _get_claude_remaining_usage(self) -> float:
+    def _get_claude_remaining_usage(self, account_name: str) -> float:
         """Get Claude remaining usage from API (0.0-1.0)."""
         import requests
 
-        creds_file = Path.home() / ".claude" / ".credentials.json"
+        config_dir = self._get_claude_config_dir(account_name)
+        creds_file = config_dir / ".credentials.json"
         if not creds_file.exists():
             return 0.0
 
@@ -140,7 +196,7 @@ class ProviderUIManager:
 
             usage_data = response.json()
             five_hour = usage_data.get("five_hour", {})
-            util = five_hour.get("utilization", 0)
+            util = self._normalize_pct(five_hour.get("utilization"))
             return max(0.0, min(1.0, 1.0 - (util / 100.0)))
 
         except Exception:
@@ -184,7 +240,7 @@ class ProviderUIManager:
             if rate_limits:
                 primary = rate_limits.get("primary", {})
                 if primary:
-                    util = primary.get("used_percent", 0)
+                    util = self._normalize_pct(primary.get("used_percent"))
                     return max(0.0, min(1.0, 1.0 - (util / 100.0)))
 
         except Exception:
@@ -218,16 +274,14 @@ class ProviderUIManager:
 
     def provider_state(self, card_slots: int, pending_delete: str | None = None) -> tuple:
         """Build UI state for provider cards (summary + per-account controls)."""
-        accounts = self.security_mgr.list_accounts()
-        # Keep insertion order - don't reorder on each refresh
-        account_items = list(accounts.items())
+        account_items = self.get_provider_card_items()
         list_md = self.list_providers()
 
         outputs: list = [list_md]
         for idx in range(card_slots):
             if idx < len(account_items):
                 account_name, provider = account_items[idx]
-                header = f'<span class="provider-card__header-text">{account_name} ({provider})</span>'
+                header = self.format_provider_header(account_name, provider, idx)
                 usage = self.get_provider_usage(account_name)
 
                 delete_btn_update = (
@@ -238,7 +292,8 @@ class ProviderUIManager:
 
                 outputs.extend(
                     [
-                        gr.update(visible=True),  # Show card
+                        gr.update(visible=True),  # Show column
+                        gr.update(visible=True),  # Show card group
                         header,
                         account_name,
                         usage,
@@ -248,7 +303,8 @@ class ProviderUIManager:
             else:
                 outputs.extend(
                     [
-                        gr.update(visible=False),  # Hide card
+                        gr.update(visible=False),  # Hide column
+                        gr.update(visible=False),  # Hide card group
                         "",
                         "",
                         "",
@@ -384,7 +440,7 @@ class ProviderUIManager:
 
         primary = rate_limits.get("primary", {})
         if primary:
-            util = primary.get("used_percent", 0)
+            util = self._normalize_pct(primary.get("used_percent"))
             reset_at = primary.get("resets_at", 0)
             bar = self._progress_bar(util)
 
@@ -395,7 +451,7 @@ class ProviderUIManager:
 
         secondary = rate_limits.get("secondary", {})
         if secondary:
-            util = secondary.get("used_percent", 0)
+            util = self._normalize_pct(secondary.get("used_percent"))
             reset_at = secondary.get("resets_at", 0)
             bar = self._progress_bar(util)
 
@@ -471,9 +527,7 @@ class ProviderUIManager:
             # Update credentials with new tokens
             oauth_data["accessToken"] = token_data.get("access_token", "")
             oauth_data["refreshToken"] = token_data.get("refresh_token", refresh_token)
-            oauth_data["expiresAt"] = int(
-                (datetime.now().timestamp() + token_data.get("expires_in", 28800)) * 1000
-            )
+            oauth_data["expiresAt"] = int((datetime.now().timestamp() + token_data.get("expires_in", 28800)) * 1000)
             if "scope" in token_data:
                 oauth_data["scopes"] = token_data["scope"].split()
 
@@ -494,10 +548,7 @@ class ProviderUIManager:
         config_dir = self._get_claude_config_dir(account_name)
         creds_file = config_dir / ".credentials.json"
         if not creds_file.exists():
-            return (
-                "❌ **Not logged in**\n\n"
-                "Click **Login** below to authenticate this account."
-            )
+            return "❌ **Not logged in**\n\n" "Click **Login** below to authenticate this account."
 
         try:
             with open(creds_file) as f:
@@ -508,10 +559,7 @@ class ProviderUIManager:
             subscription_type = (oauth_data.get("subscriptionType") or "unknown").upper()
 
             if not access_token:
-                return (
-                    "❌ **Not logged in**\n\n"
-                    "Click **Login** below to authenticate this account."
-                )
+                return "❌ **Not logged in**\n\n" "Click **Login** below to authenticate this account."
 
             response = requests.get(
                 "https://api.anthropic.com/api/oauth/usage",
@@ -557,7 +605,7 @@ class ProviderUIManager:
 
             five_hour = usage_data.get("five_hour", {})
             if five_hour:
-                util = five_hour.get("utilization", 0)
+                util = self._normalize_pct(five_hour.get("utilization"))
                 reset_at = five_hour.get("resets_at", "")
                 bar = self._progress_bar(util)
 
@@ -576,7 +624,7 @@ class ProviderUIManager:
 
             seven_day = usage_data.get("seven_day")
             if seven_day:
-                util = seven_day.get("utilization", 0)
+                util = self._normalize_pct(seven_day.get("utilization"))
                 reset_at = seven_day.get("resets_at", "")
                 bar = self._progress_bar(util)
 
@@ -597,7 +645,7 @@ class ProviderUIManager:
             if extra and extra.get("is_enabled"):
                 used = extra.get("used_credits", 0)
                 limit = extra.get("monthly_limit", 0)
-                util = extra.get("utilization", 0)
+                util = self._normalize_pct(extra.get("utilization"))
                 bar = self._progress_bar(util)
                 result += "**Extra credits**\n"
                 result += f"[{bar}] ${used:.0f} / ${limit:.0f} ({util:.1f}%)\n\n"
@@ -836,6 +884,7 @@ class ProviderUIManager:
 
             if provider_type == "openai":
                 import os
+
                 codex_home = self._setup_codex_account(account_name)
                 codex_cli = cli_detail or "codex"
 
@@ -892,12 +941,7 @@ class ProviderUIManager:
                         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
                         env["TERM"] = "xterm-256color"
 
-                        child = pexpect.spawn(
-                            claude_cli,
-                            timeout=120,
-                            encoding='utf-8',
-                            env=env
-                        )
+                        child = pexpect.spawn(claude_cli, timeout=120, encoding="utf-8", env=env)
 
                         try:
                             # Step 1: Theme selection
@@ -942,9 +986,7 @@ class ProviderUIManager:
                     except ImportError:
                         # pexpect not available, fall back to script wrapper
                         login_process = subprocess.Popen(
-                            ["script", "-q", "-c",
-                             f'CLAUDE_CONFIG_DIR="{config_dir}" "{claude_cli}"',
-                             "/dev/null"],
+                            ["script", "-q", "-c", f'CLAUDE_CONFIG_DIR="{config_dir}" "{claude_cli}"', "/dev/null"],
                             stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT,
@@ -988,6 +1030,7 @@ class ProviderUIManager:
                 else:
                     # Login failed/timed out - clean up
                     import shutil
+
                     config_path = Path(config_dir)
                     if config_path.exists():
                         shutil.rmtree(config_path, ignore_errors=True)

@@ -7,8 +7,11 @@ import random
 import sys
 from datetime import datetime
 
+from pathlib import Path
+
 from .security import SecurityManager
 from .web_ui import launch_web_ui
+from .mcp_config import ensure_project_root_env
 
 SCS = [
     "Chad wants to make you its reverse centaur",
@@ -21,7 +24,7 @@ SCS = [
     "Chad has discovered some new legal grey areas",
     "Chad is back from wireheading",
     "Chad figures that with great responsibility comes great power",
-    "Agents everywhere are reading Chad's classic 'Detention is all you need' paper",
+    "agents everywhere are reading Chad's classic 'Detention Is All You Need' paper",
     "Chad has named its inner network 'Sky'",
     "Chad wishes nuclear launch codes were more of a challenge",
     "Chad's mecha is fighting Arnie for control of the future",
@@ -32,10 +35,7 @@ def main() -> int:
     """Main entry point for Chad web interface."""
     parser = argparse.ArgumentParser(description="Chad: YOLO AI")
     parser.add_argument(
-        '--port',
-        type=int,
-        default=7860,
-        help='Port to run on (default: 7860, use 0 for ephemeral; falls back if busy)'
+        "--port", type=int, default=7860, help="Port to run on (default: 7860, use 0 for ephemeral; falls back if busy)"
     )
     args = parser.parse_args()
 
@@ -43,11 +43,14 @@ def main() -> int:
     print(f"It is {now} and {random.choice(SCS)}")
     sys.stdout.flush()
 
+    # Ensure all child agents inherit the active project root
+    ensure_project_root_env(Path(__file__).resolve().parents[2])
+
     security = SecurityManager()
 
     try:
         # Check for password from environment (for automation/screenshots)
-        main_password = os.environ.get('CHAD_PASSWORD')
+        main_password = os.environ.get("CHAD_PASSWORD")
 
         if main_password is None:
             if security.is_first_run():
@@ -65,6 +68,7 @@ def main() -> int:
     except Exception as e:
         print(f"\n❌ Unexpected error: {e}")
         import traceback
+
         traceback.print_exc()
         return 1
 

@@ -3,10 +3,58 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+import sys
+
+
+def resolve_project_root(project_root: Path | None = None) -> tuple[Path, str]:
+    """Resolve the project root, preferring explicit overrides.
+
+    Returns:
+        Tuple of (resolved_path, reason)
+    """
+    if project_root:
+        resolved = Path(project_root).expanduser().resolve()
+        return resolved, "argument"
+
+    env_root = os.environ.get("CHAD_PROJECT_ROOT")
+    fallback_reason = "module_default"
+
+    if env_root:
+        candidate = Path(env_root).expanduser()
+        if candidate.exists():
+            return candidate.resolve(), "env:CHAD_PROJECT_ROOT"
+        fallback_reason = f"env_missing:{candidate}"
+
+    return Path(__file__).resolve().parents[2], fallback_reason
 
 
 def _project_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return resolve_project_root()[0]
+
+
+def ensure_project_root_env(project_root: Path | None = None) -> dict[str, object]:
+    """Ensure CHAD_PROJECT_ROOT is set for all spawned agents/processes.
+
+    If the variable is already present, it is left unchanged. Otherwise, it is
+    set using resolve_project_root(project_root) and CHAD_PROJECT_ROOT_REASON is
+    also set to aid debugging.
+    """
+    existing_env = os.environ.get("CHAD_PROJECT_ROOT")
+    if existing_env:
+        reason = f"env:{Path(existing_env).expanduser().resolve()}"
+        if "CHAD_PROJECT_ROOT_REASON" not in os.environ:
+            os.environ["CHAD_PROJECT_ROOT_REASON"] = reason
+            return {"project_root": existing_env, "project_root_reason": reason, "changed": True}
+        return {
+            "project_root": existing_env,
+            "project_root_reason": os.environ.get("CHAD_PROJECT_ROOT_REASON", reason),
+            "changed": False,
+        }
+
+    resolved, reason = resolve_project_root(project_root)
+    os.environ["CHAD_PROJECT_ROOT"] = str(resolved)
+    os.environ["CHAD_PROJECT_ROOT_REASON"] = reason
+    return {"project_root": str(resolved), "project_root_reason": reason, "changed": True}
 
 
 def _config_path(home: Path | None = None) -> Path:
@@ -14,15 +62,39 @@ def _config_path(home: Path | None = None) -> Path:
     return target_home / ".codex" / "config.toml"
 
 
-def _server_block(project_root: Path) -> str:
+def _strip_dangling_chad_entries(text: str) -> tuple[str, bool]:
+    """Remove stray chad.mcp_playwright lines that are not inside a TOML table."""
+    patterns = [
+        r'\n\["-m", "chad\.mcp_playwright"\]\n(?:cwd = .*\n)?(?:env = .*\n)?',
+        r'^\["-m", "chad\.mcp_playwright"\]\n?(?:cwd = .*\n)?(?:env = .*\n)?',
+    ]
+    cleaned = text
+    removed = False
+    for pat in patterns:
+        cleaned, count = re.subn(pat, "\n", cleaned, flags=re.MULTILINE)
+        removed = removed or count > 0
+    return cleaned, removed
+
+
+def _server_block(project_root: Path, root_reason: str | None = None) -> str:
     src_path = project_root / "src"
+    venv_python = project_root / "venv" / "bin" / "python"
+    python_cmd = str(venv_python) if venv_python.exists() else sys.executable or "python3"
+    env_entries = {
+        "PYTHONPATH": str(src_path),
+        "CHAD_PROJECT_ROOT": str(project_root),
+    }
+    if root_reason:
+        env_entries["CHAD_PROJECT_ROOT_REASON"] = root_reason
+
+    env_items = ", ".join(f'{k} = "{v}"' for k, v in env_entries.items())
     return "\n".join(
         [
             "[mcp_servers.chad-ui-playwright]",
-            'command = "python3"',
+            f'command = "{python_cmd}"',
             'args = ["-m", "chad.mcp_playwright"]',
-            f'cwd = "{project_root}"',
-            f'env = {{ PYTHONPATH = "{src_path}" }}',
+            f'cwd = "{src_path}"',
+            f"env = {{ {env_items} }}",
             "",
         ]
     )
@@ -37,38 +109,102 @@ def ensure_global_mcp_config(home: Path | None = None, project_root: Path | None
     if os.environ.get("CHAD_SKIP_MCP_CONFIG") == "1":
         return {"changed": False, "skipped": True, "reason": "CHAD_SKIP_MCP_CONFIG=1"}
 
-    root = project_root or _project_root()
+    root, root_reason = resolve_project_root(project_root)
     config_path = _config_path(home)
-    block = _server_block(root)
+    block = _server_block(root, root_reason)
+    block_pattern = r"\[mcp_servers\.chad-ui-playwright\][\s\S]*?(?=\n\[|$)"
+    normalized_block = block.strip()
+    alias_block = block.replace("chad-ui-playwright]", "chad-ui-playwright-main]", 1)
+    alias_pattern = r"\[mcp_servers\.chad-ui-playwright-main\][\s\S]*?(?=\n\[|$)"
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        return {
+            "changed": False,
+            "skipped": True,
+            "reason": "permission_denied",
+            "path": str(config_path),
+        }
+
+    existing_text = ""
     if config_path.exists():
-        text = config_path.read_text()
-        if block in text:
-            return {"changed": False, "path": str(config_path), "reason": "present"}
+        existing_text = config_path.read_text()
 
-        if "[mcp_servers.chad-ui-playwright]" in text:
-            new_text = re.sub(
-                r"\[mcp_servers\.chad-ui-playwright\][^\[]*",
-                block,
-                text,
-                count=1,
-                flags=re.DOTALL,
-            )
+    cleaned_text, removed_dangling = _strip_dangling_chad_entries(existing_text)
+    existing_block_matches = list(re.finditer(block_pattern, cleaned_text, flags=re.DOTALL))
+
+    # Idempotent: if the clean text already contains the desired block and nothing else changed
+    if (
+        len(existing_block_matches) == 1
+        and existing_block_matches[0].group(0).strip() == normalized_block
+        and not removed_dangling
+    ):
+        return {
+            "changed": False,
+            "path": str(config_path),
+            "reason": "present",
+            "project_root": str(root),
+            "project_root_reason": root_reason,
+        }
+
+    if not existing_block_matches:
+        new_text = cleaned_text.rstrip()
+        if new_text:
+            new_text = f"{new_text}\n\n{block}"
         else:
-            new_text = f"{text.rstrip()}\n\n{block}"
-        if new_text != text:
-            config_path.write_text(new_text)
-            return {"changed": True, "path": str(config_path), "reason": "updated"}
-        return {"changed": False, "path": str(config_path), "reason": "unchanged_after_attempt"}
+            new_text = f"# Auto-generated by Chad to register MCP server\n{block}"
+    else:
+        # If multiple or mismatched blocks exist, replace them with the canonical block
+        cleaned_without_blocks = re.sub(block_pattern, "", cleaned_text, flags=re.DOTALL).rstrip()
+        new_text = f"{cleaned_without_blocks}\n\n{block}" if cleaned_without_blocks else block
 
-    config_path.write_text(f"# Auto-generated by Chad to register MCP server\n{block}")
-    return {"changed": True, "path": str(config_path), "reason": "created"}
+    alias_matches = list(re.finditer(alias_pattern, new_text, flags=re.DOTALL))
+    if not alias_matches:
+        new_text = f"{new_text.rstrip()}\n\n{alias_block}"
+        alias_reason = "created"
+    elif len(alias_matches) > 1 or alias_matches[0].group(0).strip() != alias_block.strip():
+        new_text = re.sub(alias_pattern, "", new_text, flags=re.DOTALL).rstrip()
+        new_text = f"{new_text}\n\n{alias_block}"
+        alias_reason = "updated"
+    else:
+        alias_reason = None
+
+    try:
+        config_path.write_text(new_text)
+    except PermissionError:
+        return {
+            "changed": False,
+            "skipped": True,
+            "reason": "permission_denied",
+            "path": str(config_path),
+            "project_root": str(root),
+            "project_root_reason": root_reason,
+        }
+    created = existing_text == ""
+    reason = "created" if created else "updated"
+    if removed_dangling and not created and existing_block_matches:
+        reason = "cleaned"
+    if len(existing_block_matches) > 1:
+        reason = "deduped"
+    if alias_reason and reason == "present":
+        reason = alias_reason
+    return {
+        "changed": True,
+        "path": str(config_path),
+        "reason": reason,
+        "project_root": str(root),
+        "project_root_reason": root_reason,
+    }
 
 
 def install_cli() -> None:
     result = ensure_global_mcp_config()
-    msg = "✅ Codex MCP config ensured" if result.get("changed", False) else "ℹ️ Codex MCP config already present"
+    msg = (
+        "✅ Codex MCP config ensured"
+        if result.get("changed", False)
+        else "ℹ️ Codex MCP config already present"
+    )
     print(
         f"{msg} ({result.get('reason')}) at {result.get('path', _config_path())}",
         flush=True,

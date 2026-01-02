@@ -1,9 +1,17 @@
-- Classes for 1 sentence summaries and splitting tasks, self-contained including prompt, tested first then integration
-- Load balance based on usage, user preference, context limits hit, etc - will need: 
-  - task splitting to support session continuation per agent
-  - Local projects: copy directory into system temp and work on it
-  - Git remote projects: checkout and branch, push branch back to remote for review once done
-- Rollback
+v0.7 Touring complete
+
+Screenshots and hypothesis in task summaries
+Integrated live view
+Testing the mistral and gemini providers and add qwen code
+Fix Chatbox scrollbar keeps resetting to the bottom
+
+v0.8 Hack-propagation
+
+Load balance based on usage, user preference, context limits hit, etc.
+
+v0.9 Slip slop slap
+
+Rollback:
+  - Failed hypothesis
   - summarize progress and resume from checkpoints
   - Revert failed changes
-

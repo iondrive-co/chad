@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,19 +35,10 @@ class ModelCatalog:
     cache_ttl: float = 300.0
     max_session_files: int = 60
 
-    OPENAI_FALLBACK: tuple[str, ...] = (
-        "gpt-5.2-codex",
-        "gpt-5.1-codex-max",
-        "gpt-5.1-codex",
-        "gpt-5.1-codex-mini",
-        "gpt-5.2",
-        "gpt-4.1",
-        "gpt-4.1-mini",
-        "o3",
-        "o4-mini",
-        "codex-mini",
-        "default",
-    )
+    # Only include "default" in fallback - specific models vary by account type
+    # (ChatGPT accounts vs API accounts have different available models)
+    # User's actual available models are discovered from config/session files
+    OPENAI_FALLBACK: tuple[str, ...] = ("default",)
     ANTHROPIC_FALLBACK: tuple[str, ...] = (
         "claude-sonnet-4-20250514",
         "claude-opus-4-20250514",
@@ -76,8 +69,14 @@ class ModelCatalog:
         models |= self._stored_model(provider, account_name)
 
         if provider == "openai":
-            models |= self._codex_config_models()
-            models |= self._codex_session_models()
+            models |= self._codex_config_models(account_name)
+            models |= self._codex_session_models(account_name)
+
+        models = {str(m).strip() for m in models if m}
+        models = {m for m in models if m}
+
+        if provider == "openai":
+            models = {m for m in models if m.lower() != "codex"}
 
         models.add("default")
         resolved = sorted(models, key=lambda m: (m == "default", m))
@@ -105,11 +104,14 @@ class ModelCatalog:
             return set()
         return {str(model)} if model else set()
 
-    def _codex_config_models(self) -> set[str]:
+    def _codex_config_models(self, account_name: str | None) -> set[str]:
         if tomllib is None:
             return set()
 
-        config_path = self.home_dir / ".codex" / "config.toml"
+        if not account_name:
+            return set()
+
+        config_path = self._codex_home(account_name) / ".codex" / "config.toml"
         if not config_path.exists():
             return set()
 
@@ -135,8 +137,11 @@ class ModelCatalog:
 
         return models
 
-    def _codex_session_models(self) -> set[str]:
-        sessions_dir = self.home_dir / ".codex" / "sessions"
+    def _codex_session_models(self, account_name: str | None) -> set[str]:
+        if not account_name:
+            return set()
+
+        sessions_dir = self._codex_home(account_name) / ".codex" / "sessions"
         if not sessions_dir.exists():
             return set()
 
@@ -177,3 +182,33 @@ class ModelCatalog:
                 return str(payload_model)
 
         return None
+
+    def _codex_home(self, account_name: str) -> Path:
+        temp_home = os.environ.get("CHAD_TEMP_HOME")
+        base = Path(temp_home) if temp_home else self.home_dir
+        return base / ".chad" / "codex-homes" / account_name
+
+    def _codex_plan_type(self, account_name: str | None) -> str | None:
+        if not account_name:
+            return None
+
+        auth_file = self._codex_home(account_name) / ".codex" / "auth.json"
+        if not auth_file.exists():
+            return None
+
+        try:
+            data = json.loads(auth_file.read_text())
+            token = data.get("tokens", {}).get("access_token")
+            if not token:
+                return None
+
+            payload = token.split(".")[1]
+            if payload:
+                payload += "=" * (-len(payload) % 4)
+            decoded = base64.urlsafe_b64decode(payload or "")
+            jwt_data = json.loads(decoded)
+            auth_info = jwt_data.get("https://api.openai.com/auth", {})
+            plan_type = auth_info.get("chatgpt_plan_type")
+            return str(plan_type).lower() if plan_type else None
+        except Exception:
+            return None

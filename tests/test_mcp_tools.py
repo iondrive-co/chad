@@ -37,10 +37,12 @@ class TestVisualTestMap:
     def test_get_tests_for_files_multiple(self):
         from chad.visual_test_map import get_tests_for_files
 
-        tests = get_tests_for_files([
-            "src/chad/provider_ui.py",
-            "src/chad/web_ui.py",
-        ])
+        tests = get_tests_for_files(
+            [
+                "src/chad/provider_ui.py",
+                "src/chad/web_ui.py",
+            ]
+        )
         assert "TestProvidersTab" in tests
         assert "TestUIElements" in tests
 
@@ -62,21 +64,41 @@ class TestVisualTestMap:
         tests = get_tests_for_file("chad/src/chad/provider_ui.py")
         assert "TestProvidersTab" in tests
 
+    def test_find_component_verification_preferences(self):
+        from chad.visual_test_map import find_component
+
+        model_component = find_component("verification model")
+        assert model_component is not None
+        assert "project-path" == model_component.component
+
+        reasoning_component = find_component("verification reasoning")
+        assert reasoning_component is not None
+        assert "project-path" == reasoning_component.component
+
 
 class TestMCPHelpers:
     """Test MCP helper functions."""
 
     def test_failure_helper(self):
         from chad.mcp_playwright import _failure
+
         result = _failure("Test error")
         assert result["success"] is False
         assert result["error"] == "Test error"
 
     def test_project_root(self):
         from chad.mcp_playwright import _project_root
+
         root = _project_root()
         assert root.exists()
         assert (root / "src" / "chad").exists()
+
+    def test_project_root_prefers_env(self, monkeypatch, tmp_path):
+        from chad.mcp_playwright import _project_root
+
+        monkeypatch.setenv("CHAD_PROJECT_ROOT", str(tmp_path))
+        root = _project_root()
+        assert root == tmp_path
 
 
 class TestListTools:
@@ -84,6 +106,7 @@ class TestListTools:
 
     def test_list_tools_returns_all_tools(self):
         from chad.mcp_playwright import list_tools
+
         result = list_tools()
         assert result["success"] is True
         assert "verify" in result["tools"]
@@ -94,6 +117,7 @@ class TestListTools:
 
     def test_list_tools_includes_workflow(self):
         from chad.mcp_playwright import list_tools
+
         result = list_tools()
         assert "workflow" in result
         assert len(result["workflow"]) > 0
@@ -109,6 +133,7 @@ class TestVerify:
             # Mock lint success, test success
             mock_run.side_effect = [
                 MagicMock(returncode=0, stdout="", stderr=""),  # lint
+                MagicMock(returncode=0, stdout="", stderr=""),  # pip check
                 MagicMock(returncode=0, stdout="10 passed", stderr=""),  # tests
             ]
             result = verify()
@@ -119,11 +144,7 @@ class TestVerify:
         from chad.mcp_playwright import verify
 
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=1,
-                stdout="src/file.py:1:1: E501 line too long",
-                stderr=""
-            )
+            mock_run.return_value = MagicMock(returncode=1, stdout="src/file.py:1:1: E501 line too long", stderr="")
             result = verify()
             assert result["success"] is False
             assert result["failed_phase"] == "lint"
@@ -134,6 +155,7 @@ class TestVerify:
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
                 MagicMock(returncode=0, stdout="", stderr=""),  # lint passes
+                MagicMock(returncode=0, stdout="", stderr=""),  # pip check passes
                 MagicMock(returncode=1, stdout="5 passed, 2 failed", stderr=""),  # tests fail
             ]
             result = verify()
@@ -192,10 +214,7 @@ class TestHypothesisMCPTools:
         monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
         mcp_module._current_tracker = None  # Reset global
 
-        result = hypothesis(
-            description="CSS is not being applied",
-            checks="Element has class,Stylesheet loaded"
-        )
+        result = hypothesis(description="CSS is not being applied", checks="Element has class,Stylesheet loaded")
 
         assert result["success"] is True
         assert "tracker_id" in result
@@ -214,11 +233,7 @@ class TestHypothesisMCPTools:
         tracker_id = result1["tracker_id"]
 
         # Add second hypothesis to same tracker
-        result2 = hypothesis(
-            description="Second theory",
-            checks="Check B",
-            tracker_id=tracker_id
-        )
+        result2 = hypothesis(description="Second theory", checks="Check B", tracker_id=tracker_id)
 
         assert result2["success"] is True
         assert result2["hypothesis_id"] == 2
@@ -234,6 +249,18 @@ class TestHypothesisMCPTools:
         assert result["success"] is False
         assert "At least one check" in result["error"]
 
+    def test_hypothesis_accepts_none_tracker(self, tmp_path, monkeypatch):
+        from chad.mcp_playwright import hypothesis
+        import chad.mcp_playwright as mcp_module
+
+        monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
+        mcp_module._current_tracker = None
+
+        result = hypothesis(description="No tracker id", checks="Check A", tracker_id=None)
+
+        assert result["success"] is True
+        assert "tracker_id" in result
+
 
 class TestCheckResult:
     """Test the check_result() tool."""
@@ -248,13 +275,7 @@ class TestCheckResult:
         hyp_result = hypothesis(description="Theory", checks="Check A,Check B")
         tracker_id = hyp_result["tracker_id"]
 
-        result = check_result(
-            tracker_id=tracker_id,
-            hypothesis_id=1,
-            check_index=0,
-            passed=True,
-            notes="Verified OK"
-        )
+        result = check_result(tracker_id=tracker_id, hypothesis_id=1, check_index=0, passed=True, notes="Verified OK")
 
         assert result["success"] is True
         assert result["passed"] is True
@@ -270,13 +291,7 @@ class TestCheckResult:
         hyp_result = hypothesis(description="Bad theory", checks="Will fail")
         tracker_id = hyp_result["tracker_id"]
 
-        result = check_result(
-            tracker_id=tracker_id,
-            hypothesis_id=1,
-            check_index=0,
-            passed=False,
-            notes="Check failed"
-        )
+        result = check_result(tracker_id=tracker_id, hypothesis_id=1, check_index=0, passed=False, notes="Check failed")
 
         assert result["success"] is True
         assert result["hypothesis_status"] == "rejected"
@@ -301,12 +316,7 @@ class TestCheckResult:
 
         monkeypatch.setattr(HypothesisTracker, "BASE_DIR", tmp_path)
 
-        result = check_result(
-            tracker_id="nonexistent",
-            hypothesis_id=1,
-            check_index=0,
-            passed=True
-        )
+        result = check_result(tracker_id="nonexistent", hypothesis_id=1, check_index=0, passed=True)
 
         assert result["success"] is False
         assert "not found" in result["error"]
@@ -342,11 +352,7 @@ class TestReport:
         tracker_id = hyp_result["tracker_id"]
         check_result(tracker_id, 1, 0, passed=True)
 
-        result = report(
-            tracker_id,
-            screenshot_before="/tmp/before.png",
-            screenshot_after="/tmp/after.png"
-        )
+        result = report(tracker_id, screenshot_before="/tmp/before.png", screenshot_after="/tmp/after.png")
 
         assert result["success"] is True
         assert result["screenshots"]["before"] == "/tmp/before.png"
@@ -376,3 +382,51 @@ class TestReport:
 
         assert result["success"] is False
         assert "not found" in result["error"]
+
+
+class TestMCPCodeMode:
+    """Test the code-mode wrappers for MCP tools."""
+
+    def test_list_servers_and_tools(self):
+        from chad.mcp_code_mode import list_servers, list_tools
+
+        servers = list_servers()
+        assert "chad-ui-playwright" in servers
+
+        tools = list_tools()
+        assert set(tools) == {"check_result", "hypothesis", "report", "screenshot", "verify"}
+
+    def test_call_tool_routes_to_mcp_playwright(self, monkeypatch):
+        from chad import mcp_playwright
+        from chad.mcp_code_mode import call_tool
+
+        called = {}
+
+        def fake_verify() -> dict:
+            called["verify"] = True
+            return {"ok": True}
+
+        monkeypatch.setattr(mcp_playwright, "verify", fake_verify)
+
+        result = call_tool("verify")
+
+        assert result == {"ok": True}
+        assert called["verify"] is True
+
+    def test_record_hypothesis_normalizes_checks(self, monkeypatch):
+        from chad import mcp_playwright
+        from chad.mcp_code_mode.servers.chad_ui_playwright import hypothesis as code_hypothesis
+
+        captured = {}
+
+        def fake_hypothesis(**kwargs):
+            captured.update(kwargs)
+            return {"checks": kwargs["checks"]}
+
+        monkeypatch.setattr(mcp_playwright, "hypothesis", fake_hypothesis)
+
+        result = code_hypothesis.record_hypothesis("desc", [" A ", "B "], tracker_id=None)
+
+        assert result["checks"] == "A,B"
+        assert captured["checks"] == "A,B"
+        assert captured["tracker_id"] is None

@@ -42,11 +42,13 @@ try:
         ChadLaunchError,
         PlaywrightUnavailable,
         create_temp_env,
+        inject_live_stream_content,
         open_playwright_page,
         resolve_screenshot_output,
         start_chad,
         stop_chad,
     )
+    from chad.screenshot_fixtures import LIVE_VIEW_CONTENT
 except ImportError as e:
     print(f"Error importing ui_playwright_runner: {e}", file=sys.stderr)
     print("Ensure playwright is installed: pip install playwright && playwright install chromium")
@@ -59,8 +61,36 @@ DEFAULT_OUTPUT = Path("/tmp/chad/screenshot.png")
 def screenshot_element(page, selector: str, output_path: Path) -> Path:
     """Screenshot a specific element by CSS selector."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    element = page.locator(selector)
-    element.wait_for(state="visible", timeout=10000)
+    page.wait_for_selector(selector, state="attached", timeout=10000)
+    page.evaluate(
+        """
+(targetSelector) => {
+    const elem = document.querySelector(targetSelector);
+    if (!elem) return;
+    let node = elem;
+    while (node) {
+        if (node.classList) {
+            node.classList.remove('hide-container');
+        }
+        if (node.style) {
+            node.style.setProperty('display', 'block', 'important');
+            node.style.setProperty('visibility', 'visible', 'important');
+            node.style.setProperty('opacity', '1', 'important');
+            node.style.setProperty('height', 'auto', 'important');
+        }
+        if (node.hasAttribute && node.hasAttribute('hidden')) {
+            node.removeAttribute('hidden');
+        }
+        node = node.parentElement;
+    }
+}
+""",
+        selector,
+    )
+    page.wait_for_timeout(200)
+    element = page.query_selector(selector)
+    if element is None:
+        raise RuntimeError(f"Selector did not resolve to an element: {selector}")
     element.screenshot(path=os.fspath(output_path))
     return output_path
 
@@ -73,40 +103,23 @@ def screenshot_page(page, output_path: Path) -> Path:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Take a screenshot of Chad's Gradio UI"
+    parser = argparse.ArgumentParser(description="Take a screenshot of Chad's Gradio UI")
+    parser.add_argument(
+        "--output", "-o", type=Path, default=DEFAULT_OUTPUT, help=f"Output path (default: {DEFAULT_OUTPUT})"
     )
     parser.add_argument(
-        "--output", "-o",
-        type=Path,
-        default=DEFAULT_OUTPUT,
-        help=f"Output path (default: {DEFAULT_OUTPUT})"
+        "--tab", "-t", choices=["run", "providers"], default=None, help="Tab to screenshot (default: run)"
     )
     parser.add_argument(
-        "--tab", "-t",
-        choices=["run", "providers"],
-        default=None,
-        help="Tab to screenshot (default: run)"
-    )
-    parser.add_argument(
-        "--selector", "-s",
+        "--selector",
+        "-s",
         type=str,
         default=None,
-        help="CSS selector to capture a specific element (e.g., '#run-top-inputs')"
+        help="CSS selector to capture a specific element (e.g., '#run-top-inputs')",
     )
-    parser.add_argument(
-        "--width", type=int, default=1280,
-        help="Viewport width (default: 1280)"
-    )
-    parser.add_argument(
-        "--height", type=int, default=900,
-        help="Viewport height (default: 900)"
-    )
-    parser.add_argument(
-        "--headless",
-        action="store_true",
-        help="Run browser in headless mode (no window)"
-    )
+    parser.add_argument("--width", type=int, default=1280, help="Viewport width (default: 1280)")
+    parser.add_argument("--height", type=int, default=900, help="Viewport height (default: 900)")
+    parser.add_argument("--headless", action="store_true", help="Run browser in headless mode (no window)")
     parser.add_argument(
         "--color-scheme",
         choices=["dark", "light", "both"],
@@ -131,7 +144,7 @@ def main():
 
         for scheme in schemes:
             target_path = resolve_screenshot_output(args.output, scheme, multi)
-            target_desc = args.selector if args.selector else (args.tab or 'run') + " tab"
+            target_desc = args.selector if args.selector else (args.tab or "run") + " tab"
             print(f"Taking screenshot of {target_desc} ({scheme} mode)...")
             with open_playwright_page(
                 instance.port,
@@ -141,13 +154,15 @@ def main():
                 color_scheme=scheme,
                 render_delay=2.0,
             ) as page:
+                if args.tab in (None, "run"):
+                    inject_live_stream_content(page, LIVE_VIEW_CONTENT)
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 if args.selector:
                     screenshot_element(page, args.selector, target_path)
                 else:
                     screenshot_page(page, target_path)
-                outputs.append(target_path)
-                print(f"Saved: {target_path}")
+            outputs.append(target_path)
+            print(f"Saved: {target_path}")
 
         for path in outputs:
             webbrowser.open(path.as_uri())
@@ -162,7 +177,7 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     finally:
-        if 'instance' in locals():
+        if "instance" in locals():
             stop_chad(instance)
         env.cleanup()
 

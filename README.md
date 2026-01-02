@@ -25,23 +25,29 @@ chad
 
 ### How is this better than $Grug?
 
--> Gradio UI to manage multiple coding agents, select preferred models, monitor usage quotas, and run tasks:
+-> Gradio UI to manage multiple coding agents, monitor usage quotas, run multiple tasks in parallel and merge results:
 <details open>
 <summary><b>Screenshots</b></summary>
 
-#### Select a task and agent
+#### Select coding and verification agents for a task
 <img src="docs/screenshot-task-input.png" width="800" alt="Task input panel">
 
 #### Monitor multiple provider accounts with usage tracking
 <img src="docs/screenshot-providers.png" width="800" alt="Providers tab">
 
-#### View completed tasks with verification results and live activity
+#### View task details
 <img src="docs/screenshot-conversation.png" width="800" alt="Completed task conversation">
+
+#### Run multiple tasks in parallel
+<img src="docs/screenshot-task-tabs.png" width="800" alt="Multiple task tabs">
+
+#### Resolve merge conflicts
+<img src="docs/screenshot-merge-conflicts.png" width="800" alt="Merge conflict resolution">
 
 </details>
 
 -> Provider tokens encrypted with a master password you create each session
 
-### Is this satire?
+### Is this satire? What are you even doing here?
 
-Sadly, no. "As a society, what are we even doing here?" might be a better question.
+¯\_(ツ)_/¯
