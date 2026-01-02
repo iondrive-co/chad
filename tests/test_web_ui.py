@@ -670,6 +670,74 @@ class TestChadWebUITaskExecution:
         assert model == "claude-3-opus"
         assert reasoning == "high"
 
+    def test_verification_none_disables_verification(self, monkeypatch, tmp_path, git_repo):
+        """Selecting None for verification should skip verification runs."""
+        from chad import web_ui
+
+        security_mgr = Mock()
+        security_mgr.list_accounts.return_value = {"coder": "anthropic"}
+        security_mgr.list_role_assignments.return_value = {"CODING": "coder"}
+        security_mgr.get_account_model.return_value = "claude-3"
+        security_mgr.get_account_reasoning.return_value = "medium"
+        security_mgr.assign_role = Mock()
+        security_mgr.set_account_model = Mock()
+        security_mgr.set_account_reasoning = Mock()
+
+        class StubProvider:
+            def __init__(self, config):
+                self.config = config
+                self.stopped = False
+
+            def set_activity_callback(self, cb):
+                self.cb = cb
+
+            def start_session(self, project_path, context):
+                return True
+
+            def send_message(self, message):
+                return None
+
+            def get_response(self, timeout=None):
+                return "codex\nok"
+
+            def stop_session(self):
+                self.stopped = True
+
+            def supports_multi_turn(self):
+                return True
+
+            def is_alive(self):
+                return not self.stopped
+
+        monkeypatch.setattr(web_ui, "create_provider", lambda config: StubProvider(config))
+
+        verification_called = {"called": False}
+
+        def fake_run_verification(*args, **kwargs):
+            verification_called["called"] = True
+            return True, "ok"
+
+        ui = web_ui.ChadWebUI(security_mgr, "test-password")
+        ui.session_logger.base_dir = tmp_path
+        monkeypatch.setattr(ui, "_run_verification", fake_run_verification)
+
+        session = ui.create_session("test")
+        list(
+            ui.start_chad_task(
+                session.id,
+                str(git_repo),
+                "do something",
+                "coder",
+                ui.VERIFICATION_NONE,
+                "claude-3",
+                "medium",
+                None,
+                None,
+            )
+        )
+
+        assert verification_called["called"] is False
+
     def test_start_task_revision_runtime_error_handled(self, monkeypatch, tmp_path, git_repo):
         """Runtime errors during revision should be surfaced without crashing."""
         from chad import web_ui
