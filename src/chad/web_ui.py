@@ -1335,11 +1335,9 @@ function() {
         if (!container || !state) return;
         state.ignoreNextScroll = true;
         requestAnimationFrame(() => {
-            if (!state.userScrolledUp) {
-                container.scrollTop = container.scrollHeight;
-            } else if (state.savedScrollTop > 0) {
-                container.scrollTop = state.savedScrollTop;
-            }
+            const targetScrollTop =
+                state.savedScrollTop > 0 ? state.savedScrollTop : container.scrollTop;
+            container.scrollTop = targetScrollTop;
             setTimeout(() => { state.ignoreNextScroll = false; }, 100);
         });
     }
