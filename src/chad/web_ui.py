@@ -364,6 +364,14 @@ body, .gradio-container, .gradio-container * {
   display: none !important;
 }
 
+/* Auto-hide provider cards with empty headers (fallback for when JavaScript doesn't work) */
+.provider-card:has(.provider-card__header-text:empty),
+.provider-card:has(.provider-card__header-text-secondary:empty),
+.column:has(.provider-card__header-text:empty),
+.column:has(.provider-card__header-text-secondary:empty) {
+  display: none !important;
+}
+
 .provider-usage {
   background: #fff;
   border: 1px solid #e2e8f0;
@@ -4764,24 +4772,17 @@ class ChadWebUI:
         with gr.Blocks(title="Chad") as interface:
             # Inject custom CSS
             gr.HTML(f"<style>{PROVIDER_PANEL_CSS}</style>")
+
+            # Note: CUSTOM_JS injection removed - was causing script execution issues
+
             gr.HTML(
                 """
-<button role="tab" id="static-plus-tab" aria-label="➕" style="position:fixed;top:8px;right:8px;z-index:9999;
+<button role="tab" id="initial-static-plus-tab" aria-label="➕" style="position:fixed;top:8px;right:8px;z-index:9999;
 padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
-<script>
-  (function() {
-    const btn = document.getElementById('static-plus-tab');
-    if (!btn) return;
-    btn.addEventListener('click', () => {
-      const app = document.querySelector('gradio-app');
-      const root = app && app.shadowRoot ? app.shadowRoot : document;
-      const addBtn = root.querySelector('#add-new-task-btn');
-      if (addBtn) addBtn.click();
-    });
-  })();
-</script>
 """
             )
+
+            # JavaScript injection moved back to launch() parameter
 
             # Custom JavaScript is now passed to launch() in Gradio 6.x
 
@@ -4808,7 +4809,7 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                 task_tabs = []
                 for i in range(MAX_TASKS):
                     tab_id = i + 1  # Providers is 0, tasks start at 1
-                    is_visible = True  # Keep tabs visible for accessibility/tests
+                    is_visible = (i == 0)  # Only first tab visible initially
                     with gr.Tab(f"Task {i + 1}", id=tab_id, visible=is_visible) as task_tab:
                         self._create_session_ui(all_sessions[i].id, is_first=(i == 0))
                     task_tabs.append(task_tab)
@@ -4916,7 +4917,41 @@ def launch_web_ui(password: str = None, port: int = 7860) -> tuple[None, int]:
         share=False,
         inbrowser=open_browser,  # Don't open browser for screenshot mode
         quiet=False,
-        js=CUSTOM_JS,  # Custom JS must be passed to launch() in Gradio 6.x
+        js="""
+        function() {
+            console.log('Chad JavaScript starting via launch...');
+
+            // Auto-click "Add New Task" button when + tab is clicked
+            function setupPlusTabAutoClick() {
+                console.log('setupPlusTabAutoClick running...');
+                const tabButtons = document.querySelectorAll('button[role="tab"]');
+                console.log('Found ' + tabButtons.length + ' tab buttons');
+                tabButtons.forEach((tab, idx) => {
+                    if (tab.textContent.trim() === '➕' && !tab._plusClickSetup) {
+                        console.log('Setting up plus tab click handler for tab ' + idx);
+                        tab._plusClickSetup = true;
+                        tab.addEventListener('click', () => {
+                            console.log('Plus tab clicked!');
+                            // Small delay to let tab panel become visible
+                            setTimeout(() => {
+                                const addBtn = document.getElementById('add-new-task-btn');
+                                console.log('Add btn found:', !!addBtn);
+                                if (addBtn) {
+                                    console.log('Clicking add task button...');
+                                    addBtn.click();
+                                }
+                            }, 50);
+                        });
+                    }
+                });
+            }
+
+            // Run setup periodically to catch dynamically added tabs
+            console.log('Starting plus tab auto-click setup...');
+            setInterval(setupPlusTabAutoClick, 500);
+            setTimeout(setupPlusTabAutoClick, 100);
+        }
+        """,
     )
 
     return None, port

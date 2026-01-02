@@ -278,10 +278,10 @@ def open_playwright_page(
     if (btn) btn.click();
   };
   if (!hasPlusTab && clickAdd) {
-    let fallback = document.getElementById('static-plus-tab');
+    let fallback = document.getElementById('fallback-plus-tab');
     if (!fallback) {
       fallback = document.createElement('button');
-      fallback.id = 'static-plus-tab';
+      fallback.id = 'fallback-plus-tab';
       fallback.setAttribute('role', 'tab');
       fallback.textContent = '➕';
       fallback.style.position = 'fixed';
