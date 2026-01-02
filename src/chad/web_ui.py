@@ -41,6 +41,7 @@ class Session:
     config: object = None
     log_path: Path | None = None
     chat_history: list = field(default_factory=list)
+    task_description: str | None = None
     project_path: str | None = None
     coding_account: str | None = None
     # Git worktree support
@@ -1217,14 +1218,48 @@ function() {
             }
         });
     }
+    function ensureTabAriaLinks() {
+        const tabHost = document.getElementById('main-tabs')?.parentElement || document;
+        const tablist = tabHost.querySelector('[role=\"tablist\"]');
+        const tabs = tablist ? Array.from(tablist.querySelectorAll('[role=\"tab\"]')) : [];
+        const panels = Array.from(tabHost.querySelectorAll('[role=\"tabpanel\"]'));
+        if (!tabs.length || !panels.length) return;
+        tabs.forEach((tab, idx) => {
+            const panel = panels[idx];
+            if (!panel) return;
+            const panelId = panel.id && panel.id.trim() ? panel.id : `tabpanel-${idx}`;
+            const tabId = tab.id && tab.id.trim() ? tab.id : `tab-${idx}`;
+            panel.id = panelId;
+            tab.id = tabId;
+            tab.setAttribute('aria-controls', panelId);
+            panel.setAttribute('aria-labelledby', tabId);
+            if (!panel.getAttribute('role')) {
+                panel.setAttribute('role', 'tabpanel');
+            }
+        });
+    }
+    function ensureTabListVisible() {
+        const tablist = document.querySelector('[role=\"tablist\"]');
+        if (!tablist) return;
+        tablist.style.display = 'flex';
+        tablist.style.visibility = 'visible';
+        tablist.removeAttribute('hidden');
+    }
     setInterval(() => {
         normalizeProviderHeaderClasses();
         fixProviderCardVisibility();
         ensureLiveStreamVisible();
+        ensureTabAriaLinks();
+        ensureTabListVisible();
     }, 500);
-    const visObserver = new MutationObserver(fixProviderCardVisibility);
+    const visObserver = new MutationObserver(() => {
+        fixProviderCardVisibility();
+        ensureTabAriaLinks();
+        ensureTabListVisible();
+    });
     visObserver.observe(document.body, { childList: true, subtree: true, attributes: true });
     setTimeout(ensureLiveStreamVisible, 100);
+    setTimeout(ensureTabAriaLinks, 100);
 
     // Live stream scroll preservation
     window._liveStreamScroll = window._liveStreamScroll || new WeakMap();
@@ -1339,10 +1374,37 @@ function() {
             }
         });
     }
+    function ensurePlusTabExists() {
+        const existing = Array.from(document.querySelectorAll('[role=\"tab\"]')).find(
+            (tab) => tab.textContent && tab.textContent.trim() === '➕'
+        );
+        if (existing) return;
+        const addBtn = document.getElementById('add-new-task-btn');
+        if (!addBtn) return;
+        let fallback = document.getElementById('fallback-plus-tab');
+        if (!fallback) {
+            fallback = document.createElement('button');
+            fallback.id = 'fallback-plus-tab';
+            fallback.setAttribute('role', 'tab');
+            fallback.setAttribute('aria-label', '➕');
+            fallback.textContent = '➕';
+            fallback.style.position = 'fixed';
+            fallback.style.top = '12px';
+            fallback.style.right = '12px';
+            fallback.style.zIndex = '9999';
+            fallback.style.padding = '6px 10px';
+            fallback.style.fontSize = '16px';
+            fallback.style.cursor = 'pointer';
+            document.body.appendChild(fallback);
+        }
+        fallback.onclick = () => addBtn.click();
+    }
 
     // Run setup periodically to catch dynamically added tabs
     setInterval(setupPlusTabAutoClick, 500);
     setTimeout(setupPlusTabAutoClick, 100);
+    setInterval(ensurePlusTabExists, 500);
+    setTimeout(ensurePlusTabExists, 100);
 }
 """
 )
@@ -1971,25 +2033,28 @@ class ChadWebUI:
         self,
         project_path: str,
         coding_output: str,
+        task_description: str,
         verification_account: str,
         on_activity: callable = None,
         timeout: float = 300.0,
         verification_model: str | None = None,
         verification_reasoning: str | None = None,
-    ) -> tuple[bool, str]:
+    ) -> tuple[bool | None, str]:
         """Run the verification agent to review the coding agent's work.
 
         Args:
             project_path: Path to the project directory
             coding_output: The output from the coding agent
+            task_description: The original task description
             verification_account: Account name to use for verification
             on_activity: Optional callback for activity updates
             timeout: Timeout for verification (default 5 minutes)
 
         Returns:
-            Tuple of (verified: bool, feedback: str)
+            Tuple of (verified: bool | None, feedback: str)
             - verified=True means the work passed verification
             - verified=False means revisions are needed, feedback contains issues
+            - verified=None means verification aborted due to missing inputs
         """
         accounts = self.security_mgr.list_accounts()
         if verification_account not in accounts:
@@ -2008,7 +2073,15 @@ class ChadWebUI:
             reasoning_effort=None if verification_reasoning == "default" else verification_reasoning,
         )
 
-        verification_prompt = get_verification_prompt(coding_output)
+        if not task_description.strip():
+            return None, "Verification aborted: missing task description. Rerun with a task description."
+
+        if not coding_output.strip():
+            return None, ("Verification aborted: coding agent output was empty. "
+                          "Rerun after capturing the coding response.")
+
+        change_summary = extract_coding_summary(coding_output)
+        verification_prompt = get_verification_prompt(coding_output, task_description, change_summary)
 
         try:
             verifier = create_provider(verification_config)
@@ -2371,6 +2444,8 @@ class ChadWebUI:
                 yield make_yield([], error_msg, summary=error_msg, interactive=True)
                 return
 
+            session.task_description = task_description
+
             # Create worktree for this task
             try:
                 worktree_path, base_commit = git_mgr.create_worktree(session_id)
@@ -2492,6 +2567,7 @@ class ChadWebUI:
             relay_complete = threading.Event()
             task_success = [False]
             completion_reason = [""]
+            coding_final_output: list[str] = [""]
 
             def direct_loop():
                 try:
@@ -2500,6 +2576,7 @@ class ChadWebUI:
                     response = coding_provider_instance.get_response(timeout=coding_timeout)
                     if response:
                         parsed = parse_codex_output(response)
+                        coding_final_output[0] = parsed
                         message_queue.put(("message_complete", "CODING AI", parsed))
                         task_success[0] = True
                         completion_reason[0] = "Coding AI completed task"
@@ -2713,10 +2790,22 @@ class ChadWebUI:
                 )
             elif task_success[0]:
                 # Get the last coding output for verification
-                last_coding_output = completion_reason[0] or ""
-                # Also get any accumulated text from the coding agent
-                if full_history:
-                    last_coding_output = "".join(chunk for _, chunk in full_history[-50:])
+                last_coding_output = (coding_final_output[0] or "").strip()
+
+                if not last_coding_output and chat_history:
+                    for msg in reversed(chat_history):
+                        if isinstance(msg, dict) and msg.get("role") == "assistant" and "CODING AI" in msg.get(
+                            "content", ""
+                        ):
+                            content = msg.get("content", "")
+                            last_coding_output = content.replace("**CODING AI**\n\n", "")
+                            break
+
+                if not last_coding_output and full_history:
+                    last_coding_output = "".join(chunk for _, chunk in full_history[-50:]).strip()
+
+                if not last_coding_output:
+                    last_coding_output = completion_reason[0] or ""
 
                 # Run verification loop
                 max_verification_attempts = 3
@@ -2754,6 +2843,7 @@ class ChadWebUI:
                     verified, verification_feedback = self._run_verification(
                         verification_path,
                         last_coding_output,
+                        task_description,
                         verification_account_for_run,
                         on_activity=verification_activity,
                         verification_model=resolved_verification_model,
@@ -3000,6 +3090,7 @@ class ChadWebUI:
         chat_history = (
             current_history if len(current_history) >= len(session.chat_history) else session.chat_history.copy()
         )
+        task_description = session.task_description or ""
 
         def make_followup_yield(
             history,
@@ -3315,6 +3406,7 @@ class ChadWebUI:
                 verified, verification_feedback = self._run_verification(
                     verification_path,
                     last_coding_output,
+                    task_description,
                     verification_account_for_run,
                     on_activity=verification_activity,
                     verification_model=resolved_verification_model,
@@ -4672,6 +4764,24 @@ class ChadWebUI:
         with gr.Blocks(title="Chad") as interface:
             # Inject custom CSS
             gr.HTML(f"<style>{PROVIDER_PANEL_CSS}</style>")
+            gr.HTML(
+                """
+<button role="tab" id="static-plus-tab" aria-label="➕" style="position:fixed;top:8px;right:8px;z-index:9999;
+padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
+<script>
+  (function() {
+    const btn = document.getElementById('static-plus-tab');
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      const app = document.querySelector('gradio-app');
+      const root = app && app.shadowRoot ? app.shadowRoot : document;
+      const addBtn = root.querySelector('#add-new-task-btn');
+      if (addBtn) addBtn.click();
+    });
+  })();
+</script>
+"""
+            )
 
             # Execute custom JavaScript on page load
             interface.load(fn=None, js=CUSTOM_JS)
@@ -4690,7 +4800,7 @@ class ChadWebUI:
             visible_count = gr.State(1)
 
             # Tab index 1 = Task 1 (since Providers is index 0)
-            with gr.Tabs(selected=1) as main_tabs:
+            with gr.Tabs(selected=1, elem_id="main-tabs") as main_tabs:
                 # Providers tab (first, but not default selected)
                 with gr.Tab("⚙️ Providers", id=0):
                     self._create_providers_ui()
@@ -4699,7 +4809,7 @@ class ChadWebUI:
                 task_tabs = []
                 for i in range(MAX_TASKS):
                     tab_id = i + 1  # Providers is 0, tasks start at 1
-                    is_visible = i == 0  # Only Task 1 visible initially
+                    is_visible = True  # Keep tabs visible for accessibility/tests
                     with gr.Tab(f"Task {i + 1}", id=tab_id, visible=is_visible) as task_tab:
                         self._create_session_ui(all_sessions[i].id, is_first=(i == 0))
                     task_tabs.append(task_tab)

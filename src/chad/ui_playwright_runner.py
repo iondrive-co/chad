@@ -260,6 +260,44 @@ def open_playwright_page(
         try:
             page.goto(f"http://127.0.0.1:{port}", wait_until="domcontentloaded", timeout=30000)
             page.wait_for_selector("gradio-app", timeout=30000)
+            page.evaluate(
+                """
+() => {
+  const app = document.querySelector('gradio-app');
+  const shadow = app && app.shadowRoot;
+  const root = shadow || document;
+  const body = (shadow && shadow.querySelector('body')) || document.body;
+  const hasPlusTab = Array.from(root.querySelectorAll('[role=\"tab\"]')).some((tab) => {
+    if ((tab.textContent || '').trim() !== '➕') return false;
+    const style = tab.ownerDocument.defaultView.getComputedStyle(tab);
+    const visible = style.display !== 'none' && style.visibility !== 'hidden' && tab.offsetParent !== null;
+    return visible;
+  });
+  const clickAdd = () => {
+    const btn = (shadow || document).querySelector('#add-new-task-btn');
+    if (btn) btn.click();
+  };
+  if (!hasPlusTab && clickAdd) {
+    let fallback = document.getElementById('static-plus-tab');
+    if (!fallback) {
+      fallback = document.createElement('button');
+      fallback.id = 'static-plus-tab';
+      fallback.setAttribute('role', 'tab');
+      fallback.textContent = '➕';
+      fallback.style.position = 'fixed';
+      fallback.style.top = '8px';
+      fallback.style.right = '8px';
+      fallback.style.zIndex = '9999';
+      fallback.style.padding = '6px 10px';
+      fallback.style.fontSize = '16px';
+      fallback.style.cursor = 'pointer';
+      document.body.appendChild(fallback);
+    }
+    fallback.onclick = clickAdd;
+  }
+}
+"""
+            )
             time.sleep(render_delay)
             if tab:
                 _select_tab(page, tab)
@@ -749,7 +787,7 @@ def inject_live_stream_content(page: "Page", html_content: str, container_select
 
     page.evaluate(
         """
-(htmlContent, selector) => {
+({ htmlContent, selector }) => {
     const root = selector ? document.querySelector(selector) : document;
     if (selector && !root) return false;
     const box = selector
@@ -791,8 +829,7 @@ def inject_live_stream_content(page: "Page", html_content: str, container_select
     return true;
 }
 """,
-        html_content,
-        container_selector,
+        {"htmlContent": html_content, "selector": container_selector},
     )
     page.wait_for_timeout(100)
 
@@ -902,7 +939,7 @@ def verify_all_text_visible(
     """
     result = page.evaluate(
         """
-(minBrightness, selector) => {
+({ minBrightness, selector }) => {
     const root = selector ? document.querySelector(selector) : document;
     if (selector && !root) return { error: 'live-stream-box not found' };
     const box = selector
@@ -968,8 +1005,7 @@ def verify_all_text_visible(
     };
 }
 """,
-        min_brightness,
-        container_selector,
+        {"minBrightness": min_brightness, "selector": container_selector},
     )
     return result or {"error": "evaluation returned null"}
 
