@@ -1433,47 +1433,50 @@ function() {
     setTimeout(ensurePlusTabExists, 100);
 
     // Fix for Gradio Column visibility not updating after merge/discard
-    // Since gr.update(visible=False) doesn't work for Columns in Gradio 5.36+,
-    // we watch for status messages and hide/show sections via JavaScript
+    // Since gr.update(visible=False) doesn't work for Columns in Gradio 6.x,
+    // we use a hidden state element to control visibility reliably via JavaScript
     function syncMergeSectionVisibility() {
         // Find all merge sections in all task panels
         const mergeSections = document.querySelectorAll('.merge-section');
         mergeSections.forEach(mergeSection => {
-            const taskPanel = mergeSection.closest('.tabitem, [role="tabpanel"]');
-            if (!taskPanel) return;
+            // Primary method: Check the visibility state element (more reliable)
+            const stateInput =
+                mergeSection.querySelector('.merge-visibility-state input, .merge-visibility-state textarea');
+            let shouldHide = false;
 
-            // Check if this panel's status shows merge/discard complete
-            // Look for the status element with multiple selectors
-            const statusEl = taskPanel.querySelector('.task-status-header') ||
-                            taskPanel.querySelector('[id*="task-status"]') ||
-                            taskPanel.querySelector('[class*="task-status"]');
-            const statusText = statusEl ? (statusEl.textContent || '') : '';
-            const shouldHide = statusText.includes('merged') || statusText.includes('discarded');
+            if (stateInput) {
+                // Use the explicit visibility state from Python
+                shouldHide = stateInput.value === 'hidden' || stateInput.value === '';
+            } else {
+                // Fallback: Check status text (for backward compatibility)
+                const taskPanel = mergeSection.closest('.tabitem, [role="tabpanel"]');
+                if (taskPanel) {
+                    const statusEl = taskPanel.querySelector('.task-status-header') ||
+                                    taskPanel.querySelector('[id*="task-status"]') ||
+                                    taskPanel.querySelector('[class*="task-status"]');
+                    const statusText = statusEl ? (statusEl.textContent || '') : '';
+                    shouldHide = statusText.includes('merged') || statusText.includes('discarded');
+                }
+            }
 
             if (shouldHide) {
-                // Status indicates merge/discard complete - hide the section completely
-                // Use CSS class for maximum specificity (!important rules)
+                // Hide the section completely
                 mergeSection.classList.add('merge-section-hidden');
-                // Also clear inline styles that might interfere
                 mergeSection.style.cssText = 'display: none !important; visibility: hidden !important;';
-                // Hide all child accordions explicitly
                 mergeSection.querySelectorAll('.accordion, [class*="accordion"]').forEach(acc => {
                     acc.style.cssText = 'display: none !important;';
                 });
-            } else if (mergeSection.classList.contains('merge-section-hidden')) {
-                // Status changed - check if we should show again
-                const changesSummary = taskPanel.querySelector('[id*="changes-summary"], [class*="changes-summary"]');
-                if (changesSummary && changesSummary.textContent.trim()) {
-                    mergeSection.classList.remove('merge-section-hidden');
-                    mergeSection.style.cssText = '';
-                    mergeSection.querySelectorAll('.accordion, [class*="accordion"]').forEach(acc => {
-                        acc.style.cssText = '';
-                    });
-                }
+            } else if (stateInput && stateInput.value === 'visible') {
+                // Explicitly show the section
+                mergeSection.classList.remove('merge-section-hidden');
+                mergeSection.style.cssText = '';
+                mergeSection.querySelectorAll('.accordion, [class*="accordion"]').forEach(acc => {
+                    acc.style.cssText = '';
+                });
             }
         });
 
-        // Also handle conflict sections
+        // Also handle conflict sections (still using status text for these)
         const conflictSections = document.querySelectorAll('.conflict-section');
         conflictSections.forEach(conflictSection => {
             const taskPanel = conflictSection.closest('.tabitem, [role="tabpanel"]');
@@ -1495,10 +1498,11 @@ function() {
         });
     }
 
-    // Run periodically and on DOM changes
-    setInterval(syncMergeSectionVisibility, 500);
+    // Run frequently and on DOM changes for responsive UI
+    setInterval(syncMergeSectionVisibility, 100);
     const mergeSectionObserver = new MutationObserver(syncMergeSectionVisibility);
-    mergeSectionObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+    mergeSectionObserver.observe(document.body,
+        { childList: true, subtree: true, characterData: true, attributes: true });
 }
 """
 )
@@ -2520,6 +2524,9 @@ class ChadWebUI:
                 branch_update = gr.update(choices=branch_choices, value=branch_choices[0])
             else:
                 branch_update = gr.update()
+            # Determine visibility state for merge section (controls via JS workaround)
+            visibility_state = "visible" if show_merge else "hidden"
+            header_text = "### Changes Ready to Merge" if show_merge else ""
             return (
                 display_history,
                 display_stream,
@@ -2534,10 +2541,12 @@ class ChadWebUI:
                 gr.update(value=""),  # Clear followup input
                 gr.update(visible=show_followup),  # Show/hide followup row
                 gr.update(interactive=show_followup),  # Enable/disable send button
-                gr.update(visible=show_merge),  # Show/hide merge section
+                gr.update(visible=show_merge),  # Show/hide merge section (Gradio - may not work)
                 gr.update(value=merge_summary),  # Merge changes summary
                 branch_update,  # Branch dropdown choices
                 gr.update(value=diff_full),  # Full diff content
+                visibility_state,  # merge_visibility_state - controls via JS
+                header_text,  # merge_section_header - dynamic header
             )
 
         try:
@@ -3750,9 +3759,10 @@ class ChadWebUI:
     ) -> tuple:
         """Attempt to merge worktree changes to a target branch.
 
-        Returns 12 values for merge_outputs:
+        Returns 14 values for merge_outputs:
         [merge_section, changes_summary, conflict_section, conflict_info, conflicts_html,
-         task_status, chatbot, start_btn, cancel_btn, live_stream, followup_row, task_description]
+         task_status, chatbot, start_btn, cancel_btn, live_stream, followup_row, task_description,
+         merge_visibility_state, merge_section_header]
         """
         session = self.get_session(session_id)
         no_change = gr.update()
@@ -3761,6 +3771,7 @@ class ChadWebUI:
                 gr.update(visible=False), no_change, gr.update(visible=False),
                 no_change, no_change, gr.update(value="❌ No worktree to merge.", visible=True),
                 no_change, no_change, no_change, no_change, no_change, no_change,
+                "hidden", "",  # merge_visibility_state, merge_section_header
             )
 
         try:
@@ -3794,6 +3805,8 @@ class ChadWebUI:
                     "",                                          # live_stream - direct value
                     gr.update(visible=False),                    # followup_row - hide
                     "",                                          # task_description - direct value
+                    "hidden",                                    # merge_visibility_state - hide via JS
+                    "",                                          # merge_section_header - clear
                 )
             elif conflicts:
                 session.merge_conflicts = conflicts
@@ -3808,6 +3821,7 @@ class ChadWebUI:
                     gr.update(value=self._render_conflicts_html(conflicts or [])),
                     no_change,                                   # task_status
                     no_change, no_change, no_change, no_change, no_change, no_change,
+                    "hidden", "",                                # merge_visibility_state, merge_section_header
                 )
             else:
                 error_detail = error_msg or "Merge failed. Check git status and commit hooks."
@@ -3819,12 +3833,14 @@ class ChadWebUI:
                     gr.update(value=""),                         # conflicts_html cleared
                     gr.update(value=f"❌ {error_detail}", visible=True),
                     no_change, no_change, no_change, no_change, no_change, no_change,
+                    "visible", no_change,                  # merge_visibility_state (keep visible), merge_section_header
                 )
         except Exception as e:
             return (
                 no_change, no_change, no_change, no_change, no_change,
                 gr.update(value=f"❌ Merge error: {e}", visible=True),
                 no_change, no_change, no_change, no_change, no_change, no_change,
+                no_change, no_change,                # merge_visibility_state, merge_section_header (no change on error)
             )
 
     def _render_conflicts_html(self, conflicts: list[MergeConflict]) -> str:
@@ -4011,7 +4027,7 @@ class ChadWebUI:
     def resolve_all_conflicts(self, session_id: str, use_incoming: bool) -> tuple:
         """Resolve all conflicts by choosing all original or all incoming.
 
-        Returns 12 values for merge_outputs.
+        Returns 14 values for merge_outputs.
         """
         session = self.get_session(session_id)
         no_change = gr.update()
@@ -4020,6 +4036,7 @@ class ChadWebUI:
                 no_change, no_change, gr.update(visible=False),
                 no_change, no_change, gr.update(value="❌ No project path set.", visible=True),
                 no_change, no_change, no_change, no_change, no_change, no_change,
+                no_change, no_change,  # merge_visibility_state, merge_section_header
             )
 
         try:
@@ -4051,24 +4068,28 @@ class ChadWebUI:
                     "",                                          # live_stream - direct value
                     gr.update(visible=False),                    # followup_row - hide
                     "",                                          # task_description - direct value
+                    "hidden",                                    # merge_visibility_state - hide via JS
+                    "",                                          # merge_section_header - clear
                 )
             else:
                 return (
                     no_change, no_change, no_change, no_change, no_change,
                     gr.update(value="❌ Failed to complete merge. Check git status.", visible=True),
                     no_change, no_change, no_change, no_change, no_change, no_change,
+                    no_change, no_change,  # merge_visibility_state, merge_section_header
                 )
         except Exception as e:
             return (
                 no_change, no_change, no_change, no_change, no_change,
                 gr.update(value=f"❌ Error resolving conflicts: {e}", visible=True),
                 no_change, no_change, no_change, no_change, no_change, no_change,
+                no_change, no_change,  # merge_visibility_state, merge_section_header
             )
 
     def abort_merge_action(self, session_id: str) -> tuple:
         """Abort an in-progress merge, return to merge section.
 
-        Returns 12 values for merge_outputs.
+        Returns 14 values for merge_outputs.
         """
         session = self.get_session(session_id)
         no_change = gr.update()
@@ -4077,6 +4098,7 @@ class ChadWebUI:
                 no_change, no_change, gr.update(visible=False),
                 no_change, no_change, no_change,
                 no_change, no_change, no_change, no_change, no_change, no_change,
+                no_change, no_change,  # merge_visibility_state, merge_section_header
             )
 
         git_mgr = GitWorktreeManager(Path(session.project_path))
@@ -4085,6 +4107,8 @@ class ChadWebUI:
 
         # Check if worktree still has changes - show merge section if so
         has_changes, summary = self.check_worktree_changes(session_id)
+        visibility_state = "visible" if has_changes else "hidden"
+        header_text = "### Changes Ready to Merge" if has_changes else ""
 
         return (
             gr.update(visible=has_changes),              # merge_section
@@ -4094,12 +4118,14 @@ class ChadWebUI:
             no_change,                                   # conflicts_html
             gr.update(value="⚠️ Merge aborted. Changes remain in worktree.", visible=True),
             no_change, no_change, no_change, no_change, no_change, no_change,  # no tab reset on abort
+            visibility_state,                            # merge_visibility_state
+            header_text,                                 # merge_section_header
         )
 
     def discard_worktree_changes(self, session_id: str) -> tuple:
         """Discard worktree and all changes, reset merge UI but keep task description.
 
-        Returns 12 values for merge_outputs. Task description is preserved so user
+        Returns 14 values for merge_outputs. Task description is preserved so user
         can retry the task with the same description.
         """
         session = self.get_session(session_id)
@@ -4129,6 +4155,8 @@ class ChadWebUI:
             "",                                          # live_stream - direct value
             gr.update(visible=False),                    # followup_row - hide
             no_change,                                   # task_description - keep for retry
+            "hidden",                                    # merge_visibility_state - hide via JS
+            "",                                          # merge_section_header - clear
         )
 
     def _build_handoff_context(self, chat_history: list) -> str:
@@ -4422,9 +4450,18 @@ class ChadWebUI:
             )
 
         # Merge section - shown when worktree has changes
+        # Note: visibility controlled via merge_visibility_state due to Gradio 6 Column visibility bug
         with gr.Column(visible=False, key=f"merge-section-{session_id}",
                        elem_classes=["merge-section"]) as merge_section:
-            gr.Markdown("### Changes Ready to Merge")
+            # Hidden state element controls visibility - JS watches this value
+            # "visible" = show section, "hidden" = hide section
+            merge_visibility_state = gr.Textbox(
+                value="hidden",
+                visible=False,
+                elem_classes=["merge-visibility-state"],
+                key=f"merge-visibility-{session_id}",
+            )
+            merge_section_header = gr.Markdown("### Changes Ready to Merge")
             changes_summary = gr.Markdown(
                 "",
                 key=f"changes-summary-{session_id}",
@@ -4589,6 +4626,8 @@ class ChadWebUI:
                 changes_summary,
                 merge_target_branch,
                 diff_content,
+                merge_visibility_state,  # Controls visibility via JS
+                merge_section_header,    # Dynamic header text
             ],
         )
 
@@ -4632,19 +4671,22 @@ class ChadWebUI:
             return self.abort_merge_action(session_id)
 
         # Full reset outputs - includes components needed to reset tab to initial state
+        # Note: merge_visibility_state at index 12 controls visibility via JS (Gradio 6 Column bug workaround)
         merge_outputs = [
-            merge_section,      # 0: Hide merge section
-            changes_summary,    # 1: Clear summary
-            conflict_section,   # 2: Hide conflict section
-            conflict_info,      # 3: Clear conflict info
-            conflicts_html,     # 4: Clear conflicts display
-            task_status,        # 5: Show status message
-            chatbot,            # 6: Clear chat history
-            start_btn,          # 7: Re-enable start button
-            cancel_btn,         # 8: Disable cancel button
-            live_stream,        # 9: Clear live stream
-            followup_row,       # 10: Hide followup row
-            task_description,   # 11: Clear task description
+            merge_section,          # 0: Hide merge section (Gradio visibility - may not work)
+            changes_summary,        # 1: Clear summary
+            conflict_section,       # 2: Hide conflict section
+            conflict_info,          # 3: Clear conflict info
+            conflicts_html,         # 4: Clear conflicts display
+            task_status,            # 5: Show status message
+            chatbot,                # 6: Clear chat history
+            start_btn,              # 7: Re-enable start button
+            cancel_btn,             # 8: Disable cancel button
+            live_stream,            # 9: Clear live stream
+            followup_row,           # 10: Hide followup row
+            task_description,       # 11: Clear task description
+            merge_visibility_state,  # 12: Set to "hidden" to hide section via JS
+            merge_section_header,    # 13: Clear header when hiding
         ]
 
         accept_merge_btn.click(
