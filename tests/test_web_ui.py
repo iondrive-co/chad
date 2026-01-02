@@ -525,6 +525,12 @@ class TestChadWebUITaskExecution:
 
         return ChadWebUI(mock_security_mgr, "test-password")
 
+    def test_claude_remaining_usage_wrapper_requires_account(self, web_ui):
+        """Public wrapper should pass account name through to provider UI."""
+        with patch.object(web_ui.provider_ui, "_get_claude_remaining_usage", return_value=0.5) as mock_call:
+            assert web_ui._get_claude_remaining_usage("claude-1") == 0.5
+            mock_call.assert_called_once_with("claude-1")
+
     def test_start_task_missing_project(self, web_ui):
         """Test starting task without project path."""
         session = web_ui.create_session("test")

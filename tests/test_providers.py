@@ -1,6 +1,7 @@
 """Tests for AI providers."""
 
 import json
+import platform
 import sys
 from unittest.mock import Mock, patch
 
@@ -1030,6 +1031,19 @@ class TestOpenAICodexProvider:
 
             with pytest.raises(RuntimeError, match="reconnect"):
                 provider.get_response(timeout=1.0)
+
+
+class TestImportOnWindows:
+    """Ensure providers import cleanly when termios/pty is unavailable (Windows)."""
+
+    def test_import_providers_skips_pty_on_windows(self, monkeypatch):
+        monkeypatch.setattr(platform, "system", lambda: "Windows")
+        import importlib
+
+        import chad.providers as providers
+
+        importlib.reload(providers)
+        assert providers.__name__ == "chad.providers"
 
     @patch("chad.providers._stream_pty_output", return_value=("", False, True))
     @patch("chad.providers._start_pty_process")

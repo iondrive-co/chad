@@ -84,7 +84,7 @@ ensure_global_mcp_config()
 
 
 @SERVER.tool()
-def verify(lint_only: bool = False) -> Dict[str, object]:
+def verify(lint_only: bool = False, project_root: str | None = None) -> Dict[str, object]:
     """Run linting and ALL tests (unit + integration + visual) to verify no regressions.
 
     Call this tool to:
@@ -95,7 +95,16 @@ def verify(lint_only: bool = False) -> Dict[str, object]:
     Returns results from each phase: lint, unit tests, visual tests.
     """
     try:
-        project_root, root_reason = resolve_project_root()
+        resolved_root = Path(project_root).expanduser() if project_root else None
+        if resolved_root:
+            if not resolved_root.exists() or not resolved_root.is_dir():
+                return _failure(f"Project root does not exist or is not a directory: {resolved_root}")
+            pyproject = resolved_root / "pyproject.toml"
+            if not pyproject.exists():
+                return _failure(f"Project root missing pyproject.toml: {resolved_root}")
+            project_root, root_reason = resolved_root, "param:project_root"
+        else:
+            project_root, root_reason = resolve_project_root()
         _log_debug(f"verify start (lint_only={lint_only}) root={project_root} reason={root_reason}")
         env = {
             **os.environ,
@@ -103,6 +112,10 @@ def verify(lint_only: bool = False) -> Dict[str, object]:
             "CHAD_PROJECT_ROOT": str(project_root),
             "CHAD_PROJECT_ROOT_REASON": root_reason,
         }
+        # Prefer existing environment; avoid network installs during verify
+        env.setdefault("PIP_NO_INDEX", "1")
+        env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+        env.setdefault("PIP_PREFER_BINARY", "1")
         preflight_note = f"Using project root: {project_root} (source={root_reason})"
         results: Dict[str, object] = {
             "phases": {},
@@ -138,7 +151,26 @@ def verify(lint_only: bool = False) -> Dict[str, object]:
             )
             return results
 
-        # Phase 2: All tests (unit + integration + visual)
+        # Phase 2: pip check to catch dependency conflicts early
+        pip_check = subprocess.run(
+            [sys.executable, "-m", "pip", "check"],
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+            env=env,
+            timeout=60,
+        )
+        results["phases"]["pip_check"] = {
+            "success": pip_check.returncode == 0,
+            "issues": pip_check.stdout.strip().splitlines()[:20],
+        }
+        if pip_check.returncode != 0:
+            results["success"] = False
+            results["failed_phase"] = "pip_check"
+            results["message"] = f"{message_prefix}Dependency check failed ({pip_check.returncode})"
+            return results
+
+        # Phase 3: All tests (unit + integration + visual)
         # Use pytest-xdist for parallel execution (-n auto uses all CPU cores)
         # Tests typically complete in ~15 seconds parallel, 2 min timeout is plenty
         test_result = subprocess.run(
