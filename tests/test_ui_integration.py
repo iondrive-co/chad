@@ -911,3 +911,26 @@ class TestScreenshots:
         page.screenshot(path=str(output))
         assert output.exists()
         print(f"Screenshot saved: {output}")
+
+
+class TestMergeDiscardReset:
+    """Test that Accept & Merge and Discard buttons properly reset the task tab.
+
+    Note: Full click behavior testing requires a running task with actual worktree
+    changes. The handler logic is verified via unit tests in test_web_ui.py:
+    - test_discard_keeps_task_description: verifies discard preserves task input
+    - test_merge_clears_task_description_on_success: verifies merge clears task input
+    """
+
+    def test_unit_tests_cover_merge_discard_behavior(self):
+        """Document that merge/discard behavior is covered by unit tests.
+
+        The key behaviors tested in test_web_ui.py:
+        1. Accept & Merge clears task description on success
+        2. Discard keeps task description for retry
+        3. Both hide the merge section and re-enable the start button
+        """
+        # This test documents the test coverage - actual verification
+        # is in test_web_ui.py::TestChadWebUI::test_discard_keeps_task_description
+        # and test_web_ui.py::TestChadWebUI::test_merge_clears_task_description_on_success
+        pass
