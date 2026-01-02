@@ -3143,7 +3143,12 @@ class ChadWebUI:
                     failure_msg += f"\n\n*{completion_reason[0]}*"
                 chat_history.append({"role": "user", "content": failure_msg})
 
-            streaming_transcript = "".join(chunk for _, chunk in full_history) if full_history else None
+            streaming_transcript = "".join(chunk for _, chunk in full_history) if full_history else ""
+            if final_status:
+                marker = f"[FINAL STATUS] {final_status}"
+                streaming_transcript = (
+                    f"{streaming_transcript.rstrip()}\n\n{marker}" if streaming_transcript else marker
+                )
 
             self.session_logger.update_log(
                 session.log_path,
@@ -3153,6 +3158,7 @@ class ChadWebUI:
                 completion_reason=completion_reason[0],
                 status="completed" if task_success[0] else "failed",
                 verification_attempts=verification_log,
+                final_status=final_status,
             )
             if session.log_path:
                 final_status += f"\n\n*Session log: {session.log_path}*"
@@ -3170,11 +3176,12 @@ class ChadWebUI:
 
             # Check for worktree changes to show merge section
             has_changes, merge_summary_text = self.check_worktree_changes(session_id)
+            show_merge = has_changes and task_success[0]
 
             # Get available branches and rendered diff for merge target
             branches = []
             diff_html = ""
-            if has_changes and session.project_path:
+            if show_merge and session.project_path:
                 try:
                     git_mgr = GitWorktreeManager(Path(session.project_path))
                     branches = git_mgr.get_branches()
@@ -3190,9 +3197,9 @@ class ChadWebUI:
                 summary=final_summary,
                 interactive=True,
                 show_followup=can_continue,
-                show_merge=has_changes,
-                merge_summary=merge_summary_text,
-                branch_choices=branches if has_changes else None,
+                show_merge=show_merge,
+                merge_summary=merge_summary_text if show_merge else "",
+                branch_choices=branches if show_merge else None,
                 diff_full=diff_html,
             )
 
