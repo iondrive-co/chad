@@ -482,6 +482,20 @@ class TestPortResolution:
         assert "visibility:" not in box_block
 
 
+def test_live_stream_scroll_state_initializes_with_null():
+    """Live stream scroll state should use null savedScrollTop to distinguish 'not scrolled' from 'scrolled to 0'."""
+    from chad.web_ui import CUSTOM_JS
+
+    # Verify the initialization uses null (not 0) for savedScrollTop
+    assert "savedScrollTop: null" in CUSTOM_JS, (
+        "savedScrollTop must initialize to null to properly handle scrolling to position 0"
+    )
+    # Verify the restore check uses !== null (not > 0)
+    assert "savedScrollTop !== null" in CUSTOM_JS, (
+        "Scroll restore must check !== null to properly restore scroll position 0"
+    )
+
+
 def test_live_stream_display_buffer_trims_to_tail():
     """Live stream display buffer should keep only the most recent content."""
     from chad.web_ui import LiveStreamDisplayBuffer
@@ -1866,6 +1880,49 @@ class TestSessionLogging:
         chad_dir = Path(tempfile.gettempdir()) / "chad"
         if chad_dir.exists() and not any(chad_dir.iterdir()):
             chad_dir.rmdir()
+
+
+def test_session_logger_preserves_streaming_history_with_agent_names():
+    """Session logger should preserve structured streaming history with agent names."""
+    from chad.session_logger import SessionLogger
+
+    logger = SessionLogger()
+    log_path = logger.create_log(
+        task_description="Test task",
+        project_path="/tmp/test",
+        coding_account="test",
+        coding_provider="anthropic",
+    )
+
+    streaming_history = [
+        ("CODING AI", "Processing request\n"),
+        ("CODING AI", "Making changes...\n"),
+        ("VERIFICATION AI", "Checking work...\n"),
+    ]
+
+    logger.update_log(
+        log_path,
+        [],
+        streaming_history=streaming_history,
+        status="completed",
+    )
+
+    with open(log_path) as f:
+        data = json.load(f)
+
+    # Verify structured history is preserved
+    assert "streaming_history" in data
+    assert len(data["streaming_history"]) == 3
+    assert data["streaming_history"][0] == {"agent": "CODING AI", "content": "Processing request\n"}
+    assert data["streaming_history"][2] == {"agent": "VERIFICATION AI", "content": "Checking work...\n"}
+
+    # Verify flat transcript is also created for backward compatibility
+    assert "streaming_transcript" in data
+    assert "Processing request" in data["streaming_transcript"]
+    assert "Checking work" in data["streaming_transcript"]
+
+    # Cleanup
+    log_path.unlink()
 
 
 class TestSessionLogIncludesTask:
