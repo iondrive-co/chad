@@ -371,10 +371,26 @@ body, .gradio-container, .gradio-container * {
 .conflict-section-hidden {
   display: none !important;
   visibility: hidden !important;
-  height: 0 !important;
-  overflow: hidden !important;
-  margin: 0 !important;
+}
+
+/* Ensure ALL children of hidden merge section are also hidden */
+.merge-section-hidden *,
+.conflict-section-hidden * {
+  display: none !important;
+  visibility: hidden !important;
+}
+
+/* Visually hidden but still in DOM for JS access */
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
   padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
 }
 
 /* Hide task status when empty (keeps element in DOM for JS detection) */
@@ -1438,8 +1454,20 @@ function() {
         const mergeSections = document.querySelectorAll('.merge-section');
         mergeSections.forEach(mergeSection => {
             // Primary method: Check the visibility state element (more reliable)
-            const stateInput =
-                mergeSection.querySelector('.merge-visibility-state input, .merge-visibility-state textarea');
+            // Query handles both container mode (input inside .merge-visibility-state)
+            // and container=False mode (class directly on input/textarea)
+            let stateInput = mergeSection.querySelector('.merge-visibility-state input,
+                .merge-visibility-state textarea');
+            if (!stateInput) {
+                // Fallback: container=False puts class directly on the element
+                stateInput = mergeSection.querySelector('input.merge-visibility-state,
+                    textarea.merge-visibility-state');
+            }
+            if (!stateInput) {
+                // Last resort: find by ID pattern
+                stateInput = mergeSection.querySelector('[id^="merge-visibility-"] input,
+                [id^="merge-visibility-"] textarea, input[id^="merge-visibility-"], textarea[id^="merge-visibility-"]');
+            }
             let shouldHide = false;
 
             if (stateInput) {
@@ -1458,18 +1486,26 @@ function() {
             }
 
             if (shouldHide) {
-                // Hide the section completely
+                // Hide the entire section and ALL its children completely
                 mergeSection.classList.add('merge-section-hidden');
                 mergeSection.style.cssText = 'display: none !important; visibility: hidden !important;';
-                mergeSection.querySelectorAll('.accordion, [class*="accordion"]').forEach(acc => {
-                    acc.style.cssText = 'display: none !important;';
+                // Hide all child elements to ensure nothing bleeds through
+                mergeSection.querySelectorAll('*').forEach(child => {
+                    if (!child.classList.contains('merge-visibility-state') &&
+                        !child.closest('.merge-visibility-state')) {
+                        child.style.cssText = 'display: none !important; visibility: hidden !important;';
+                    }
                 });
             } else if (stateInput && stateInput.value === 'visible') {
-                // Explicitly show the section
+                // Explicitly show the section and restore all children
                 mergeSection.classList.remove('merge-section-hidden');
                 mergeSection.style.cssText = '';
-                mergeSection.querySelectorAll('.accordion, [class*="accordion"]').forEach(acc => {
-                    acc.style.cssText = '';
+                mergeSection.querySelectorAll('*').forEach(child => {
+                    if (!child.classList.contains('merge-visibility-state') &&
+                        !child.classList.contains('visually-hidden') &&
+                        !child.closest('.visually-hidden')) {
+                        child.style.cssText = '';
+                    }
                 });
             }
         });
@@ -4457,11 +4493,14 @@ class ChadWebUI:
                        elem_classes=["merge-section"]) as merge_section:
             # Hidden state element controls visibility - JS watches this value
             # "visible" = show section, "hidden" = hide section
+            # Note: Using visible=True with CSS hiding so element is always in DOM for JS to find
             merge_visibility_state = gr.Textbox(
                 value="hidden",
-                visible=False,
-                elem_classes=["merge-visibility-state"],
+                visible=True,
+                elem_classes=["merge-visibility-state", "visually-hidden"],
+                elem_id=f"merge-visibility-{session_id}",
                 key=f"merge-visibility-{session_id}",
+                container=False,
             )
             merge_section_header = gr.Markdown("### Changes Ready to Merge")
             changes_summary = gr.Markdown(
