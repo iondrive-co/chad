@@ -1,5 +1,6 @@
 """Tests for web UI module."""
 
+import json
 import re
 import socket
 import subprocess
@@ -1900,6 +1901,86 @@ class TestSessionLogIncludesTask:
 
         # Cleanup
         session_log_path.unlink(missing_ok=True)
+
+
+class TestSessionLogFailureVisibility:
+    """Ensure failure details are recorded clearly in session logs."""
+
+    @pytest.fixture
+    def mock_security_mgr(self):
+        mgr = Mock()
+        mgr.list_accounts.return_value = {"claude": "anthropic"}
+        mgr.list_role_assignments.return_value = {"CODING": "claude"}
+        mgr.get_account_model.return_value = "default"
+        mgr.get_account_reasoning.return_value = "default"
+        return mgr
+
+    @pytest.fixture
+    def web_ui(self, mock_security_mgr):
+        from chad.web_ui import ChadWebUI
+
+        ui = ChadWebUI(mock_security_mgr, "test-password")
+        return ui
+
+    class _FailingProvider:
+        def __init__(self):
+            self._callback = None
+
+        def set_activity_callback(self, cb):
+            self._callback = cb
+
+        def start_session(self, *_):
+            return True
+
+        def send_message(self, *_):
+            pass
+
+        def get_response(self, timeout: float = 0.0):
+            raise RuntimeError("Simulated timeout")
+
+        def stop_session(self):
+            pass
+
+        def supports_multi_turn(self):
+            return False
+
+        def is_alive(self):
+            return False
+
+    @patch("chad.web_ui.create_provider")
+    def test_failure_status_written_to_transcript(self, mock_create_provider, web_ui, tmp_path, git_repo):
+        """Timeout failures should be visible in streaming transcript within the session log."""
+        mock_create_provider.return_value = self._FailingProvider()
+        web_ui.session_logger.base_dir = tmp_path
+
+        session = web_ui.create_session("fail-log")
+        list(web_ui.start_chad_task(session.id, str(git_repo), "cause timeout", "claude"))
+
+        log_path = session.log_path
+        assert log_path is not None and log_path.exists()
+
+        with open(log_path) as f:
+            data = json.load(f)
+
+        assert data["completion_reason"] == "Simulated timeout"
+        transcript = data.get("streaming_transcript", "")
+        assert "Simulated timeout" in transcript
+
+    @patch("chad.web_ui.create_provider")
+    def test_merge_section_hidden_after_main_failure(
+        self, mock_create_provider, web_ui, tmp_path, git_repo, monkeypatch
+    ):
+        """Changes-ready UI should stay hidden when the coding task itself fails."""
+        mock_create_provider.return_value = self._FailingProvider()
+        web_ui.session_logger.base_dir = tmp_path
+        monkeypatch.setattr(web_ui, "check_worktree_changes", lambda *_: (True, "dirty worktree"))
+
+        session = web_ui.create_session("hide-merge")
+        outputs = list(web_ui.start_chad_task(session.id, str(git_repo), "broken task", "claude"))
+        final_output = outputs[-1]
+
+        merge_section_update = final_output[12]
+        assert merge_section_update.get("visible") is False
 
 
 class TestCodingSummaryExtraction:

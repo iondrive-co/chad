@@ -108,6 +108,7 @@ class SessionLogger:
         completion_reason: str | None = None,
         status: str = "running",
         verification_attempts: list | None = None,
+        final_status: str | None = None,
     ) -> None:
         """Update an existing session log with new data.
 
@@ -118,6 +119,7 @@ class SessionLogger:
             success: Whether the task succeeded
             completion_reason: Why the task ended
             status: Current status (running, completed, failed)
+            final_status: Final task status text to surface failures
         """
         try:
             with open(filepath) as f:
@@ -136,6 +138,8 @@ class SessionLogger:
                 session_data["success"] = success
             if completion_reason is not None:
                 session_data["completion_reason"] = completion_reason
+            if final_status is not None:
+                session_data["final_status"] = final_status
 
             with open(filepath, "w") as f:
                 json.dump(session_data, f, indent=2)

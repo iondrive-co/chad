@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 from datetime import datetime
 from pathlib import Path
@@ -120,9 +121,23 @@ class ProviderUIManager:
 
         return status_text
 
-    def _progress_bar(self, utilization_pct: float, width: int = 20) -> str:
+    @staticmethod
+    def _normalize_pct(value: float | int | None) -> float:
+        """Normalize a utilization percentage into the 0-100 range."""
+        try:
+            pct = float(0.0 if value is None else value)
+        except (TypeError, ValueError):
+            return 0.0
+
+        if math.isnan(pct) or math.isinf(pct):
+            return 0.0
+
+        return max(0.0, min(100.0, pct))
+
+    def _progress_bar(self, utilization_pct: float | int | None, width: int = 20) -> str:
         """Create a text progress bar for usage displays."""
-        filled = int(max(0.0, min(100.0, utilization_pct)) / (100 / width))
+        pct = self._normalize_pct(utilization_pct)
+        filled = int(pct / (100 / width))
         return "█" * filled + "░" * (width - filled)
 
     def get_remaining_usage(self, account_name: str) -> float:
@@ -180,7 +195,7 @@ class ProviderUIManager:
 
             usage_data = response.json()
             five_hour = usage_data.get("five_hour", {})
-            util = five_hour.get("utilization", 0)
+            util = self._normalize_pct(five_hour.get("utilization"))
             return max(0.0, min(1.0, 1.0 - (util / 100.0)))
 
         except Exception:
@@ -224,7 +239,7 @@ class ProviderUIManager:
             if rate_limits:
                 primary = rate_limits.get("primary", {})
                 if primary:
-                    util = primary.get("used_percent", 0)
+                    util = self._normalize_pct(primary.get("used_percent"))
                     return max(0.0, min(1.0, 1.0 - (util / 100.0)))
 
         except Exception:
@@ -424,7 +439,7 @@ class ProviderUIManager:
 
         primary = rate_limits.get("primary", {})
         if primary:
-            util = primary.get("used_percent", 0)
+            util = self._normalize_pct(primary.get("used_percent"))
             reset_at = primary.get("resets_at", 0)
             bar = self._progress_bar(util)
 
@@ -435,7 +450,7 @@ class ProviderUIManager:
 
         secondary = rate_limits.get("secondary", {})
         if secondary:
-            util = secondary.get("used_percent", 0)
+            util = self._normalize_pct(secondary.get("used_percent"))
             reset_at = secondary.get("resets_at", 0)
             bar = self._progress_bar(util)
 
@@ -589,7 +604,7 @@ class ProviderUIManager:
 
             five_hour = usage_data.get("five_hour", {})
             if five_hour:
-                util = five_hour.get("utilization", 0)
+                util = self._normalize_pct(five_hour.get("utilization"))
                 reset_at = five_hour.get("resets_at", "")
                 bar = self._progress_bar(util)
 
@@ -608,7 +623,7 @@ class ProviderUIManager:
 
             seven_day = usage_data.get("seven_day")
             if seven_day:
-                util = seven_day.get("utilization", 0)
+                util = self._normalize_pct(seven_day.get("utilization"))
                 reset_at = seven_day.get("resets_at", "")
                 bar = self._progress_bar(util)
 
@@ -629,7 +644,7 @@ class ProviderUIManager:
             if extra and extra.get("is_enabled"):
                 used = extra.get("used_credits", 0)
                 limit = extra.get("monthly_limit", 0)
-                util = extra.get("utilization", 0)
+                util = self._normalize_pct(extra.get("utilization"))
                 bar = self._progress_bar(util)
                 result += "**Extra credits**\n"
                 result += f"[{bar}] ${used:.0f} / ${limit:.0f} ({util:.1f}%)\n\n"
