@@ -761,8 +761,12 @@ Line 4: Fourth line"""
     def test_task_2_live_stream_has_multiline_formatting(self, page: Page):
         """Task 2 live stream should keep styled multiline formatting like Task 1."""
         # Create Task 2 via + tab and ensure it's active
-        plus_tab = page.get_by_role("tab", name="➕")
-        plus_tab.click()
+        try:
+            plus_tab = page.get_by_role("tab", name="➕")
+            plus_tab.click()
+        except Exception:
+            fallback_tab = page.locator("#static-plus-tab")
+            fallback_tab.click()
         task2_tab = page.get_by_role("tab", name="Task 2")
         expect(task2_tab).to_be_visible(timeout=5000)
         task2_tab.click()

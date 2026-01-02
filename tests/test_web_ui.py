@@ -1855,6 +1855,54 @@ More details here...
         assert "I've updated the authentication module" in message["content"]
 
 
+class TestVerificationPrompt:
+    """Ensure verification prompts include task context and summaries."""
+
+    def test_get_verification_prompt_includes_task_and_summary(self):
+        """Task and change summary should be prefixed for the verifier."""
+        from chad.prompts import get_verification_prompt
+
+        prompt = get_verification_prompt("Full response content", "Do the thing", "Did the thing")
+        assert "Do the thing" in prompt
+        assert "Summary from coding agent: Did the thing" in prompt
+        assert "Full response:" in prompt
+        assert "Full response content" in prompt
+
+    def test_run_verification_aborts_without_required_inputs(self, monkeypatch, tmp_path):
+        """Verification should abort before contacting providers when inputs are missing."""
+        from chad.web_ui import ChadWebUI
+
+        class DummySecurityMgr:
+            def list_accounts(self):
+                return {"verifier": "mock"}
+
+            def get_account_model(self, _):
+                return "default"
+
+            def get_account_reasoning(self, _):
+                return "default"
+
+        # Fail fast if provider creation is attempted
+        def _fail_if_called(*_args, **_kwargs):
+            raise AssertionError("create_provider should not be called when inputs are missing")
+
+        monkeypatch.setattr("chad.web_ui.create_provider", _fail_if_called)
+
+        web_ui = ChadWebUI(DummySecurityMgr(), "test-password")
+
+        verified, feedback = web_ui._run_verification(
+            str(tmp_path), "output present", "", "verifier"
+        )
+        assert verified is None
+        assert "missing task description" in feedback
+
+        verified, feedback = web_ui._run_verification(
+            str(tmp_path), "", "Task here", "verifier"
+        )
+        assert verified is None
+        assert "coding agent output was empty" in feedback
+
+
 class TestAnsiToHtml:
     """Test that ANSI escape codes are properly converted to HTML spans."""
 

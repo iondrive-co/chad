@@ -96,17 +96,22 @@ def build_coding_prompt(task: str, project_docs: str | None = None) -> str:
     return CODING_AGENT_PROMPT.format(project_docs=docs_section, task=task)
 
 
-def get_verification_prompt(coding_output: str, task: str = "") -> str:
+def get_verification_prompt(coding_output: str, task: str = "", change_summary: str | None = None) -> str:
     """Build the prompt for the verification agent.
 
     Args:
         coding_output: The output from the coding agent
         task: The original task description
+        change_summary: Optional extracted change summary to prepend
 
     Returns:
         Complete prompt for the verification agent
     """
-    return VERIFICATION_AGENT_PROMPT.format(coding_output=coding_output, task=task or "(no task provided)")
+    coding_block = coding_output
+    if change_summary:
+        coding_block = f"Summary from coding agent: {change_summary}\n\nFull response:\n{coding_output}"
+
+    return VERIFICATION_AGENT_PROMPT.format(coding_output=coding_block, task=task or "(no task provided)")
 
 
 class VerificationParseError(Exception):
