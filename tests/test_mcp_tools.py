@@ -133,6 +133,7 @@ class TestVerify:
             # Mock lint success, test success
             mock_run.side_effect = [
                 MagicMock(returncode=0, stdout="", stderr=""),  # lint
+                MagicMock(returncode=0, stdout="", stderr=""),  # pip check
                 MagicMock(returncode=0, stdout="10 passed", stderr=""),  # tests
             ]
             result = verify()
@@ -154,6 +155,7 @@ class TestVerify:
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
                 MagicMock(returncode=0, stdout="", stderr=""),  # lint passes
+                MagicMock(returncode=0, stdout="", stderr=""),  # pip check passes
                 MagicMock(returncode=1, stdout="5 passed, 2 failed", stderr=""),  # tests fail
             ]
             result = verify()
