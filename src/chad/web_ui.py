@@ -3757,10 +3757,10 @@ class ChadWebUI:
     ) -> tuple:
         """Attempt to merge worktree changes to a target branch.
 
-        Returns 14 values for merge_outputs:
+        Returns 15 values for merge_outputs:
         [merge_section, changes_summary, conflict_section, conflict_info, conflicts_html,
          task_status, chatbot, start_btn, cancel_btn, live_stream, followup_row, task_description,
-         merge_visibility_state, merge_section_header]
+         merge_visibility_state, merge_section_header, diff_content]
         """
         session = self.get_session(session_id)
         no_change = gr.update()
@@ -3769,7 +3769,7 @@ class ChadWebUI:
                 gr.update(visible=False), no_change, gr.update(visible=False),
                 no_change, no_change, gr.update(value="❌ No worktree to merge.", visible=True),
                 no_change, no_change, no_change, no_change, no_change, no_change,
-                "hidden", "",  # merge_visibility_state, merge_section_header
+                "hidden", "", "",  # merge_visibility_state, merge_section_header, diff_content
             )
 
         try:
@@ -3805,6 +3805,7 @@ class ChadWebUI:
                     "",                                          # task_description - direct value
                     "hidden",                                    # merge_visibility_state - hide via JS
                     "",                                          # merge_section_header - clear
+                    "",                                          # diff_content - clear diff view
                 )
             elif conflicts:
                 session.merge_conflicts = conflicts
@@ -3819,7 +3820,7 @@ class ChadWebUI:
                     gr.update(value=self._render_conflicts_html(conflicts or [])),
                     no_change,                                   # task_status
                     no_change, no_change, no_change, no_change, no_change, no_change,
-                    "hidden", "",                                # merge_visibility_state, merge_section_header
+                    "hidden", "", "",                       # merge_visibility_state, merge_section_header, diff_content
                 )
             else:
                 error_detail = error_msg or "Merge failed. Check git status and commit hooks."
@@ -3831,14 +3832,14 @@ class ChadWebUI:
                     gr.update(value=""),                         # conflicts_html cleared
                     gr.update(value=f"❌ {error_detail}", visible=True),
                     no_change, no_change, no_change, no_change, no_change, no_change,
-                    "visible", no_change,                  # merge_visibility_state (keep visible), merge_section_header
+                    "visible", no_change, no_change,        # merge_visibility_state, merge_section_header, diff_content
                 )
         except Exception as e:
             return (
                 no_change, no_change, no_change, no_change, no_change,
                 gr.update(value=f"❌ Merge error: {e}", visible=True),
                 no_change, no_change, no_change, no_change, no_change, no_change,
-                no_change, no_change,                # merge_visibility_state, merge_section_header (no change on error)
+                no_change, no_change, no_change,            # merge_visibility_state, merge_section_header, diff_content
             )
 
     def _render_conflicts_html(self, conflicts: list[MergeConflict]) -> str:
@@ -4025,7 +4026,7 @@ class ChadWebUI:
     def resolve_all_conflicts(self, session_id: str, use_incoming: bool) -> tuple:
         """Resolve all conflicts by choosing all original or all incoming.
 
-        Returns 14 values for merge_outputs.
+        Returns 15 values for merge_outputs.
         """
         session = self.get_session(session_id)
         no_change = gr.update()
@@ -4034,7 +4035,7 @@ class ChadWebUI:
                 no_change, no_change, gr.update(visible=False),
                 no_change, no_change, gr.update(value="❌ No project path set.", visible=True),
                 no_change, no_change, no_change, no_change, no_change, no_change,
-                no_change, no_change,  # merge_visibility_state, merge_section_header
+                no_change, no_change, no_change,  # merge_visibility_state, merge_section_header, diff_content
             )
 
         try:
@@ -4068,26 +4069,27 @@ class ChadWebUI:
                     "",                                          # task_description - direct value
                     "hidden",                                    # merge_visibility_state - hide via JS
                     "",                                          # merge_section_header - clear
+                    "",                                          # diff_content - clear diff view
                 )
             else:
                 return (
                     no_change, no_change, no_change, no_change, no_change,
                     gr.update(value="❌ Failed to complete merge. Check git status.", visible=True),
                     no_change, no_change, no_change, no_change, no_change, no_change,
-                    no_change, no_change,  # merge_visibility_state, merge_section_header
+                    no_change, no_change, no_change,  # merge_visibility_state, merge_section_header, diff_content
                 )
         except Exception as e:
             return (
                 no_change, no_change, no_change, no_change, no_change,
                 gr.update(value=f"❌ Error resolving conflicts: {e}", visible=True),
                 no_change, no_change, no_change, no_change, no_change, no_change,
-                no_change, no_change,  # merge_visibility_state, merge_section_header
+                no_change, no_change, no_change,  # merge_visibility_state, merge_section_header, diff_content
             )
 
     def abort_merge_action(self, session_id: str) -> tuple:
         """Abort an in-progress merge, return to merge section.
 
-        Returns 14 values for merge_outputs.
+        Returns 15 values for merge_outputs.
         """
         session = self.get_session(session_id)
         no_change = gr.update()
@@ -4096,7 +4098,7 @@ class ChadWebUI:
                 no_change, no_change, gr.update(visible=False),
                 no_change, no_change, no_change,
                 no_change, no_change, no_change, no_change, no_change, no_change,
-                no_change, no_change,  # merge_visibility_state, merge_section_header
+                no_change, no_change, no_change,  # merge_visibility_state, merge_section_header, diff_content
             )
 
         git_mgr = GitWorktreeManager(Path(session.project_path))
@@ -4118,12 +4120,13 @@ class ChadWebUI:
             no_change, no_change, no_change, no_change, no_change, no_change,  # no tab reset on abort
             visibility_state,                            # merge_visibility_state
             header_text,                                 # merge_section_header
+            no_change,                                   # diff_content - keep as is
         )
 
     def discard_worktree_changes(self, session_id: str) -> tuple:
         """Discard worktree and all changes, reset merge UI but keep task description.
 
-        Returns 14 values for merge_outputs. Task description is preserved so user
+        Returns 15 values for merge_outputs. Task description is preserved so user
         can retry the task with the same description.
         """
         session = self.get_session(session_id)
@@ -4155,6 +4158,7 @@ class ChadWebUI:
             no_change,                                   # task_description - keep for retry
             "hidden",                                    # merge_visibility_state - hide via JS
             "",                                          # merge_section_header - clear
+            "",                                          # diff_content - clear diff view
         )
 
     def _build_handoff_context(self, chat_history: list) -> str:
@@ -4685,6 +4689,7 @@ class ChadWebUI:
             task_description,       # 11: Clear task description
             merge_visibility_state,  # 12: Set to "hidden" to hide section via JS
             merge_section_header,    # 13: Clear header when hiding
+            diff_content,            # 14: Clear diff view inside accordion
         ]
 
         accept_merge_btn.click(
