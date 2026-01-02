@@ -2077,8 +2077,8 @@ class ChadWebUI:
     def get_remaining_usage(self, account_name: str) -> float:
         return self.provider_ui.get_remaining_usage(account_name)
 
-    def _get_claude_remaining_usage(self) -> float:
-        return self.provider_ui._get_claude_remaining_usage()
+    def _get_claude_remaining_usage(self, account_name: str) -> float:
+        return self.provider_ui._get_claude_remaining_usage(account_name)
 
     def _get_codex_remaining_usage(self, account_name: str) -> float:
         return self.provider_ui._get_codex_remaining_usage(account_name)

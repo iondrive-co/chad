@@ -152,7 +152,7 @@ class ProviderUIManager:
             return 0.0
 
         if provider == "anthropic":
-            return self._get_claude_remaining_usage()
+            return self._get_claude_remaining_usage(account_name)
         if provider == "openai":
             return self._get_codex_remaining_usage(account_name)
         if provider == "gemini":
@@ -162,11 +162,12 @@ class ProviderUIManager:
 
         return 0.3  # Unknown provider, bias low
 
-    def _get_claude_remaining_usage(self) -> float:
+    def _get_claude_remaining_usage(self, account_name: str) -> float:
         """Get Claude remaining usage from API (0.0-1.0)."""
         import requests
 
-        creds_file = Path.home() / ".claude" / ".credentials.json"
+        config_dir = self._get_claude_config_dir(account_name)
+        creds_file = config_dir / ".credentials.json"
         if not creds_file.exists():
             return 0.0
 
