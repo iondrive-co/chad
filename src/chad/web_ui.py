@@ -2808,6 +2808,7 @@ class ChadWebUI:
             session.config = coding_config if session.active else None
 
             verification_account_for_run = actual_verification_account or verification_agent
+            verification_log: list[dict[str, object]] = []
 
             if session.cancel_requested:
                 final_status = "🛑 Task cancelled by user"
@@ -2841,6 +2842,7 @@ class ChadWebUI:
                 verification_attempt = 0
                 verified = False
                 verification_feedback = ""
+                verification_log: list[dict[str, object]] = []
 
                 while (
                     not verified and verification_attempt < max_verification_attempts and not session.cancel_requested
@@ -2878,6 +2880,15 @@ class ChadWebUI:
                         verification_model=resolved_verification_model,
                         verification_reasoning=resolved_verification_reasoning,
                     )
+                    status_label = "error" if verified is None else ("passed" if verified else "failed")
+                    verification_log.append(
+                        {
+                            "attempt": verification_attempt,
+                            "status": status_label,
+                            "feedback": verification_feedback,
+                            "account": verification_account_for_run,
+                        }
+                    )
 
                     # Add verification result to chat
                     if verified is None:
@@ -2894,7 +2905,9 @@ class ChadWebUI:
                                 "content": "───────────── ❌ VERIFICATION ERROR ─────────────",
                             }
                         )
-                        self.session_logger.update_log(session.log_path, chat_history)
+                        self.session_logger.update_log(
+                            session.log_path, chat_history, verification_attempts=verification_log
+                        )
                         break
                     elif verified:
                         chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
@@ -2904,10 +2917,14 @@ class ChadWebUI:
                                 "content": "───────────── ✅ VERIFICATION PASSED ─────────────",
                             }
                         )
-                        self.session_logger.update_log(session.log_path, chat_history)
+                        self.session_logger.update_log(
+                            session.log_path, chat_history, verification_attempts=verification_log
+                        )
                     else:
                         chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
-                        self.session_logger.update_log(session.log_path, chat_history)
+                        self.session_logger.update_log(
+                            session.log_path, chat_history, verification_attempts=verification_log
+                        )
 
                         # If not verified and session is still active, send feedback to coding agent
                         can_revise = (
@@ -2960,20 +2977,26 @@ class ChadWebUI:
                                 session.active = False
                                 session.provider = None
                                 session.config = None
-                                self.session_logger.update_log(session.log_path, chat_history)
+                                self.session_logger.update_log(
+                                    session.log_path, chat_history, verification_attempts=verification_log
+                                )
                                 break
 
                             if revision_response:
                                 parsed_revision = parse_codex_output(revision_response)
                                 chat_history[revision_pending_idx] = make_chat_message("CODING AI", parsed_revision)
                                 last_coding_output = parsed_revision
-                                self.session_logger.update_log(session.log_path, chat_history)
+                                self.session_logger.update_log(
+                                    session.log_path, chat_history, verification_attempts=verification_log
+                                )
                             else:
                                 chat_history[revision_pending_idx] = {
                                     "role": "assistant",
                                     "content": "**CODING AI**\n\n❌ *No response to revision request*",
                                 }
-                                self.session_logger.update_log(session.log_path, chat_history)
+                                self.session_logger.update_log(
+                                    session.log_path, chat_history, verification_attempts=verification_log
+                                )
                                 break
 
                             yield make_yield(
@@ -2985,7 +3008,9 @@ class ChadWebUI:
                             # Can't continue - session not active or max attempts reached
                             break
 
-                    self.session_logger.update_log(session.log_path, chat_history)
+                    self.session_logger.update_log(
+                        session.log_path, chat_history, verification_attempts=verification_log
+                    )
 
                 if verified is True:
                     final_status = "✓ Task completed and verified!"
@@ -3025,6 +3050,7 @@ class ChadWebUI:
                 success=task_success[0],
                 completion_reason=completion_reason[0],
                 status="completed" if task_success[0] else "failed",
+                verification_attempts=verification_log,
             )
             if session.log_path:
                 final_status += f"\n\n*Session log: {session.log_path}*"
@@ -3120,6 +3146,7 @@ class ChadWebUI:
             current_history if len(current_history) >= len(session.chat_history) else session.chat_history.copy()
         )
         task_description = session.task_description or ""
+        verification_log: list[dict[str, object]] = []
 
         def make_followup_yield(
             history,
@@ -3389,7 +3416,7 @@ class ChadWebUI:
                 "role": "assistant",
                 "content": "**CODING AI**\n\n❌ *No response received*",
             }
-            self._update_session_log(session, chat_history, full_history)
+            self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
             yield make_followup_yield(chat_history, "", show_followup=True)
             return
 
@@ -3399,7 +3426,7 @@ class ChadWebUI:
 
         # Update stored history
         session.chat_history = chat_history
-        self._update_session_log(session, chat_history, full_history)
+        self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
 
         yield make_followup_yield(chat_history, "", show_followup=True, working=True)
 
@@ -3420,7 +3447,7 @@ class ChadWebUI:
                         "content": f"───────────── 🔍 VERIFICATION (Attempt {verification_attempt}) ─────────────",
                     }
                 )
-                self._update_session_log(session, chat_history, full_history)
+                self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
 
                 verify_status = (
                     f"🔍 Running verification " f"(attempt {verification_attempt}/{max_verification_attempts})..."
@@ -3442,6 +3469,16 @@ class ChadWebUI:
                     verification_reasoning=resolved_verification_reasoning,
                 )
 
+                status_label = "error" if verified is None else ("passed" if verified else "failed")
+                verification_log.append(
+                    {
+                        "attempt": verification_attempt,
+                        "status": status_label,
+                        "feedback": verification_feedback,
+                        "account": verification_account_for_run,
+                    }
+                )
+
                 if verified is None:
                     # Verification error - stop
                     chat_history.append(
@@ -3456,7 +3493,9 @@ class ChadWebUI:
                             "content": "───────────── ❌ VERIFICATION ERROR ─────────────",
                         }
                     )
-                    self._update_session_log(session, chat_history, full_history)
+                    self._update_session_log(
+                        session, chat_history, full_history, verification_attempts=verification_log
+                    )
                     break
                 elif verified:
                     chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
@@ -3466,10 +3505,14 @@ class ChadWebUI:
                             "content": "───────────── ✅ VERIFICATION PASSED ─────────────",
                         }
                     )
-                    self._update_session_log(session, chat_history, full_history)
+                    self._update_session_log(
+                        session, chat_history, full_history, verification_attempts=verification_log
+                    )
                 else:
                     chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
-                    self._update_session_log(session, chat_history, full_history)
+                    self._update_session_log(
+                        session, chat_history, full_history, verification_attempts=verification_log
+                    )
 
                     # Check if we can revise
                     can_revise = (
@@ -3491,7 +3534,9 @@ class ChadWebUI:
                             }
                         )
                         revision_idx = len(chat_history) - 1
-                        self._update_session_log(session, chat_history, full_history)
+                        self._update_session_log(
+                            session, chat_history, full_history, verification_attempts=verification_log
+                        )
                         yield make_followup_yield(chat_history, "🔄 Revision in progress...", working=True)
 
                         revision_request = (
@@ -3511,20 +3556,26 @@ class ChadWebUI:
                             session.active = False
                             session.provider = None
                             session.config = None
-                            self._update_session_log(session, chat_history, full_history)
+                            self._update_session_log(
+                                session, chat_history, full_history, verification_attempts=verification_log
+                            )
                             break
 
                         if revision_response:
                             parsed_revision = parse_codex_output(revision_response)
                             chat_history[revision_idx] = make_chat_message("CODING AI", parsed_revision)
                             last_coding_output = parsed_revision
-                            self._update_session_log(session, chat_history, full_history)
+                            self._update_session_log(
+                                session, chat_history, full_history, verification_attempts=verification_log
+                            )
                         else:
                             chat_history[revision_idx] = {
                                 "role": "assistant",
                                 "content": "**CODING AI**\n\n❌ *No response to revision request*",
                             }
-                            self._update_session_log(session, chat_history, full_history)
+                            self._update_session_log(
+                                session, chat_history, full_history, verification_attempts=verification_log
+                            )
                             break
 
                         yield make_followup_yield(
@@ -3540,15 +3591,19 @@ class ChadWebUI:
                                 "content": "───────────── ❌ VERIFICATION FAILED ─────────────",
                             }
                         )
-                        self._update_session_log(session, chat_history, full_history)
+                        self._update_session_log(
+                            session, chat_history, full_history, verification_attempts=verification_log
+                        )
                         break
 
                 # Incremental session log update after each verification attempt
-                self._update_session_log(session, chat_history, full_history)
+                self._update_session_log(
+                    session, chat_history, full_history, verification_attempts=verification_log
+                )
 
         # Always update stored history and session log after follow-up completes
         session.chat_history = chat_history
-        self._update_session_log(session, chat_history, full_history)
+        self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
 
         yield make_followup_yield(chat_history, "", show_followup=True)
 
@@ -3987,7 +4042,13 @@ class ChadWebUI:
 
         return "\n".join(context_parts)
 
-    def _update_session_log(self, session: Session, chat_history: list, streaming_history: list = None):
+    def _update_session_log(
+        self,
+        session: Session,
+        chat_history: list,
+        streaming_history: list = None,
+        verification_attempts: list | None = None,
+    ):
         """Update the session log with current state.
 
         Args:
@@ -4002,6 +4063,7 @@ class ChadWebUI:
                 chat_history,
                 streaming_transcript=streaming_transcript,
                 status="continued",
+                verification_attempts=verification_attempts,
             )
 
     def _create_session_ui(self, session_id: str, is_first: bool = False):
