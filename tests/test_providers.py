@@ -1,6 +1,8 @@
-"Tests for AI providers."
+"""Tests for AI providers."""
 
+import json
 from unittest.mock import Mock, patch
+
 import pytest
 from chad.providers import (
     ModelConfig,
@@ -910,7 +912,7 @@ class TestOpenAICodexProvider:
         provider.project_path = "/tmp/test_project"
         provider.current_message = "What is 2+2?"
 
-        with pytest.raises(RuntimeError, match="timed out"):
+        with pytest.raises(RuntimeError, match="stalled|timed out"):
             provider.get_response(timeout=1.0)
         assert provider.current_message is None
         mock_process.kill.assert_called_once()
@@ -939,7 +941,7 @@ class TestOpenAICodexProvider:
         response = provider.get_response()
         assert response == ""
 
-    @patch("chad.providers._stream_pty_output", return_value=("", False))
+    @patch("chad.providers._stream_pty_output", return_value=("", False, False))
     @patch("chad.providers._start_pty_process")
     def test_get_response_exec_includes_network_access(self, mock_start, mock_stream):
         mock_process = Mock()
@@ -958,7 +960,7 @@ class TestOpenAICodexProvider:
         assert "-c" in cmd
         assert 'network_access="enabled"' in cmd
 
-    @patch("chad.providers._stream_pty_output", return_value=("", False))
+    @patch("chad.providers._stream_pty_output", return_value=("", False, False))
     @patch("chad.providers._start_pty_process")
     def test_get_response_resume_includes_network_access(self, mock_start, mock_stream):
         mock_process = Mock()
@@ -977,6 +979,72 @@ class TestOpenAICodexProvider:
         cmd = mock_start.call_args.args[0]
         assert "-c" in cmd
         assert 'network_access="enabled"' in cmd
+
+    def test_reconnect_error_then_success(self):
+        events = [
+            {"type": "error", "message": "Reconnecting... 1/5"},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}},
+        ]
+
+        def fake_stream(_p, _fd, on_chunk, _t, idle_timeout=None):
+            for event in events:
+                on_chunk(json.dumps(event) + "\n")
+            return "", False, False
+
+        with patch("chad.providers._start_pty_process") as mock_start, patch(
+            "chad.providers._stream_pty_output", side_effect=fake_stream
+        ):
+            mock_process = Mock()
+            mock_process.stdin = Mock()
+            mock_start.return_value = (mock_process, 11)
+
+            config = ModelConfig(provider="openai", model_name="gpt-4")
+            provider = OpenAICodexProvider(config)
+            provider.project_path = "/tmp/test_project"
+            provider.current_message = "Hello"
+            provider.cli_path = "/bin/codex"
+
+            assert provider.get_response(timeout=1.0) == "ok"
+
+    def test_reconnect_error_without_recovery(self):
+        events = [{"type": "error", "message": "Reconnecting... 5/5"}]
+
+        def fake_stream(_p, _fd, on_chunk, _t, idle_timeout=None):
+            for event in events:
+                on_chunk(json.dumps(event) + "\n")
+            return "", False, False
+
+        with patch("chad.providers._start_pty_process") as mock_start, patch(
+            "chad.providers._stream_pty_output", side_effect=fake_stream
+        ):
+            mock_process = Mock()
+            mock_process.stdin = Mock()
+            mock_start.return_value = (mock_process, 11)
+
+            config = ModelConfig(provider="openai", model_name="gpt-4")
+            provider = OpenAICodexProvider(config)
+            provider.project_path = "/tmp/test_project"
+            provider.current_message = "Hello"
+            provider.cli_path = "/bin/codex"
+
+            with pytest.raises(RuntimeError, match="reconnect"):
+                provider.get_response(timeout=1.0)
+
+    @patch("chad.providers._stream_pty_output", return_value=("", False, True))
+    @patch("chad.providers._start_pty_process")
+    def test_get_response_idle_stall(self, mock_start, mock_stream):
+        mock_process = Mock()
+        mock_process.stdin = Mock()
+        mock_start.return_value = (mock_process, 11)
+
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+        provider.project_path = "/tmp/test_project"
+        provider.current_message = "Hello"
+        provider.cli_path = "/bin/codex"
+
+        with pytest.raises(RuntimeError, match="stalled"):
+            provider.get_response(timeout=1.0)
 
 
 class TestCodexJsonEventParsing:

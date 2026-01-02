@@ -17,6 +17,8 @@ from .installer import AIToolInstaller
 from .installer import DEFAULT_TOOLS_DIR
 from .mcp_config import ensure_global_mcp_config
 
+CODEX_IDLE_TIMEOUT = 180.0
+
 
 def find_cli_executable(name: str) -> str:
     """Find a CLI executable, checking common locations if not in PATH.
@@ -359,11 +361,17 @@ def _drain_pty(master_fd: int, output_chunks: list[str], on_chunk: Callable[[str
 
 
 def _stream_pty_output(
-    process: subprocess.Popen, master_fd: int, on_chunk: Callable[[str], None] | None, timeout: float
-) -> tuple[str, bool]:
+    process: subprocess.Popen,
+    master_fd: int,
+    on_chunk: Callable[[str], None] | None,
+    timeout: float,
+    idle_timeout: float | None = None,
+) -> tuple[str, bool, bool]:
     """Stream output from a PTY-backed process until completion or timeout."""
     output_chunks: list[str] = []
     start_time = time.time()
+    last_activity = start_time
+    idle_stalled = False
 
     try:
         while time.time() - start_time < timeout:
@@ -388,8 +396,18 @@ def _stream_pty_output(
                     if on_chunk:
                         on_chunk(decoded)
                     start_time = time.time()
+                    last_activity = start_time
 
-        timed_out = process.poll() is None
+            if idle_timeout and (time.time() - last_activity) >= idle_timeout:
+                idle_stalled = True
+                try:
+                    process.kill()
+                    process.wait()
+                except Exception:
+                    pass
+                break
+
+        timed_out = process.poll() is None and not idle_stalled
         if timed_out:
             process.kill()
             process.wait()
@@ -401,7 +419,7 @@ def _stream_pty_output(
     finally:
         _close_master_fd(master_fd)
 
-    return "".join(output_chunks), timed_out
+    return "".join(output_chunks), timed_out, idle_stalled
 
 
 class AIProvider(ABC):
@@ -784,6 +802,7 @@ class OpenAICodexProvider(AIProvider):
 
             # Both initial and resume use JSON output
             json_events = []
+            reconnect_seen = [False]
 
             def format_json_event_as_text(event: dict) -> str | None:
                 """Convert a JSON event to human-readable text for streaming."""
@@ -880,7 +899,11 @@ class OpenAICodexProvider(AIProvider):
 
                         # Check for API errors (model not supported, etc.)
                         if event.get("type") == "error":
-                            api_error[0] = event.get("message", "Unknown API error")
+                            msg = event.get("message", "Unknown API error")
+                            if "reconnecting" in msg.lower():
+                                reconnect_seen[0] = True
+                            else:
+                                api_error[0] = msg
                         elif event.get("type") == "turn.failed":
                             error_info = event.get("error", {})
                             api_error[0] = error_info.get("message", "Turn failed")
@@ -888,6 +911,13 @@ class OpenAICodexProvider(AIProvider):
                         # Extract thread_id from first event
                         if event.get("type") == "thread.started" and "thread_id" in event:
                             self.thread_id = event["thread_id"]
+
+                        is_agent_message = (
+                            event.get("type") == "item.completed"
+                            and event.get("item", {}).get("type") == "agent_message"
+                        )
+                        if is_agent_message:
+                            reconnect_seen[0] = False
 
                         # Convert to human-readable and stream
                         readable = format_json_event_as_text(event)
@@ -908,18 +938,27 @@ class OpenAICodexProvider(AIProvider):
                         # Non-JSON line in JSON mode - might be stderr, skip
                         pass
 
-            output, timed_out = _stream_pty_output(self.process, self.master_fd, process_chunk, timeout)
+            output, timed_out, idle_stalled = _stream_pty_output(
+                self.process, self.master_fd, process_chunk, timeout, idle_timeout=CODEX_IDLE_TIMEOUT
+            )
 
             self.current_message = None
             self.process = None
             self.master_fd = None
 
+            if idle_stalled:
+                raise RuntimeError(
+                    f"Codex stalled waiting for output for {int(CODEX_IDLE_TIMEOUT)}s "
+                    "— process likely waiting for input"
+                )
             if timed_out:
                 raise RuntimeError(f"Codex execution timed out ({int(timeout / 60)} minutes)")
 
             # Check for API errors (model not supported, etc.)
             if api_error[0]:
                 raise RuntimeError(f"Codex API error: {api_error[0]}")
+            if reconnect_seen[0]:
+                raise RuntimeError("Codex connection failed during reconnect attempts")
 
             # Extract response from JSON events
             response_parts = []
@@ -1107,12 +1146,14 @@ class GeminiCodeAssistProvider(AIProvider):
             if self.process.stdin:
                 self.process.stdin.close()
 
-            output, timed_out = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
+            output, timed_out, idle_stalled = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
 
             self.current_message = None
             self.process = None
             self.master_fd = None
 
+            if idle_stalled:
+                return f"Error: Gemini execution stalled (no output for {int(timeout)}s)"
             if timed_out:
                 return f"Error: Gemini execution timed out ({int(timeout / 60)} minutes)"
 
@@ -1222,12 +1263,14 @@ class MistralVibeProvider(AIProvider):
             if self.process.stdin:
                 self.process.stdin.close()
 
-            output, timed_out = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
+            output, timed_out, idle_stalled = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
 
             self.current_message = None
             self.process = None
             self.master_fd = None
 
+            if idle_stalled:
+                return f"Error: Vibe execution stalled (no output for {int(timeout)}s)"
             if timed_out:
                 return f"Error: Vibe execution timed out ({int(timeout / 60)} minutes)"
 
