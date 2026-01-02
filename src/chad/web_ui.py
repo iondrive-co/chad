@@ -1951,6 +1951,8 @@ class ChadWebUI:
 
     # Constant for verification agent dropdown default
     SAME_AS_CODING = "(Same as Coding Agent)"
+    VERIFICATION_NONE = "__verification_none__"
+    VERIFICATION_NONE_LABEL = "None"
 
     def __init__(self, security_mgr: SecurityManager, main_password: str):
         self.security_mgr = security_mgr
@@ -2274,6 +2276,8 @@ class ChadWebUI:
     ) -> tuple[str | None, str, str]:
         """Resolve verification account/model/reasoning selections without mutating coding prefs."""
         accounts = self.security_mgr.list_accounts()
+        if verification_agent == self.VERIFICATION_NONE:
+            return None, coding_model, coding_reasoning
         actual_account = coding_account if verification_agent == self.SAME_AS_CODING else verification_agent
         if not actual_account or actual_account not in accounts:
             return None, coding_model, coding_reasoning
@@ -2314,6 +2318,14 @@ class ChadWebUI:
         current_verification_reasoning: str | None = None,
     ) -> VerificationDropdownState:
         """Resolve verification dropdown values based on current selections."""
+        if verification_agent == self.VERIFICATION_NONE:
+            return VerificationDropdownState(
+                ["default"],
+                "default",
+                ["default"],
+                "default",
+                False,
+            )
         accounts_map = self.security_mgr.list_accounts()
         account_choices = list(accounts_map.keys())
         actual_account = coding_agent if verification_agent == self.SAME_AS_CODING else verification_agent
@@ -2807,7 +2819,8 @@ class ChadWebUI:
             # Track the active configuration only when the session can continue
             session.config = coding_config if session.active else None
 
-            verification_account_for_run = actual_verification_account or verification_agent
+            verification_enabled = verification_agent != self.VERIFICATION_NONE
+            verification_account_for_run = actual_verification_account if verification_enabled else None
             verification_log: list[dict[str, object]] = []
 
             if session.cancel_requested:
@@ -2818,6 +2831,10 @@ class ChadWebUI:
                         "content": "───────────── 🛑 TASK CANCELLED ─────────────",
                     }
                 )
+            elif task_success[0] and not verification_enabled:
+                final_status = "✓ Task completed (verification disabled)"
+                completion_msg = "───────────── ✅ TASK COMPLETED (VERIFICATION DISABLED) ─────────────"
+                chat_history.append({"role": "user", "content": completion_msg})
             elif task_success[0]:
                 # Get the last coding output for verification
                 last_coding_output = (coding_final_output[0] or "").strip()
@@ -3431,7 +3448,8 @@ class ChadWebUI:
         yield make_followup_yield(chat_history, "", show_followup=True, working=True)
 
         # Run verification on follow-up
-        verification_account_for_run = actual_verification_account or verification_agent
+        verification_enabled = verification_agent != self.VERIFICATION_NONE
+        verification_account_for_run = actual_verification_account if verification_enabled else None
 
         if verification_account_for_run and verification_account_for_run in accounts:
             # Verification loop (like start_chad_task)
@@ -4095,7 +4113,16 @@ class ChadWebUI:
         # Get ready status after any auto-assignment
         is_ready, _ = self.get_role_config_status()
 
-        verification_choices = [self.SAME_AS_CODING] + account_choices
+        none_label = (
+            "None (disable verification)"
+            if self.VERIFICATION_NONE_LABEL in account_choices
+            else self.VERIFICATION_NONE_LABEL
+        )
+        verification_choices = [
+            (self.SAME_AS_CODING, self.SAME_AS_CODING),
+            (none_label, self.VERIFICATION_NONE),
+            *[(account, account) for account in account_choices],
+        ]
         stored_verification = self.security_mgr.get_verification_agent()
         initial_verification = stored_verification if stored_verification in account_choices else self.SAME_AS_CODING
 
@@ -4859,8 +4886,6 @@ class ChadWebUI:
         with gr.Blocks(title="Chad") as interface:
             # Inject custom CSS
             gr.HTML(f"<style>{PROVIDER_PANEL_CSS}</style>")
-
-            # Note: CUSTOM_JS injection removed - was causing script execution issues
 
             gr.HTML(
                 """
