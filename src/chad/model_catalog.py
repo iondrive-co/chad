@@ -69,8 +69,8 @@ class ModelCatalog:
         models |= self._stored_model(provider, account_name)
 
         if provider == "openai":
-            models |= self._codex_config_models()
-            models |= self._codex_session_models()
+            models |= self._codex_config_models(account_name)
+            models |= self._codex_session_models(account_name)
 
         if provider == "openai":
             plan_type = self._codex_plan_type(account_name)
@@ -103,11 +103,14 @@ class ModelCatalog:
             return set()
         return {str(model)} if model else set()
 
-    def _codex_config_models(self) -> set[str]:
+    def _codex_config_models(self, account_name: str | None) -> set[str]:
         if tomllib is None:
             return set()
 
-        config_path = self.home_dir / ".codex" / "config.toml"
+        if not account_name:
+            return set()
+
+        config_path = self._codex_home(account_name) / ".codex" / "config.toml"
         if not config_path.exists():
             return set()
 
@@ -133,8 +136,11 @@ class ModelCatalog:
 
         return models
 
-    def _codex_session_models(self) -> set[str]:
-        sessions_dir = self.home_dir / ".codex" / "sessions"
+    def _codex_session_models(self, account_name: str | None) -> set[str]:
+        if not account_name:
+            return set()
+
+        sessions_dir = self._codex_home(account_name) / ".codex" / "sessions"
         if not sessions_dir.exists():
             return set()
 
