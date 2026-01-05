@@ -822,7 +822,11 @@ class OpenAICodexProvider(AIProvider):
     def _get_env(self) -> dict:
         """Get environment with isolated HOME for this account."""
         env = os.environ.copy()
-        env["HOME"] = self._get_isolated_home()
+        isolated_home = self._get_isolated_home()
+        env["HOME"] = isolated_home
+        # On Windows, also set USERPROFILE as some tools check this
+        if os.name == "nt":
+            env["USERPROFILE"] = isolated_home
         env["PYTHONUNBUFFERED"] = "1"
         env["TERM"] = "xterm-256color"
         return env

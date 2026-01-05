@@ -1,5 +1,6 @@
 """Utility functions for the installer."""
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -19,7 +20,8 @@ def ensure_directory(path: Path) -> None:
 
 
 def is_tool_installed(tool_name: str) -> bool:
-    return subprocess.run(["which", tool_name], capture_output=True).returncode == 0
+    """Check if a tool is installed and available in PATH (cross-platform)."""
+    return shutil.which(tool_name) is not None
 
 
 def get_platform() -> str:
