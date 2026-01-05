@@ -828,19 +828,19 @@ class ProviderUIManager:
         except Exception as exc:
             return False, f"Error: {str(exc)}"
 
-    def _setup_codex_account(self, account_name: str) -> str:
+    def _setup_codex_account(self, account_name: str) -> Path:
         """Setup isolated home directory for a Codex account."""
         codex_home = self._get_codex_home(account_name)
         codex_dir = codex_home / ".codex"
         codex_dir.mkdir(parents=True, exist_ok=True)
         ensure_global_mcp_config(home=codex_home)
-        return str(codex_home)
+        return codex_home
 
-    def _setup_claude_account(self, account_name: str) -> str:
+    def _setup_claude_account(self, account_name: str) -> Path:
         """Setup isolated config directory for a Claude account."""
         config_dir = self._get_claude_config_dir(account_name)
         config_dir.mkdir(parents=True, exist_ok=True)
-        return str(config_dir)
+        return config_dir
 
     def _ensure_provider_cli(self, provider_type: str) -> tuple[bool, str]:
         """Ensure the provider's CLI is present; install if missing."""
@@ -884,22 +884,113 @@ class ProviderUIManager:
 
             if provider_type == "openai":
                 import os
+                import shutil as shutil_mod
+                import time
 
                 codex_home = self._setup_codex_account(account_name)
                 codex_cli = cli_detail or "codex"
+                is_windows = os.name == "nt"
 
                 env = os.environ.copy()
-                env["HOME"] = codex_home
+                env["HOME"] = str(codex_home)
+                if is_windows:
+                    env["USERPROFILE"] = str(codex_home)
 
-                login_result = subprocess.run(
-                    [codex_cli, "login"],
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
+                isolated_auth_file = codex_home / ".codex" / "auth.json"
+                real_home = Path.home()
+                real_auth_file = real_home / ".codex" / "auth.json"
 
-                if login_result.returncode == 0:
+                # Track the mtime of real auth file before login to detect changes
+                real_auth_mtime_before = None
+                if is_windows and real_auth_file.exists():
+                    try:
+                        real_auth_mtime_before = real_auth_file.stat().st_mtime
+                    except OSError:
+                        pass
+
+                login_success = False
+
+                try:
+                    if is_windows:
+                        # On Windows, open Codex in a new console with custom HOME
+                        CREATE_NEW_CONSOLE = 0x00000010
+                        process = subprocess.Popen(
+                            [codex_cli, "login"],
+                            env=env,
+                            creationflags=CREATE_NEW_CONSOLE,
+                        )
+
+                        # Poll for auth file - check both isolated and real home
+                        # (in case Codex doesn't respect our custom HOME)
+                        start_time = time.time()
+                        timeout_secs = 120
+                        while time.time() - start_time < timeout_secs:
+                            # First check isolated location (preferred)
+                            if isolated_auth_file.exists():
+                                try:
+                                    with open(isolated_auth_file) as f:
+                                        auth_data = json.load(f)
+                                    tokens = auth_data.get("tokens", {})
+                                    if tokens.get("access_token"):
+                                        login_success = True
+                                        break
+                                except (json.JSONDecodeError, KeyError, OSError):
+                                    pass
+
+                            # Fallback: check if real home auth file was updated
+                            if real_auth_file.exists():
+                                try:
+                                    current_mtime = real_auth_file.stat().st_mtime
+                                    # Only use if file is new or was modified after we started
+                                    if real_auth_mtime_before is None or current_mtime > real_auth_mtime_before:
+                                        with open(real_auth_file) as f:
+                                            auth_data = json.load(f)
+                                        tokens = auth_data.get("tokens", {})
+                                        if tokens.get("access_token"):
+                                            # Copy to isolated directory
+                                            isolated_auth_file.parent.mkdir(parents=True, exist_ok=True)
+                                            shutil_mod.copy2(real_auth_file, isolated_auth_file)
+                                            login_success = True
+                                            break
+                                except (json.JSONDecodeError, KeyError, OSError):
+                                    pass
+
+                            time.sleep(2)
+
+                        # Clean up process if still running
+                        try:
+                            process.terminate()
+                        except Exception:
+                            pass
+                    else:
+                        # On Unix, use subprocess.run directly
+                        login_result = subprocess.run(
+                            [codex_cli, "login"],
+                            env=env,
+                            capture_output=True,
+                            text=True,
+                            timeout=120,
+                        )
+                        login_success = login_result.returncode == 0
+
+                except FileNotFoundError:
+                    # CLI not found - provide helpful message
+                    import shutil
+                    codex_home_path = self._get_codex_home(account_name)
+                    if codex_home_path.exists():
+                        shutil.rmtree(codex_home_path, ignore_errors=True)
+                    result = (
+                        f"❌ Codex CLI not found.\n\n"
+                        f"Please install Codex first:\n"
+                        f"```\nnpm install -g @openai/codex\n```"
+                    )
+                    base_response = self.provider_action_response(result, card_slots)
+                    return (*base_response, name_field_value, add_btn_state, accordion_state)
+
+                except Exception:
+                    pass  # Fall through to login_success check
+
+                if login_success:
                     self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
                     result = f"✅ Provider '{account_name}' added and logged in!"
                     name_field_value = ""
@@ -912,8 +1003,14 @@ class ProviderUIManager:
                     if codex_home_path.exists():
                         shutil.rmtree(codex_home_path, ignore_errors=True)
 
-                    error = login_result.stderr.strip() if login_result.stderr else "Login was cancelled or failed"
-                    result = f"❌ Login failed for '{account_name}': {error}"
+                    if is_windows:
+                        result = (
+                            f"❌ Login timed out for '{account_name}'.\n\n"
+                            f"A Codex CLI window should have opened. If you didn't complete the login in time, "
+                            f"please try again and complete the browser authentication within 2 minutes."
+                        )
+                    else:
+                        result = f"❌ Login failed for '{account_name}'. Please try again."
                     base_response = self.provider_action_response(result, card_slots)
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
 
@@ -931,31 +1028,26 @@ class ProviderUIManager:
                     import time
                     import os
 
-                    creds_file = Path(config_dir) / ".credentials.json"
+                    creds_file = config_dir / ".credentials.json"
+                    is_windows = os.name == "nt"
 
                     try:
-                        import pexpect
+                        if is_windows:
+                            # On Windows, open Claude in a new console window for user interaction
+                            # and poll for credentials in the background
+                            import subprocess
 
-                        # Set up environment for Claude
-                        env = os.environ.copy()
-                        env["CLAUDE_CONFIG_DIR"] = str(config_dir)
-                        env["TERM"] = "xterm-256color"
+                            # Set up environment
+                            env = os.environ.copy()
+                            env["CLAUDE_CONFIG_DIR"] = str(config_dir)
 
-                        child = pexpect.spawn(claude_cli, timeout=120, encoding="utf-8", env=env)
-
-                        try:
-                            # Step 1: Theme selection
-                            child.expect("Choose the text style", timeout=20)
-                            time.sleep(1)
-                            child.send("\r")
-
-                            # Step 2: Login method selection
-                            child.expect("Select login method", timeout=15)
-                            time.sleep(1)
-                            child.send("\r")
-
-                            # Step 3: Wait for browser to open
-                            child.expect(["Opening browser", "browser"], timeout=15)
+                            # Start Claude in a new console window (CREATE_NEW_CONSOLE = 0x10)
+                            CREATE_NEW_CONSOLE = 0x00000010
+                            process = subprocess.Popen(
+                                [claude_cli],
+                                env=env,
+                                creationflags=CREATE_NEW_CONSOLE,
+                            )
 
                             # Poll for credentials file to appear (OAuth callback)
                             start_time = time.time()
@@ -973,50 +1065,74 @@ class ProviderUIManager:
                                         pass
                                 time.sleep(2)
 
-                        except pexpect.TIMEOUT:
-                            pass  # Will fall through to login_success check
-                        except pexpect.EOF:
-                            pass  # Process ended unexpectedly
-                        finally:
+                            # Clean up process if still running
                             try:
-                                child.close()
+                                process.terminate()
                             except Exception:
                                 pass
 
-                    except ImportError:
-                        # pexpect not available, fall back to script wrapper
-                        login_process = subprocess.Popen(
-                            ["script", "-q", "-c", f'CLAUDE_CONFIG_DIR="{config_dir}" "{claude_cli}"', "/dev/null"],
-                            stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            env={**os.environ, "CLAUDE_CONFIG_DIR": str(config_dir)},
-                            start_new_session=True,
-                        )
+                        else:
+                            # On Unix, use pexpect for automated login
+                            import pexpect
 
-                        start_time = time.time()
-                        timeout_secs = 120
-                        while time.time() - start_time < timeout_secs:
-                            if creds_file.exists():
+                            env = os.environ.copy()
+                            env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+                            env["TERM"] = "xterm-256color"
+
+                            child = pexpect.spawn(claude_cli, timeout=120, encoding="utf-8", env=env)
+
+                            try:
+                                # Step 1: Theme selection
+                                child.expect("Choose the text style", timeout=20)
+                                time.sleep(1)
+                                child.send("\r")
+
+                                # Step 2: Login method selection
+                                child.expect("Select login method", timeout=15)
+                                time.sleep(1)
+                                child.send("\r")
+
+                                # Step 3: Wait for browser to open
+                                child.expect(["Opening browser", "browser"], timeout=15)
+
+                                # Poll for credentials file to appear (OAuth callback)
+                                start_time = time.time()
+                                timeout_secs = 120
+                                while time.time() - start_time < timeout_secs:
+                                    if creds_file.exists():
+                                        try:
+                                            with open(creds_file) as f:
+                                                creds_data = json.load(f)
+                                            oauth = creds_data.get("claudeAiOauth", {})
+                                            if oauth.get("accessToken"):
+                                                login_success = True
+                                                break
+                                        except (json.JSONDecodeError, KeyError, OSError):
+                                            pass
+                                    time.sleep(2)
+
+                            except pexpect.TIMEOUT:
+                                pass  # Will fall through to login_success check
+                            except pexpect.EOF:
+                                pass  # Process ended unexpectedly
+                            finally:
                                 try:
-                                    with open(creds_file) as f:
-                                        creds_data = json.load(f)
-                                    oauth = creds_data.get("claudeAiOauth", {})
-                                    if oauth.get("accessToken"):
-                                        login_success = True
-                                        break
-                                except (json.JSONDecodeError, KeyError, OSError):
+                                    child.close()
+                                except Exception:
                                     pass
-                            time.sleep(2)
 
-                        try:
-                            login_process.terminate()
-                            login_process.wait(timeout=5)
-                        except Exception:
-                            try:
-                                login_process.kill()
-                            except Exception:
-                                pass
+                    except FileNotFoundError:
+                        # CLI not found - provide helpful message
+                        import shutil
+                        if config_dir.exists():
+                            shutil.rmtree(config_dir, ignore_errors=True)
+                        result = (
+                            f"❌ Claude CLI not found.\n\n"
+                            f"Please install Claude Code first:\n"
+                            f"```\nnpm install -g @anthropic-ai/claude-code\n```"
+                        )
+                        base_response = self.provider_action_response(result, card_slots)
+                        return (*base_response, name_field_value, add_btn_state, accordion_state)
 
                     except Exception:
                         pass  # Any error, fall through to login_success check
@@ -1031,11 +1147,17 @@ class ProviderUIManager:
                     # Login failed/timed out - clean up
                     import shutil
 
-                    config_path = Path(config_dir)
-                    if config_path.exists():
-                        shutil.rmtree(config_path, ignore_errors=True)
+                    if config_dir.exists():
+                        shutil.rmtree(config_dir, ignore_errors=True)
 
-                    result = f"❌ Login timed out for '{account_name}'. Please try again."
+                    if is_windows:
+                        result = (
+                            f"❌ Login timed out for '{account_name}'.\n\n"
+                            f"A Claude CLI window should have opened. If you didn't complete the login in time, "
+                            f"please try again and complete the browser authentication within 2 minutes."
+                        )
+                    else:
+                        result = f"❌ Login timed out for '{account_name}'. Please try again."
                     base_response = self.provider_action_response(result, card_slots)
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
 

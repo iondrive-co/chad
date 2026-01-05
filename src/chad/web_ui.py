@@ -5360,7 +5360,7 @@ def launch_web_ui(password: str = None, port: int = 7860) -> tuple[None, int]:
         inbrowser=open_browser,  # Don't open browser for screenshot mode
         quiet=False,
         js="""
-        function() {
+        () => {
             const getRoot = () => {
                 const app = document.querySelector('gradio-app');
                 return (app && app.shadowRoot) ? app.shadowRoot : document;

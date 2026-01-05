@@ -47,6 +47,7 @@ coverage.xml
 
 # PyCharm
 .idea/
+!.idea/runConfigurations/
 *.iml
 *.iws
 .idea_modules/

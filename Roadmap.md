@@ -8,10 +8,14 @@ Fix Chatbox scrollbar keeps resetting to the bottom
 v0.8 Hack-propagation
 
 Load balance based on usage, user preference, context limits hit, etc.
-
-v0.9 Slip slop slap
-
+Structured log format for better inter-provider handoff
 Rollback:
   - Failed hypothesis
   - summarize progress and resume from checkpoints
   - Revert failed changes
+
+v0.9 Slip slop slap
+
+Telegram and slack integrations
+Bug fixing
+
