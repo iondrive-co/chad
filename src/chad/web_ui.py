@@ -2086,6 +2086,8 @@ class ChadWebUI:
         self.model_catalog = ModelCatalog(security_mgr)
         self.provider_ui = ProviderUIManager(security_mgr, main_password, self.model_catalog)
         self.session_logger = SessionLogger()
+        # Store dropdown references for cross-tab updates
+        self._session_dropdowns: dict[str, dict] = {}
 
     def get_session(self, session_id: str) -> Session:
         """Get or create a session by ID."""
@@ -3011,22 +3013,62 @@ class ChadWebUI:
                     )
                     yield make_yield(chat_history, verify_status, "")
 
-                    # Run verification
+                    # Run verification in a thread so we can stream output to live view
                     def verification_activity(activity_type: str, detail: str):
                         content = detail if activity_type == "stream" else f"[{activity_type}] {detail}\n"
                         message_queue.put(("stream", content))
 
-                    # Run verification in worktree so it can see the changes
                     verification_path = str(session.worktree_path or path_obj)
-                    verified, verification_feedback = self._run_verification(
-                        verification_path,
-                        last_coding_output,
-                        task_description,
-                        verification_account_for_run,
-                        on_activity=verification_activity,
-                        verification_model=resolved_verification_model,
-                        verification_reasoning=resolved_verification_reasoning,
-                    )
+                    verification_result: list = [None, None]  # [verified, feedback]
+                    verification_complete = threading.Event()
+
+                    def run_verification_thread():
+                        try:
+                            v, f = self._run_verification(
+                                verification_path,
+                                last_coding_output,
+                                task_description,
+                                verification_account_for_run,
+                                on_activity=verification_activity,
+                                verification_model=resolved_verification_model,
+                                verification_reasoning=resolved_verification_reasoning,
+                            )
+                            verification_result[0] = v
+                            verification_result[1] = f
+                        except Exception as exc:
+                            verification_result[0] = None
+                            verification_result[1] = f"Verification error: {exc}"
+                        finally:
+                            verification_complete.set()
+
+                    verification_thread = threading.Thread(target=run_verification_thread, daemon=True)
+                    verification_thread.start()
+
+                    # Poll message queue while verification runs (live stream updates)
+                    verif_display_buffer = LiveStreamDisplayBuffer()
+                    verif_render_state = LiveStreamRenderState()
+                    verif_last_yield = 0.0
+                    while not verification_complete.is_set() and not session.cancel_requested:
+                        try:
+                            msg = message_queue.get(timeout=0.05)
+                            if msg[0] == "stream":
+                                chunk = msg[1]
+                                if chunk.strip():
+                                    verif_display_buffer.append(chunk)
+                                    now = time_module.time()
+                                    if now - verif_last_yield >= min_yield_interval:
+                                        rendered = build_live_stream_html(
+                                            verif_display_buffer.content, "VERIFICATION AI"
+                                        )
+                                        if verif_render_state.should_render(rendered):
+                                            yield make_yield(chat_history, verify_status, rendered)
+                                            verif_render_state.record(rendered)
+                                            verif_last_yield = now
+                        except queue.Empty:
+                            pass
+
+                    verification_thread.join(timeout=1.0)
+                    verified, verification_feedback = verification_result[0], verification_result[1]
                     status_label = "error" if verified is None else ("passed" if verified else "failed")
                     verification_log.append(
                         {
@@ -3106,20 +3148,57 @@ class ChadWebUI:
                             )
                             revision_pending_idx = len(chat_history) - 1
                             self.session_logger.update_log(session.log_path, chat_history)
-                            yield make_yield(
-                                chat_history,
-                                f"{status_prefix}⏳ Coding agent working on revisions...",
-                                "",
-                            )
+                            revision_status_msg = f"{status_prefix}⏳ Coding agent working on revisions..."
+                            yield make_yield(chat_history, revision_status_msg, "")
 
-                            # Send the revision request
-                            try:
-                                coding_provider_instance.send_message(revision_request)
-                                revision_response = coding_provider_instance.get_response(timeout=coding_timeout)
-                            except Exception as exc:
+                            # Run revision in a thread so we can stream output to live view
+                            revision_result: list = [None, None]  # [response, error]
+                            revision_complete = threading.Event()
+
+                            def run_revision_thread():
+                                try:
+                                    coding_provider_instance.send_message(revision_request)
+                                    resp = coding_provider_instance.get_response(timeout=coding_timeout)
+                                    revision_result[0] = resp
+                                except Exception as exc:
+                                    revision_result[1] = exc
+                                finally:
+                                    revision_complete.set()
+
+                            revision_thread = threading.Thread(target=run_revision_thread, daemon=True)
+                            revision_thread.start()
+
+                            # Poll message queue while revision runs (live stream updates)
+                            rev_display_buffer = LiveStreamDisplayBuffer()
+                            rev_render_state = LiveStreamRenderState()
+                            rev_last_yield = 0.0
+                            while not revision_complete.is_set() and not session.cancel_requested:
+                                try:
+                                    msg = message_queue.get(timeout=0.05)
+                                    if msg[0] == "stream":
+                                        chunk = msg[1]
+                                        if chunk.strip():
+                                            rev_display_buffer.append(chunk)
+                                            now = time_module.time()
+                                            if now - rev_last_yield >= min_yield_interval:
+                                                rendered = build_live_stream_html(
+                                                    rev_display_buffer.content, "CODING AI"
+                                                )
+                                                if rev_render_state.should_render(rendered):
+                                                    yield make_yield(chat_history, revision_status_msg, rendered)
+                                                    rev_render_state.record(rendered)
+                                                    rev_last_yield = now
+                                except queue.Empty:
+                                    pass
+
+                            revision_thread.join(timeout=1.0)
+                            revision_response = revision_result[0]
+                            revision_error = revision_result[1]
+
+                            if revision_error:
                                 chat_history[revision_pending_idx] = {
                                     "role": "assistant",
-                                    "content": f"**CODING AI**\n\n❌ *Error: {exc}*",
+                                    "content": f"**CODING AI**\n\n❌ *Error: {revision_error}*",
                                 }
                                 session.active = False
                                 session.provider = None
@@ -3236,7 +3315,7 @@ class ChadWebUI:
                 final_summary,
                 "",
                 summary=final_summary,
-                interactive=True,
+                interactive=False,  # Task description locked after work begins
                 show_followup=can_continue,
                 show_merge=show_merge,
                 merge_summary=merge_summary_text if show_merge else "",
@@ -3255,7 +3334,7 @@ class ChadWebUI:
                 chat_history,
                 error_msg,
                 summary=error_msg,
-                interactive=True,
+                interactive=False,  # Task description locked after work begins
                 show_followup=False,
                 show_merge=False,
                 merge_summary="",
@@ -4500,7 +4579,7 @@ class ChadWebUI:
                 key=f"merge-visibility-{session_id}",
                 container=False,
             )
-            merge_section_header = gr.Markdown("### Changes Ready to Merge")
+            merge_section_header = gr.Markdown("")  # Populated when changes exist
             changes_summary = gr.Markdown(
                 "",
                 key=f"changes-summary-{session_id}",
@@ -4923,6 +5002,12 @@ class ChadWebUI:
             outputs=[verification_model, verification_reasoning],
         )
 
+        # Store dropdown references for cross-tab updates when providers change
+        self._session_dropdowns[session_id] = {
+            "coding_agent": coding_agent,
+            "verification_agent": verification_agent,
+        }
+
     def _create_providers_ui(self):
         """Create the Providers tab UI within @gr.render."""
         account_items = self.provider_ui.get_provider_card_items()
@@ -5281,6 +5366,44 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                 inputs=[visible_count],
                 outputs=[main_tabs, visible_count] + task_tabs,
             )
+
+            # Refresh dropdowns when switching to any task tab (after adding providers)
+            def on_tab_select(evt: gr.SelectData):
+                """Refresh agent dropdowns when switching to a task tab."""
+                # Only refresh for task tabs (id >= 1, not providers tab id=0)
+                if evt.index == 0:
+                    return [gr.update() for _ in range(len(self._session_dropdowns) * 2)]
+
+                # Get current account choices
+                accounts = self.security_mgr.list_accounts()
+                account_choices = list(accounts.keys())
+                none_label = (
+                    "None (disable verification)"
+                    if self.VERIFICATION_NONE_LABEL in account_choices
+                    else self.VERIFICATION_NONE_LABEL
+                )
+                verification_choices = [
+                    (self.SAME_AS_CODING, self.SAME_AS_CODING),
+                    (none_label, self.VERIFICATION_NONE),
+                    *[(account, account) for account in account_choices],
+                ]
+
+                # Update all session dropdowns
+                updates = []
+                for session_id in self._session_dropdowns:
+                    updates.append(gr.update(choices=account_choices))  # coding_agent
+                    updates.append(gr.update(choices=verification_choices))  # verification_agent
+                return updates
+
+            # Collect all dropdown outputs for the select handler
+            all_dropdown_outputs = []
+            for session_id in sorted(self._session_dropdowns.keys()):
+                dropdowns = self._session_dropdowns[session_id]
+                all_dropdown_outputs.append(dropdowns["coding_agent"])
+                all_dropdown_outputs.append(dropdowns["verification_agent"])
+
+            if all_dropdown_outputs:
+                main_tabs.select(on_tab_select, outputs=all_dropdown_outputs)
 
             return interface
 

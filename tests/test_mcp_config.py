@@ -157,11 +157,13 @@ def test_ensure_project_root_env_sets_env(monkeypatch, tmp_path):
 def test_ensure_project_root_env_respects_existing(monkeypatch, tmp_path):
     from chad.mcp_config import ensure_project_root_env
 
-    monkeypatch.setenv("CHAD_PROJECT_ROOT", "/already/set")
+    # Use tmp_path for cross-platform compatibility (Unix paths normalize oddly on Windows)
+    existing_path = str(tmp_path / "already" / "set")
+    monkeypatch.setenv("CHAD_PROJECT_ROOT", existing_path)
     monkeypatch.delenv("CHAD_PROJECT_ROOT_REASON", raising=False)
 
     result = ensure_project_root_env(tmp_path)
 
     assert result["changed"] is True  # reason added
-    assert os.environ["CHAD_PROJECT_ROOT"] == "/already/set"
-    assert os.environ["CHAD_PROJECT_ROOT_REASON"].startswith("env:/already/set")
+    assert os.environ["CHAD_PROJECT_ROOT"] == existing_path
+    assert os.environ["CHAD_PROJECT_ROOT_REASON"].startswith("env:")

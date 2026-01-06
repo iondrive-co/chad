@@ -58,7 +58,10 @@ def test_codex_start_session_ensures_mcp_config(monkeypatch, tmp_path):
             calls.append(("cli", key))
             return True, "/bin/codex"
 
+    # Set both HOME and USERPROFILE for cross-platform compatibility
+    # (Path.home() prefers USERPROFILE on Windows)
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setattr(providers, "CLI_INSTALLER", DummyInstaller())
 
     def fake_config(home=None, project_root=None):
@@ -853,6 +856,7 @@ class TestOpenAICodexProvider:
         provider.send_message("Hello")
         assert provider.current_message == "Hello"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
     @patch("chad.providers.select.select")
     @patch("chad.providers.os.read")
     @patch("chad.providers.os.close")
@@ -886,6 +890,7 @@ class TestOpenAICodexProvider:
         mock_stdin.write.assert_called_once_with(b"What is 2+2?")
         mock_stdin.close.assert_called_once()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
     @patch("chad.providers.select.select")
     @patch("chad.providers.os.read")
     @patch("chad.providers.os.close")
@@ -919,6 +924,7 @@ class TestOpenAICodexProvider:
         assert provider.current_message is None
         mock_process.kill.assert_called_once()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
     @patch("chad.providers.os.close")
     @patch("chad.providers.pty.openpty")
     @patch("subprocess.Popen")
@@ -945,7 +951,7 @@ class TestOpenAICodexProvider:
 
     @patch("chad.providers._stream_pty_output", return_value=("", False, False))
     @patch("chad.providers._start_pty_process")
-    def test_get_response_exec_includes_network_access(self, mock_start, mock_stream):
+    def test_get_response_exec_uses_bypass_flag(self, mock_start, mock_stream):
         mock_process = Mock()
         mock_process.stdin = Mock()
         mock_start.return_value = (mock_process, 11)
@@ -959,12 +965,13 @@ class TestOpenAICodexProvider:
         provider.get_response(timeout=1.0)
 
         cmd = mock_start.call_args.args[0]
-        assert "-c" in cmd
-        assert 'network_access="enabled"' in cmd
+        # In exec mode, we use bypass flag because approval_policy=on-request
+        # doesn't work in non-interactive mode
+        assert "--dangerously-bypass-approvals-and-sandbox" in cmd
 
     @patch("chad.providers._stream_pty_output", return_value=("", False, False))
     @patch("chad.providers._start_pty_process")
-    def test_get_response_resume_includes_network_access(self, mock_start, mock_stream):
+    def test_get_response_resume_uses_bypass_flag(self, mock_start, mock_stream):
         mock_process = Mock()
         mock_process.stdin = Mock()
         mock_start.return_value = (mock_process, 11)
@@ -979,8 +986,10 @@ class TestOpenAICodexProvider:
         provider.get_response(timeout=1.0)
 
         cmd = mock_start.call_args.args[0]
-        assert "-c" in cmd
-        assert 'network_access="enabled"' in cmd
+        # Resume also needs bypass flag for non-interactive mode
+        assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+        assert "resume" in cmd
+        assert "thread-123" in cmd
 
     def test_reconnect_error_then_success(self):
         events = [
@@ -1032,6 +1041,26 @@ class TestOpenAICodexProvider:
             with pytest.raises(RuntimeError, match="reconnect"):
                 provider.get_response(timeout=1.0)
 
+    def test_get_env_sets_windows_home_variables(self, monkeypatch):
+        """Test that _get_env sets all Windows home-related environment variables."""
+        from pathlib import Path
+
+        monkeypatch.setattr("os.name", "nt")
+        config = ModelConfig(provider="openai", model_name="gpt-4", account_name="test-account")
+        provider = OpenAICodexProvider(config)
+
+        env = provider._get_env()
+        isolated_home = provider._get_isolated_home()
+        home_path = Path(isolated_home)
+
+        # Check all Windows-specific environment variables are set
+        assert env["HOME"] == isolated_home
+        assert env["USERPROFILE"] == isolated_home
+        assert env["HOMEDRIVE"] == (home_path.drive or "C:")
+        assert env["HOMEPATH"] == str(home_path.relative_to(home_path.anchor))
+        assert env["APPDATA"] == str(home_path / "AppData" / "Roaming")
+        assert env["LOCALAPPDATA"] == str(home_path / "AppData" / "Local")
+
 
 class TestImportOnWindows:
     """Ensure providers import cleanly when termios/pty is unavailable (Windows)."""
@@ -1076,6 +1105,51 @@ def test_stream_output_without_pty(monkeypatch):
     assert "hello from pipe" in output
     assert timed_out is False
     assert idle_stalled is False
+
+
+def test_stream_pipe_output_buffers_partial_lines(monkeypatch):
+    """Test that _stream_pipe_output properly buffers partial lines for JSON parsing.
+
+    This is a regression test for the Windows pipe buffering issue where JSON
+    lines could be split across multiple read() calls, causing parse failures.
+    """
+    import chad.providers as providers
+
+    monkeypatch.setattr(providers, "_HAS_PTY", False)
+    monkeypatch.setattr(providers, "pty", None)
+
+    # Create a subprocess that outputs multiple JSON lines
+    # The print statements should be buffered properly
+    code = '''
+import sys
+print('{"type": "event1", "data": "first"}'  , flush=True)
+print('{"type": "event2", "data": "second"}' , flush=True)
+print('{"type": "event3", "data": "third"}'  , flush=True)
+'''
+    process, master_fd = providers._start_pty_process(
+        [sys.executable, "-c", code]
+    )
+
+    received_chunks = []
+
+    def on_chunk(chunk):
+        received_chunks.append(chunk)
+
+    output, timed_out, idle_stalled = providers._stream_pty_output(
+        process, master_fd, on_chunk, timeout=5.0
+    )
+
+    assert timed_out is False
+    assert idle_stalled is False
+
+    # Each line should be parseable as JSON
+    import json
+    for chunk in received_chunks:
+        for line in chunk.strip().split("\n"):
+            if line.strip():
+                parsed = json.loads(line)
+                assert "type" in parsed
+                assert "data" in parsed
 
 
 class TestCodexJsonEventParsing:
@@ -1251,6 +1325,7 @@ class TestCodexLiveViewFormatting:
 class TestOpenAICodexProviderIntegration:
     """Integration tests for OpenAICodexProvider using mocked subprocess."""
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="select.select doesn't work with pipes on Windows")
     def test_codex_execution_flow(self):
         """Test the end-to-end flow with mocked codex CLI."""
         import tempfile
@@ -1308,15 +1383,18 @@ class TestOpenAICodexProviderIntegration:
 class TestMistralVibeProvider:
     """Test cases for MistralVibeProvider."""
 
-    def test_start_session_success(self):
+    @patch("chad.providers._ensure_cli_tool", return_value=(True, "/bin/vibe"))
+    def test_start_session_success(self, mock_ensure):
         config = ModelConfig(provider="mistral", model_name="default")
         provider = MistralVibeProvider(config)
 
         result = provider.start_session("/tmp/test_project")
         assert result is True
         assert provider.project_path == "/tmp/test_project"
+        mock_ensure.assert_called_once_with("vibe", provider._notify_activity)
 
-    def test_start_session_with_system_prompt(self):
+    @patch("chad.providers._ensure_cli_tool", return_value=(True, "/bin/vibe"))
+    def test_start_session_with_system_prompt(self, mock_ensure):
         config = ModelConfig(provider="mistral", model_name="default")
         provider = MistralVibeProvider(config)
 
@@ -1346,6 +1424,7 @@ class TestGeminiCodeAssistProvider:
         assert "system" in provider.current_message
         assert "hello" in provider.current_message
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
     @patch("chad.providers.select.select")
     @patch("chad.providers.os.read")
     @patch("chad.providers.os.close")
@@ -1372,6 +1451,7 @@ class TestGeminiCodeAssistProvider:
         mock_popen.assert_called_once()
         assert provider.current_message is None
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
     @patch("chad.providers.select.select")
     @patch("chad.providers.os.read")
     @patch("chad.providers.os.close")
@@ -1398,6 +1478,7 @@ class TestGeminiCodeAssistProvider:
         assert "timed out" in response
         assert provider.current_message is None
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
     @patch("chad.providers.os.close")
     @patch("chad.providers.pty.openpty")
     @patch("subprocess.Popen")
