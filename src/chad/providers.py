@@ -336,7 +336,11 @@ def _close_master_fd(master_fd: int | None) -> None:
 def _start_pty_process(
     cmd: list[str], cwd: str | None = None, env: dict | None = None
 ) -> tuple[subprocess.Popen, int | None]:
-    """Start a subprocess with a PTY attached for streaming output when available."""
+    """Start a subprocess with a PTY attached for streaming output when available.
+
+    On Unix, uses a PTY for proper terminal emulation.
+    On Windows, uses pipes with CREATE_NEW_PROCESS_GROUP for proper process tree termination.
+    """
     if _HAS_PTY:
         master_fd, slave_fd = pty.openpty()
         process = subprocess.Popen(
@@ -352,6 +356,12 @@ def _start_pty_process(
         os.close(slave_fd)
         return process, master_fd
 
+    # Windows: use pipes with flags for proper process management
+    creation_flags = 0
+    if os.name == "nt":
+        # CREATE_NEW_PROCESS_GROUP allows taskkill /T to terminate the tree
+        creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
+
     process = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -359,6 +369,7 @@ def _start_pty_process(
         stderr=subprocess.STDOUT,
         cwd=cwd,
         env=env,
+        creationflags=creation_flags,
     )
     return process, None
 
@@ -387,13 +398,23 @@ def _stream_pipe_output(
     timeout: float,
     idle_timeout: float | None = None,
 ) -> tuple[str, bool, bool]:
-    """Stream output from a pipe-backed process until completion or timeout."""
+    """Stream output from a pipe-backed process until completion or timeout.
+
+    On Windows, pipes can split output at arbitrary byte boundaries (unlike Unix PTYs
+    which typically preserve line boundaries). This can cause JSON lines to be split
+    across multiple read() calls. To handle this:
+    - We buffer raw bytes and decode complete lines
+    - Partial lines at the end of a chunk are held until more data arrives
+    - This ensures callbacks receive complete lines for JSON parsing
+    """
     output_chunks: list[str] = []
     start_time = time.time()
     last_activity = start_time
     idle_stalled = False
     output_queue: queue.Queue = queue.Queue()
     stop_event = threading.Event()
+    # Buffer for incomplete lines (Windows pipes can split at arbitrary boundaries)
+    line_buffer: list[bytes] = [b""]
 
     def _reader() -> None:
         try:
@@ -413,6 +434,13 @@ def _stream_pipe_output(
     try:
         while time.time() - start_time < timeout:
             if process.poll() is not None and output_queue.empty() and stop_event.is_set():
+                # Process any remaining buffered content before exiting
+                if line_buffer[0]:
+                    decoded = line_buffer[0].decode("utf-8", errors="replace")
+                    output_chunks.append(decoded)
+                    if on_chunk:
+                        on_chunk(decoded)
+                    line_buffer[0] = b""
                 break
 
             try:
@@ -421,10 +449,20 @@ def _stream_pipe_output(
                 chunk = None
 
             if chunk:
-                decoded = chunk.decode("utf-8", errors="replace")
-                output_chunks.append(decoded)
-                if on_chunk:
-                    on_chunk(decoded)
+                # Combine with any buffered partial line from previous chunk
+                combined = line_buffer[0] + chunk
+                # Split into lines, keeping the last partial line in buffer
+                lines = combined.split(b"\n")
+                line_buffer[0] = lines[-1]  # Keep incomplete line for next iteration
+
+                # Process complete lines (all but the last split result)
+                if len(lines) > 1:
+                    complete_data = b"\n".join(lines[:-1]) + b"\n"
+                    decoded = complete_data.decode("utf-8", errors="replace")
+                    output_chunks.append(decoded)
+                    if on_chunk:
+                        on_chunk(decoded)
+
                 start_time = time.time()
                 last_activity = start_time
 
@@ -435,6 +473,16 @@ def _stream_pipe_output(
         timed_out = process.poll() is None and not idle_stalled
         if timed_out or idle_stalled:
             try:
+                # On Windows, use taskkill to terminate the entire process tree
+                if os.name == "nt":
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                            capture_output=True,
+                            timeout=5,
+                        )
+                    except (subprocess.SubprocessError, OSError):
+                        pass
                 process.kill()
             except Exception:
                 pass
@@ -717,55 +765,77 @@ class ClaudeCodeProvider(AIProvider):
         idle_timeout = 2.0
         self.accumulated_text = []
 
-        while time.time() - start_time < timeout:
-            if self.process.poll() is not None:
-                break
+        # Use a thread-based approach for Windows compatibility
+        # (select.select doesn't work with pipes on Windows)
+        line_queue: queue.Queue = queue.Queue()
+        stop_reading = threading.Event()
 
-            ready, _, _ = select.select([self.process.stdout], [], [], idle_timeout)
-
-            if not ready:
-                if result_text is not None:
-                    break
-                continue
-
-            line = self.process.stdout.readline()
-            if not line:
-                if result_text is not None:
-                    break
-                continue
-
+        def reader_thread():
             try:
-                msg = json.loads(line.strip())
+                while not stop_reading.is_set() and self.process and self.process.stdout:
+                    line = self.process.stdout.readline()
+                    if line:
+                        line_queue.put(line)
+                    elif self.process.poll() is not None:
+                        break
+            except (OSError, ValueError):
+                pass
 
-                if msg.get("type") == "assistant":
-                    content = msg.get("message", {}).get("content", [])
-                    for item in content:
-                        if item.get("type") == "text":
-                            text = item.get("text", "")
-                            self.accumulated_text.append(text)
-                            # Stream the text to UI
-                            self._notify_activity("stream", text + "\n")
-                            self._notify_activity("text", text[:100])
-                        elif item.get("type") == "tool_use":
-                            tool_name = item.get("name", "unknown")
-                            tool_input = item.get("input", {})
-                            if tool_name in ("Read", "Edit", "Write"):
-                                detail = tool_input.get("file_path", "")
-                            elif tool_name == "Bash":
-                                detail = tool_input.get("command", "")[:50]
-                            elif tool_name in ("Glob", "Grep"):
-                                detail = tool_input.get("pattern", "")
-                            else:
-                                detail = ""
-                            self._notify_activity("tool", f"{tool_name}: {detail}")
+        reader = threading.Thread(target=reader_thread, daemon=True)
+        reader.start()
 
-                if msg.get("type") == "result":
-                    result_text = msg.get("result", "")
+        try:
+            while time.time() - start_time < timeout:
+                if self.process.poll() is not None and line_queue.empty():
                     break
 
-                start_time = time.time()
-            except json.JSONDecodeError:
-                continue
+                try:
+                    line = line_queue.get(timeout=idle_timeout)
+                except queue.Empty:
+                    if result_text is not None:
+                        break
+                    continue
+
+                if not line:
+                    if result_text is not None:
+                        break
+                    continue
+
+                try:
+                    msg = json.loads(line.strip())
+
+                    if msg.get("type") == "assistant":
+                        content = msg.get("message", {}).get("content", [])
+                        for item in content:
+                            if item.get("type") == "text":
+                                text = item.get("text", "")
+                                self.accumulated_text.append(text)
+                                # Stream the text to UI
+                                self._notify_activity("stream", text + "\n")
+                                self._notify_activity("text", text[:100])
+                            elif item.get("type") == "tool_use":
+                                tool_name = item.get("name", "unknown")
+                                tool_input = item.get("input", {})
+                                if tool_name in ("Read", "Edit", "Write"):
+                                    detail = tool_input.get("file_path", "")
+                                elif tool_name == "Bash":
+                                    detail = tool_input.get("command", "")[:50]
+                                elif tool_name in ("Glob", "Grep"):
+                                    detail = tool_input.get("pattern", "")
+                                else:
+                                    detail = ""
+                                self._notify_activity("tool", f"{tool_name}: {detail}")
+
+                    if msg.get("type") == "result":
+                        result_text = msg.get("result", "")
+                        break
+
+                    start_time = time.time()
+                except json.JSONDecodeError:
+                    continue
+        finally:
+            stop_reading.set()
+            reader.join(timeout=0.5)
 
         return result_text or ""
 
@@ -824,9 +894,17 @@ class OpenAICodexProvider(AIProvider):
         env = os.environ.copy()
         isolated_home = self._get_isolated_home()
         env["HOME"] = isolated_home
-        # On Windows, also set USERPROFILE as some tools check this
+        # On Windows, set all home-related variables to ensure Codex CLI
+        # uses our isolated config directory. Node.js apps may check any of these.
         if os.name == "nt":
             env["USERPROFILE"] = isolated_home
+            # HOMEDRIVE and HOMEPATH are used by Windows for home resolution
+            home_path = Path(isolated_home)
+            env["HOMEDRIVE"] = home_path.drive or "C:"
+            env["HOMEPATH"] = str(home_path.relative_to(home_path.anchor))
+            # Some Node.js apps use APPDATA/LOCALAPPDATA for config storage
+            env["APPDATA"] = str(home_path / "AppData" / "Roaming")
+            env["LOCALAPPDATA"] = str(home_path / "AppData" / "Local")
         env["PYTHONUNBUFFERED"] = "1"
         env["TERM"] = "xterm-256color"
         return env
@@ -863,12 +941,9 @@ class OpenAICodexProvider(AIProvider):
                 codex_cli,
                 "exec",
                 "--json",  # Must be before 'resume' subcommand
-                "-c",
-                'sandbox_mode="workspace-write"',  # Match --full-auto sandbox mode
-                "-c",
-                'approval_policy="on-request"',  # Match --full-auto approval policy
-                "-c",
-                'network_access="enabled"',
+                # Use bypass flag for resume too - approval_policy=on-request
+                # doesn't work in non-interactive exec mode
+                "--dangerously-bypass-approvals-and-sandbox",
                 "resume",
                 self.thread_id,
                 "-",  # Read prompt from stdin
@@ -877,11 +952,11 @@ class OpenAICodexProvider(AIProvider):
             cmd = [
                 codex_cli,
                 "exec",
-                "--full-auto",
+                # Use bypass flag because --full-auto sets approval_policy=on-request
+                # which falls back to 'never' in non-interactive exec mode (no user to ask)
+                "--dangerously-bypass-approvals-and-sandbox",
                 "--skip-git-repo-check",
                 "--json",
-                "-c",
-                'network_access="enabled"',
                 "-C",
                 self.project_path,
                 "-",  # Read from stdin
@@ -1128,12 +1203,25 @@ class OpenAICodexProvider(AIProvider):
         if self.process:
             try:
                 # Kill entire process group to stop child processes too
-                import signal
+                if os.name == "nt":
+                    # On Windows, use taskkill to terminate the process tree
+                    # /T kills child processes, /F forces termination
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", str(self.process.pid)],
+                            capture_output=True,
+                            timeout=5,
+                        )
+                    except (subprocess.SubprocessError, OSError):
+                        pass
+                else:
+                    # On Unix, kill the process group
+                    import signal
 
-                try:
-                    os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    pass
+                    try:
+                        os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
                 self.process.kill()
                 self.process.wait(timeout=5)
             except Exception:

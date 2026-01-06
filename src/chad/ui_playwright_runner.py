@@ -8,7 +8,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import pwd
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterator, Optional, TYPE_CHECKING
@@ -22,7 +21,15 @@ if TYPE_CHECKING:
 
 # Repository root; used for locating scripts and setting PYTHONPATH.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SHARED_BROWSERS_PATH = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".cache" / "ms-playwright"
+
+# Get the user's real home directory for shared browser cache
+# On Windows, use Path.home(); on Unix, use pwd to get the actual home even if HOME is overridden
+if os.name == "nt":
+    _real_home = Path.home()
+else:
+    import pwd
+    _real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+SHARED_BROWSERS_PATH = _real_home / ".cache" / "ms-playwright"
 
 # Ensure Playwright browsers are read from a shared cache even if HOME is overridden (e.g., Codex isolated homes).
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", os.fspath(SHARED_BROWSERS_PATH))

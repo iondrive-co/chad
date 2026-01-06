@@ -423,14 +423,41 @@ class ProviderUIManager:
         try:
             with open(latest_session) as f:
                 for line in f:
-                    if "rate_limits" in line:
+                    if "rate_limits" not in line:
+                        continue
+                    try:
                         data = json.loads(line.strip())
-                        if data.get("type") == "event_msg":
-                            payload = data.get("payload", {})
-                            if payload.get("type") == "token_count":
-                                rate_limits = payload.get("rate_limits")
-                                timestamp = data.get("timestamp")
-        except (json.JSONDecodeError, OSError):
+                    except json.JSONDecodeError:
+                        continue
+
+                    # Try various locations where rate_limits might be
+                    # 1. Old format: event_msg with token_count payload
+                    if data.get("type") == "event_msg":
+                        payload = data.get("payload", {})
+                        if payload.get("type") == "token_count":
+                            rate_limits = payload.get("rate_limits")
+                            timestamp = data.get("timestamp")
+                            continue
+
+                    # 2. New format: rate_limits at top level
+                    if "rate_limits" in data and isinstance(data.get("rate_limits"), dict):
+                        rate_limits = data.get("rate_limits")
+                        timestamp = data.get("timestamp")
+                        continue
+
+                    # 3. New format: rate_limits in item
+                    item = data.get("item", {})
+                    if isinstance(item, dict) and "rate_limits" in item:
+                        rate_limits = item.get("rate_limits")
+                        timestamp = data.get("timestamp")
+                        continue
+
+                    # 4. turn.ended event format
+                    if data.get("type") in ("turn.ended", "thread.ended"):
+                        if "rate_limits" in data:
+                            rate_limits = data.get("rate_limits")
+                            timestamp = data.get("timestamp")
+        except OSError:
             return None
 
         if not rate_limits:

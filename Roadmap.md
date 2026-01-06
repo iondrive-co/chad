@@ -17,5 +17,6 @@ Rollback:
 v0.9 Slip slop slap
 
 Telegram and slack integrations
+Packaging for different platforms
 Bug fixing
 
