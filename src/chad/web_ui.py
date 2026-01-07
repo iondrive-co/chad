@@ -1266,13 +1266,23 @@ function() {
         const tabs = tablist ? Array.from(tablist.querySelectorAll('[role=\"tab\"]')) : [];
         const panels = Array.from(tabHost.querySelectorAll('[role=\"tabpanel\"]'));
         if (!tabs.length || !panels.length) return;
+        const usedPanelIds = new Set();
+        const usedTabIds = new Set();
         tabs.forEach((tab, idx) => {
             const panel = panels[idx];
             if (!panel) return;
-            const panelId = panel.id && panel.id.trim() ? panel.id : `tabpanel-${idx}`;
-            const tabId = tab.id && tab.id.trim() ? tab.id : `tab-${idx}`;
+            let panelId = panel.id && panel.id.trim() ? panel.id : `tabpanel-${idx}`;
+            if (usedPanelIds.has(panelId)) {
+                panelId = `tabpanel-${idx}-${idx}`;
+            }
+            let tabId = tab.id && tab.id.trim() ? tab.id : `tab-${idx}`;
+            if (usedTabIds.has(tabId)) {
+                tabId = `tab-${idx}-${idx}`;
+            }
             panel.id = panelId;
             tab.id = tabId;
+            usedPanelIds.add(panelId);
+            usedTabIds.add(tabId);
             tab.setAttribute('aria-controls', panelId);
             panel.setAttribute('aria-labelledby', tabId);
             if (!panel.getAttribute('role')) {
@@ -5232,19 +5242,46 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                     btn.style.visibility = 'hidden';
                     btn.style.opacity = '0';
                   };
+                  const collectAll = (selector) => {
+                    const seen = new Set();
+                    const results = [];
+                    const walk = (node) => {
+                      if (!node) return;
+                      node.querySelectorAll(selector).forEach((el) => {
+                        if (seen.has(el)) return;
+                        seen.add(el);
+                        results.push(el);
+                      });
+                      node.querySelectorAll('*').forEach((el) => {
+                        if (el.shadowRoot) walk(el.shadowRoot);
+                      });
+                    };
+                    walk(document);
+                    return results;
+                  };
                   const fixAriaLinks = () => {
                     const root = getRoot();
-                    const tabs = Array.from(root.querySelectorAll('[role=\"tab\"][data-tab-id]'));
-                    const panels = Array.from(root.querySelectorAll('.tabitem'));
+                    const tabs = collectAll('[role=\"tab\"]');
+                    const panels = collectAll('.tabitem, [role=\"tabpanel\"]');
                     const textOf = (el) => (el.textContent || '').trim();
                     const addPanel = panels.find((p) => textOf(p).includes('Add New Task'));
                     const taskPanels = panels.filter((p) => textOf(p).includes('Task Description'));
+                    const panelByData = new Map();
+                    panels.forEach((panel) => {
+                      const dataId = panel.getAttribute('data-tab-id');
+                      if (dataId) panelByData.set(dataId, panel);
+                    });
                     let taskIdx = 0;
+                    const usedPanelIds = new Set();
+                    const usedTabIds = new Set();
 
                     tabs.forEach((tab, idx) => {
                       const label = textOf(tab);
+                      const tabData = tab.getAttribute('data-tab-id');
                       let panel = null;
-                      if (isPlus(tab) && addPanel) {
+                      if (tabData && panelByData.has(tabData)) {
+                        panel = panelByData.get(tabData);
+                      } else if (isPlus(tab) && addPanel) {
                         panel = addPanel;
                       } else if (label.startsWith('Task') && taskPanels.length) {
                         panel = taskPanels[Math.min(taskIdx, taskPanels.length - 1)];
@@ -5253,12 +5290,21 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                         panel = panels.length ? panels[idx % panels.length] : null;
                       }
                       if (!panel) return;
-                      const dataId = tab.getAttribute('data-tab-id') || idx;
-                      const panelId = panel.id && panel.id.trim() ? panel.id : `tabpanel-${dataId}`;
-                      const tabId = tab.id && tab.id.trim() ? tab.id : `tab-${dataId}`;
+                      const panelIndex = panels.indexOf(panel);
+                      const dataId = tab.getAttribute('data-tab-id') || panelIndex || idx;
+                      let panelId = panel.id && panel.id.trim() ? panel.id : `tabpanel-${dataId}`;
+                      if (usedPanelIds.has(panelId)) {
+                        panelId = `tabpanel-${dataId}-${idx}`;
+                      }
+                      let tabId = tab.id && tab.id.trim() ? tab.id : `tab-${dataId}`;
+                      if (usedTabIds.has(tabId)) {
+                        tabId = `tab-${dataId}-${idx}`;
+                      }
                       panel.id = panelId;
                       panel.setAttribute('role', 'tabpanel');
                       tab.id = tabId;
+                      usedPanelIds.add(panelId);
+                      usedTabIds.add(tabId);
                       tab.setAttribute('aria-controls', panelId);
                       panel.setAttribute('aria-labelledby', tabId);
                     });
@@ -5300,6 +5346,13 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                   };
                   setInterval(tickAll, 400);
                   setTimeout(tickAll, 80);
+                  document.addEventListener('click', (event) => {
+                    const tab = event.target && event.target.closest
+                      ? event.target.closest('[role=\"tab\"]')
+                      : null;
+                    if (!tab) return;
+                    setTimeout(fixAriaLinks, 0);
+                  }, true);
                 }
                 """,
             )

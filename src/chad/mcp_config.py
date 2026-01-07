@@ -58,7 +58,11 @@ def ensure_project_root_env(project_root: Path | None = None) -> dict[str, objec
 
 
 def _config_path(home: Path | None = None) -> Path:
-    target_home = home or Path.home()
+    if home:
+        target_home = home
+    else:
+        env_home = os.environ.get("HOME")
+        target_home = Path(env_home) if env_home else Path.home()
     return target_home / ".codex" / "config.toml"
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -111,6 +112,7 @@ class ModelCatalog:
         if not account_name:
             return set()
 
+        self._sync_codex_home(account_name)
         config_path = self._codex_home(account_name) / ".codex" / "config.toml"
         if not config_path.exists():
             return set()
@@ -141,6 +143,7 @@ class ModelCatalog:
         if not account_name:
             return set()
 
+        self._sync_codex_home(account_name)
         sessions_dir = self._codex_home(account_name) / ".codex" / "sessions"
         if not sessions_dir.exists():
             return set()
@@ -187,6 +190,39 @@ class ModelCatalog:
         temp_home = os.environ.get("CHAD_TEMP_HOME")
         base = Path(temp_home) if temp_home else self.home_dir
         return base / ".chad" / "codex-homes" / account_name
+
+    def _sync_codex_home(self, account_name: str) -> None:
+        """Sync real-home Codex data into the isolated home on Windows."""
+        if os.name != "nt":
+            return
+
+        isolated_home = self._codex_home(account_name) / ".codex"
+        real_home = Path.home() / ".codex"
+        if not real_home.exists():
+            return
+
+        isolated_home.mkdir(parents=True, exist_ok=True)
+
+        def sync_file(src: Path, dest: Path) -> None:
+            try:
+                if not dest.exists() or src.stat().st_mtime > dest.stat().st_mtime:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dest)
+            except OSError:
+                return
+
+        def sync_tree(src_dir: Path, dest_dir: Path) -> None:
+            for root, _, files in os.walk(src_dir):
+                for filename in files:
+                    src_path = Path(root) / filename
+                    rel_path = src_path.relative_to(src_dir)
+                    dest_path = dest_dir / rel_path
+                    sync_file(src_path, dest_path)
+
+        sync_file(real_home / "auth.json", isolated_home / "auth.json")
+        sync_file(real_home / "config.toml", isolated_home / "config.toml")
+        if (real_home / "sessions").exists():
+            sync_tree(real_home / "sessions", isolated_home / "sessions")
 
     def _codex_plan_type(self, account_name: str | None) -> str | None:
         if not account_name:
