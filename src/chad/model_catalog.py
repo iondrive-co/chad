@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from chad.utils import platform_path, safe_home
+
 try:  # Python 3.11+
     import tomllib  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover
@@ -32,7 +34,7 @@ class ModelCatalog:
     """Discover and cache available models per provider."""
 
     security_mgr: object | None = None
-    home_dir: Path = field(default_factory=Path.home)
+    home_dir: Path = field(default_factory=safe_home)
     cache_ttl: float = 300.0
     max_session_files: int = 60
 
@@ -188,16 +190,16 @@ class ModelCatalog:
 
     def _codex_home(self, account_name: str) -> Path:
         temp_home = os.environ.get("CHAD_TEMP_HOME")
-        base = Path(temp_home) if temp_home else self.home_dir
-        return base / ".chad" / "codex-homes" / account_name
+        base = platform_path(temp_home) if temp_home else platform_path(self.home_dir)
+        return platform_path(base / ".chad" / "codex-homes" / account_name)
 
     def _sync_codex_home(self, account_name: str) -> None:
         """Sync real-home Codex data into the isolated home on Windows."""
         if os.name != "nt":
             return
 
-        isolated_home = self._codex_home(account_name) / ".codex"
-        real_home = Path.home() / ".codex"
+        isolated_home = platform_path(self._codex_home(account_name) / ".codex")
+        real_home = platform_path(safe_home(ignore_temp_home=True) / ".codex")
         if not real_home.exists():
             return
 
@@ -214,7 +216,7 @@ class ModelCatalog:
         def sync_tree(src_dir: Path, dest_dir: Path) -> None:
             for root, _, files in os.walk(src_dir):
                 for filename in files:
-                    src_path = Path(root) / filename
+                    src_path = platform_path(root) / filename
                     rel_path = src_path.relative_to(src_dir)
                     dest_path = dest_dir / rel_path
                     sync_file(src_path, dest_path)
