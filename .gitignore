@@ -83,5 +83,3 @@ dmypy.json
 # Project-specific
 dist/install-chad.sh
 /.chad-worktrees/
-
-BUGS.md
