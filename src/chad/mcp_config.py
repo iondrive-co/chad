@@ -171,7 +171,7 @@ def ensure_global_mcp_config(home: Path | None = None, project_root: Path | None
 
     existing_text = ""
     if config_path.exists():
-        existing_text = config_path.read_text()
+        existing_text = config_path.read_text(encoding="utf-8")
 
     cleaned_text, removed_dangling = _strip_dangling_chad_entries(existing_text)
     # Ensure sandbox settings are always present

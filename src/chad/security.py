@@ -109,7 +109,7 @@ class SecurityManager:
             return {}
 
         try:
-            with open(self.config_path, "r") as f:
+            with open(self.config_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError) as e:
             print(f"Warning: Could not load config file: {e}")
@@ -131,7 +131,7 @@ class SecurityManager:
             # Write to temp file in same directory (for atomic rename)
             fd, tmp_path = tempfile.mkstemp(dir=self.config_path.parent, prefix=".chad_config_", suffix=".tmp")
             try:
-                with os.fdopen(fd, "w") as f:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
                     json.dump(config, f, indent=2)
                 # Set permissions before rename
                 os.chmod(tmp_path, 0o600)

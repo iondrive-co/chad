@@ -173,7 +173,7 @@ class ProviderUIManager:
             return 0.0
 
         try:
-            with open(creds_file) as f:
+            with open(creds_file, encoding="utf-8") as f:
                 creds = json.load(f)
 
             oauth_data = creds.get("claudeAiOauth", {})
@@ -230,7 +230,7 @@ class ProviderUIManager:
 
         try:
             rate_limits = None
-            with open(latest_session) as f:
+            with open(latest_session, encoding="utf-8") as f:
                 for line in f:
                     if "rate_limits" in line:
                         data = json.loads(line.strip())
@@ -391,7 +391,7 @@ class ProviderUIManager:
             return "❌ **Not logged in**\n\nClick 'Login' to authenticate this account."
 
         try:
-            with open(auth_file) as f:
+            with open(auth_file, encoding="utf-8") as f:
                 auth_data = json.load(f)
 
             tokens = auth_data.get("tokens", {})
@@ -463,7 +463,7 @@ class ProviderUIManager:
         rate_limits = None
         timestamp = None
         try:
-            with open(latest_session) as f:
+            with open(latest_session, encoding="utf-8") as f:
                 for line in f:
                     if "rate_limits" not in line:
                         continue
@@ -563,7 +563,7 @@ class ProviderUIManager:
             return False
 
         try:
-            with open(creds_file) as f:
+            with open(creds_file, encoding="utf-8") as f:
                 creds = json.load(f)
 
             oauth_data = creds.get("claudeAiOauth", {})
@@ -602,7 +602,7 @@ class ProviderUIManager:
 
             creds["claudeAiOauth"] = oauth_data
 
-            with open(creds_file, "w") as f:
+            with open(creds_file, "w", encoding="utf-8") as f:
                 json.dump(creds, f)
 
             return True
@@ -620,7 +620,7 @@ class ProviderUIManager:
             return "❌ **Not logged in**\n\n" "Click **Login** below to authenticate this account."
 
         try:
-            with open(creds_file) as f:
+            with open(creds_file, encoding="utf-8") as f:
                 creds = json.load(f)
 
             oauth_data = creds.get("claudeAiOauth", {})
@@ -645,7 +645,7 @@ class ProviderUIManager:
             if response.status_code == 401:
                 if self._refresh_claude_token(account_name):
                     # Re-read credentials and retry
-                    with open(creds_file) as f:
+                    with open(creds_file, encoding="utf-8") as f:
                         creds = json.load(f)
                     oauth_data = creds.get("claudeAiOauth", {})
                     access_token = oauth_data.get("accessToken", "")
@@ -762,7 +762,7 @@ class ProviderUIManager:
 
         for session_file in session_files:
             try:
-                with open(session_file) as f:
+                with open(session_file, encoding="utf-8") as f:
                     session_data = json.load(f)
 
                 messages = session_data.get("messages", [])
@@ -831,7 +831,7 @@ class ProviderUIManager:
 
         for session_file in session_files:
             try:
-                with open(session_file) as f:
+                with open(session_file, encoding="utf-8") as f:
                     data = json.load(f)
 
                 metadata = data.get("metadata", {})
@@ -997,7 +997,7 @@ class ProviderUIManager:
                             # First check isolated location (preferred)
                             if isolated_auth_file.exists():
                                 try:
-                                    with open(isolated_auth_file) as f:
+                                    with open(isolated_auth_file, encoding="utf-8") as f:
                                         auth_data = json.load(f)
                                     tokens = auth_data.get("tokens", {})
                                     if tokens.get("access_token"):
@@ -1012,7 +1012,7 @@ class ProviderUIManager:
                                     current_mtime = real_auth_file.stat().st_mtime
                                     # Only use if file is new or was modified after we started
                                     if real_auth_mtime_before is None or current_mtime > real_auth_mtime_before:
-                                        with open(real_auth_file) as f:
+                                        with open(real_auth_file, encoding="utf-8") as f:
                                             auth_data = json.load(f)
                                         tokens = auth_data.get("tokens", {})
                                         if tokens.get("access_token"):
@@ -1126,7 +1126,7 @@ class ProviderUIManager:
                             while time.time() - start_time < timeout_secs:
                                 if creds_file.exists():
                                     try:
-                                        with open(creds_file) as f:
+                                        with open(creds_file, encoding="utf-8") as f:
                                             creds_data = json.load(f)
                                         oauth = creds_data.get("claudeAiOauth", {})
                                         if oauth.get("accessToken"):
@@ -1172,7 +1172,7 @@ class ProviderUIManager:
                                 while time.time() - start_time < timeout_secs:
                                     if creds_file.exists():
                                         try:
-                                            with open(creds_file) as f:
+                                            with open(creds_file, encoding="utf-8") as f:
                                                 creds_data = json.load(f)
                                             oauth = creds_data.get("claudeAiOauth", {})
                                             if oauth.get("accessToken"):

@@ -32,7 +32,7 @@ class SessionLogger:
             "verification_attempts": [],
         }
 
-        with open(filepath, "w") as f:
+        with open(filepath, "w", encoding="utf-8") as f:
             json.dump(session_data, f, indent=2)
 
         return filepath
@@ -62,7 +62,7 @@ class SessionLogger:
             "verification_attempts": [],
         }
 
-        with open(filepath, "w") as f:
+        with open(filepath, "w", encoding="utf-8") as f:
             json.dump(session_data, f, indent=2)
 
     def create_log(
@@ -93,7 +93,7 @@ class SessionLogger:
             "verification_attempts": [],
         }
 
-        with open(filepath, "w") as f:
+        with open(filepath, "w", encoding="utf-8") as f:
             json.dump(session_data, f, indent=2)
 
         return filepath
@@ -124,7 +124,7 @@ class SessionLogger:
             final_status: Final task status text to surface failures
         """
         try:
-            with open(filepath) as f:
+            with open(filepath, encoding="utf-8") as f:
                 session_data = json.load(f)
 
             session_data["conversation"] = list(chat_history)
@@ -149,7 +149,7 @@ class SessionLogger:
             if final_status is not None:
                 session_data["final_status"] = final_status
 
-            with open(filepath, "w") as f:
+            with open(filepath, "w", encoding="utf-8") as f:
                 json.dump(session_data, f, indent=2)
         except Exception:
             # Logging failures shouldn't break the task flow.

@@ -46,12 +46,12 @@ class HypothesisTracker:
     def _load(self) -> None:
         if not self._file_path.exists():
             raise FileNotFoundError(f"Tracker {self._id} not found")
-        with open(self._file_path) as f:
+        with open(self._file_path, encoding="utf-8") as f:
             self._data = json.load(f)
 
     def _save(self) -> None:
         self._data["updated_at"] = datetime.now(timezone.utc).isoformat()
-        with open(self._file_path, "w") as f:
+        with open(self._file_path, "w", encoding="utf-8") as f:
             json.dump(self._data, f, indent=2)
 
     @property
@@ -215,7 +215,7 @@ class HypothesisTracker:
         trackers = []
         for f in sorted(cls.BASE_DIR.glob("hyp_*.json"), reverse=True):
             try:
-                with open(f) as fp:
+                with open(f, encoding="utf-8") as fp:
                     data = json.load(fp)
                 confirmed = len([h for h in data["hypotheses"] if h["status"] == "confirmed"])
                 trackers.append(
