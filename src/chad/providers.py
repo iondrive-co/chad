@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from chad.utils import platform_path, safe_home
 from .installer import AIToolInstaller
 from .installer import DEFAULT_TOOLS_DIR
 from .mcp_config import ensure_global_mcp_config
@@ -426,12 +427,8 @@ def _stream_pipe_output(
             if process.stdout is None:
                 return
             while not stop_event.is_set():
-                # Use readline() on Windows for responsive output
-                # read(4096) blocks until buffer fills, readline() returns after each line
-                if os.name == "nt":
-                    chunk = process.stdout.readline()
-                else:
-                    chunk = process.stdout.read(4096)
+                # Use readline() for responsive output regardless of platform
+                chunk = process.stdout.readline()
                 if not chunk:
                     break
                 output_queue.put(chunk)
@@ -921,11 +918,10 @@ class OpenAICodexProvider(AIProvider):
 
     def _get_isolated_home(self) -> str:
         """Get the isolated HOME directory for this account."""
-        from pathlib import Path
-
+        base_home = safe_home()
         if self.config.account_name:
-            return str(Path.home() / ".chad" / "codex-homes" / self.config.account_name)
-        return str(Path.home())
+            return str(base_home / ".chad" / "codex-homes" / self.config.account_name)
+        return str(base_home)
 
     def _get_env(self) -> dict:
         """Get environment with isolated HOME for this account."""
@@ -937,7 +933,7 @@ class OpenAICodexProvider(AIProvider):
         if os.name == "nt":
             env["USERPROFILE"] = isolated_home
             # HOMEDRIVE and HOMEPATH are used by Windows for home resolution
-            home_path = Path(isolated_home)
+            home_path = platform_path(isolated_home)
             env["HOMEDRIVE"] = home_path.drive or "C:"
             env["HOMEPATH"] = str(home_path.relative_to(home_path.anchor))
             # Some Node.js apps use APPDATA/LOCALAPPDATA for config storage

@@ -23,7 +23,8 @@ the screenshot to confirm you understand the issue/current state.
 When designing new code, never make fallback code to handle paths other than the happy one, instead spend as much effort
 as necessary to make sure that everyone using your feature sees the same happy path you tested. Similarly don't provide
 config options, instead decide which option makes the most sense and implement that without writing code to handle other
-options.
+options. Keep code simple rather than using abstractions, and find and delete unused or redundant code and tests as
+part of your change.
 
 When fixing bugs, generate many plausible root-cause theories then use the screenshot and existing tests to eliminate
 candidates and research which remaining theory is most likely. Define the failure as a binary, assertable condition and

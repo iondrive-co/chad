@@ -284,10 +284,10 @@ class TestChadWebUI:
         # Note: 15 outputs total (includes merge_visibility_state, merge_section_header, diff_content)
         assert len(outputs) >= 15, "Discard should return 15 outputs including visibility controls"
         task_desc_update = outputs[11]
-        # no_change is gr.update() which returns an empty dict
-        assert task_desc_update == {} or task_desc_update.get("value") is None, (
-            "Task description should be preserved (no_change) for retry"
+        assert task_desc_update.get("value") == session.task_description, (
+            "Task description value should be preserved for retry"
         )
+        assert task_desc_update.get("interactive") is True, "Task description should become editable after discard"
 
         # Verify visibility state outputs for JS workaround
         visibility_state = outputs[12]

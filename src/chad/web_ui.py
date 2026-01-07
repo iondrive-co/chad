@@ -4254,7 +4254,6 @@ class ChadWebUI:
         can retry the task with the same description.
         """
         session = self.get_session(session_id)
-        no_change = gr.update()
         if session.worktree_path and session.project_path:
             git_mgr = GitWorktreeManager(Path(session.project_path))
             git_mgr.delete_worktree(session_id)
@@ -4279,7 +4278,7 @@ class ChadWebUI:
             gr.update(interactive=False),                # cancel_btn - disable
             "",                                          # live_stream - direct value
             gr.update(visible=False),                    # followup_row - hide
-            no_change,                                   # task_description - keep for retry
+            gr.update(value=session.task_description or "", interactive=True),  # task_description - enable editing
             "hidden",                                    # merge_visibility_state - hide via JS
             "",                                          # merge_section_header - clear
             "",                                          # diff_content - clear diff view

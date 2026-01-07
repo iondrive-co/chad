@@ -3,6 +3,7 @@
 import json
 import platform
 import sys
+import textwrap
 from unittest.mock import Mock, patch
 
 import pytest
@@ -1043,7 +1044,7 @@ class TestOpenAICodexProvider:
 
     def test_get_env_sets_windows_home_variables(self, monkeypatch):
         """Test that _get_env sets all Windows home-related environment variables."""
-        from pathlib import Path
+        from chad.utils import platform_path
 
         monkeypatch.setattr("os.name", "nt")
         config = ModelConfig(provider="openai", model_name="gpt-4", account_name="test-account")
@@ -1051,7 +1052,7 @@ class TestOpenAICodexProvider:
 
         env = provider._get_env()
         isolated_home = provider._get_isolated_home()
-        home_path = Path(isolated_home)
+        home_path = platform_path(isolated_home)
 
         # Check all Windows-specific environment variables are set
         assert env["HOME"] == isolated_home
@@ -1507,7 +1508,6 @@ class TestWindowsCodexStallHandling:
     def test_idle_stall_detected_on_silent_process(self, monkeypatch):
         """Test that a process producing no output triggers idle stall detection."""
         import chad.providers as providers
-        import time
 
         monkeypatch.setattr(providers, "_HAS_PTY", False)
         monkeypatch.setattr(providers, "pty", None)
@@ -1532,7 +1532,6 @@ class TestWindowsCodexStallHandling:
     def test_process_killed_after_idle_stall(self, monkeypatch):
         """Test that the process is properly killed when idle stall is detected."""
         import chad.providers as providers
-        import os
 
         monkeypatch.setattr(providers, "_HAS_PTY", False)
         monkeypatch.setattr(providers, "pty", None)
@@ -1561,7 +1560,7 @@ class TestWindowsCodexStallHandling:
     def test_stdin_flush_before_close(self, monkeypatch):
         """Test that stdin is flushed before being closed."""
         import chad.providers as providers
-        from unittest.mock import Mock, call
+        from unittest.mock import Mock
 
         # Mock the _start_pty_process to return a mock process
         mock_stdin = Mock()
@@ -1617,26 +1616,28 @@ class TestWindowsCodexStallHandling:
     def test_output_received_before_stall(self, monkeypatch):
         """Test that output produced before a stall is captured."""
         import chad.providers as providers
-        import time
 
         monkeypatch.setattr(providers, "_HAS_PTY", False)
         monkeypatch.setattr(providers, "pty", None)
 
         # Create a subprocess that outputs something then sleeps
         # Add a small delay after output to ensure it's flushed to the pipe
-        code = '''
-import sys
-import time
-print("output before stall", flush=True)
-sys.stdout.flush()
-time.sleep(0.2)  # Give time for output to be read
-time.sleep(10)   # Then stall
-'''
+        code = textwrap.dedent(
+            """
+            import sys
+            import time
+            print("output before stall", flush=True)
+            sys.stdout.flush()
+            time.sleep(0.2)  # Give time for output to be read
+            time.sleep(10)   # Then stall
+            """
+        )
         process, master_fd = providers._start_pty_process(
             [sys.executable, "-c", code]
         )
 
         received = []
+
         def on_chunk(chunk):
             received.append(chunk)
 
@@ -1696,7 +1697,6 @@ class TestWindowsEncodingHandling:
 
         # Capture the Popen kwargs
         captured_kwargs = {}
-        original_popen = subprocess.Popen
 
         def mock_popen(*args, **kwargs):
             captured_kwargs.update(kwargs)
@@ -1743,6 +1743,7 @@ print("Done", flush=True)
         )
 
         received = []
+
         def on_chunk(chunk):
             received.append(chunk)
 

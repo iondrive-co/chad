@@ -10,6 +10,7 @@ from pathlib import Path
 
 import gradio as gr
 
+from chad.utils import platform_path, safe_home
 from .model_catalog import ModelCatalog
 from .installer import AIToolInstaller
 from .mcp_config import ensure_global_mcp_config
@@ -219,7 +220,7 @@ class ProviderUIManager:
         for root, _, files in os.walk(sessions_dir):
             for filename in files:
                 if filename.endswith(".jsonl"):
-                    path = Path(root) / filename
+                    path = platform_path(root) / filename
                     session_files.append((path.stat().st_mtime, path))
 
         if not session_files:
@@ -328,17 +329,16 @@ class ProviderUIManager:
         """Get the isolated HOME directory for a Codex account."""
         # Use temp home in screenshot mode
         temp_home = os.environ.get("CHAD_TEMP_HOME")
-        if temp_home:
-            return Path(temp_home) / ".chad" / "codex-homes" / account_name
-        return Path.home() / ".chad" / "codex-homes" / account_name
+        base_home = safe_home() if temp_home else safe_home(ignore_temp_home=True)
+        return platform_path(base_home / ".chad" / "codex-homes" / account_name)
 
     def _sync_codex_home(self, account_name: str) -> None:
         """Sync real-home Codex data into the isolated home on Windows."""
         if os.name != "nt":
             return
 
-        isolated_home = self._get_codex_home(account_name) / ".codex"
-        real_home = Path.home() / ".codex"
+        isolated_home = platform_path(self._get_codex_home(account_name) / ".codex")
+        real_home = platform_path(safe_home(ignore_temp_home=True) / ".codex")
         if not real_home.exists():
             return
 
@@ -355,7 +355,7 @@ class ProviderUIManager:
         def sync_tree(src_dir: Path, dest_dir: Path) -> None:
             for root, _, files in os.walk(src_dir):
                 for filename in files:
-                    src_path = Path(root) / filename
+                    src_path = platform_path(root) / filename
                     rel_path = src_path.relative_to(src_dir)
                     dest_path = dest_dir / rel_path
                     sync_file(src_path, dest_path)
@@ -371,11 +371,8 @@ class ProviderUIManager:
         Each Claude account gets its own config directory to support
         multiple Claude accounts with separate authentication.
         """
-        # Use temp home in screenshot mode
-        temp_home = os.environ.get("CHAD_TEMP_HOME")
-        if temp_home:
-            return Path(temp_home) / ".chad" / "claude-configs" / account_name
-        return Path.home() / ".chad" / "claude-configs" / account_name
+        base_home = safe_home()
+        return platform_path(base_home / ".chad" / "claude-configs" / account_name)
 
     @staticmethod
     def _is_windows() -> bool:
@@ -451,7 +448,7 @@ class ProviderUIManager:
         for root, _, files in os.walk(sessions_dir):
             for filename in files:
                 if filename.endswith(".jsonl"):
-                    path = Path(root) / filename
+                    path = platform_path(root) / filename
                     session_files.append((path.stat().st_mtime, path))
 
         if not session_files:
@@ -1038,8 +1035,8 @@ class ProviderUIManager:
                             env=env,
                             capture_output=True,
                             text=True,
-                encoding="utf-8",
-                errors="replace",
+                            encoding="utf-8",
+                            errors="replace",
                             timeout=120,
                         )
                         login_success = login_result.returncode == 0
