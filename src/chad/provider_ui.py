@@ -4,6 +4,7 @@ import base64
 import json
 import math
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -204,6 +205,7 @@ class ProviderUIManager:
 
     def _get_codex_remaining_usage(self, account_name: str) -> float:
         """Get Codex remaining usage from session files (0.0-1.0)."""
+        self._sync_codex_home(account_name)
         codex_home = self._get_codex_home(account_name)
         auth_file = codex_home / ".codex" / "auth.json"
         if not auth_file.exists():
@@ -330,6 +332,39 @@ class ProviderUIManager:
             return Path(temp_home) / ".chad" / "codex-homes" / account_name
         return Path.home() / ".chad" / "codex-homes" / account_name
 
+    def _sync_codex_home(self, account_name: str) -> None:
+        """Sync real-home Codex data into the isolated home on Windows."""
+        if os.name != "nt":
+            return
+
+        isolated_home = self._get_codex_home(account_name) / ".codex"
+        real_home = Path.home() / ".codex"
+        if not real_home.exists():
+            return
+
+        isolated_home.mkdir(parents=True, exist_ok=True)
+
+        def sync_file(src: Path, dest: Path) -> None:
+            try:
+                if not dest.exists() or src.stat().st_mtime > dest.stat().st_mtime:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dest)
+            except OSError:
+                return
+
+        def sync_tree(src_dir: Path, dest_dir: Path) -> None:
+            for root, _, files in os.walk(src_dir):
+                for filename in files:
+                    src_path = Path(root) / filename
+                    rel_path = src_path.relative_to(src_dir)
+                    dest_path = dest_dir / rel_path
+                    sync_file(src_path, dest_path)
+
+        sync_file(real_home / "auth.json", isolated_home / "auth.json")
+        sync_file(real_home / "config.toml", isolated_home / "config.toml")
+        if (real_home / "sessions").exists():
+            sync_tree(real_home / "sessions", isolated_home / "sessions")
+
     def _get_claude_config_dir(self, account_name: str) -> Path:
         """Get the isolated CLAUDE_CONFIG_DIR for a Claude account.
 
@@ -342,8 +377,14 @@ class ProviderUIManager:
             return Path(temp_home) / ".chad" / "claude-configs" / account_name
         return Path.home() / ".chad" / "claude-configs" / account_name
 
+    @staticmethod
+    def _is_windows() -> bool:
+        """Return True when running on Windows."""
+        return os.name == "nt"
+
     def _get_codex_usage(self, account_name: str) -> str:
         """Get usage info from Codex by parsing JWT token and session files."""
+        self._sync_codex_home(account_name)
         codex_home = self._get_codex_home(account_name)
         auth_file = codex_home / ".codex" / "auth.json"
         if not auth_file.exists():
@@ -400,6 +441,7 @@ class ProviderUIManager:
 
     def _get_codex_session_usage(self, account_name: str) -> str | None:  # noqa: C901
         """Extract usage data from the most recent Codex session file."""
+        self._sync_codex_home(account_name)
         codex_home = self._get_codex_home(account_name)
         sessions_dir = codex_home / ".codex" / "sessions"
         if not sessions_dir.exists():
@@ -914,9 +956,9 @@ class ProviderUIManager:
                 import shutil as shutil_mod
                 import time
 
-                codex_home = self._setup_codex_account(account_name)
+                codex_home = Path(self._setup_codex_account(account_name))
                 codex_cli = cli_detail or "codex"
-                is_windows = os.name == "nt"
+                is_windows = self._is_windows()
 
                 env = os.environ.copy()
                 env["HOME"] = str(codex_home)
@@ -1007,9 +1049,9 @@ class ProviderUIManager:
                     if codex_home_path.exists():
                         shutil.rmtree(codex_home_path, ignore_errors=True)
                     result = (
-                        f"❌ Codex CLI not found.\n\n"
-                        f"Please install Codex first:\n"
-                        f"```\nnpm install -g @openai/codex\n```"
+                        "❌ Codex CLI not found.\n\n"
+                        "Please install Codex first:\n"
+                        "```\nnpm install -g @openai/codex\n```"
                     )
                     base_response = self.provider_action_response(result, card_slots)
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
@@ -1033,8 +1075,8 @@ class ProviderUIManager:
                     if is_windows:
                         result = (
                             f"❌ Login timed out for '{account_name}'.\n\n"
-                            f"A Codex CLI window should have opened. If you didn't complete the login in time, "
-                            f"please try again and complete the browser authentication within 2 minutes."
+                            "A Codex CLI window should have opened. If you didn't complete the login in time, "
+                            "please try again and complete the browser authentication within 2 minutes."
                         )
                     else:
                         result = f"❌ Login failed for '{account_name}'. Please try again."
@@ -1056,7 +1098,7 @@ class ProviderUIManager:
                     import os
 
                     creds_file = config_dir / ".credentials.json"
-                    is_windows = os.name == "nt"
+                    is_windows = self._is_windows()
 
                     try:
                         if is_windows:
@@ -1154,9 +1196,9 @@ class ProviderUIManager:
                         if config_dir.exists():
                             shutil.rmtree(config_dir, ignore_errors=True)
                         result = (
-                            f"❌ Claude CLI not found.\n\n"
-                            f"Please install Claude Code first:\n"
-                            f"```\nnpm install -g @anthropic-ai/claude-code\n```"
+                            "❌ Claude CLI not found.\n\n"
+                            "Please install Claude Code first:\n"
+                            "```\nnpm install -g @anthropic-ai/claude-code\n```"
                         )
                         base_response = self.provider_action_response(result, card_slots)
                         return (*base_response, name_field_value, add_btn_state, accordion_state)
@@ -1180,8 +1222,8 @@ class ProviderUIManager:
                     if is_windows:
                         result = (
                             f"❌ Login timed out for '{account_name}'.\n\n"
-                            f"A Claude CLI window should have opened. If you didn't complete the login in time, "
-                            f"please try again and complete the browser authentication within 2 minutes."
+                            "A Claude CLI window should have opened. If you didn't complete the login in time, "
+                            "please try again and complete the browser authentication within 2 minutes."
                         )
                     else:
                         result = f"❌ Login timed out for '{account_name}'. Please try again."
