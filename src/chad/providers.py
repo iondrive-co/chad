@@ -358,9 +358,13 @@ def _start_pty_process(
 
     # Windows: use pipes with flags for proper process management
     creation_flags = 0
+    startupinfo = None
     if os.name == "nt":
         # CREATE_NEW_PROCESS_GROUP allows taskkill /T to terminate the tree
         creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
+        # Hide console window and configure stdio handles properly
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESTDHANDLES
 
     process = subprocess.Popen(
         cmd,
@@ -370,6 +374,7 @@ def _start_pty_process(
         cwd=cwd,
         env=env,
         creationflags=creation_flags,
+        startupinfo=startupinfo,
     )
     return process, None
 
@@ -421,7 +426,12 @@ def _stream_pipe_output(
             if process.stdout is None:
                 return
             while not stop_event.is_set():
-                chunk = process.stdout.read(4096)
+                # Use readline() on Windows for responsive output
+                # read(4096) blocks until buffer fills, readline() returns after each line
+                if os.name == "nt":
+                    chunk = process.stdout.readline()
+                else:
+                    chunk = process.stdout.read(4096)
                 if not chunk:
                     break
                 output_queue.put(chunk)
@@ -469,6 +479,31 @@ def _stream_pipe_output(
             if idle_timeout and (time.time() - last_activity) >= idle_timeout:
                 idle_stalled = True
                 break
+
+        # Drain any remaining items from the queue before processing final buffer
+        while not output_queue.empty():
+            try:
+                chunk = output_queue.get_nowait()
+                if chunk:
+                    combined = line_buffer[0] + chunk
+                    lines = combined.split(b"\n")
+                    line_buffer[0] = lines[-1]
+                    if len(lines) > 1:
+                        complete_data = b"\n".join(lines[:-1]) + b"\n"
+                        decoded = complete_data.decode("utf-8", errors="replace")
+                        output_chunks.append(decoded)
+                        if on_chunk:
+                            on_chunk(decoded)
+            except queue.Empty:
+                break
+
+        # Process any remaining buffered content (from incomplete lines)
+        if line_buffer[0]:
+            decoded = line_buffer[0].decode("utf-8", errors="replace")
+            output_chunks.append(decoded)
+            if on_chunk:
+                on_chunk(decoded)
+            line_buffer[0] = b""
 
         timed_out = process.poll() is None and not idle_stalled
         if timed_out or idle_stalled:
@@ -670,6 +705,7 @@ class ClaudeCodeProvider(AIProvider):
         """Get environment with isolated CLAUDE_CONFIG_DIR for this account."""
         env = os.environ.copy()
         env["CLAUDE_CONFIG_DIR"] = self._get_claude_config_dir()
+        env["PYTHONIOENCODING"] = "utf-8"
         return env
 
     def _ensure_mcp_permissions(self) -> None:
@@ -726,6 +762,8 @@ class ClaudeCodeProvider(AIProvider):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=project_path,
                 bufsize=1,
                 env=env,
@@ -906,6 +944,7 @@ class OpenAICodexProvider(AIProvider):
             env["APPDATA"] = str(home_path / "AppData" / "Roaming")
             env["LOCALAPPDATA"] = str(home_path / "AppData" / "Local")
         env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         env["TERM"] = "xterm-256color"
         return env
 
@@ -974,6 +1013,7 @@ class OpenAICodexProvider(AIProvider):
 
             if self.process.stdin:
                 self.process.stdin.write(self.current_message.encode())
+                self.process.stdin.flush()
                 self.process.stdin.close()
 
             # Both initial and resume use JSON output

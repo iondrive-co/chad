@@ -1495,3 +1495,264 @@ class TestGeminiCodeAssistProvider:
     def test_get_response_no_message(self):
         provider = GeminiCodeAssistProvider(ModelConfig(provider="gemini", model_name="default"))
         assert provider.get_response(timeout=1) == ""
+
+
+class TestWindowsCodexStallHandling:
+    """Tests for Windows-specific Codex stall detection and process termination.
+
+    These tests verify that when Codex stops producing output (stalls), the system
+    correctly detects the idle timeout and terminates the process tree.
+    """
+
+    def test_idle_stall_detected_on_silent_process(self, monkeypatch):
+        """Test that a process producing no output triggers idle stall detection."""
+        import chad.providers as providers
+        import time
+
+        monkeypatch.setattr(providers, "_HAS_PTY", False)
+        monkeypatch.setattr(providers, "pty", None)
+
+        # Create a subprocess that sleeps without producing output
+        # Use a very short idle timeout to keep test fast
+        code = "import time; time.sleep(10)"
+        process, master_fd = providers._start_pty_process(
+            [sys.executable, "-c", code]
+        )
+
+        # Use a short idle timeout (0.5s) to detect stall quickly
+        output, timed_out, idle_stalled = providers._stream_pipe_output(
+            process, None, timeout=10.0, idle_timeout=0.5
+        )
+
+        assert idle_stalled is True
+        assert timed_out is False
+        # Process should be terminated
+        assert process.poll() is not None
+
+    def test_process_killed_after_idle_stall(self, monkeypatch):
+        """Test that the process is properly killed when idle stall is detected."""
+        import chad.providers as providers
+        import os
+
+        monkeypatch.setattr(providers, "_HAS_PTY", False)
+        monkeypatch.setattr(providers, "pty", None)
+
+        # Create a subprocess that hangs indefinitely
+        code = "import time; time.sleep(3600)"
+        process, master_fd = providers._start_pty_process(
+            [sys.executable, "-c", code]
+        )
+
+        # Verify process is running
+        assert process.poll() is None
+
+        # Stream with short idle timeout
+        output, timed_out, idle_stalled = providers._stream_pipe_output(
+            process, None, timeout=10.0, idle_timeout=0.3
+        )
+
+        # Process should be terminated after idle stall
+        assert idle_stalled is True
+        # Give a moment for process cleanup
+        import time
+        time.sleep(0.2)
+        assert process.poll() is not None
+
+    def test_stdin_flush_before_close(self, monkeypatch):
+        """Test that stdin is flushed before being closed."""
+        import chad.providers as providers
+        from unittest.mock import Mock, call
+
+        # Mock the _start_pty_process to return a mock process
+        mock_stdin = Mock()
+        mock_process = Mock()
+        mock_process.stdin = mock_stdin
+        mock_process.poll.return_value = 0  # Process completed immediately
+
+        monkeypatch.setattr(
+            providers, "_start_pty_process",
+            lambda cmd, cwd=None, env=None: (mock_process, None)
+        )
+        monkeypatch.setattr(providers, "_HAS_PTY", False)
+
+        # Mock _stream_pty_output to return immediately
+        monkeypatch.setattr(
+            providers, "_stream_pty_output",
+            lambda proc, fd, on_chunk, timeout, idle_timeout=None: ("", False, False)
+        )
+
+        # Mock CLI installation
+        monkeypatch.setattr(
+            providers, "_ensure_cli_tool",
+            lambda name, notify: (True, "/bin/codex")
+        )
+
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+        provider.project_path = "/tmp/test"
+        provider.current_message = "test message"
+        provider.cli_path = "/bin/codex"
+
+        # This will fail because we're mocking, but we want to verify the stdin calls
+        try:
+            provider.get_response(timeout=1.0)
+        except Exception:
+            pass
+
+        # Verify flush was called before close
+        calls = mock_stdin.method_calls
+        flush_index = None
+        close_index = None
+        for i, c in enumerate(calls):
+            if c[0] == 'flush':
+                flush_index = i
+            if c[0] == 'close':
+                close_index = i
+
+        # Both should be called, flush before close
+        assert flush_index is not None, "stdin.flush() was not called"
+        assert close_index is not None, "stdin.close() was not called"
+        assert flush_index < close_index, "flush() must be called before close()"
+
+    def test_output_received_before_stall(self, monkeypatch):
+        """Test that output produced before a stall is captured."""
+        import chad.providers as providers
+        import time
+
+        monkeypatch.setattr(providers, "_HAS_PTY", False)
+        monkeypatch.setattr(providers, "pty", None)
+
+        # Create a subprocess that outputs something then sleeps
+        # Add a small delay after output to ensure it's flushed to the pipe
+        code = '''
+import sys
+import time
+print("output before stall", flush=True)
+sys.stdout.flush()
+time.sleep(0.2)  # Give time for output to be read
+time.sleep(10)   # Then stall
+'''
+        process, master_fd = providers._start_pty_process(
+            [sys.executable, "-c", code]
+        )
+
+        received = []
+        def on_chunk(chunk):
+            received.append(chunk)
+
+        # Use longer idle timeout to ensure we capture the output first
+        output, timed_out, idle_stalled = providers._stream_pipe_output(
+            process, on_chunk, timeout=10.0, idle_timeout=1.0
+        )
+
+        assert idle_stalled is True
+        # Should have captured the output before the stall
+        all_output = output + "".join(received)
+        assert "output before stall" in all_output, f"Output not found. Got: {all_output!r}"
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific test")
+    def test_windows_startupinfo_configured(self, monkeypatch):
+        """Test that Windows subprocess uses proper STARTUPINFO flags."""
+        import chad.providers as providers
+        import subprocess
+
+        monkeypatch.setattr(providers, "_HAS_PTY", False)
+        monkeypatch.setattr(providers, "pty", None)
+
+        # Capture the Popen call to verify startupinfo
+        original_popen = subprocess.Popen
+        popen_kwargs = {}
+
+        def mock_popen(*args, **kwargs):
+            popen_kwargs.update(kwargs)
+            # Return a simple process for the test
+            return original_popen([sys.executable, "-c", "pass"], **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+
+        process, master_fd = providers._start_pty_process(
+            [sys.executable, "-c", "pass"]
+        )
+        process.wait()
+
+        # Verify startupinfo was set on Windows
+        assert "startupinfo" in popen_kwargs
+        assert popen_kwargs["startupinfo"] is not None
+        assert popen_kwargs["startupinfo"].dwFlags & subprocess.STARTF_USESTDHANDLES
+
+
+class TestWindowsEncodingHandling:
+    """Tests for Windows UTF-8 encoding handling in subprocess calls.
+
+    On Windows, subprocess with text=True defaults to cp1252 encoding which
+    can't handle all UTF-8 characters. These tests verify encoding is properly
+    specified to prevent UnicodeDecodeError.
+    """
+
+    def test_claude_provider_uses_utf8_encoding(self, monkeypatch):
+        """Test that ClaudeCodeProvider subprocess uses UTF-8 encoding."""
+        import subprocess
+        import chad.providers as providers
+
+        # Capture the Popen kwargs
+        captured_kwargs = {}
+        original_popen = subprocess.Popen
+
+        def mock_popen(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            raise FileNotFoundError("mock - CLI not found")
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        monkeypatch.setattr(providers, "_ensure_cli_tool", lambda n, cb: (True, "/fake/claude"))
+
+        config = ModelConfig(provider="anthropic", model_name="claude-sonnet-4")
+        provider = ClaudeCodeProvider(config)
+
+        # This will fail because we raise FileNotFoundError, but we can check kwargs
+        result = provider.start_session("/tmp/test")
+
+        assert result is False  # Failed because mock raised error
+        assert captured_kwargs.get("text") is True
+        assert captured_kwargs.get("encoding") == "utf-8"
+        assert captured_kwargs.get("errors") == "replace"
+
+    def test_utf8_characters_handled_in_pipe_output(self, monkeypatch):
+        """Test that UTF-8 characters (like emojis) are handled without errors."""
+        import chad.providers as providers
+        import os
+
+        monkeypatch.setattr(providers, "_HAS_PTY", False)
+        monkeypatch.setattr(providers, "pty", None)
+
+        # Create a subprocess that outputs UTF-8 characters including ones
+        # that would fail with cp1252 (like em-dash \u2014 which is byte 0x97 in cp1252
+        # or smart quotes which contain bytes that don't map)
+        code = '''
+import sys
+# Output various UTF-8 characters that would fail with cp1252
+print("Hello \\u2014 World")  # em-dash
+print("Quotes: \\u201c and \\u201d")  # smart quotes
+print("Emoji: \\U0001F600")  # grinning face emoji
+print("Done", flush=True)
+'''
+        # Set PYTHONIOENCODING so the subprocess outputs UTF-8
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        process, master_fd = providers._start_pty_process(
+            [sys.executable, "-c", code], env=env
+        )
+
+        received = []
+        def on_chunk(chunk):
+            received.append(chunk)
+
+        output, timed_out, idle_stalled = providers._stream_pipe_output(
+            process, on_chunk, timeout=10.0, idle_timeout=2.0
+        )
+
+        # Should complete without errors and capture output
+        all_output = output + "".join(received)
+        assert "Done" in all_output
+        # The special characters should be present (or replaced if errors='replace')
+        assert "Hello" in all_output
+        assert "Quotes" in all_output

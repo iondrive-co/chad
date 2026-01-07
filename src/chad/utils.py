@@ -7,7 +7,9 @@ from pathlib import Path
 
 
 def run_command(cmd: list[str], cwd: Path | None = None) -> tuple[int, str, str]:
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    result = subprocess.run(
+        cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace"
+    )
     return result.returncode, result.stdout, result.stderr
 
 
