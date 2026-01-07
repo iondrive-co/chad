@@ -15,7 +15,7 @@ def test_run_screenshot_subprocess_builds_output(monkeypatch, tmp_path):
     captured_cmd = []
     captured_env = {}
 
-    def fake_run(cmd, capture_output, text, cwd, env):
+    def fake_run(cmd, capture_output, text, cwd, env, **kwargs):
         captured_cmd[:] = cmd
         captured_env.update(env)
         out_idx = cmd.index("--output") + 1
