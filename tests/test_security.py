@@ -1,6 +1,7 @@
 """Tests for security module."""
 
 from unittest.mock import patch
+import os
 import pytest
 from chad.security import SecurityManager
 
@@ -92,7 +93,8 @@ class TestSecurityManager:
 
         # Verify file was created and has correct permissions
         assert config_path.exists()
-        assert oct(config_path.stat().st_mode)[-3:] == "600"
+        expected_mode = "666" if os.name == "nt" else "600"
+        assert oct(config_path.stat().st_mode)[-3:] == expected_mode
 
         # Load and verify
         loaded_config = mgr.load_config()

@@ -1,6 +1,7 @@
 """Tests for web UI module."""
 
 import json
+import os
 import re
 import socket
 import subprocess
@@ -116,7 +117,10 @@ class TestChadWebUI:
         mock_security_mgr.list_accounts.return_value = {}
         mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
-        with patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)):
+        with (
+            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
+            patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)),
+        ):
             result = web_ui.add_provider("my-codex", "openai")[0]
 
         assert "✅" in result or "✓" in result
@@ -129,7 +133,10 @@ class TestChadWebUI:
         mock_security_mgr.list_accounts.return_value = {}
         mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
-        with patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)):
+        with (
+            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
+            patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)),
+        ):
             result = web_ui.add_provider("", "openai")[0]
 
         assert "✓" in result or "Provider" in result
@@ -142,7 +149,10 @@ class TestChadWebUI:
         mock_security_mgr.list_accounts.return_value = {"openai": "openai"}
         mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
-        with patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)):
+        with (
+            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
+            patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)),
+        ):
             result = web_ui.add_provider("", "openai")[0]
 
         # Should create openai-1
@@ -156,7 +166,10 @@ class TestChadWebUI:
         # Mock Codex login to fail
         mock_run.return_value = Mock(returncode=1, stderr="Login cancelled", stdout="")
 
-        with patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)):
+        with (
+            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
+            patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)),
+        ):
             result = web_ui.add_provider("test", "openai")[0]
 
         assert "❌" in result
@@ -1630,7 +1643,7 @@ class TestClaudeMultiAccount:
 
         result = web_ui.provider_ui._setup_claude_account("test-account")
 
-        assert result == str(tmp_path / ".chad" / "claude-configs" / "test-account")
+        assert str(result) == str(tmp_path / ".chad" / "claude-configs" / "test-account")
         assert (tmp_path / ".chad" / "claude-configs" / "test-account").exists()
 
     @patch("pathlib.Path.home")
@@ -1727,11 +1740,20 @@ class TestClaudeMultiAccount:
         mock_child.send = Mock()
         mock_child.close = Mock()
 
-        with patch("pexpect.spawn", return_value=mock_child):
-            # Patch time to simulate timeout quickly
-            with patch("time.time", side_effect=[0, 0, 200]):  # Instant timeout
-                with patch("time.sleep"):
-                    result = web_ui.add_provider("my-claude", "anthropic")[0]
+        if os.name == "nt":
+            mock_process = Mock()
+            mock_process.terminate = Mock()
+            with patch("subprocess.Popen", return_value=mock_process):
+                # Patch time to simulate timeout quickly
+                with patch("time.time", side_effect=[0, 0, 200]):  # Instant timeout
+                    with patch("time.sleep"):
+                        result = web_ui.add_provider("my-claude", "anthropic")[0]
+        else:
+            with patch("pexpect.spawn", return_value=mock_child):
+                # Patch time to simulate timeout quickly
+                with patch("time.time", side_effect=[0, 0, 200]):  # Instant timeout
+                    with patch("time.sleep"):
+                        result = web_ui.add_provider("my-claude", "anthropic")[0]
 
         # Provider should NOT be stored (login timed out)
         mock_security_mgr.store_account.assert_not_called()
