@@ -507,7 +507,7 @@ class GitWorktreeManager:
             if not full_path.exists():
                 continue
 
-            content = full_path.read_text()
+            content = full_path.read_text(encoding="utf-8")
             hunks = self._parse_conflict_hunks(file_path, content)
             if hunks:
                 conflicts.append(MergeConflict(file_path=file_path, hunks=hunks))
@@ -571,7 +571,7 @@ class GitWorktreeManager:
         if not full_path.exists():
             return False
 
-        content = full_path.read_text()
+        content = full_path.read_text(encoding="utf-8")
         lines = content.split("\n")
         result_lines = []
         current_hunk = 0

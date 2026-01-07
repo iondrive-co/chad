@@ -378,7 +378,7 @@ def create_mock_codex_auth(home_dir: Path, account_data: dict) -> None:
 
     auth_data = {"tokens": {"access_token": fake_token, "refresh_token": "mock_refresh_token"}}
 
-    with open(codex_dir / "auth.json", "w") as f:
+    with open(codex_dir / "auth.json", "w", encoding="utf-8") as f:
         json.dump(auth_data, f)
 
 
@@ -396,7 +396,7 @@ def create_mock_claude_creds(config_dir: Path, account_data: dict) -> None:
         }
     }
 
-    with open(config_dir / ".credentials.json", "w") as f:
+    with open(config_dir / ".credentials.json", "w", encoding="utf-8") as f:
         json.dump(creds, f)
 
 
@@ -406,7 +406,7 @@ def create_mock_gemini_creds(gemini_dir: Path) -> None:
 
     creds = {"installed": {"client_id": "mock_client_id", "client_secret": "mock_secret"}}
 
-    with open(gemini_dir / "oauth_creds.json", "w") as f:
+    with open(gemini_dir / "oauth_creds.json", "w", encoding="utf-8") as f:
         json.dump(creds, f)
 
 
@@ -421,5 +421,5 @@ key = "mock_api_key"
 [defaults]
 model = "codestral-25.01"
 """
-    with open(vibe_dir / "config.toml", "w") as f:
+    with open(vibe_dir / "config.toml", "w", encoding="utf-8") as f:
         f.write(config_content)

@@ -720,7 +720,7 @@ class ClaudeCodeProvider(AIProvider):
         settings = {}
         if settings_path.exists():
             try:
-                settings = json.loads(settings_path.read_text())
+                settings = json.loads(settings_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 settings = {}
 

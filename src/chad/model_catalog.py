@@ -118,7 +118,7 @@ class ModelCatalog:
             return set()
 
         try:
-            data = tomllib.loads(config_path.read_text())
+            data = tomllib.loads(config_path.read_text(encoding="utf-8"))
         except Exception:
             return set()
 
@@ -154,7 +154,7 @@ class ModelCatalog:
 
         for path in files[: self.max_session_files]:
             try:
-                with path.open() as fh:
+                with path.open(encoding="utf-8") as fh:
                     for line in fh:
                         line = line.strip()
                         if not line:
@@ -233,7 +233,7 @@ class ModelCatalog:
             return None
 
         try:
-            data = json.loads(auth_file.read_text())
+            data = json.loads(auth_file.read_text(encoding="utf-8"))
             token = data.get("tokens", {}).get("access_token")
             if not token:
                 return None
