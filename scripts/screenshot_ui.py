@@ -45,7 +45,7 @@ except Exception:
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 try:
-    from chad.ui_playwright_runner import (
+    from chad.verification.ui_playwright_runner import (
         ChadLaunchError,
         PlaywrightUnavailable,
         create_temp_env,

@@ -8,7 +8,7 @@ except Exception:
     pytest.skip("playwright not available", allow_module_level=True)
 
 # Import test utilities
-from chad.ui_playwright_runner import (
+from chad.verification.ui_playwright_runner import (
     ChadLaunchError,
     create_temp_env,
     inject_live_stream_content,

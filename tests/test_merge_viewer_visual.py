@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-from chad.ui_playwright_runner import SAMPLE_DIFF_HTML, SAMPLE_MERGE_CONFLICT_HTML
+from chad.verification.ui_playwright_runner import SAMPLE_DIFF_HTML, SAMPLE_MERGE_CONFLICT_HTML
 from chad.web_ui import PROVIDER_PANEL_CSS
 
 

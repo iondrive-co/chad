@@ -11,7 +11,7 @@ class TestVerify:
 
     def test_verify_lint_only_success(self):
         """verify(lint_only=True) should run only flake8."""
-        from chad.tools import verify
+        from chad.verification.tools import verify
 
         with patch("chad.tools.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
@@ -25,7 +25,7 @@ class TestVerify:
 
     def test_verify_lint_failure(self):
         """verify should report lint failures."""
-        from chad.tools import verify
+        from chad.verification.tools import verify
 
         with patch("chad.tools.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 1
@@ -39,14 +39,14 @@ class TestVerify:
 
     def test_verify_prefers_project_venv(self, tmp_path, monkeypatch):
         """verify should use project venv python when available."""
-        from chad.tools import verify
+        from chad.verification.tools import verify
 
         venv_dir = tmp_path / "venv" / ("Scripts" if os.name == "nt" else "bin")
         venv_dir.mkdir(parents=True, exist_ok=True)
         venv_python = venv_dir / ("python.exe" if os.name == "nt" else "python")
         venv_python.write_text("")  # presence is enough
 
-        monkeypatch.setattr("chad.tools.resolve_project_root", lambda: (tmp_path, "test"))
+        monkeypatch.setattr("chad.verification.tools.resolve_project_root", lambda: (tmp_path, "test"))
 
         commands = []
 
@@ -54,7 +54,7 @@ class TestVerify:
             commands.append(cmd[0])
             return type("Proc", (), {"returncode": 0, "stdout": ""})
 
-        monkeypatch.setattr("chad.tools.subprocess.run", fake_run)
+        monkeypatch.setattr("chad.verification.tools.subprocess.run", fake_run)
 
         result = verify(lint_only=True)
 
@@ -67,7 +67,7 @@ class TestScreenshot:
 
     def test_screenshot_unknown_component(self):
         """screenshot with unknown component should fail."""
-        from chad.tools import screenshot
+        from chad.verification.tools import screenshot
 
         result = screenshot(tab="run", component="nonexistent")
 
@@ -76,7 +76,7 @@ class TestScreenshot:
 
     def test_screenshot_component_selector_mapping(self):
         """Verify component selectors are correctly mapped."""
-        from chad.tools import COMPONENT_SELECTORS
+        from chad.verification.tools import COMPONENT_SELECTORS
 
         assert "project-path" in COMPONENT_SELECTORS
         assert "live-view" in COMPONENT_SELECTORS

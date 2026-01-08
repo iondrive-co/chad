@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 
 def test_run_screenshot_subprocess_builds_output(monkeypatch, tmp_path):
-    from chad import ui_playwright_runner as upr
+    from chad.verification import ui_playwright_runner as upr
 
     class DummyResult:
         def __init__(self):
@@ -52,7 +52,7 @@ class TestProcessCleanup:
 
     def test_atexit_handler_registered_on_start(self, monkeypatch):
         """start_chad should register the atexit cleanup handler."""
-        from chad import ui_playwright_runner as upr
+        from chad.verification import ui_playwright_runner as upr
 
         # Reset registration state
         upr._atexit_registered = False
@@ -83,7 +83,7 @@ class TestProcessCleanup:
 
     def test_spawned_pid_tracked(self, monkeypatch):
         """start_chad should track spawned process PIDs."""
-        from chad import ui_playwright_runner as upr
+        from chad.verification import ui_playwright_runner as upr
 
         # Reset state
         upr._spawned_chad_pids.clear()
@@ -108,7 +108,7 @@ class TestProcessCleanup:
 
     def test_stop_chad_removes_pid_from_registry(self, monkeypatch):
         """stop_chad should remove PID from registry."""
-        from chad import ui_playwright_runner as upr
+        from chad.verification import ui_playwright_runner as upr
 
         # Add a PID to the registry
         upr._spawned_chad_pids.add(99999)
@@ -131,7 +131,7 @@ class TestProcessCleanup:
 
     def test_start_chad_passes_parent_pid(self, monkeypatch):
         """start_chad should set CHAD_PARENT_PID in environment."""
-        from chad import ui_playwright_runner as upr
+        from chad.verification import ui_playwright_runner as upr
 
         captured_env = {}
 
@@ -158,7 +158,7 @@ class TestProcessCleanup:
 
     def test_cleanup_handler_kills_tracked_processes(self, monkeypatch):
         """_cleanup_orphaned_processes should kill all tracked PIDs."""
-        from chad import ui_playwright_runner as upr
+        from chad.verification import ui_playwright_runner as upr
 
         # Add some fake PIDs
         upr._spawned_chad_pids.clear()
@@ -187,7 +187,7 @@ class TestPidFileCleanup:
 
     def test_register_and_unregister_test_server(self, monkeypatch, tmp_path):
         """_register_test_server and _unregister_test_server should track PIDs in pidfile."""
-        from chad import ui_playwright_runner as upr
+        from chad.verification import ui_playwright_runner as upr
 
         # Use a temp pidfile for testing
         test_pidfile = tmp_path / "test_servers.pids"
@@ -211,7 +211,7 @@ class TestPidFileCleanup:
 
     def test_cleanup_stale_test_servers_removes_old_entries(self, monkeypatch, tmp_path):
         """_cleanup_stale_test_servers should kill processes older than max age."""
-        from chad import ui_playwright_runner as upr
+        from chad.verification import ui_playwright_runner as upr
 
         test_pidfile = tmp_path / "test_servers.pids"
         monkeypatch.setattr(upr, "_CHAD_TEST_PIDFILE", test_pidfile)
@@ -249,7 +249,7 @@ class TestPidFileCleanup:
 
     def test_cleanup_stale_test_servers_keeps_fresh_entries(self, monkeypatch, tmp_path):
         """_cleanup_stale_test_servers should not kill fresh processes."""
-        from chad import ui_playwright_runner as upr
+        from chad.verification import ui_playwright_runner as upr
 
         test_pidfile = tmp_path / "test_servers.pids"
         monkeypatch.setattr(upr, "_CHAD_TEST_PIDFILE", test_pidfile)
@@ -285,7 +285,7 @@ class TestPidFileCleanup:
 
     def test_start_chad_registers_in_pidfile(self, monkeypatch, tmp_path):
         """start_chad should register the spawned PID in the pidfile."""
-        from chad import ui_playwright_runner as upr
+        from chad.verification import ui_playwright_runner as upr
 
         test_pidfile = tmp_path / "test_servers.pids"
         monkeypatch.setattr(upr, "_CHAD_TEST_PIDFILE", test_pidfile)
@@ -315,7 +315,7 @@ class TestPidFileCleanup:
 
     def test_stop_chad_unregisters_from_pidfile(self, monkeypatch, tmp_path):
         """stop_chad should remove the PID from the pidfile."""
-        from chad import ui_playwright_runner as upr
+        from chad.verification import ui_playwright_runner as upr
 
         test_pidfile = tmp_path / "test_servers.pids"
         monkeypatch.setattr(upr, "_CHAD_TEST_PIDFILE", test_pidfile)
@@ -346,7 +346,7 @@ class TestPidFileCleanup:
 
     def test_cleanup_removes_dead_processes_from_pidfile(self, monkeypatch, tmp_path):
         """_cleanup_stale_test_servers should remove entries for dead processes."""
-        from chad import ui_playwright_runner as upr
+        from chad.verification import ui_playwright_runner as upr
 
         test_pidfile = tmp_path / "test_servers.pids"
         monkeypatch.setattr(upr, "_CHAD_TEST_PIDFILE", test_pidfile)

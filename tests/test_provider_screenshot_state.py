@@ -3,8 +3,8 @@
 from chad.model_catalog import ModelCatalog
 from chad.provider_ui import ProviderUIManager
 from chad.security import SecurityManager
-from chad.screenshot_fixtures import MOCK_ACCOUNTS
-from chad.ui_playwright_runner import create_temp_env
+from chad.verification.screenshot_fixtures import MOCK_ACCOUNTS
+from chad.verification.ui_playwright_runner import create_temp_env
 
 
 def test_screenshot_mode_duplicates_fourth_provider_card(monkeypatch):
