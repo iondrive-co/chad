@@ -1,37 +1,6 @@
-The first task is making changes directly in the project rather than using a git worktree
-
 The merge function doesn't seem to be working: ❌ error: Your local changes to the following files would be overwritten by merge: src/chad/web_ui.py Please commit your changes or stash them before you merge. Aborting Merge with strategy ort failed.
 
-Changes failing the flake8 tests are being delivered as finished
-
-There was a 5-10 minute pause in the previous coding session. The issue was that MCP tools on Windows didn't check for required dependencies before trying to use them, causing:
-
-    Multiple Playwright browser downloads (169.8 MB Chromium + 107.1 MB Firefox)
-    Repeated package installations (flake8, pytest-xdist, etc.)
-
-These need to be shared across sessions to avoid this. Additionally a Windows session had a json error in the validation, can you fix error:
-
-    {
-      "role": "user",
-      "content": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 \ud83d\udd0d VERIFICATION (Attempt 1) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-    },
-    {
-      "role": "assistant",
-      "content": "**VERIFICATION AI**\n\n\u274c Verification failed: No JSON found in response: *Thinking: **Ensuring valid JSON output***\n\n{\"passed\":false,\"summary\":\"Reviewed working tree changes vs agent summary and inspected new logic/tests. Found test regressions and a mismatch between repor"
-    },
-    {
-      "role": "user",
-      "content": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 \u274c VERIFICATION ERROR \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-    }
-  ],
-  "verification_attempts": [
-    {
-      "attempt": 1,
-      "status": "error",
-      "feedback": "Verification failed: No JSON found in response: *Thinking: **Ensuring valid JSON output***\n\n{\"passed\":false,\"summary\":\"Reviewed working tree changes vs agent summary and inspected new logic/tests. Found test regressions and a mismatch between repor",
-      "account": "codex-home"
-    }
-  ],
+->Changes failing the flake8 tests are being delivered as finished - check the recent session json logs in the temp dir to find examples. The agent should run verification (from chad.tools import verify; verify()) before completing. Check why this happens and fix it.
 
 Stop live view scrolling down to bottom when new lines are added:
 src/chad/visual_test_map.py
@@ -82,4 +51,3 @@ Modified
 Once a task is discarded the task description should be made editable again
 
 Roughly half the files in the src/chad directory are related to testing and verifying tools rather than the core app, can you split this into a core directory and something else. While doing this get rid of any unused code
- 

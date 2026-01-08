@@ -9,6 +9,7 @@ v0.8 Hack-propagation
 
 Load balance based on usage, user preference, context limits hit, etc.
 Structured log format for better inter-provider handoff
+Use of /agents
 Rollback:
   - Failed hypothesis
   - summarize progress and resume from checkpoints

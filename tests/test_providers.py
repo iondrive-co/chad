@@ -48,8 +48,8 @@ class TestCreateProvider:
             create_provider(config)
 
 
-def test_codex_start_session_ensures_mcp_config(monkeypatch, tmp_path):
-    """Codex start_session should install CLI and write per-home MCP config."""
+def test_codex_start_session_ensures_cli_installed(monkeypatch, tmp_path):
+    """Codex start_session should install CLI if missing."""
     import chad.providers as providers
 
     calls: list = []
@@ -59,27 +59,15 @@ def test_codex_start_session_ensures_mcp_config(monkeypatch, tmp_path):
             calls.append(("cli", key))
             return True, "/bin/codex"
 
-    # Set both HOME and USERPROFILE for cross-platform compatibility
-    # (Path.home() prefers USERPROFILE on Windows)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setattr(providers, "CLI_INSTALLER", DummyInstaller())
-
-    def fake_config(home=None, project_root=None):
-        calls.append(("config", home))
-        return {"changed": True, "path": str(tmp_path / "cfg")}
-
-    monkeypatch.setattr(providers, "ensure_global_mcp_config", fake_config)
 
     cfg = providers.ModelConfig(provider="openai", model_name="default", account_name="acc")
     provider = providers.OpenAICodexProvider(cfg)
 
     assert provider.start_session(str(tmp_path)) is True
     assert ("cli", "codex") in calls
-    config_calls = [c for c in calls if c[0] == "config"]
-    assert config_calls, "ensure_global_mcp_config should be invoked"
-    home_used = config_calls[0][1]
-    assert str(home_used).startswith(str(tmp_path / ".chad" / "codex-homes" / "acc"))
 
 
 class TestParseCodexOutput:

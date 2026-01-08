@@ -250,8 +250,8 @@ VISUAL_TEST_MAP: dict[str, list[str]] = {
     "chad/security.py": [
         "TestProvidersTab",
     ],
-    # MCP playwright server - screenshot tools and UI automation
-    "chad/mcp_playwright.py": [
+    # Tools - verify and screenshot functions
+    "chad/tools.py": [
         "TestScreenshots",
         "TestProvidersTab",
         "TestDeleteProvider",

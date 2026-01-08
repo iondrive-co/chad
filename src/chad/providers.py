@@ -17,7 +17,6 @@ from typing import Callable
 from chad.utils import platform_path, safe_home
 from .installer import AIToolInstaller
 from .installer import DEFAULT_TOOLS_DIR
-from .mcp_config import ensure_global_mcp_config
 
 try:
     import pty
@@ -949,7 +948,6 @@ class OpenAICodexProvider(AIProvider):
         if not ok:
             return False
 
-        ensure_global_mcp_config(home=Path(self._get_isolated_home()))
         self.project_path = project_path
         self.system_prompt = system_prompt
         self.cli_path = detail

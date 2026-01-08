@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from ...registry import DEFAULT_SERVER, call_tool
+from chad.tools import verify as _verify
 
 
 def verify() -> dict[str, object]:
-    """Run lint + all tests through the chad-ui-playwright MCP server via code-mode."""
-    return call_tool("verify", server=DEFAULT_SERVER)
+    """Run lint + all tests to verify no regressions."""
+    return _verify()
