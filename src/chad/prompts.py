@@ -22,8 +22,15 @@ you understand the issue/current state.
 {task}
 ---
 Once you have completed your changes for the task, take an after screenshot if that is supported to confirm that the
-user's request is fixed/done. Run any tests and lint available in the project and fix all issues even if you didn't
-cause them. When you are done, end your response with a JSON summary block like this:
+user's request is fixed/done.
+
+CRITICAL: You MUST run the MCP verification tool before completing your task:
+- If MCP tools are available, run: mcp__chad-ui-playwright__verify()
+- Or use the code-mode wrapper: from chad.mcp_code_mode.servers.chad_ui_playwright import verify; verify()
+- This tool runs ALL linting (flake8) and tests to ensure no regressions
+- Fix any failures it reports before proceeding
+
+Only after all tests and linting pass, end your response with a JSON summary block like this:
 ```json
 {{"change_summary": "One sentence describing what was changed"}}
 ```
@@ -193,3 +200,31 @@ def extract_coding_summary(response: str) -> str | None:
         return json_match.group(1)
 
     return None
+
+
+def check_verification_mentioned(response: str) -> bool:
+    """Check if the coding agent mentioned running MCP verification.
+
+    Args:
+        response: Raw response from the coding agent
+
+    Returns:
+        True if verification was mentioned, False otherwise
+    """
+    import re
+
+    verification_patterns = [
+        r"mcp__chad-ui-playwright__verify",
+        r"verify\(\)",
+        r"verification.*passed",
+        r"all tests pass",
+        r"linting.*pass",
+        r"flake8.*pass",
+    ]
+
+    response_lower = response.lower()
+    for pattern in verification_patterns:
+        if re.search(pattern, response_lower):
+            return True
+
+    return False
