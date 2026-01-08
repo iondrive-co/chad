@@ -8,8 +8,8 @@ metadata:
 # Verifying Changes
 
 ```bash
-python -m flake8 src/chad --max-line-length=120
-python -m pytest tests/ -v --tb=short -n auto
+./venv/bin/python -m flake8 src/chad --max-line-length=120
+./venv/bin/python -m pytest tests/ -v --tb=short -n auto
 ```
 
 **Success**: Both exit 0

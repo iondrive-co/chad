@@ -214,7 +214,7 @@ def get_screenshot_params(search_term: str) -> tuple[str, str | None] | None:
 
     Example:
         >>> tab, comp = get_screenshot_params("verification agent")
-        >>> # Use: mcp__chad-ui-playwright__screenshot(tab=tab, component=comp)
+        >>> # Use: screenshot(tab=tab, component=comp)
     """
     component = find_component(search_term)
     return (component.tab, component.component) if component else None

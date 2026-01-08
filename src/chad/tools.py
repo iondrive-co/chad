@@ -55,6 +55,13 @@ def verify(lint_only: bool = False, project_root: str | None = None) -> Dict[str
         env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
         env.setdefault("PIP_PREFER_BINARY", "1")
 
+        # Prefer the project's virtualenv to avoid polluting system Python
+        venv_candidates = [
+            root / "venv" / "bin" / "python",
+            root / "venv" / "Scripts" / "python.exe",  # Windows
+        ]
+        python_exec = next((str(path) for path in venv_candidates if path.exists()), sys.executable)
+
         preflight_note = f"Using project root: {root} (source={root_reason})"
         results: Dict[str, object] = {
             "phases": {},
@@ -65,7 +72,7 @@ def verify(lint_only: bool = False, project_root: str | None = None) -> Dict[str
 
         # Phase 1: Lint
         lint_result = subprocess.run(
-            [sys.executable, "-m", "flake8", ".", "--max-line-length=120"],
+            [python_exec, "-m", "flake8", ".", "--max-line-length=120"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -94,7 +101,7 @@ def verify(lint_only: bool = False, project_root: str | None = None) -> Dict[str
 
         # Phase 2: pip check
         pip_check = subprocess.run(
-            [sys.executable, "-m", "pip", "check"],
+            [python_exec, "-m", "pip", "check"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -115,7 +122,7 @@ def verify(lint_only: bool = False, project_root: str | None = None) -> Dict[str
 
         # Phase 3: All tests
         test_result = subprocess.run(
-            [sys.executable, "-m", "pytest", "-v", "--tb=short", "-n", "auto"],
+            [python_exec, "-m", "pytest", "-v", "--tb=short", "-n", "auto"],
             capture_output=True,
             text=True,
             encoding="utf-8",
