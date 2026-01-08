@@ -1201,7 +1201,7 @@ body, .gradio-container, .gradio-container * {
 SCREENSHOT_MODE_JS = "true" if os.environ.get("CHAD_SCREENSHOT_MODE") == "1" else "false"
 SCREENSHOT_LIVE_VIEW_HTML = "null"
 if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
-    from .screenshot_fixtures import LIVE_VIEW_CONTENT
+    from .verification.screenshot_fixtures import LIVE_VIEW_CONTENT
 
     SCREENSHOT_LIVE_VIEW_HTML = json.dumps(LIVE_VIEW_CONTENT)
 CUSTOM_JS = (

@@ -1,7 +1,7 @@
 """Chad verification and screenshot tools.
 
 These functions can be called directly from agent code:
-    from chad.tools import verify, screenshot
+    from chad.verification.tools import verify, screenshot
     verify()  # Run lint + tests
     screenshot(tab="run")  # Capture UI
 """

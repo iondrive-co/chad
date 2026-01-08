@@ -55,7 +55,7 @@ try:
         start_chad,
         stop_chad,
     )
-    from chad.screenshot_fixtures import LIVE_VIEW_CONTENT
+    from chad.verification.screenshot_fixtures import LIVE_VIEW_CONTENT
 except ImportError as e:
     print(f"Error importing ui_playwright_runner: {e}", file=sys.stderr)
     print("Ensure playwright is installed: pip install playwright && playwright install chromium")
