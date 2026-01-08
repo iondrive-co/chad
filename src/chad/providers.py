@@ -1249,11 +1249,16 @@ class OpenAICodexProvider(AIProvider):
                     except (subprocess.SubprocessError, OSError):
                         pass
                 else:
-                    # On Unix, kill the process group
+                    # On Unix, kill the process group with SIGTERM then SIGKILL
                     import signal
 
                     try:
-                        os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+                        pgid = os.getpgid(self.process.pid)
+                        os.killpg(pgid, signal.SIGTERM)
+                        # Give processes a moment to terminate gracefully
+                        time.sleep(0.2)
+                        # Force kill any remaining processes in the group
+                        os.killpg(pgid, signal.SIGKILL)
                     except (ProcessLookupError, PermissionError, OSError):
                         pass
                 self.process.kill()
