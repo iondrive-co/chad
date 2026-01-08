@@ -1,20 +1,49 @@
 from __future__ import annotations
 
+import atexit
 import base64
 import contextlib
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, Optional, TYPE_CHECKING
+from typing import Dict, Iterator, Optional, Set, TYPE_CHECKING
 
 import bcrypt
 
 from .security import SecurityManager
+
+# Global registry of spawned chad server PIDs for cleanup
+_spawned_chad_pids: Set[int] = set()
+_atexit_registered = False
+
+
+def _cleanup_orphaned_processes() -> None:
+    """Kill any chad processes that weren't properly cleaned up."""
+    for pid in list(_spawned_chad_pids):
+        try:
+            if os.name != "nt":
+                # On Unix, kill the process group to get all children
+                os.killpg(pid, signal.SIGTERM)
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass  # Process already dead or not accessible
+        _spawned_chad_pids.discard(pid)
+
+
+def _ensure_atexit_registered() -> None:
+    """Register the cleanup handler once."""
+    global _atexit_registered
+    if not _atexit_registered:
+        atexit.register(_cleanup_orphaned_processes)
+        _atexit_registered = True
+
 
 if TYPE_CHECKING:
     from playwright.sync_api import Page
@@ -208,6 +237,9 @@ def _wait_for_ready(port: int, timeout: int = 60) -> None:
 
 def start_chad(env: TempChadEnv) -> ChadInstance:
     """Start Chad with an ephemeral port and return the running instance."""
+    # Ensure cleanup handler is registered
+    _ensure_atexit_registered()
+
     # Build environment with screenshot mode vars if present
     chad_env = {
         **os.environ,
@@ -215,10 +247,17 @@ def start_chad(env: TempChadEnv) -> ChadInstance:
         "CHAD_PASSWORD": env.password,
         "CHAD_PROJECT_PATH": os.fspath(env.project_dir),
         "PYTHONPATH": os.fspath(PROJECT_ROOT / "src"),
+        # Pass parent PID so chad can self-terminate if parent dies
+        "CHAD_PARENT_PID": str(os.getpid()),
     }
     # Add any additional env vars (e.g., CHAD_SCREENSHOT_MODE, CHAD_TEMP_HOME)
     if env.env_vars:
         chad_env.update(env.env_vars)
+
+    # On Unix, start in new session so we can kill the entire process group
+    popen_kwargs: Dict[str, object] = {}
+    if os.name != "nt":
+        popen_kwargs["start_new_session"] = True
 
     process = subprocess.Popen(
         [os.fspath(Path(sys.executable)), "-m", "chad", "--port", "0"],
@@ -231,20 +270,50 @@ def start_chad(env: TempChadEnv) -> ChadInstance:
         bufsize=1,
         env=chad_env,
         cwd=os.fspath(PROJECT_ROOT),
+        **popen_kwargs,
     )
+
+    # Track PID for cleanup
+    _spawned_chad_pids.add(process.pid)
+
     port = _wait_for_port(process)
     _wait_for_ready(port)
     return ChadInstance(process=process, port=port, env=env)
 
 
 def stop_chad(instance: ChadInstance) -> None:
-    """Terminate a running Chad instance."""
+    """Terminate a running Chad instance and all its children."""
     process = instance.process
-    process.terminate()
+    pid = process.pid
+
+    # Remove from registry first
+    _spawned_chad_pids.discard(pid)
+
     try:
+        if os.name != "nt":
+            # On Unix, kill the entire process group to get all children
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                # Fall back to just the process if group kill fails
+                process.terminate()
+        else:
+            process.terminate()
+
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        process.kill()
+        # Force kill if graceful termination times out
+        if os.name != "nt":
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                process.kill()
+        else:
+            process.kill()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass  # Best effort
 
 
 @contextlib.contextmanager

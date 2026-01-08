@@ -4,7 +4,10 @@ import argparse
 import getpass
 import os
 import random
+import signal
 import sys
+import threading
+import time
 from datetime import datetime
 
 from pathlib import Path
@@ -12,6 +15,38 @@ from pathlib import Path
 from .security import SecurityManager
 from .web_ui import launch_web_ui
 from .config import ensure_project_root_env
+
+
+def _start_parent_watchdog() -> None:
+    """Start a watchdog thread that terminates this process if parent dies.
+
+    This is used when chad is spawned by tests - if the test process crashes,
+    the chad server should terminate rather than becoming an orphan.
+    """
+    parent_pid_str = os.environ.get("CHAD_PARENT_PID")
+    if not parent_pid_str:
+        return
+
+    try:
+        parent_pid = int(parent_pid_str)
+    except ValueError:
+        return
+
+    def watchdog() -> None:
+        while True:
+            time.sleep(2)  # Check every 2 seconds
+            try:
+                # On Unix, sending signal 0 checks if process exists
+                # On Windows, os.kill with 0 also works
+                os.kill(parent_pid, 0)
+            except (ProcessLookupError, PermissionError, OSError):
+                # Parent is dead, terminate ourselves
+                os.kill(os.getpid(), signal.SIGTERM)
+                break
+
+    thread = threading.Thread(target=watchdog, daemon=True)
+    thread.start()
+
 
 SCS = [
     "Chad wants to make you its reverse centaur",
@@ -33,6 +68,9 @@ SCS = [
 
 def main() -> int:
     """Main entry point for Chad web interface."""
+    # Start watchdog if spawned by a parent process (e.g., tests)
+    _start_parent_watchdog()
+
     parser = argparse.ArgumentParser(description="Chad: YOLO AI")
     parser.add_argument(
         "--port", type=int, default=7860, help="Port to run on (default: 7860, use 0 for ephemeral; falls back if busy)"
