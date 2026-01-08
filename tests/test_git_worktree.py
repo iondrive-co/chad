@@ -88,6 +88,24 @@ class TestGitWorktreeManager:
         assert (worktree_path / "README.md").exists()
         assert len(base_commit) == 40  # SHA-1 hash length
 
+    def test_create_worktree_symlinks_venv(self, git_repo):
+        """Test that worktree creation symlinks the main project's venv."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-venv-symlink"
+
+        # Create a venv in the main project
+        main_venv = git_repo / "venv"
+        main_venv.mkdir()
+        (main_venv / "bin").mkdir()
+        (main_venv / "bin" / "python").write_text("#!/bin/bash\necho test")
+
+        worktree_path, _ = mgr.create_worktree(task_id)
+        worktree_venv = worktree_path / "venv"
+
+        assert worktree_venv.is_symlink()
+        assert worktree_venv.resolve() == main_venv.resolve()
+        assert (worktree_venv / "bin" / "python").exists()
+
     def test_worktree_exists(self, git_repo):
         """Test checking if worktree exists."""
         mgr = GitWorktreeManager(git_repo)
