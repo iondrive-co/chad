@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -179,3 +180,189 @@ class TestProcessCleanup:
         assert 11111 in killed_pids
         assert 22222 in killed_pids
         assert len(upr._spawned_chad_pids) == 0
+
+
+class TestPidFileCleanup:
+    """Test cases for PID file-based cross-session cleanup."""
+
+    def test_register_and_unregister_test_server(self, monkeypatch, tmp_path):
+        """_register_test_server and _unregister_test_server should track PIDs in pidfile."""
+        from chad import ui_playwright_runner as upr
+
+        # Use a temp pidfile for testing
+        test_pidfile = tmp_path / "test_servers.pids"
+        monkeypatch.setattr(upr, "_CHAD_TEST_PIDFILE", test_pidfile)
+
+        # Register a PID
+        upr._register_test_server(12345)
+        entries = upr._read_pidfile()
+        assert any(pid == 12345 for pid, _ in entries)
+
+        # Register another PID
+        upr._register_test_server(67890)
+        entries = upr._read_pidfile()
+        assert len([p for p, _ in entries]) == 2
+
+        # Unregister first PID
+        upr._unregister_test_server(12345)
+        entries = upr._read_pidfile()
+        assert not any(pid == 12345 for pid, _ in entries)
+        assert any(pid == 67890 for pid, _ in entries)
+
+    def test_cleanup_stale_test_servers_removes_old_entries(self, monkeypatch, tmp_path):
+        """_cleanup_stale_test_servers should kill processes older than max age."""
+        from chad import ui_playwright_runner as upr
+
+        test_pidfile = tmp_path / "test_servers.pids"
+        monkeypatch.setattr(upr, "_CHAD_TEST_PIDFILE", test_pidfile)
+        # Set max age to 1 second for testing
+        monkeypatch.setattr(upr, "_CHAD_MAX_AGE_SECONDS", 1)
+
+        killed_pids = []
+
+        def fake_kill(pid, sig):
+            # Simulate process exists check (sig=0) vs actual kill
+            if sig == 0:
+                return  # Process exists
+            killed_pids.append(pid)
+
+        def fake_killpg(pid, sig):
+            killed_pids.append(pid)
+
+        monkeypatch.setattr("os.kill", fake_kill)
+        if os.name != "nt":
+            monkeypatch.setattr("os.killpg", fake_killpg)
+
+        # Add an old entry (2 seconds ago)
+        old_time = time.time() - 2
+        upr._write_pidfile([(11111, old_time)])
+
+        # Run cleanup
+        upr._cleanup_stale_test_servers()
+
+        # Old process should have been killed
+        assert 11111 in killed_pids
+
+        # Pidfile should be empty
+        entries = upr._read_pidfile()
+        assert len(entries) == 0
+
+    def test_cleanup_stale_test_servers_keeps_fresh_entries(self, monkeypatch, tmp_path):
+        """_cleanup_stale_test_servers should not kill fresh processes."""
+        from chad import ui_playwright_runner as upr
+
+        test_pidfile = tmp_path / "test_servers.pids"
+        monkeypatch.setattr(upr, "_CHAD_TEST_PIDFILE", test_pidfile)
+        monkeypatch.setattr(upr, "_CHAD_MAX_AGE_SECONDS", 300)
+
+        killed_pids = []
+
+        def fake_kill(pid, sig):
+            if sig == 0:
+                return  # Process exists
+            killed_pids.append(pid)
+
+        def fake_killpg(pid, sig):
+            killed_pids.append(pid)
+
+        monkeypatch.setattr("os.kill", fake_kill)
+        if os.name != "nt":
+            monkeypatch.setattr("os.killpg", fake_killpg)
+
+        # Add a fresh entry (just now)
+        fresh_time = time.time()
+        upr._write_pidfile([(22222, fresh_time)])
+
+        # Run cleanup
+        upr._cleanup_stale_test_servers()
+
+        # Fresh process should NOT have been killed
+        assert 22222 not in killed_pids
+
+        # Entry should still be in pidfile
+        entries = upr._read_pidfile()
+        assert any(pid == 22222 for pid, _ in entries)
+
+    def test_start_chad_registers_in_pidfile(self, monkeypatch, tmp_path):
+        """start_chad should register the spawned PID in the pidfile."""
+        from chad import ui_playwright_runner as upr
+
+        test_pidfile = tmp_path / "test_servers.pids"
+        monkeypatch.setattr(upr, "_CHAD_TEST_PIDFILE", test_pidfile)
+
+        # Reset state
+        upr._spawned_chad_pids.clear()
+
+        # Mock Popen to return a fake process
+        mock_process = Mock()
+        mock_process.pid = 99999
+        mock_process.poll.return_value = None
+        mock_process.stdout.readline.return_value = "CHAD_PORT=9999\n"
+
+        with patch.object(upr.subprocess, "Popen", return_value=mock_process):
+            with patch.object(upr, "_wait_for_ready"):
+                env = Mock()
+                env.config_path = Path("/tmp/config.json")
+                env.project_dir = Path("/tmp/project")
+                env.password = ""
+                env.env_vars = {}
+
+                upr.start_chad(env)
+
+        # PID should be in pidfile
+        entries = upr._read_pidfile()
+        assert any(pid == 99999 for pid, _ in entries)
+
+    def test_stop_chad_unregisters_from_pidfile(self, monkeypatch, tmp_path):
+        """stop_chad should remove the PID from the pidfile."""
+        from chad import ui_playwright_runner as upr
+
+        test_pidfile = tmp_path / "test_servers.pids"
+        monkeypatch.setattr(upr, "_CHAD_TEST_PIDFILE", test_pidfile)
+
+        # Register a PID in the pidfile
+        upr._register_test_server(88888)
+
+        # Add to in-memory registry too
+        upr._spawned_chad_pids.add(88888)
+
+        # Mock process
+        mock_process = Mock()
+        mock_process.pid = 88888
+        mock_process.wait.return_value = 0
+
+        instance = Mock()
+        instance.process = mock_process
+
+        # Mock os.killpg to avoid errors
+        if os.name != "nt":
+            monkeypatch.setattr("os.killpg", lambda pid, sig: None)
+
+        upr.stop_chad(instance)
+
+        # PID should be removed from pidfile
+        entries = upr._read_pidfile()
+        assert not any(pid == 88888 for pid, _ in entries)
+
+    def test_cleanup_removes_dead_processes_from_pidfile(self, monkeypatch, tmp_path):
+        """_cleanup_stale_test_servers should remove entries for dead processes."""
+        from chad import ui_playwright_runner as upr
+
+        test_pidfile = tmp_path / "test_servers.pids"
+        monkeypatch.setattr(upr, "_CHAD_TEST_PIDFILE", test_pidfile)
+
+        def fake_kill(pid, sig):
+            # Simulate process doesn't exist
+            raise ProcessLookupError("No such process")
+
+        monkeypatch.setattr("os.kill", fake_kill)
+
+        # Add an entry for a dead process
+        upr._write_pidfile([(33333, time.time())])
+
+        # Run cleanup
+        upr._cleanup_stale_test_servers()
+
+        # Entry should be removed (process doesn't exist)
+        entries = upr._read_pidfile()
+        assert len(entries) == 0

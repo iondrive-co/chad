@@ -22,6 +22,86 @@ from .security import SecurityManager
 _spawned_chad_pids: Set[int] = set()
 _atexit_registered = False
 
+# PID file for tracking test-spawned chad servers across sessions
+_CHAD_TEST_PIDFILE = Path(tempfile.gettempdir()) / "chad_test_servers.pids"
+_CHAD_MAX_AGE_SECONDS = 300  # Kill test servers older than 5 minutes
+
+
+def _read_pidfile() -> list[tuple[int, float]]:
+    """Read PIDs and their start times from the pidfile."""
+    if not _CHAD_TEST_PIDFILE.exists():
+        return []
+    try:
+        entries = []
+        for line in _CHAD_TEST_PIDFILE.read_text().strip().split("\n"):
+            if line:
+                parts = line.split(":")
+                if len(parts) == 2:
+                    entries.append((int(parts[0]), float(parts[1])))
+        return entries
+    except (ValueError, OSError):
+        return []
+
+
+def _write_pidfile(entries: list[tuple[int, float]]) -> None:
+    """Write PIDs and their start times to the pidfile."""
+    try:
+        content = "\n".join(f"{pid}:{start_time}" for pid, start_time in entries)
+        _CHAD_TEST_PIDFILE.write_text(content)
+    except OSError:
+        pass
+
+
+def _cleanup_stale_test_servers() -> None:
+    """Kill any test chad servers that are stale (old or orphaned)."""
+    now = time.time()
+    entries = _read_pidfile()
+    remaining = []
+
+    for pid, start_time in entries:
+        age = now - start_time
+        is_stale = age > _CHAD_MAX_AGE_SECONDS
+
+        # Check if process is still running
+        try:
+            os.kill(pid, 0)
+            process_exists = True
+        except (ProcessLookupError, PermissionError, OSError):
+            process_exists = False
+
+        if not process_exists:
+            # Process already dead, remove from list
+            continue
+
+        if is_stale:
+            # Kill stale process
+            try:
+                if os.name != "nt":
+                    os.killpg(pid, signal.SIGTERM)
+                else:
+                    os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            continue
+
+        # Keep non-stale, still-running processes
+        remaining.append((pid, start_time))
+
+    _write_pidfile(remaining)
+
+
+def _register_test_server(pid: int) -> None:
+    """Register a test server PID in the pidfile."""
+    entries = _read_pidfile()
+    entries.append((pid, time.time()))
+    _write_pidfile(entries)
+
+
+def _unregister_test_server(pid: int) -> None:
+    """Remove a test server PID from the pidfile."""
+    entries = [(p, t) for p, t in _read_pidfile() if p != pid]
+    _write_pidfile(entries)
+
 
 def _cleanup_orphaned_processes() -> None:
     """Kill any chad processes that weren't properly cleaned up."""
@@ -35,6 +115,7 @@ def _cleanup_orphaned_processes() -> None:
         except (ProcessLookupError, PermissionError, OSError):
             pass  # Process already dead or not accessible
         _spawned_chad_pids.discard(pid)
+        _unregister_test_server(pid)
 
 
 def _ensure_atexit_registered() -> None:
@@ -237,6 +318,9 @@ def _wait_for_ready(port: int, timeout: int = 60) -> None:
 
 def start_chad(env: TempChadEnv) -> ChadInstance:
     """Start Chad with an ephemeral port and return the running instance."""
+    # Clean up any stale test servers from previous runs
+    _cleanup_stale_test_servers()
+
     # Ensure cleanup handler is registered
     _ensure_atexit_registered()
 
@@ -273,8 +357,9 @@ def start_chad(env: TempChadEnv) -> ChadInstance:
         **popen_kwargs,
     )
 
-    # Track PID for cleanup
+    # Track PID for cleanup (both in-memory and in pidfile)
     _spawned_chad_pids.add(process.pid)
+    _register_test_server(process.pid)
 
     port = _wait_for_port(process)
     _wait_for_ready(port)
@@ -286,8 +371,9 @@ def stop_chad(instance: ChadInstance) -> None:
     process = instance.process
     pid = process.pid
 
-    # Remove from registry first
+    # Remove from registry first (both in-memory and pidfile)
     _spawned_chad_pids.discard(pid)
+    _unregister_test_server(pid)
 
     try:
         if os.name != "nt":
