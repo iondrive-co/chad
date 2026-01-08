@@ -159,6 +159,12 @@ class GitWorktreeManager:
             base_commit,
         )
 
+        # Symlink the main project's venv so agents don't need to reinstall deps
+        main_venv = self.project_path / "venv"
+        worktree_venv = worktree_path / "venv"
+        if main_venv.exists() and main_venv.is_dir() and not worktree_venv.exists():
+            worktree_venv.symlink_to(main_venv)
+
         return worktree_path, base_commit
 
     def worktree_exists(self, task_id: str) -> bool:
