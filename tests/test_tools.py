@@ -13,7 +13,7 @@ class TestVerify:
         """verify(lint_only=True) should run only flake8."""
         from chad.verification.tools import verify
 
-        with patch("chad.tools.subprocess.run") as mock_run:
+        with patch("chad.verification.tools.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = ""
 
@@ -27,7 +27,7 @@ class TestVerify:
         """verify should report lint failures."""
         from chad.verification.tools import verify
 
-        with patch("chad.tools.subprocess.run") as mock_run:
+        with patch("chad.verification.tools.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 1
             mock_run.return_value.stdout = "file.py:1:1: E001 error"
 

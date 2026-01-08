@@ -1,135 +1,40 @@
 from __future__ import annotations
 
-import atexit
 import base64
 import contextlib
 import os
 import re
-import signal
 import subprocess
 import sys
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, Optional, Set, TYPE_CHECKING
+from typing import Dict, Iterator, Optional, TYPE_CHECKING
 
 import bcrypt
 
 from chad.security import SecurityManager
+from chad.process_registry import ProcessRegistry
 
-# Global registry of spawned chad server PIDs for cleanup
-_spawned_chad_pids: Set[int] = set()
-_atexit_registered = False
-
-# PID file for tracking test-spawned chad servers across sessions
-_CHAD_TEST_PIDFILE = Path(tempfile.gettempdir()) / "chad_test_servers.pids"
-_CHAD_MAX_AGE_SECONDS = 300  # Kill test servers older than 5 minutes
+# Module-level registry for test servers (uses shared pidfile)
+_test_server_registry: ProcessRegistry | None = None
 
 
-def _read_pidfile() -> list[tuple[int, float]]:
-    """Read PIDs and their start times from the pidfile."""
-    if not _CHAD_TEST_PIDFILE.exists():
-        return []
-    try:
-        entries = []
-        for line in _CHAD_TEST_PIDFILE.read_text().strip().split("\n"):
-            if line:
-                parts = line.split(":")
-                if len(parts) == 2:
-                    entries.append((int(parts[0]), float(parts[1])))
-        return entries
-    except (ValueError, OSError):
-        return []
-
-
-def _write_pidfile(entries: list[tuple[int, float]]) -> None:
-    """Write PIDs and their start times to the pidfile."""
-    try:
-        content = "\n".join(f"{pid}:{start_time}" for pid, start_time in entries)
-        _CHAD_TEST_PIDFILE.write_text(content)
-    except OSError:
-        pass
-
-
-def _cleanup_stale_test_servers() -> None:
-    """Kill any test chad servers that are stale (old or orphaned)."""
-    now = time.time()
-    entries = _read_pidfile()
-    remaining = []
-
-    for pid, start_time in entries:
-        age = now - start_time
-        is_stale = age > _CHAD_MAX_AGE_SECONDS
-
-        # Check if process is still running
-        try:
-            os.kill(pid, 0)
-            process_exists = True
-        except (ProcessLookupError, PermissionError, OSError):
-            process_exists = False
-
-        if not process_exists:
-            # Process already dead, remove from list
-            continue
-
-        if is_stale:
-            # Kill stale process
-            try:
-                if os.name != "nt":
-                    os.killpg(pid, signal.SIGTERM)
-                else:
-                    os.kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-            continue
-
-        # Keep non-stale, still-running processes
-        remaining.append((pid, start_time))
-
-    _write_pidfile(remaining)
-
-
-def _register_test_server(pid: int) -> None:
-    """Register a test server PID in the pidfile."""
-    entries = _read_pidfile()
-    entries.append((pid, time.time()))
-    _write_pidfile(entries)
-
-
-def _unregister_test_server(pid: int) -> None:
-    """Remove a test server PID from the pidfile."""
-    entries = [(p, t) for p, t in _read_pidfile() if p != pid]
-    _write_pidfile(entries)
-
-
-def _cleanup_orphaned_processes() -> None:
-    """Kill any chad processes that weren't properly cleaned up."""
-    for pid in list(_spawned_chad_pids):
-        try:
-            if os.name != "nt":
-                # On Unix, kill the process group to get all children
-                os.killpg(pid, signal.SIGTERM)
-            else:
-                os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass  # Process already dead or not accessible
-        _spawned_chad_pids.discard(pid)
-        _unregister_test_server(pid)
+def _get_test_registry() -> ProcessRegistry:
+    """Get the ProcessRegistry for test servers."""
+    global _test_server_registry
+    if _test_server_registry is None:
+        pidfile = Path(tempfile.gettempdir()) / "chad_test_servers.pids"
+        _test_server_registry = ProcessRegistry(pidfile=pidfile, max_age_seconds=300.0)
+    return _test_server_registry
 
 
 def cleanup_all_test_servers() -> None:
     """Kill all spawned Chad test servers. Call on task cancellation."""
-    _cleanup_stale_test_servers()
-    _cleanup_orphaned_processes()
-
-
-def _ensure_atexit_registered() -> None:
-    """Register the cleanup handler once."""
-    global _atexit_registered
-    if not _atexit_registered:
-        atexit.register(_cleanup_orphaned_processes)
-        _atexit_registered = True
+    registry = _get_test_registry()
+    registry.cleanup_stale()
+    registry.terminate_all()
 
 
 if TYPE_CHECKING:
@@ -324,11 +229,10 @@ def _wait_for_ready(port: int, timeout: int = 60) -> None:
 
 def start_chad(env: TempChadEnv) -> ChadInstance:
     """Start Chad with an ephemeral port and return the running instance."""
-    # Clean up any stale test servers from previous runs
-    _cleanup_stale_test_servers()
+    registry = _get_test_registry()
 
-    # Ensure cleanup handler is registered
-    _ensure_atexit_registered()
+    # Clean up any stale test servers from previous runs
+    registry.cleanup_stale()
 
     # Build environment with screenshot mode vars if present
     chad_env = {
@@ -363,9 +267,8 @@ def start_chad(env: TempChadEnv) -> ChadInstance:
         **popen_kwargs,
     )
 
-    # Track PID for cleanup (both in-memory and in pidfile)
-    _spawned_chad_pids.add(process.pid)
-    _register_test_server(process.pid)
+    # Register process for cleanup tracking
+    registry.register(process, description="chad test server (port pending)")
 
     port = _wait_for_port(process)
     _wait_for_ready(port)
@@ -374,38 +277,11 @@ def start_chad(env: TempChadEnv) -> ChadInstance:
 
 def stop_chad(instance: ChadInstance) -> None:
     """Terminate a running Chad instance and all its children."""
-    process = instance.process
-    pid = process.pid
+    registry = _get_test_registry()
+    pid = instance.process.pid
 
-    # Remove from registry first (both in-memory and pidfile)
-    _spawned_chad_pids.discard(pid)
-    _unregister_test_server(pid)
-
-    try:
-        if os.name != "nt":
-            # On Unix, kill the entire process group to get all children
-            try:
-                os.killpg(pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError, OSError):
-                # Fall back to just the process if group kill fails
-                process.terminate()
-        else:
-            process.terminate()
-
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        # Force kill if graceful termination times out
-        if os.name != "nt":
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                process.kill()
-        else:
-            process.kill()
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            pass  # Best effort
+    # Use ProcessRegistry's terminate method which handles escalation
+    registry.terminate(pid, timeout=5.0)
 
 
 @contextlib.contextmanager

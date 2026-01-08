@@ -19,7 +19,7 @@ from pathlib import Path
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from chad.ui_playwright_runner import (  # noqa: E402
+from chad.verification.ui_playwright_runner import (  # noqa: E402
     ChadLaunchError,
     PlaywrightUnavailable,
     create_temp_env,

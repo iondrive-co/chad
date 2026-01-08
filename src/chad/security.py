@@ -369,16 +369,6 @@ class SecurityManager:
                 print(f"Error: Could not decrypt API key for {account_name}: {e}")
                 return None
 
-        # Fallback to old format for backward compatibility
-        if "api_keys" in config and account_name in config["api_keys"]:
-            encryption_salt = base64.urlsafe_b64decode(config["encryption_salt"].encode())
-            try:
-                api_key = self.decrypt_value(config["api_keys"][account_name], password, encryption_salt)
-                return {"provider": account_name, "api_key": api_key}  # In old format, provider name was the key
-            except Exception as e:
-                print(f"Error: Could not decrypt API key for {account_name}: {e}")
-                return None
-
         return None
 
     def list_accounts(self) -> dict[str, str]:
@@ -390,16 +380,9 @@ class SecurityManager:
         config = self.load_config()
         accounts = {}
 
-        # New format
         if "accounts" in config:
             for account_name, account_data in config["accounts"].items():
                 accounts[account_name] = account_data["provider"]
-
-        # Old format (for backward compatibility)
-        if "api_keys" in config:
-            for provider_name in config["api_keys"].keys():
-                if provider_name not in accounts:  # Don't override new format
-                    accounts[provider_name] = provider_name
 
         return accounts
 
@@ -413,33 +396,7 @@ class SecurityManager:
             True if account is stored
         """
         config = self.load_config()
-
-        if "accounts" in config and account_name in config["accounts"]:
-            return True
-
-        # Backward compatibility
-        if "api_keys" in config and account_name in config["api_keys"]:
-            return True
-
-        return False
-
-    # Legacy methods for backward compatibility
-    def store_api_key(self, provider: str, api_key: str, password: str) -> None:
-        """Legacy method - use store_account instead."""
-        self.store_account(provider, provider, api_key, password)
-
-    def get_api_key(self, provider: str, password: str) -> str | None:
-        """Legacy method - use get_account instead."""
-        account = self.get_account(provider, password)
-        return account["api_key"] if account else None
-
-    def has_api_key(self, provider: str) -> bool:
-        """Legacy method - use has_account instead."""
-        return self.has_account(provider)
-
-    def list_stored_providers(self) -> list[str]:
-        """Legacy method - use list_accounts instead."""
-        return list(self.list_accounts().keys())
+        return "accounts" in config and account_name in config["accounts"]
 
     def assign_role(self, account_name: str, role: str) -> None:
         """Assign a role to an account.

@@ -277,74 +277,6 @@ class TestSecurityManager:
         verified = mgr.verify_main_password()
         assert verified == "newpass2"
 
-    def test_store_and_get_api_key(self, tmp_path):
-        """Test storing and retrieving API keys."""
-        config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
-
-        # Setup master password
-        import base64
-        import bcrypt
-
-        password = "masterpassword"
-        password_hash = mgr.hash_password(password)
-        salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
-
-        mgr.save_config({"password_hash": password_hash, "encryption_salt": salt, "api_keys": {}})
-
-        # Store API key
-        api_key = "sk-test-anthropic-key-12345"
-        mgr.store_api_key("anthropic", api_key, password)
-
-        # Retrieve API key
-        retrieved_key = mgr.get_api_key("anthropic", password)
-        assert retrieved_key == api_key
-
-    def test_get_api_key_nonexistent(self, tmp_path):
-        """Test retrieving non-existent API key."""
-        config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
-
-        import base64
-        import bcrypt
-
-        password = "masterpassword"
-        salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
-
-        mgr.save_config({"encryption_salt": salt, "api_keys": {}})
-
-        retrieved_key = mgr.get_api_key("nonexistent", password)
-        assert retrieved_key is None
-
-    def test_has_api_key(self, tmp_path):
-        """Test checking if API key exists."""
-        config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
-
-        mgr.save_config({"api_keys": {"anthropic": "encrypted_key"}})
-
-        assert mgr.has_api_key("anthropic") is True
-        assert mgr.has_api_key("openai") is False
-
-    def test_list_stored_providers(self, tmp_path):
-        """Test listing stored providers."""
-        config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
-
-        mgr.save_config({"api_keys": {"anthropic": "key1", "openai": "key2"}})
-
-        providers = mgr.list_stored_providers()
-        assert set(providers) == {"anthropic", "openai"}
-
-    def test_list_stored_providers_empty(self, tmp_path):
-        """Test listing providers when none are stored."""
-        config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
-        mgr.save_config({})
-
-        providers = mgr.list_stored_providers()
-        assert providers == []
-
     def test_store_and_get_account(self, tmp_path):
         """Test storing and retrieving named accounts."""
         config_path = tmp_path / "test.conf"
@@ -412,37 +344,6 @@ class TestSecurityManager:
 
         assert mgr.has_account("my-account") is True
         assert mgr.has_account("nonexistent") is False
-
-    def test_backward_compatibility_with_old_format(self, tmp_path):
-        """Test that old api_keys format is still readable."""
-        config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
-
-        import base64
-        import bcrypt
-
-        password = "testpassword"
-        password_hash = mgr.hash_password(password)
-        salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
-        salt_bytes = base64.urlsafe_b64decode(salt.encode())
-
-        # Create old format config
-        api_key = "sk-old-key"
-        encrypted_key = mgr.encrypt_value(api_key, password, salt_bytes)
-
-        mgr.save_config(
-            {"password_hash": password_hash, "encryption_salt": salt, "api_keys": {"anthropic": encrypted_key}}
-        )
-
-        # Should be able to read with new methods
-        accounts = mgr.list_accounts()
-        assert "anthropic" in accounts
-        assert accounts["anthropic"] == "anthropic"
-
-        account = mgr.get_account("anthropic", password)
-        assert account is not None
-        assert account["provider"] == "anthropic"
-        assert account["api_key"] == api_key
 
     def test_encrypt_value_produces_different_output_each_time(self, tmp_path):
         """Test that encrypt_value produces different output each time due to IV."""
@@ -608,8 +509,8 @@ class TestSecurityManager:
         preferences = mgr.load_preferences()
         assert preferences is None
 
-    def test_mixed_old_and_new_format_accounts(self, tmp_path):
-        """Test config with both 'api_keys' and 'accounts' sections."""
+    def test_multiple_accounts(self, tmp_path):
+        """Test config with multiple accounts."""
         config_path = tmp_path / "test.conf"
         mgr = SecurityManager(config_path)
 
@@ -621,22 +522,24 @@ class TestSecurityManager:
         salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
         salt_bytes = base64.urlsafe_b64decode(salt.encode())
 
-        # Create mixed format config
-        old_key = mgr.encrypt_value("old-api-key", password, salt_bytes)
-        new_account_key = mgr.encrypt_value("new-api-key", password, salt_bytes)
+        # Create config with multiple accounts
+        account1_key = mgr.encrypt_value("api-key-1", password, salt_bytes)
+        account2_key = mgr.encrypt_value("api-key-2", password, salt_bytes)
 
         mgr.save_config(
             {
                 "password_hash": password_hash,
                 "encryption_salt": salt,
-                "api_keys": {"anthropic": old_key},  # Old format
-                "accounts": {  # New format
-                    "new_account": {"provider": "openai", "encrypted_api_key": new_account_key, "model": "gpt-4"}
+                "accounts": {
+                    "work-anthropic": {"provider": "anthropic", "key": account1_key, "model": "claude"},
+                    "personal-openai": {"provider": "openai", "key": account2_key, "model": "gpt-4"},
                 },
             }
         )
 
         accounts = mgr.list_accounts()
-        assert "anthropic" in accounts  # From old format
-        assert "new_account" in accounts  # From new format
+        assert "work-anthropic" in accounts
+        assert "personal-openai" in accounts
+        assert accounts["work-anthropic"] == "anthropic"
+        assert accounts["personal-openai"] == "openai"
         assert len(accounts) == 2  # No duplicates

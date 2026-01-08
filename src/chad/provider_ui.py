@@ -54,10 +54,7 @@ class ProviderUIManager:
         # In screenshot mode, ensure deterministic ordering for tests
         if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
             # Use the same order as defined in MOCK_ACCOUNTS for consistency
-            try:
-                from .screenshot_fixtures import MOCK_ACCOUNTS
-            except ImportError:
-                from chad.screenshot_fixtures import MOCK_ACCOUNTS
+            from .verification.screenshot_fixtures import MOCK_ACCOUNTS
             screenshot_order = []
             other_accounts = []
 
@@ -99,7 +96,7 @@ class ProviderUIManager:
         """Get usage text for a single provider."""
         # Check for screenshot mode - return synthetic data
         if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
-            from .screenshot_fixtures import get_mock_usage
+            from .verification.screenshot_fixtures import get_mock_usage
 
             return get_mock_usage(account_name)
 
