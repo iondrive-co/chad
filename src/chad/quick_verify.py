@@ -5,7 +5,7 @@ from __future__ import annotations
 Usage:
     python -m chad.quick_verify               # run full suite quickly
     python -m chad.quick_verify -k providers  # keyword filter
-    python -m chad.quick_verify tests/test_mcp_playwright.py -k lint
+    python -m chad.quick_verify tests/test_providers.py -k start
 """
 
 import argparse

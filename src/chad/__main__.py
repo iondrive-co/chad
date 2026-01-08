@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .security import SecurityManager
 from .web_ui import launch_web_ui
-from .mcp_config import ensure_project_root_env
+from .config import ensure_project_root_env
 
 SCS = [
     "Chad wants to make you its reverse centaur",

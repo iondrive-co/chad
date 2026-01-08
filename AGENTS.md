@@ -16,9 +16,10 @@ flawlessly working features.
 ```
 
 Then write a test which should fail until the issue is fixed or feature is implemented. Take a "before" screenshot
-with `mcp__chad-ui-playwright__screenshot` using the component from the map. MCP screenshots are saved to a temp
-directory like `/tmp/chad_visual_xxxxx/` with filenames derived from the label/tab (e.g., `before_run.png`). Review
-the screenshot to confirm you understand the issue/current state.
+using the screenshot skill. The skill is automatically activated when you mention "screenshot" or "capture UI".
+
+**Codex**: Use `$screenshot` to explicitly invoke the skill
+**Claude**: Ask to use the screenshot skill or mention taking a screenshot
 
 When designing new code, never make fallback code to handle paths other than the happy one, instead spend as much effort
 as necessary to make sure that everyone using your feature sees the same happy path you tested. Similarly don't provide
@@ -28,103 +29,73 @@ part of your change.
 
 When fixing bugs, generate many plausible root-cause theories then use the screenshot and existing tests to eliminate
 candidates and research which remaining theory is most likely. Define the failure as a binary, assertable condition and
-build a single reliable reproducer case (e.g. I am reducing flakiness via reduced concurrency). Iterate with
-one-variable hypotheses ("if I change X, the failure stops"), run the experiment by changing only X and re-running the
-reproducer, discard falsified hypotheses immediately, and stop to re-evaluate if results are unexpected. Once a
-hypothesis predicts both failure and non-failure, minimize it to the smallest causal change and add a regression test
-that fails before the fix and passes after; fixes without a reproducer, falsifiable experiments, and a regression test
-are unacceptable.
+build a single reliable reproducer case. Iterate with one-variable hypotheses ("if I change X, the failure stops"), run
+the experiment by changing only X and re-running the reproducer, discard falsified hypotheses immediately, and stop to
+re-evaluate if results are unexpected. Once a hypothesis predicts both failure and non-failure, minimize it to the
+smallest causal change and add a regression test that fails before the fix and passes after.
 
-### During changes
+## During changes
 
-Follow this MCP workflow for every task:
-1. Record or update your hypothesis and binary rejection checks with `hypothesis(description, checks=..., tracker_id?)`. Store the returned `tracker_id`/`hypothesis_id`.
-2. For UI changes add any new display functionality to `visual_test_map.py`.
-3. As each check outcome is known, file it immediately with `check_result(tracker_id, hypothesis_id, check_index, passed, notes?)`.
-4. Iterate on hypotheses and keep the work focused on the happy path; refine checks when new evidence appears.
-- Start new trackers with `hypothesis(description, checks)`; omit `tracker_id` unless you are resuming an existing tracker (empty/None will create a new tracker).
-- Prefer MCP code-mode wrappers when available to keep tool definitions/results out of context. See `src/chad/mcp_code_mode/servers/chad_ui_playwright/` for callable wrappers like `verify()`, `record_hypothesis(...)`, and `file_check_result(...)`.
+For UI changes add any new display functionality to `visual_test_map.py`.
 
 ## After making changes
 
-- If the issue has a visual component, take the mandatory "after" screenshot using `mcp__chad-ui-playwright__screenshot` with `label="after"` and the same `component` as the before screenshot. Confirm it demonstrates the fix.
-- Run the MCP `mcp__chad-ui-playwright__verify` call once per task; it runs linting plus all unit, integration, and visual tests to confirm no regressions. Fix any failures before completing.
-- Ensure every recorded check has a filed result via `check_result`, then call `report(tracker_id, screenshot_before?, screenshot_after?)` to generate the summary you will share with the user.
-- Perform a critical self-review of your changes and note any outstanding issues.
+- If the issue has a visual component, take the mandatory "after" screenshot using the same component as the before
+- Run verification once per task to confirm no regressions using the verify skill
+  - **Codex**: Use `$verify` to explicitly invoke
+  - **Claude**: Ask to verify or mention running tests
+- Perform a critical self-review of your changes and note any outstanding issues
 
 **CRITICAL: All tests must pass - no skipping allowed.** Never use `@pytest.mark.skip` or skip tests for any reason. If a test fails, fix the code or the test - do not skip it. If you encounter tests that were previously skipped, unskip them and make them pass. Skipped tests hide regressions and are unacceptable in this codebase.
 
-## MCP Tools
+## Skills
+
+Skills are markdown files that provide task-specific instructions. They are installed in `.claude/skills/` for Claude
+Code and `.codex/skills/` for OpenAI Codex. Skills are automatically activated when your task matches their description,
+or can be explicitly invoked.
 
 ### verify
+
 Run lint + all tests. Required once per task.
+
+**Activation**: Mention "verify", "run tests", "check lint", or use `$verify` (Codex)
+
+The skill instructs you to run:
+```bash
+./venv/bin/python -m flake8 src/chad --max-line-length=120
+./venv/bin/python -m pytest tests/ -v --tb=short -n auto
 ```
-mcp__chad-ui-playwright__verify()
-```
-- Code-mode alternative: `from chad.mcp_code_mode.servers.chad_ui_playwright import verify`
 
 ### screenshot
+
 Capture UI tab or specific component. Use for before/after visual verification.
-```
-mcp__chad-ui-playwright__screenshot(tab, component?, label?)
-```
-- Code-mode alternative: `from chad.mcp_code_mode.servers.chad_ui_playwright import screenshot`
 
-**Parameters:**
-- `tab`: "run" or "providers"
-- `component`: (optional) Specific UI component to capture instead of full tab
-- `label`: (optional) Label like "before" or "after" for filename
+**Activation**: Mention "screenshot", "capture UI", or use `$screenshot` (Codex)
 
-**Available components:**
-
-| Tab | Component | What it captures |
-|-----|-----------|------------------|
-| run | `project-path` | Project path + agent dropdowns |
-| run | `agent-communication` | Chat interface panel |
-| run | `live-view` | Live activity stream (empty until task runs) |
-| providers | `provider-summary` | Summary panel with all providers |
-| providers | `provider-card` | First visible provider card |
-| providers | `add-provider` | Add New Provider accordion |
-
-**Examples:**
-```
-screenshot(tab="run")                                    # Full run tab
-screenshot(tab="run", component="project-path")         # Just project path panel
-screenshot(tab="providers", component="provider-card")  # Single provider card
-screenshot(tab="run", component="agent-communication", label="before")
+The skill instructs you to run:
+```bash
+./venv/bin/python scripts/screenshot_ui.py --tab run --output /tmp/screenshot.png --headless
 ```
 
-### hypothesis
-Record hypotheses with binary rejection checks.
-```
-mcp__chad-ui-playwright__hypothesis(description, checks, tracker_id?)
-```
-- Code-mode alternative: `from chad.mcp_code_mode.servers.chad_ui_playwright import record_hypothesis`
+**Available options:**
+- `--tab run` or `--tab providers`
+- `--selector "#run-top-row"` for specific components
+- `--width 1280 --height 900` for dimensions
 
-### check_result
-File pass/fail for each check.
-```
-mcp__chad-ui-playwright__check_result(tracker_id, hypothesis_id, check_index, passed, notes?)
-```
-- Code-mode alternative: `from chad.mcp_code_mode.servers.chad_ui_playwright import file_check_result`
+**Available component selectors:**
 
-### report
-Get final summary with all hypotheses and results.
-```
-mcp__chad-ui-playwright__report(tracker_id, screenshot_before?, screenshot_after?)
-```
-- Code-mode alternative: `from chad.mcp_code_mode.servers.chad_ui_playwright import report`
-
-### list_tools
-List available MCP tools and their purposes.
-```
-mcp__chad-ui-playwright__list_tools()
-```
+| Tab | Selector | What it captures |
+|-----|----------|------------------|
+| run | `#run-top-row` | Project path + agent dropdowns |
+| run | `#agent-chatbot` | Chat interface panel |
+| run | `#live-stream-box` | Live activity stream |
+| providers | `#provider-summary-panel` | Summary with all providers |
+| providers | `.provider-cards-row .column:has(.provider-card__header-row)` | Single provider card |
+| providers | `#add-provider-panel` | Add New Provider accordion |
 
 ## Screenshot Fixtures
 
-MCP screenshots automatically use synthetic data for realistic UI captures. The test environment
-includes:
+Screenshots automatically use synthetic data for realistic UI captures. The test environment includes:
 
 **Provider Accounts (8 total):**
 - `codex-work` (openai) - TEAM plan, o3 model, 15% session / 42% weekly usage
@@ -172,9 +143,17 @@ src/chad/
 ├── security.py       # Password hashing, API key encryption
 ├── session_logger.py # Session log management
 ├── web_ui.py         # Gradio web interface
-├── mcp_code_mode/    # Code-mode wrappers for MCP tools (reduces prompt context)
-├── mcp_playwright.py # MCP tools (verify, screenshot, hypothesis)
+├── tools.py          # Python utilities for verify/screenshot
+├── config.py         # Project root configuration
 └── model_catalog.py  # Model discovery per provider
+
+.claude/skills/       # Claude Code skills
+├── verify/SKILL.md
+└── screenshot/SKILL.md
+
+.codex/skills/        # OpenAI Codex skills
+├── verify/SKILL.md
+└── screenshot/SKILL.md
 ```
 
 ## Configuration

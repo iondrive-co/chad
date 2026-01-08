@@ -2249,19 +2249,17 @@ class ChadWebUI:
             return None, ("Verification aborted: coding agent output was empty. "
                           "Rerun after capturing the coding response.")
 
-        # First run MCP verification to check flake8 and tests
+        # First run automated verification (flake8 + tests)
         try:
-            from .mcp_code_mode.servers.chad_ui_playwright import verify as mcp_verify
+            from .tools import verify as run_verify
             if on_activity:
-                on_activity("system", "Running MCP verification (flake8 + tests)...")
+                on_activity("system", "Running verification (flake8 + tests)...")
 
-            mcp_result = mcp_verify()
-            if not mcp_result.get("success", False):
-                # Extract specific issues from MCP result
+            verify_result = run_verify()
+            if not verify_result.get("success", False):
                 issues = []
-                phases = mcp_result.get("phases", {})
+                phases = verify_result.get("phases", {})
 
-                # Check lint phase
                 lint_phase = phases.get("lint", {})
                 if not lint_phase.get("success", True):
                     lint_issues = lint_phase.get("issues", [])
@@ -2270,23 +2268,21 @@ class ChadWebUI:
                     else:
                         issues.append(f"Flake8 failed with {lint_phase.get('issue_count', 0)} errors")
 
-                # Check test phase
                 test_phase = phases.get("tests", {})
                 if not test_phase.get("success", True):
                     failed_count = test_phase.get("failed", 0)
                     issues.append(f"Tests failed: {failed_count} test(s) failed")
 
-                # Check pip phase
                 pip_phase = phases.get("pip_check", {})
                 if not pip_phase.get("success", True):
                     issues.append("Package dependency issues found")
 
-                feedback = "MCP verification failed - " + "; ".join(issues) if issues else "MCP verification failed"
+                feedback = "Verification failed - " + "; ".join(issues) if issues else "Verification failed"
                 return False, feedback
         except Exception as e:
-            # If MCP verification fails to run, log but continue with LLM verification
+            # If verification fails to run, log but continue with LLM verification
             if on_activity:
-                on_activity("system", f"Warning: MCP verification could not run: {str(e)}")
+                on_activity("system", f"Warning: Verification could not run: {str(e)}")
 
         change_summary = extract_coding_summary(coding_output)
         trimmed_output = _truncate_verification_output(coding_output)
@@ -5532,7 +5528,7 @@ def launch_web_ui(password: str = None, port: int = 7860) -> tuple[None, int]:
     """
     # Ensure downstream agents inherit a consistent project root
     try:
-        from .mcp_config import ensure_project_root_env
+        from .config import ensure_project_root_env
 
         ensure_project_root_env()
     except Exception:

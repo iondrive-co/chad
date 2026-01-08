@@ -24,11 +24,10 @@ you understand the issue/current state.
 Once you have completed your changes for the task, take an after screenshot if that is supported to confirm that the
 user's request is fixed/done.
 
-CRITICAL: You MUST run the MCP verification tool before completing your task:
-- If MCP tools are available, run: mcp__chad-ui-playwright__verify()
-- Or use the code-mode wrapper: from chad.mcp_code_mode.servers.chad_ui_playwright import verify; verify()
-- This tool runs ALL linting (flake8) and tests to ensure no regressions
-- Fix any failures it reports before proceeding
+CRITICAL: You MUST run verification before completing your task:
+- Run flake8 linting: ./venv/bin/python -m flake8 src/chad --max-line-length=120
+- Run all tests: ./venv/bin/python -m pytest tests/ -v --tb=short -n auto
+- Fix any failures before proceeding
 
 Only after all tests and linting pass, end your response with a JSON summary block like this:
 ```json
@@ -142,15 +141,46 @@ def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
     import json
     import re
 
+    # Strip thinking/reasoning prefixes that some models add before JSON
+    # e.g., "*Thinking: **Ensuring valid JSON output***\n\n{..."
+    cleaned = re.sub(r"^\s*\*+[Tt]hinking:.*?\*+\s*", "", response, flags=re.DOTALL)
+
     # Extract JSON from the response (may be wrapped in ```json ... ```)
-    json_match = re.search(r"```json\s*(\{.*?\})\s*```", response, re.DOTALL)
+    json_match = re.search(r"```json\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
     if json_match:
         json_str = json_match.group(1)
     else:
-        # Try to find raw JSON object
-        json_match = re.search(r'\{[^{}]*"passed"[^{}]*\}', response, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(0)
+        # Try to find JSON object by matching balanced braces
+        # Find the first { and extract a valid JSON object from there
+        brace_start = cleaned.find("{")
+        if brace_start != -1:
+            depth = 0
+            in_string = False
+            escape_next = False
+            json_end = -1
+            for i, char in enumerate(cleaned[brace_start:], brace_start):
+                if escape_next:
+                    escape_next = False
+                    continue
+                if char == "\\" and in_string:
+                    escape_next = True
+                    continue
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        json_end = i + 1
+                        break
+            if json_end != -1:
+                json_str = cleaned[brace_start:json_end]
+            else:
+                raise VerificationParseError(f"No valid JSON found in response: {response[:200]}")
         else:
             raise VerificationParseError(f"No JSON found in response: {response[:200]}")
 
@@ -203,7 +233,7 @@ def extract_coding_summary(response: str) -> str | None:
 
 
 def check_verification_mentioned(response: str) -> bool:
-    """Check if the coding agent mentioned running MCP verification.
+    """Check if the coding agent mentioned running verification.
 
     Args:
         response: Raw response from the coding agent
@@ -214,12 +244,12 @@ def check_verification_mentioned(response: str) -> bool:
     import re
 
     verification_patterns = [
-        r"mcp__chad-ui-playwright__verify",
-        r"verify\(\)",
+        r"flake8",
+        r"pytest",
         r"verification.*passed",
         r"all tests pass",
         r"linting.*pass",
-        r"flake8.*pass",
+        r"\d+ passed",
     ]
 
     response_lower = response.lower()
