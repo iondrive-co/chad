@@ -1,5 +1,6 @@
 """Tests for chad.tools module."""
 
+import os
 from unittest.mock import patch
 
 import pytest
@@ -35,6 +36,30 @@ class TestVerify:
             assert result["success"] is False
             assert result["failed_phase"] == "lint"
             assert result["phases"]["lint"]["issue_count"] == 1
+
+    def test_verify_prefers_project_venv(self, tmp_path, monkeypatch):
+        """verify should use project venv python when available."""
+        from chad.tools import verify
+
+        venv_dir = tmp_path / "venv" / ("Scripts" if os.name == "nt" else "bin")
+        venv_dir.mkdir(parents=True, exist_ok=True)
+        venv_python = venv_dir / ("python.exe" if os.name == "nt" else "python")
+        venv_python.write_text("")  # presence is enough
+
+        monkeypatch.setattr("chad.tools.resolve_project_root", lambda: (tmp_path, "test"))
+
+        commands = []
+
+        def fake_run(cmd, **kwargs):
+            commands.append(cmd[0])
+            return type("Proc", (), {"returncode": 0, "stdout": ""})
+
+        monkeypatch.setattr("chad.tools.subprocess.run", fake_run)
+
+        result = verify(lint_only=True)
+
+        assert result["success"] is True
+        assert commands[0] == str(venv_python)
 
 
 class TestScreenshot:
