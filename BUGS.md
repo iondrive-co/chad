@@ -50,4 +50,4 @@ Modified
 
 Once a task is discarded the task description should be made editable again
 
-Roughly half the files in the src/chad directory are related to testing and verifying tools rather than the core app, can you split this into a core directory and something else. While doing this get rid of any unused code
+Roughly half the files in the src/chad directory are related to testing and verifying tools rather than the core app, can you split this into more packages, for example core and verification. While doing this get rid of any unused code

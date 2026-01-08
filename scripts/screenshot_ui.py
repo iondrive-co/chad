@@ -34,6 +34,13 @@ import sys
 from pathlib import Path
 import webbrowser
 
+# Ensure logs flush promptly when output is piped (CI/agents)
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
