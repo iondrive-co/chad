@@ -2208,6 +2208,9 @@ class ChadWebUI:
     ) -> tuple[bool | None, str]:
         """Run the verification agent to review the coding agent's work.
 
+        First runs MCP verification (flake8 + tests), then if that passes,
+        runs the LLM verification agent.
+
         Args:
             project_path: Path to the project directory
             coding_output: The output from the coding agent
@@ -2245,6 +2248,45 @@ class ChadWebUI:
         if not coding_output.strip():
             return None, ("Verification aborted: coding agent output was empty. "
                           "Rerun after capturing the coding response.")
+
+        # First run MCP verification to check flake8 and tests
+        try:
+            from .mcp_code_mode.servers.chad_ui_playwright import verify as mcp_verify
+            if on_activity:
+                on_activity("system", "Running MCP verification (flake8 + tests)...")
+
+            mcp_result = mcp_verify()
+            if not mcp_result.get("success", False):
+                # Extract specific issues from MCP result
+                issues = []
+                phases = mcp_result.get("phases", {})
+
+                # Check lint phase
+                lint_phase = phases.get("lint", {})
+                if not lint_phase.get("success", True):
+                    lint_issues = lint_phase.get("issues", [])
+                    if lint_issues:
+                        issues.append(f"Flake8 errors: {'; '.join(lint_issues)}")
+                    else:
+                        issues.append(f"Flake8 failed with {lint_phase.get('issue_count', 0)} errors")
+
+                # Check test phase
+                test_phase = phases.get("tests", {})
+                if not test_phase.get("success", True):
+                    failed_count = test_phase.get("failed", 0)
+                    issues.append(f"Tests failed: {failed_count} test(s) failed")
+
+                # Check pip phase
+                pip_phase = phases.get("pip_check", {})
+                if not pip_phase.get("success", True):
+                    issues.append("Package dependency issues found")
+
+                feedback = "MCP verification failed - " + "; ".join(issues) if issues else "MCP verification failed"
+                return False, feedback
+        except Exception as e:
+            # If MCP verification fails to run, log but continue with LLM verification
+            if on_activity:
+                on_activity("system", f"Warning: MCP verification could not run: {str(e)}")
 
         change_summary = extract_coding_summary(coding_output)
         trimmed_output = _truncate_verification_output(coding_output)
@@ -2996,6 +3038,9 @@ class ChadWebUI:
                 if not last_coding_output:
                     last_coding_output = completion_reason[0] or ""
 
+                # No longer need to warn about verification not being mentioned
+                # since we now run it automatically during verification phase
+
                 # Run verification loop
                 max_verification_attempts = 3
                 verification_attempt = 0
@@ -3254,12 +3299,12 @@ class ChadWebUI:
                     chat_history.append({"role": "user", "content": completion_msg})
                 elif verified is None:
                     # Verification errored - already added error message above
-                    final_status = "❌ Task completed but verification errored"
+                    final_status = "❌ Task failed - verification error"
                 else:
                     final_status = (
-                        f"⚠️ Task completed but verification failed " f"after {verification_attempt} attempt(s)"
+                        f"❌ Task failed - verification failed " f"after {verification_attempt} attempt(s)"
                     )
-                    completion_msg = "───────────── ⚠️ TASK COMPLETED (UNVERIFIED) ─────────────"
+                    completion_msg = "───────────── ❌ TASK FAILED (VERIFICATION) ─────────────"
                     if verification_feedback:
                         if len(verification_feedback) > 200:
                             completion_msg += f"\n\n*{verification_feedback[:200]}...*"
@@ -3280,13 +3325,28 @@ class ChadWebUI:
             if final_status:
                 full_history.append(("SYSTEM", f"\n\n[FINAL STATUS] {final_status}"))
 
+            # Determine final session status based on both task completion and verification
+            overall_success = False
+            if not task_success[0]:
+                session_status = "failed"
+            elif not verification_enabled:
+                session_status = "completed"
+                overall_success = True
+            elif verified is True:
+                session_status = "completed"
+                overall_success = True
+            else:
+                # Task succeeded but verification failed or errored
+                session_status = "failed"
+                overall_success = False
+
             self.session_logger.update_log(
                 session.log_path,
                 chat_history,
                 streaming_history=full_history if full_history else None,
-                success=task_success[0],
+                success=overall_success,
                 completion_reason=completion_reason[0],
-                status="completed" if task_success[0] else "failed",
+                status=session_status,
                 verification_attempts=verification_log,
                 final_status=final_status,
             )
@@ -3298,15 +3358,15 @@ class ChadWebUI:
             session.chat_history = chat_history
             session.coding_account = coding_account
 
-            # Show follow-up input if session can continue (Claude with successful task)
-            can_continue = session.active and task_success[0]
+            # Show follow-up input if session can continue (Claude with successful task and verification)
+            can_continue = session.active and overall_success
             if can_continue:
                 final_status += "\n\n*Session active - you can send follow-up messages*"
                 final_summary = f"{status_prefix}{final_status}"
 
             # Check for worktree changes to show merge section
             has_changes, merge_summary_text = self.check_worktree_changes(session_id)
-            show_merge = has_changes and task_success[0]
+            show_merge = has_changes and overall_success
 
             # Get available branches and rendered diff for merge target
             branches = []
