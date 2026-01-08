@@ -118,6 +118,12 @@ def _cleanup_orphaned_processes() -> None:
         _unregister_test_server(pid)
 
 
+def cleanup_all_test_servers() -> None:
+    """Kill all spawned Chad test servers. Call on task cancellation."""
+    _cleanup_stale_test_servers()
+    _cleanup_orphaned_processes()
+
+
 def _ensure_atexit_registered() -> None:
     """Register the cleanup handler once."""
     global _atexit_registered

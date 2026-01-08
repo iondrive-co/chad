@@ -27,6 +27,7 @@ from .prompts import (
     VerificationParseError,
 )
 from .git_worktree import GitWorktreeManager, MergeConflict, FileDiff
+from .ui_playwright_runner import cleanup_all_test_servers
 
 
 @dataclass
@@ -2427,6 +2428,12 @@ class ChadWebUI:
             session.provider = None
         session.config = None
 
+        # Clean up any spawned test server processes (e.g., from visual tests)
+        try:
+            cleanup_all_test_servers()
+        except Exception:
+            pass  # Best effort cleanup
+
         # Clean up worktree if it exists
         if session.worktree_path and session.project_path:
             try:
@@ -3002,6 +3009,7 @@ class ChadWebUI:
             verification_enabled = verification_agent != self.VERIFICATION_NONE
             verification_account_for_run = actual_verification_account if verification_enabled else None
             verification_log: list[dict[str, object]] = []
+            verified: bool | None = None  # Track verification result
 
             if session.cancel_requested:
                 final_status = "🛑 Task cancelled by user"
@@ -3323,7 +3331,9 @@ class ChadWebUI:
 
             # Determine final session status based on both task completion and verification
             overall_success = False
-            if not task_success[0]:
+            if session.cancel_requested:
+                session_status = "cancelled"
+            elif not task_success[0]:
                 session_status = "failed"
             elif not verification_enabled:
                 session_status = "completed"
