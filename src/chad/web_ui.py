@@ -27,7 +27,7 @@ from .prompts import (
     VerificationParseError,
 )
 from .git_worktree import GitWorktreeManager, MergeConflict, FileDiff
-from .ui_playwright_runner import cleanup_all_test_servers
+from .verification.ui_playwright_runner import cleanup_all_test_servers
 
 
 @dataclass
@@ -2252,7 +2252,7 @@ class ChadWebUI:
 
         # First run automated verification (flake8 + tests)
         try:
-            from .tools import verify as run_verify
+            from .verification.tools import verify as run_verify
             if on_activity:
                 on_activity("system", "Running verification (flake8 + tests)...")
 

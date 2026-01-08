@@ -3,7 +3,7 @@ The merge function doesn't seem to be working: ❌ error: Your local changes to 
 ->Changes failing the flake8 tests are being delivered as finished - check the recent session json logs in the temp dir to find examples. The agent should run verification (from chad.tools import verify; verify()) before completing. Check why this happens and fix it.
 
 Stop live view scrolling down to bottom when new lines are added, as a starting point consider:
-src/chad/visual_test_map.py
+src/chad/verification/visual_test_map.py
 Original
         "TestSubtaskTabs",
         "TestLiveViewFormat",
@@ -49,5 +49,3 @@ Modified
     }
 
 Once a task is discarded the task description should be made editable again
-
-Roughly half the files in the src/chad directory are related to testing and verifying tools rather than the core app, can you split this into more packages, for example core and verification. While doing this get rid of any unused code

@@ -7,7 +7,7 @@ flawlessly working features.
 
 ## Before making changes
 
-**For UI work, first search `src/chad/visual_test_map.py` for keywords from your task** (e.g., "reasoning effort",
+**For UI work, first search `src/chad/verification/visual_test_map.py` for keywords from your task** (e.g., "reasoning effort",
 "verification agent"). The `UI_COMPONENT_MAP` tells you which screenshot component to use and which tests cover it.
 
 Then write a test which should fail until the issue is fixed or feature is implemented. Take a before screenshot to
@@ -28,7 +28,7 @@ smallest causal change and add a regression test that fails before the fix and p
 
 ## During changes
 
-For UI changes add any new display functionality to `visual_test_map.py`.
+For UI changes add any new display functionality to `verification/visual_test_map.py`.
 
 ## After making changes
 

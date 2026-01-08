@@ -6,7 +6,7 @@ import pytest
 from chad.model_catalog import ModelCatalog
 from chad.provider_ui import ProviderUIManager
 from chad.security import SecurityManager
-from chad.ui_playwright_runner import create_temp_env
+from chad.verification.ui_playwright_runner import create_temp_env
 
 
 class DummyResponse:
