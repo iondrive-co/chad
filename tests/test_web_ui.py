@@ -2311,3 +2311,26 @@ class TestAnsiToHtml:
         # The content before and after should be present
         assert "Before" in result
         assert "After" in result
+
+    def test_strips_background_colors(self):
+        """Background colors (40-47) should be stripped to prevent white-on-dark issues."""
+        from chad.web_ui import ansi_to_html
+
+        # White background (47) - would make text unreadable on dark theme
+        text = "\x1b[47mWhite bg text\x1b[0m"
+        result = ansi_to_html(text)
+        assert "White bg text" in result
+        assert "background" not in result
+        assert "\x1b" not in result
+
+        # Extended background (48;5;N) should also be stripped
+        text = "\x1b[48;5;231mBright bg\x1b[0m"
+        result = ansi_to_html(text)
+        assert "Bright bg" in result
+        assert "background" not in result
+
+        # Extended RGB background (48;2;R;G;B) should also be stripped
+        text = "\x1b[48;2;255;255;255mRGB white bg\x1b[0m"
+        result = ansi_to_html(text)
+        assert "RGB white bg" in result
+        assert "background" not in result

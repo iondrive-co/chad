@@ -1641,16 +1641,6 @@ def ansi_to_html(text: str) -> str:
         "96": (86, 182, 194),
         "97": (255, 255, 255),
     }
-    bg_colors = {
-        "40": "#1e1e2e",
-        "41": "#e06c75",
-        "42": "#98c379",
-        "43": "#e5c07b",
-        "44": "#61afef",
-        "45": "#c678dd",
-        "46": "#56b6c2",
-        "47": "#abb2bf",
-    }
 
     # CSI sequence ending characters (covers most terminal sequences)
     CSI_ENDINGS = "ABCDEFGHJKLMPSTXZcfghlmnpqrstuz"
@@ -1727,9 +1717,7 @@ def ansi_to_html(text: str) -> str:
                                     r, g, b = _brighten_color(*basic_colors[code])
                                     result.append(f'<span style="color:rgb({r},{g},{b})">')
                                     current_styles.append("color")
-                                elif code in bg_colors:
-                                    result.append(f'<span style="background-color:{bg_colors[code]}">')
-                                    current_styles.append("bg")
+                                # Skip basic background colors (40-47) - they clash with our dark theme
                                 idx += 1
                         # Skip the entire CSI sequence (including non-SGR ones)
                         i = j + 1
