@@ -1,9 +1,11 @@
 """Tests for AI providers."""
 
 import json
+import os
 import platform
 import sys
 import textwrap
+import time
 from unittest.mock import Mock, patch
 
 import pytest
@@ -1154,6 +1156,49 @@ def test_stream_output_without_pty(monkeypatch):
     assert "hello from pipe" in output
     assert timed_out is False
     assert idle_stalled is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
+def test_stream_pty_kills_process_group_on_idle():
+    import chad.providers as providers
+
+    if not providers._HAS_PTY:
+        pytest.skip("PTY not available")
+
+    script = textwrap.dedent(
+        """
+        import subprocess, sys, time
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        print(child.pid, flush=True)
+        time.sleep(10)
+        """
+    )
+
+    process, master_fd = providers._start_pty_process([sys.executable, "-c", script])
+    output, timed_out, idle_stalled = providers._stream_pty_output(
+        process, master_fd, None, timeout=3.0, idle_timeout=0.5
+    )
+
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    assert lines, "No output captured from child process"
+    child_pid = int(lines[0])
+
+    assert idle_stalled is True
+    assert timed_out is False
+    assert process.poll() is not None
+
+    def pid_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, OSError):
+            return False
+        return True
+
+    deadline = time.time() + 2
+    while pid_alive(child_pid) and time.time() < deadline:
+        time.sleep(0.05)
+
+    assert pid_alive(child_pid) is False, "Child process survived stall termination"
 
 
 def test_stream_pipe_output_buffers_partial_lines(monkeypatch):

@@ -5,6 +5,7 @@ import os
 import re
 import select
 import shutil
+import signal
 import subprocess
 import time
 import threading
@@ -352,6 +353,51 @@ def _close_master_fd(master_fd: int | None) -> None:
         pass
 
 
+def _kill_process_tree(process: subprocess.Popen) -> None:
+    """Kill a process along with its entire process group."""
+    if process.poll() is not None:
+        return
+
+    pid = getattr(process, "pid", None)
+
+    if os.name == "nt":
+        if isinstance(pid, int):
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True,
+                    timeout=5,
+                )
+                return
+            except (subprocess.SubprocessError, OSError):
+                pass
+        try:
+            process.kill()
+        except Exception:
+            pass
+        return
+
+    if isinstance(pid, int):
+        try:
+            pgid = os.getpgid(pid)
+            if pgid == pid:
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                process.kill()
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                process.kill()
+                return
+            except Exception:
+                pass
+
+    try:
+        process.kill()
+    except Exception:
+        pass
+
+
 def _start_pty_process(
     cmd: list[str], cwd: str | None = None, env: dict | None = None
 ) -> tuple[subprocess.Popen, int | None]:
@@ -531,20 +577,7 @@ def _stream_pipe_output(
 
         timed_out = process.poll() is None and not idle_stalled
         if timed_out or idle_stalled:
-            try:
-                # On Windows, use taskkill to terminate the entire process tree
-                if os.name == "nt":
-                    try:
-                        subprocess.run(
-                            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
-                            capture_output=True,
-                            timeout=5,
-                        )
-                    except (subprocess.SubprocessError, OSError):
-                        pass
-                process.kill()
-            except Exception:
-                pass
+            _kill_process_tree(process)
         try:
             process.wait(timeout=0.1)
         except Exception:
@@ -633,9 +666,9 @@ def _stream_pty_output(
             # Drain any final output before killing - process may have produced
             # output that's still in the PTY buffer
             _drain_pty(master_fd, output_chunks, on_chunk)
+            _kill_process_tree(process)
             try:
-                process.kill()
-                process.wait()
+                process.wait(timeout=1)
             except Exception:
                 pass
         else:
