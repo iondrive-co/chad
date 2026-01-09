@@ -13,23 +13,27 @@ Edit these prompts to customize agent behavior.
 CODING_AGENT_PROMPT = """\
 {project_docs}
 
-Firstly, write a test which should fail until the following task has been successfully completed. For any UI-affecting
-work, see if the project has a means to take a "before" screenshot, if so do that and review the screenshot to confirm
-you understand the issue/current state.
+You need to complete the following task:
 ---
 # Task
 
 {task}
 ---
-Once you have completed your changes for the task, take an after screenshot if that is supported to confirm that the
-user's request is fixed/done.
-
-CRITICAL: You MUST run verification before completing your task:
-- Run flake8 linting: ./venv/bin/python -m flake8 src/chad --max-line-length=120
+Use the following sequence to complete the task:
+1. Explore the code to understand the task.
+2. if code changes are required, write test(s) which should fail until they are done. If the task affects the UI,
+then see if the project has a means (i.e. tools, agent skills, etc) to take a screenshot, if it does then ensure your
+test(s) can set up the UI to the point it can that it can display the issue, then take a "before" screenshot and review
+it to confirm you understand the issue/current state.
+3. If changes are required, make them here, adjusting tests and making more screenshots if required. If they are not
+required, then complete your investigation and move to step 7.
+4. Once you have completed your changes for the task, take an after screenshot (if that is supported) to confirm
+that the user's request is fixed/done.
+5. You MUST run verification before completing your task, for example:
+- Run linting: ./venv/bin/python -m flake8 src/chad --max-line-length=120
 - Run all tests: ./venv/bin/python -m pytest tests/ -v --tb=short -n auto
-- Fix any failures before proceeding
-
-Only after all tests and linting pass, end your response with a JSON summary block like this:
+6. Fix ALL failures and retest if required.
+7. End your response with a JSON summary block like this:
 ```json
 {{"change_summary": "One sentence describing what was changed"}}
 ```
