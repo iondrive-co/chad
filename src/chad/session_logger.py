@@ -1,18 +1,38 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
 
+def _parse_positive_int(value: str | None, default: int | None) -> int | None:
+    """Parse a positive integer environment value."""
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+        return parsed if parsed > 0 else default
+    except ValueError:
+        return default
+
+
 class SessionLogger:
     """Create and update per-session log files."""
 
-    def __init__(self, base_dir: Path | None = None) -> None:
-        self.base_dir = base_dir or Path(tempfile.gettempdir()) / "chad"
-        self.base_dir.mkdir(exist_ok=True)
+    def __init__(self, base_dir: Path | None = None, max_logs: int | None = None) -> None:
+        env_dir = os.environ.get("CHAD_SESSION_LOG_DIR")
+        resolved_dir = Path(base_dir) if base_dir else Path(env_dir) if env_dir else (
+                Path(tempfile.gettempdir()) / "chad")
+        resolved_dir.mkdir(parents=True, exist_ok=True)
+
+        env_max = _parse_positive_int(os.environ.get("CHAD_SESSION_LOG_MAX_FILES"), 1000)
+        self.base_dir = resolved_dir
+        self.max_logs = max_logs if max_logs is not None else env_max
+
+        self._prune_logs()
 
     def precreate_log(self) -> Path:
         """Pre-create an empty session log file and return its path.
@@ -35,6 +55,7 @@ class SessionLogger:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(session_data, f, indent=2)
 
+        self._prune_logs()
         return filepath
 
     def initialize_log(
@@ -96,6 +117,7 @@ class SessionLogger:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(session_data, f, indent=2)
 
+        self._prune_logs()
         return filepath
 
     def update_log(
@@ -154,3 +176,30 @@ class SessionLogger:
         except Exception:
             # Logging failures shouldn't break the task flow.
             pass
+
+    def _prune_logs(self) -> None:
+        """Trim old session logs to keep the directory small."""
+        limit = self.max_logs
+        if limit is None or limit <= 0:
+            return
+
+        try:
+            entries = [
+                (entry.stat().st_mtime, entry)
+                for entry in self.base_dir.iterdir()
+                if entry.is_file()
+                and entry.name.startswith("chad_session_")
+                and entry.name.endswith(".json")
+            ]
+        except FileNotFoundError:
+            return
+
+        if len(entries) <= limit:
+            return
+
+        entries.sort(key=lambda item: item[0], reverse=True)
+        for _, path_obj in entries[limit:]:
+            try:
+                path_obj.unlink(missing_ok=True)
+            except Exception:
+                continue
