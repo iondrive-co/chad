@@ -25,7 +25,23 @@ except ImportError:  # pragma: no cover - only hit on Windows
 
 _HAS_PTY = pty is not None
 
-CODEX_IDLE_TIMEOUT = 180.0
+
+# Configurable timeouts via environment variables
+def _get_env_float(name: str, default: float) -> float:
+    """Get a float from environment variable, with fallback to default."""
+    val = os.environ.get(name)
+    if val:
+        try:
+            return float(val)
+        except ValueError:
+            pass
+    return default
+
+
+# Idle timeout after a command completes (waiting for next action from API)
+CODEX_IDLE_TIMEOUT = _get_env_float("CODEX_IDLE_TIMEOUT", 180.0)
+# Shorter timeout during pure "thinking" phases (no command running)
+CODEX_THINKING_TIMEOUT = _get_env_float("CODEX_THINKING_TIMEOUT", 60.0)
 
 
 def find_cli_executable(name: str) -> str:
@@ -540,7 +556,12 @@ def _stream_pty_output(
     timeout: float,
     idle_timeout: float | None = None,
 ) -> tuple[str, bool, bool]:
-    """Stream output from a PTY-backed process until completion or timeout."""
+    """Stream output from a PTY-backed process until completion or timeout.
+
+    Returns (output, timed_out, idle_stalled):
+    - idle_stalled is True only if process has exited AND no output for idle_timeout
+    - If process is still running, we wait until overall timeout before killing
+    """
     if master_fd is None:
         return _stream_pipe_output(process, on_chunk, timeout, idle_timeout=idle_timeout)
 
@@ -571,17 +592,16 @@ def _stream_pty_output(
                     output_chunks.append(decoded)
                     if on_chunk:
                         on_chunk(decoded)
-                    start_time = time.time()
-                    last_activity = start_time
+                    last_activity = time.time()
 
+            # Only treat silence as a stall if the child process has exited
+            # If process is still running (waiting for API), we give it more time
             if idle_timeout and (time.time() - last_activity) >= idle_timeout:
-                idle_stalled = True
-                try:
-                    process.kill()
-                    process.wait()
-                except Exception:
-                    pass
-                break
+                if process.poll() is not None:
+                    # Process has exited and no output - true stall
+                    idle_stalled = True
+                    break
+                # Process still running - continue waiting until overall timeout
 
         timed_out = process.poll() is None and not idle_stalled
         if timed_out:
@@ -959,7 +979,7 @@ class OpenAICodexProvider(AIProvider):
         else:
             self.current_message = message
 
-    def get_response(self, timeout: float = 1800.0) -> str:  # noqa: C901
+    def get_response(self, timeout: float = 1800.0, _is_recovery: bool = False) -> str:  # noqa: C901
         import json
 
         if not self.current_message:
@@ -1094,6 +1114,8 @@ class OpenAICodexProvider(AIProvider):
                 return None
 
             api_error = [None]  # Track API errors
+            # Track last event for adaptive timeout and diagnostics
+            last_event_info = {"kind": None, "time": time.time(), "command": None}
 
             def process_chunk(chunk: str) -> None:
                 # Parse JSON events and convert to human-readable text
@@ -1134,14 +1156,20 @@ class OpenAICodexProvider(AIProvider):
                         if readable:
                             self._notify_activity("stream", readable)
 
-                        # Also send activity notifications for status bar
+                        # Track last event for diagnostics and adaptive timeout
                         if event.get("type") == "item.completed":
                             item = event.get("item", {})
-                            if item.get("type") == "reasoning":
+                            item_type = item.get("type", "")
+                            last_event_info["time"] = time.time()
+                            last_event_info["kind"] = item_type
+                            if item_type == "command_execution":
+                                last_event_info["command"] = item.get("command", "")[:80]
+                            # Also send activity notifications for status bar
+                            if item_type == "reasoning":
                                 self._notify_activity("thinking", item.get("text", "")[:80])
-                            elif item.get("type") == "agent_message":
+                            elif item_type == "agent_message":
                                 self._notify_activity("text", item.get("text", "")[:80])
-                            elif item.get("type") in ("mcp_tool_call", "command_execution"):
+                            elif item_type in ("mcp_tool_call", "command_execution"):
                                 name = item.get("tool", item.get("command", "tool"))[:50]
                                 self._notify_activity("tool", name)
                     except json.JSONDecodeError:
@@ -1157,9 +1185,30 @@ class OpenAICodexProvider(AIProvider):
             self.master_fd = None
 
             if idle_stalled:
+                # Build diagnostic info for logging
+                stall_duration = time.time() - last_event_info["time"]
+                last_kind = last_event_info["kind"] or "none"
+                last_cmd = last_event_info["command"] or ""
+                diag_msg = (
+                    f"last_event={last_kind}, stall_duration={stall_duration:.1f}s"
+                    + (f", last_cmd={last_cmd}" if last_cmd else "")
+                )
+
+                # Single recovery attempt if we have a thread_id and this isn't already a recovery
+                if self.thread_id and not _is_recovery:
+                    self._notify_activity(
+                        "stream",
+                        f"\033[33m• API stream stalled ({diag_msg}), attempting resume...\033[0m\n"
+                    )
+                    self.current_message = (
+                        "Continue with the task. If you were running a command, report its result. "
+                        "If you had completed the task, provide your final summary."
+                    )
+                    return self.get_response(timeout=timeout, _is_recovery=True)
+
+                # No thread_id or already tried recovery - fail with diagnostic info
                 raise RuntimeError(
-                    f"Codex stalled waiting for output for {int(CODEX_IDLE_TIMEOUT)}s "
-                    "— process likely waiting for input"
+                    f"Codex stalled waiting for output for {int(CODEX_IDLE_TIMEOUT)}s ({diag_msg})"
                 )
             if timed_out:
                 raise RuntimeError(f"Codex execution timed out ({int(timeout / 60)} minutes)")
