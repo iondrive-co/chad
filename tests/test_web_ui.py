@@ -2216,6 +2216,51 @@ class TestVerificationPrompt:
         assert verified is None
         assert "coding agent output was empty" in feedback
 
+    def test_run_verification_returns_rich_feedback(self, monkeypatch, tmp_path):
+        """Verification failures should include lint and test details."""
+        from chad.web_ui import ChadWebUI
+
+        class DummySecurityMgr:
+            def list_accounts(self):
+                return {"verifier": "mock"}
+
+            def get_account_model(self, _):
+                return "default"
+
+            def get_account_reasoning(self, _):
+                return "default"
+
+        # Patch verification tool to avoid running real lint/tests
+        def fake_verify():
+            return {
+                "success": False,
+                "message": "Preflight failed",
+                "phases": {
+                    "lint": {"success": False, "issues": ["E123 line 5: bad import"]},
+                    "tests": {
+                        "success": False,
+                        "failed": 2,
+                        "passed": 1,
+                        "output": "FAIL: test_example.py::test_one\nAssertionError\nFAIL: test_two\nTraceback",
+                    },
+                },
+            }
+
+        def _fail_if_called(*_args, **_kwargs):
+            raise AssertionError("create_provider should not be called when verify fails")
+
+        monkeypatch.setattr("chad.web_ui.create_provider", _fail_if_called)
+        monkeypatch.setattr("chad.verification.tools.verify", fake_verify)
+
+        web_ui = ChadWebUI(DummySecurityMgr(), "test-password")
+        verified, feedback = web_ui._run_verification(str(tmp_path), "output", "Task", "verifier")
+
+        assert verified is False
+        assert "Verification failed" in feedback
+        assert "Flake8 errors" in feedback
+        assert "E123 line 5" in feedback
+        assert "Tests failed" in feedback
+
 
 class TestAnsiToHtml:
     """Test that ANSI escape codes are properly converted to HTML spans."""
