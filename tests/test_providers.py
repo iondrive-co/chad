@@ -1065,7 +1065,8 @@ class TestImportOnWindows:
 
     @patch("chad.providers._stream_pty_output", return_value=("", False, True))
     @patch("chad.providers._start_pty_process")
-    def test_get_response_idle_stall(self, mock_start, mock_stream):
+    def test_get_response_idle_stall_no_thread_id(self, mock_start, mock_stream):
+        """Stall without thread_id should fail immediately (no recovery possible)."""
         mock_process = Mock()
         mock_process.stdin = Mock()
         mock_start.return_value = (mock_process, 11)
@@ -1075,9 +1076,67 @@ class TestImportOnWindows:
         provider.project_path = "/tmp/test_project"
         provider.current_message = "Hello"
         provider.cli_path = "/bin/codex"
+        provider.thread_id = None  # No thread_id means no recovery possible
 
         with pytest.raises(RuntimeError, match="stalled"):
             provider.get_response(timeout=1.0)
+
+    @patch("chad.providers._start_pty_process")
+    def test_get_response_stall_recovery_success(self, mock_start):
+        """Stall with thread_id should attempt recovery and succeed on retry."""
+        mock_process = Mock()
+        mock_process.stdin = Mock()
+        mock_start.return_value = (mock_process, 11)
+
+        # First call stalls, second call succeeds
+        stall_count = [0]
+
+        def fake_stream(_p, _fd, on_chunk, _t, idle_timeout=None):
+            stall_count[0] += 1
+            if stall_count[0] == 1:
+                # First call: stall
+                return "", False, True
+            else:
+                # Second call: success with response
+                on_chunk(json.dumps({
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Recovered!"}
+                }) + "\n")
+                return "", False, False
+
+        with patch("chad.providers._stream_pty_output", side_effect=fake_stream):
+            config = ModelConfig(provider="openai", model_name="gpt-4")
+            provider = OpenAICodexProvider(config)
+            provider.project_path = "/tmp/test_project"
+            provider.current_message = "Hello"
+            provider.cli_path = "/bin/codex"
+            provider.thread_id = "thread-123"  # Has thread_id so recovery is possible
+
+            result = provider.get_response(timeout=1.0)
+            assert "Recovered!" in result
+            assert stall_count[0] == 2  # First stall, then recovery
+
+    @patch("chad.providers._stream_pty_output", return_value=("", False, True))
+    @patch("chad.providers._start_pty_process")
+    def test_get_response_stall_recovery_exhausted(self, mock_start, mock_stream):
+        """Stall with thread_id should fail after single recovery attempt."""
+        mock_process = Mock()
+        mock_process.stdin = Mock()
+        mock_start.return_value = (mock_process, 11)
+
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+        provider.project_path = "/tmp/test_project"
+        provider.current_message = "Hello"
+        provider.cli_path = "/bin/codex"
+        provider.thread_id = "thread-123"  # Has thread_id
+
+        # Should fail after single recovery attempt (initial + 1 recovery = 2 calls)
+        with pytest.raises(RuntimeError, match="stalled"):
+            provider.get_response(timeout=1.0)
+
+        # Verify exactly 2 attempts were made (initial + single recovery)
+        assert mock_stream.call_count == 2
 
 
 def test_stream_output_without_pty(monkeypatch):
