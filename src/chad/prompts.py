@@ -3,6 +3,9 @@
 Edit these prompts to customize agent behavior.
 """
 
+from dataclasses import dataclass
+
+
 # =============================================================================
 # CODING AGENT SYSTEM PROMPT
 # =============================================================================
@@ -48,8 +51,14 @@ PY
 6. Fix ALL failures and retest if required.
 7. End your response with a JSON summary block like this:
 ```json
-{{"change_summary": "One sentence describing what was changed"}}
+{{
+  "change_summary": "One sentence describing what was changed",
+  "hypothesis": "Brief root cause explanation (include if investigating a bug)",
+  "before_screenshot": "/path/to/before.png (include if you took a before screenshot)",
+  "after_screenshot": "/path/to/after.png (include if you took an after screenshot)"
+}}
 ```
+Only include optional fields (hypothesis, before_screenshot, after_screenshot) when applicable.
 """
 
 
@@ -143,6 +152,16 @@ class VerificationParseError(Exception):
     pass
 
 
+@dataclass
+class CodingSummary:
+    """Structured summary extracted from coding agent response."""
+
+    change_summary: str
+    hypothesis: str | None = None
+    before_screenshot: str | None = None
+    after_screenshot: str | None = None
+
+
 def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
     """Parse the JSON response from the verification agent.
 
@@ -219,14 +238,14 @@ def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
     return passed, summary, issues
 
 
-def extract_coding_summary(response: str) -> str | None:
-    """Extract the change_summary from a coding agent response.
+def extract_coding_summary(response: str) -> CodingSummary | None:
+    """Extract the structured summary from a coding agent response.
 
     Args:
         response: Raw response from the coding agent
 
     Returns:
-        The change_summary string if found, None otherwise
+        CodingSummary with change_summary and optional hypothesis/screenshot paths, or None
     """
     import json
     import re
@@ -237,14 +256,19 @@ def extract_coding_summary(response: str) -> str | None:
         try:
             data = json.loads(json_match.group(1))
             if "change_summary" in data:
-                return data["change_summary"]
+                return CodingSummary(
+                    change_summary=data["change_summary"],
+                    hypothesis=data.get("hypothesis"),
+                    before_screenshot=data.get("before_screenshot"),
+                    after_screenshot=data.get("after_screenshot"),
+                )
         except json.JSONDecodeError:
             pass
 
-    # Try to find raw JSON with change_summary
+    # Try to find raw JSON with change_summary (fallback - only gets change_summary)
     json_match = re.search(r'\{\s*"change_summary"\s*:\s*"([^"]+)"\s*\}', response)
     if json_match:
-        return json_match.group(1)
+        return CodingSummary(change_summary=json_match.group(1))
 
     return None
 

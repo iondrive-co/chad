@@ -2051,17 +2051,31 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
         content: The message content
         collapsible: Whether to make long messages collapsible with a summary
     """
-    # All AI messages are assistant role
     role = "assistant"
 
-    # For long content, make it collapsible with a summary
     if collapsible and len(content) > 300:
-        # First try to extract structured summary from JSON block
-        summary = extract_coding_summary(content)
-        if not summary:
-            # Fall back to heuristic-based extraction
-            summary = summarize_content(content)
-        formatted = f"**{speaker}**\n\n{summary}\n\n<details><summary>Show full output</summary>\n\n{content}\n\n</details>"  # noqa: E501
+        coding_summary = extract_coding_summary(content)
+        if coding_summary:
+            summary_text = coding_summary.change_summary
+            extra_parts = []
+            if coding_summary.hypothesis:
+                extra_parts.append(f"**Hypothesis:** {coding_summary.hypothesis}")
+            if coding_summary.before_screenshot:
+                extra_parts.append(
+                    f"**Before:** [screenshot](file://{coding_summary.before_screenshot})"
+                )
+            if coding_summary.after_screenshot:
+                extra_parts.append(
+                    f"**After:** [screenshot](file://{coding_summary.after_screenshot})"
+                )
+            if extra_parts:
+                summary_text = f"{summary_text}\n\n" + "\n\n".join(extra_parts)
+        else:
+            summary_text = summarize_content(content)
+        formatted = (
+            f"**{speaker}**\n\n{summary_text}\n\n"
+            f"<details><summary>Show full output</summary>\n\n{content}\n\n</details>"
+        )
     else:
         formatted = f"**{speaker}**\n\n{content}"
 
@@ -2311,7 +2325,8 @@ class ChadWebUI:
             if on_activity:
                 on_activity("system", f"Warning: Verification could not run: {str(e)}")
 
-        change_summary = extract_coding_summary(coding_output)
+        coding_summary = extract_coding_summary(coding_output)
+        change_summary = coding_summary.change_summary if coding_summary else None
         trimmed_output = _truncate_verification_output(coding_output)
         verification_prompt = get_verification_prompt(trimmed_output, task_description, change_summary)
 
