@@ -31,7 +31,19 @@ required, then complete your investigation and move to step 7.
 that the user's request is fixed/done.
 5. You MUST run verification before completing your task, for example:
 - Run linting: ./venv/bin/python -m flake8 src/chad --max-line-length=120
-- Run all tests: ./venv/bin/python -m pytest tests/ -v --tb=short -n auto
+- Run core tests (skip heavy UI visuals): ./venv/bin/python -m pytest tests/ -v --tb=short -n auto
+                                       --ignore tests/test_ui_integration.py --ignore tests/test_ui_playwright_runner.py
+- Run only the visual tests mapped to the UI you touched (see src/chad/verification/visual_test_map.py):
+    VTESTS=$(./venv/bin/python - <<'PY'
+import subprocess
+from chad.verification.visual_test_map import tests_for_paths
+changed = subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines()
+print(" or ".join(tests_for_paths(changed)))
+PY
+)
+    if [ -n "$VTESTS" ]; then ./venv/bin/python -m pytest tests/test_ui_integration.py
+                                                       tests/test_ui_playwright_runner.py -v --tb=short -k "$VTESTS"; fi
+  If you add or change UI components, update visual_test_map.py so future runs pick the right visual tests.
 6. Fix ALL failures and retest if required.
 7. End your response with a JSON summary block like this:
 ```json
