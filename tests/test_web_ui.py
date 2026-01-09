@@ -2109,7 +2109,8 @@ class TestCodingSummaryExtraction:
 ```
 """
         result = extract_coding_summary(content)
-        assert result == "Fixed the authentication bug in login flow"
+        assert result is not None
+        assert result.change_summary == "Fixed the authentication bug in login flow"
 
     def test_extract_coding_summary_from_raw_json(self):
         """Extract summary from raw JSON without code block."""
@@ -2117,7 +2118,44 @@ class TestCodingSummaryExtraction:
 
         content = 'Done! {"change_summary": "Added new feature"}'
         result = extract_coding_summary(content)
-        assert result == "Added new feature"
+        assert result is not None
+        assert result.change_summary == "Added new feature"
+
+    def test_extract_coding_summary_with_all_fields(self):
+        """Extract summary with hypothesis and screenshots."""
+        from chad.prompts import extract_coding_summary
+
+        content = '''Done with the fix.
+
+```json
+{
+  "change_summary": "Fixed login bug",
+  "hypothesis": "Race condition in token refresh",
+  "before_screenshot": "/tmp/before.png",
+  "after_screenshot": "/tmp/after.png"
+}
+```
+'''
+        result = extract_coding_summary(content)
+        assert result is not None
+        assert result.change_summary == "Fixed login bug"
+        assert result.hypothesis == "Race condition in token refresh"
+        assert result.before_screenshot == "/tmp/before.png"
+        assert result.after_screenshot == "/tmp/after.png"
+
+    def test_extract_coding_summary_partial_fields(self):
+        """Extract summary with only some optional fields."""
+        from chad.prompts import extract_coding_summary
+
+        content = '''```json
+{"change_summary": "Added feature", "hypothesis": "User needs this"}
+```'''
+        result = extract_coding_summary(content)
+        assert result is not None
+        assert result.change_summary == "Added feature"
+        assert result.hypothesis == "User needs this"
+        assert result.before_screenshot is None
+        assert result.after_screenshot is None
 
     def test_extract_coding_summary_returns_none_when_missing(self):
         """Return None when no change_summary found."""
@@ -2167,6 +2205,32 @@ More details here...
         message = make_chat_message("CODING AI", content)
         # Should use heuristic extraction (starts with "I've updated...")
         assert "I've updated the authentication module" in message["content"]
+
+    def test_make_chat_message_displays_hypothesis_and_screenshots(self):
+        """make_chat_message should show hypothesis and screenshot links."""
+        from chad.web_ui import make_chat_message
+
+        content = '''Working on the task...
+''' + "x" * 300 + '''
+```json
+{
+  "change_summary": "Fixed the display issue",
+  "hypothesis": "CSS z-index conflict",
+  "before_screenshot": "/tmp/screenshots/before.png",
+  "after_screenshot": "/tmp/screenshots/after.png"
+}
+```
+'''
+        message = make_chat_message("CODING AI", content)
+        content_str = message["content"]
+        summary_part = content_str.split("<details>")[0]
+        assert "Fixed the display issue" in summary_part
+        assert "Hypothesis:" in summary_part
+        assert "CSS z-index conflict" in summary_part
+        assert "Before:" in summary_part
+        assert "file:///tmp/screenshots/before.png" in summary_part
+        assert "After:" in summary_part
+        assert "file:///tmp/screenshots/after.png" in summary_part
 
 
 class TestVerificationPrompt:
