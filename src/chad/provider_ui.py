@@ -329,10 +329,7 @@ class ProviderUIManager:
         return platform_path(base_home / ".chad" / "codex-homes" / account_name)
 
     def _sync_codex_home(self, account_name: str) -> None:
-        """Sync real-home Codex data into the isolated home on Windows."""
-        if os.name != "nt":
-            return
-
+        """Sync real-home Codex data into the isolated home."""
         isolated_home = platform_path(self._get_codex_home(account_name) / ".codex")
         real_home = platform_path(safe_home(ignore_temp_home=True) / ".codex")
         if not real_home.exists():
