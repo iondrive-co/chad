@@ -126,12 +126,13 @@ class SessionLogger:
         chat_history: Iterable,
         *,
         streaming_transcript: str | None = None,
-        streaming_history: list[tuple[str, str]] | None = None,
+        streaming_history: list[tuple[str, str] | tuple[str, str, str]] | None = None,
         success: bool | None = None,
         completion_reason: str | None = None,
         status: str = "running",
         verification_attempts: list | None = None,
         final_status: str | None = None,
+        last_event: dict | None = None,
     ) -> None:
         """Update an existing session log with new data.
 
@@ -139,11 +140,12 @@ class SessionLogger:
             filepath: Path to the session log file
             chat_history: Structured chat messages (for backward compatibility)
             streaming_transcript: Full streaming output from the session (flat text)
-            streaming_history: Structured streaming output as (ai_name, chunk) tuples
+            streaming_history: Structured streaming output as (ai_name, chunk[, timestamp]) tuples
             success: Whether the task succeeded
             completion_reason: Why the task ended
             status: Current status (running, completed, failed)
             final_status: Final task status text to surface failures
+            last_event: Optional diagnostics for the last provider event/command
         """
         try:
             with open(filepath, encoding="utf-8") as f:
@@ -157,12 +159,28 @@ class SessionLogger:
 
             # Store structured streaming history with AI names preserved
             if streaming_history is not None:
-                now = datetime.now().isoformat()
-                session_data["streaming_history"] = [
-                    {"agent": agent, "content": content, "timestamp": now} for agent, content in streaming_history
-                ]
+                session_data["streaming_history"] = []
+                transcript_parts = []
+                for entry in streaming_history:
+                    timestamp = datetime.now().isoformat()
+                    agent = ""
+                    content = ""
+                    if isinstance(entry, tuple):
+                        if len(entry) == 3:
+                            agent, content, timestamp = entry
+                        elif len(entry) >= 2:
+                            agent, content = entry[0], entry[1]
+                    elif isinstance(entry, dict):
+                        agent = entry.get("agent", "")
+                        content = entry.get("content", "")
+                        timestamp = entry.get("timestamp", timestamp)
+                    session_data["streaming_history"].append(
+                        {"agent": agent, "content": content, "timestamp": timestamp}
+                    )
+                    if content:
+                        transcript_parts.append(content)
                 # Also create flat transcript for backward compatibility
-                session_data["streaming_transcript"] = "".join(chunk for _, chunk in streaming_history)
+                session_data["streaming_transcript"] = "".join(transcript_parts)
             elif streaming_transcript is not None:
                 session_data["streaming_transcript"] = streaming_transcript
 
@@ -172,6 +190,8 @@ class SessionLogger:
                 session_data["completion_reason"] = completion_reason
             if final_status is not None:
                 session_data["final_status"] = final_status
+            if last_event is not None:
+                session_data["last_event"] = last_event
 
             with open(filepath, "w", encoding="utf-8") as f:
                 json.dump(session_data, f, indent=2)
