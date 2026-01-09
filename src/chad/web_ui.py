@@ -2087,6 +2087,8 @@ class ChadWebUI:
         self.session_logger = SessionLogger()
         # Store dropdown references for cross-tab updates
         self._session_dropdowns: dict[str, dict] = {}
+        # Store provider card delete events for chaining dropdown updates
+        self._provider_delete_events: list = []
 
     def get_session(self, session_id: str) -> Session:
         """Get or create a session by ID."""
@@ -5238,11 +5240,12 @@ class ChadWebUI:
                 return handler
 
             delete_outputs = [pending_delete_state] + provider_outputs
-            card["delete_btn"].click(
+            delete_event = card["delete_btn"].click(
                 fn=make_delete_handler(),
                 inputs=[pending_delete_state, card["account_state"]],
                 outputs=delete_outputs,
             )
+            self._provider_delete_events.append(delete_event)
 
     def create_interface(self) -> gr.Blocks:
         """Create the Gradio interface."""
@@ -5540,6 +5543,38 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
 
             if all_dropdown_outputs:
                 main_tabs.select(on_tab_select, outputs=all_dropdown_outputs)
+
+            # Chain dropdown refresh to provider delete events
+            # This ensures dropdowns update when providers are deleted
+            def refresh_dropdowns_after_delete():
+                """Refresh all session dropdowns after a provider is deleted."""
+                accounts = self.security_mgr.list_accounts()
+                account_choices = list(accounts.keys())
+                none_label = (
+                    "None (disable verification)"
+                    if self.VERIFICATION_NONE_LABEL in account_choices
+                    else self.VERIFICATION_NONE_LABEL
+                )
+                verification_choices = [
+                    (self.SAME_AS_CODING, self.SAME_AS_CODING),
+                    (none_label, self.VERIFICATION_NONE),
+                    *[(account, account) for account in account_choices],
+                ]
+
+                updates = []
+                for session_id in self._session_dropdowns:
+                    # Update choices; reset value to first valid choice if current is invalid
+                    first_choice = account_choices[0] if account_choices else None
+                    updates.append(gr.update(choices=account_choices, value=first_choice))
+                    updates.append(gr.update(choices=verification_choices))
+                return updates
+
+            if all_dropdown_outputs and self._provider_delete_events:
+                for delete_event in self._provider_delete_events:
+                    delete_event.then(
+                        fn=refresh_dropdowns_after_delete,
+                        outputs=all_dropdown_outputs,
+                    )
 
             return interface
 
