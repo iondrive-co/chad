@@ -19,6 +19,7 @@ VISUAL_TEST_MAP: Maps source files to test classes (for targeted test runs).
 
 from __future__ import annotations
 from dataclasses import dataclass
+from typing import Iterable
 
 
 @dataclass
@@ -218,6 +219,48 @@ def get_screenshot_params(search_term: str) -> tuple[str, str | None] | None:
     """
     component = find_component(search_term)
     return (component.tab, component.component) if component else None
+
+
+def tests_for_paths(paths: Iterable[str]) -> list[str]:
+    """Return visual test classes relevant to the given file paths."""
+    normalized = [p.replace("\\", "/") for p in paths]
+    tests: set[str] = set()
+    for component in UI_COMPONENT_MAP.values():
+        for path in normalized:
+            if path.endswith(component.source_file):
+                tests.update(component.tests)
+    return sorted(tests)
+
+
+def tests_for_keywords(keywords: Iterable[str]) -> list[str]:
+    """Return visual test classes relevant to the given keywords."""
+    tests: set[str] = set()
+    for keyword in keywords:
+        component = find_component(keyword)
+        if component:
+            tests.update(component.tests)
+    return sorted(tests)
+
+
+def _main(argv: list[str] | None = None) -> int:
+    """CLI helper: print visual tests for given paths or keywords."""
+    import argparse
+    parser = argparse.ArgumentParser(description="List visual tests for given paths or keywords.")
+    parser.add_argument("--paths", nargs="*", default=[], help="File paths to match against source files")
+    parser.add_argument("--keywords", nargs="*", default=[], help="Keywords to match UI components")
+    args = parser.parse_args(argv)
+
+    selected: set[str] = set()
+    selected.update(tests_for_paths(args.paths))
+    selected.update(tests_for_keywords(args.keywords))
+
+    for test in sorted(selected):
+        print(test)
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(_main())
 
 
 # =============================================================================

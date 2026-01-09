@@ -1935,8 +1935,14 @@ def test_session_logger_preserves_streaming_history_with_agent_names():
     # Verify structured history is preserved
     assert "streaming_history" in data
     assert len(data["streaming_history"]) == 3
-    assert data["streaming_history"][0] == {"agent": "CODING AI", "content": "Processing request\n"}
-    assert data["streaming_history"][2] == {"agent": "VERIFICATION AI", "content": "Checking work...\n"}
+    first = data["streaming_history"][0]
+    last = data["streaming_history"][2]
+    assert first["agent"] == "CODING AI"
+    assert first["content"] == "Processing request\n"
+    assert "timestamp" in first
+    assert last["agent"] == "VERIFICATION AI"
+    assert last["content"] == "Checking work...\n"
+    assert "timestamp" in last
 
     # Verify flat transcript is also created for backward compatibility
     assert "streaming_transcript" in data
