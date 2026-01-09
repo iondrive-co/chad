@@ -497,6 +497,10 @@ def _stream_pipe_output(
                 if idle_timeout_callback and not idle_timeout_callback(elapsed):
                     last_activity = time.time()
                     continue
+                # Before declaring stall, check if data arrived in the queue
+                if not output_queue.empty():
+                    last_activity = time.time()
+                    continue
                 idle_stalled = True
                 break
 
@@ -614,11 +618,21 @@ def _stream_pty_output(
                 if idle_timeout_callback and not idle_timeout_callback(elapsed):
                     last_activity = time.time()
                     continue
+                # Before declaring stall, try one final drain - data may have arrived
+                chunks_before = len(output_chunks)
+                _drain_pty(master_fd, output_chunks, on_chunk)
+                if len(output_chunks) > chunks_before:
+                    # Got new data during drain, reset and continue
+                    last_activity = time.time()
+                    continue
                 idle_stalled = True
                 break
 
         timed_out = process.poll() is None and not idle_stalled
         if timed_out or idle_stalled:
+            # Drain any final output before killing - process may have produced
+            # output that's still in the PTY buffer
+            _drain_pty(master_fd, output_chunks, on_chunk)
             try:
                 process.kill()
                 process.wait()
@@ -1135,6 +1149,8 @@ class OpenAICodexProvider(AIProvider):
             # Track last event for adaptive timeout and diagnostics
             last_event_info = {"kind": "start", "time": time.time(), "command": None}
             idle_diag = {"elapsed": 0.0, "limit": CODEX_THINK_IDLE_TIMEOUT, "kind": "start"}
+            # Track command categories for session analysis
+            cmd_stats = {"total": 0, "exploration": 0, "implementation": 0, "commands": []}
 
             def process_chunk(chunk: str) -> None:
                 # Parse JSON events and convert to human-readable text
@@ -1182,7 +1198,23 @@ class OpenAICodexProvider(AIProvider):
                             last_event_info["time"] = time.time()
                             last_event_info["kind"] = item_type
                             if item_type == "command_execution":
-                                last_event_info["command"] = item.get("command", "")[:80]
+                                cmd = item.get("command", "")
+                                last_event_info["command"] = cmd[:80]
+                                # Categorize command for session analysis
+                                cmd_stats["total"] += 1
+                                cmd_lower = cmd.lower()
+                                # Implementation: file writes, edits, git commits
+                                if any(x in cmd_lower for x in [
+                                    "edit ", "write ", "> ", ">> ", "tee ",
+                                    "git add", "git commit", "patch ", "sed -i",
+                                ]):
+                                    cmd_stats["implementation"] += 1
+                                else:
+                                    cmd_stats["exploration"] += 1
+                                # Keep last N commands for diagnostics
+                                cmd_stats["commands"].append(cmd[:100])
+                                if len(cmd_stats["commands"]) > 20:
+                                    cmd_stats["commands"] = cmd_stats["commands"][-20:]
                             idle_diag["limit"] = (
                                 CODEX_COMMAND_IDLE_TIMEOUT
                                 if item_type == "command_execution"
@@ -1227,6 +1259,14 @@ class OpenAICodexProvider(AIProvider):
                 "captured_at": datetime.now(UTC).isoformat(),
                 "last_event_age": max(0.0, time.time() - last_event_info.get("time", time.time())),
             }
+            # Add command statistics for session analysis
+            if cmd_stats["total"] > 0:
+                self.last_event_info["cmd_stats"] = {
+                    "total": cmd_stats["total"],
+                    "exploration": cmd_stats["exploration"],
+                    "implementation": cmd_stats["implementation"],
+                    "last_commands": cmd_stats["commands"][-10:],  # Last 10 for brevity
+                }
             if idle_diag.get("elapsed"):
                 self.last_event_info["last_silence"] = {
                     "elapsed": idle_diag["elapsed"],

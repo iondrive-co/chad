@@ -901,7 +901,8 @@ class TestOpenAICodexProvider:
         mock_select.return_value = ([], [], [])
 
         # Simulate timeout by having time advance past the limit
-        mock_time.side_effect = [0, 0, 2000, 2000]
+        # Provide enough values for all time.time() calls in the code path
+        mock_time.side_effect = [0, 0, 0, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000]
 
         config = ModelConfig(provider="openai", model_name="gpt-4")
         provider = OpenAICodexProvider(config)
