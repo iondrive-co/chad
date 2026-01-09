@@ -1973,7 +1973,7 @@ class TestSessionLogIncludesTask:
 
         return ChadWebUI(mock_security_mgr, "test-password")
 
-    @patch("chad.providers.create_provider")
+    @patch("chad.web_ui.create_provider")
     def test_session_log_starts_with_task(self, mock_create_provider, web_ui, tmp_path, git_repo):
         """Session log should include task description as first message."""
         import json
@@ -1983,15 +1983,18 @@ class TestSessionLogIncludesTask:
         mock_provider.start_session.return_value = True
         mock_provider.get_response.return_value = "Task completed successfully"
         mock_provider.stop_session.return_value = None
-        mock_provider.is_alive.return_value = False  # Task completes immediately
+        mock_provider.is_alive.return_value = False
+        mock_provider.last_event_info = None  # Prevent MagicMock from breaking JSON serialization
         mock_create_provider.return_value = mock_provider
 
         task_description = "Fix the login bug"
 
-        # Create a session and run task
+        # Create a session and run task (verification disabled for speed)
         session = web_ui.create_session("test")
         session.log_path = web_ui.session_logger.precreate_log()
-        list(web_ui.start_chad_task(session.id, str(git_repo), task_description, "coding-ai"))
+        list(web_ui.start_chad_task(
+            session.id, str(git_repo), task_description, "coding-ai", "__verification_none__"
+        ))
 
         # Get the session log path
         session_log_path = session.log_path
