@@ -2246,27 +2246,46 @@ class ChadWebUI:
 
             verify_result = run_verify()
             if not verify_result.get("success", False):
-                issues = []
+                issues: list[str] = []
+                failure_message = verify_result.get("message") or verify_result.get("error")
+                if failure_message:
+                    issues.append(failure_message)
+
                 phases = verify_result.get("phases", {})
 
                 lint_phase = phases.get("lint", {})
                 if not lint_phase.get("success", True):
-                    lint_issues = lint_phase.get("issues", [])
+                    lint_issues = lint_phase.get("issues") or []
                     if lint_issues:
-                        issues.append(f"Flake8 errors: {'; '.join(lint_issues)}")
+                        joined = "\n".join(f"- {issue}" for issue in lint_issues[:5])
+                        issues.append(f"Flake8 errors:\n{joined}")
                     else:
                         issues.append(f"Flake8 failed with {lint_phase.get('issue_count', 0)} errors")
+
+                pip_phase = phases.get("pip_check", {})
+                if not pip_phase.get("success", True):
+                    pip_issues = pip_phase.get("issues") or []
+                    if pip_issues:
+                        joined = "\n".join(f"- {issue}" for issue in pip_issues[:5])
+                        issues.append(f"Dependency issues:\n{joined}")
+                    else:
+                        issues.append("Package dependency issues found")
 
                 test_phase = phases.get("tests", {})
                 if not test_phase.get("success", True):
                     failed_count = test_phase.get("failed", 0)
-                    issues.append(f"Tests failed: {failed_count} test(s) failed")
+                    passed_count = test_phase.get("passed", 0)
+                    output_lines = (test_phase.get("output") or "").strip().splitlines()
+                    snippet = "\n".join(output_lines[-5:]) if output_lines else ""
+                    summary = f"Tests failed ({failed_count} failed, {passed_count} passed)"
+                    if snippet:
+                        summary += f":\n{snippet}"
+                    issues.append(summary)
 
-                pip_phase = phases.get("pip_check", {})
-                if not pip_phase.get("success", True):
-                    issues.append("Package dependency issues found")
+                if not issues:
+                    issues.append("Verification failed")
 
-                feedback = "Verification failed - " + "; ".join(issues) if issues else "Verification failed"
+                feedback = "Verification failed:\n" + "\n\n".join(issues)
                 return False, feedback
         except Exception as e:
             # If verification fails to run, log but continue with LLM verification
