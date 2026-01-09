@@ -8,6 +8,7 @@ import threading
 import queue
 import uuid
 import html
+from datetime import datetime, UTC
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
@@ -53,6 +54,22 @@ class Session:
     merge_conflicts: list[MergeConflict] | None = None
 
 
+def _history_entry(agent: str, content: str) -> tuple[str, str, str]:
+    """Create a streaming history entry with a timestamp."""
+    return (agent, content, datetime.now(UTC).isoformat())
+
+
+def _history_contents(history: list[tuple]) -> list[str]:
+    """Extract textual content from streaming history entries."""
+    contents: list[str] = []
+    for entry in history or []:
+        if isinstance(entry, tuple) and len(entry) >= 2:
+            contents.append(entry[1])
+        elif isinstance(entry, dict) and "content" in entry:
+            contents.append(str(entry["content"]))
+    return contents
+
+
 @dataclass
 class VerificationDropdownState:
     """Resolved state for verification model/reasoning dropdowns."""
@@ -66,7 +83,7 @@ class VerificationDropdownState:
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\][^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")
 
-DEFAULT_CODING_TIMEOUT = 1800.0
+DEFAULT_CODING_TIMEOUT = 1500.0
 DEFAULT_VERIFICATION_TIMEOUT = 600.0
 MAX_VERIFICATION_PROMPT_CHARS = 6000
 
@@ -2756,7 +2773,9 @@ class ChadWebUI:
             status_prefix += "• Mode: Direct (coding AI only)\n\n"
 
             chat_history.append({"role": "user", "content": f"**Task**\n\n{task_description}"})
-            self.session_logger.update_log(session.log_path, chat_history)
+            self.session_logger.update_log(
+                session.log_path, chat_history, last_event=self._last_event_info(session)
+            )
 
             initial_status = f"{status_prefix}⏳ Initializing session..."
             yield make_yield(chat_history, initial_status, summary=initial_status, interactive=False)
@@ -2857,7 +2876,7 @@ class ChadWebUI:
 
             last_activity = ""
             streaming_buffer = ""
-            full_history = []  # Infinite history - list of (ai_name, content) tuples
+            full_history = []  # Infinite history - list of (ai_name, content, timestamp) tuples
             display_buffer = LiveStreamDisplayBuffer()
             last_yield_time = 0.0
             last_log_update_time = time_module.time()
@@ -2907,7 +2926,9 @@ class ChadWebUI:
                         last_activity = ""
                         current_live_stream = ""
                         render_state.reset()
-                        self.session_logger.update_log(session.log_path, chat_history)
+                        self.session_logger.update_log(
+                            session.log_path, chat_history, last_event=self._last_event_info(session)
+                        )
                         yield make_yield(chat_history, current_status, current_live_stream)
                         last_yield_time = time_module.time()
 
@@ -2928,14 +2949,14 @@ class ChadWebUI:
                     elif msg_type == "ai_switch":
                         current_ai = msg[1]
                         streaming_buffer = ""
-                        full_history.append((current_ai, "Processing request\n"))
+                        full_history.append(_history_entry(current_ai, "Processing request\n"))
                         display_buffer.append("Processing request\n")
 
                     elif msg_type == "stream":
                         chunk = msg[1]
                         if chunk.strip():
                             streaming_buffer += chunk
-                            full_history.append((current_ai, chunk))
+                            full_history.append(_history_entry(current_ai, chunk))
                             display_buffer.append(chunk)
                             now = time_module.time()
                             if now - last_yield_time >= min_yield_interval:
@@ -2981,11 +3002,7 @@ class ChadWebUI:
 
                     # Periodically update session log with streaming history
                     if full_history and now - last_log_update_time >= log_update_interval:
-                        self.session_logger.update_log(
-                            session.log_path,
-                            chat_history,
-                            streaming_history=full_history,
-                        )
+                        self._update_session_log(session, chat_history, full_history)
                         last_log_update_time = now
 
             if session.cancel_requested:
@@ -3016,7 +3033,9 @@ class ChadWebUI:
                                 chat_history[pending_message_idx] = make_chat_message(speaker, content)
                             else:
                                 chat_history.append(make_chat_message(speaker, content))
-                            self.session_logger.update_log(session.log_path, chat_history)
+                            self.session_logger.update_log(
+                                session.log_path, chat_history, last_event=self._last_event_info(session)
+                            )
                             yield make_yield(chat_history, current_status, "")
                     except queue.Empty:
                         break
@@ -3057,7 +3076,7 @@ class ChadWebUI:
                             break
 
                 if not last_coding_output and full_history:
-                    last_coding_output = "".join(chunk for _, chunk in full_history[-50:]).strip()
+                    last_coding_output = "".join(_history_contents(full_history[-50:])).strip()
 
                 if not last_coding_output:
                     last_coding_output = completion_reason[0] or ""
@@ -3083,7 +3102,9 @@ class ChadWebUI:
                             "content": f"───────────── 🔍 VERIFICATION (Attempt {verification_attempt}) ─────────────",
                         }
                     )
-                    self.session_logger.update_log(session.log_path, chat_history)
+                    self.session_logger.update_log(
+                        session.log_path, chat_history, last_event=self._last_event_info(session)
+                    )
 
                     # Show verification status
                     verify_status = (
@@ -3174,7 +3195,10 @@ class ChadWebUI:
                             }
                         )
                         self.session_logger.update_log(
-                            session.log_path, chat_history, verification_attempts=verification_log
+                            session.log_path,
+                            chat_history,
+                            verification_attempts=verification_log,
+                            last_event=self._last_event_info(session),
                         )
                         break
                     elif verified:
@@ -3186,12 +3210,18 @@ class ChadWebUI:
                             }
                         )
                         self.session_logger.update_log(
-                            session.log_path, chat_history, verification_attempts=verification_log
+                            session.log_path,
+                            chat_history,
+                            verification_attempts=verification_log,
+                            last_event=self._last_event_info(session),
                         )
                     else:
                         chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
                         self.session_logger.update_log(
-                            session.log_path, chat_history, verification_attempts=verification_log
+                            session.log_path,
+                            chat_history,
+                            verification_attempts=verification_log,
+                            last_event=self._last_event_info(session),
                         )
 
                         # If not verified and session is still active, send feedback to coding agent
@@ -3206,7 +3236,9 @@ class ChadWebUI:
                                 "*Sending verification feedback to coding agent...*"
                             )
                             chat_history.append({"role": "user", "content": revision_content})
-                            self.session_logger.update_log(session.log_path, chat_history)
+                            self.session_logger.update_log(
+                                session.log_path, chat_history, last_event=self._last_event_info(session)
+                            )
                             revision_status = f"{status_prefix}🔄 Sending revision request to coding agent..."
                             yield make_yield(chat_history, revision_status, "")
 
@@ -3226,7 +3258,9 @@ class ChadWebUI:
                                 }
                             )
                             revision_pending_idx = len(chat_history) - 1
-                            self.session_logger.update_log(session.log_path, chat_history)
+                            self.session_logger.update_log(
+                                session.log_path, chat_history, last_event=self._last_event_info(session)
+                            )
                             revision_status_msg = f"{status_prefix}⏳ Coding agent working on revisions..."
                             yield make_yield(chat_history, revision_status_msg, "")
 
@@ -3283,7 +3317,10 @@ class ChadWebUI:
                                 session.provider = None
                                 session.config = None
                                 self.session_logger.update_log(
-                                    session.log_path, chat_history, verification_attempts=verification_log
+                                    session.log_path,
+                                    chat_history,
+                                    verification_attempts=verification_log,
+                                    last_event=self._last_event_info(session),
                                 )
                                 break
 
@@ -3292,7 +3329,10 @@ class ChadWebUI:
                                 chat_history[revision_pending_idx] = make_chat_message("CODING AI", parsed_revision)
                                 last_coding_output = parsed_revision
                                 self.session_logger.update_log(
-                                    session.log_path, chat_history, verification_attempts=verification_log
+                                    session.log_path,
+                                    chat_history,
+                                    verification_attempts=verification_log,
+                                    last_event=self._last_event_info(session),
                                 )
                             else:
                                 chat_history[revision_pending_idx] = {
@@ -3300,7 +3340,10 @@ class ChadWebUI:
                                     "content": "**CODING AI**\n\n❌ *No response to revision request*",
                                 }
                                 self.session_logger.update_log(
-                                    session.log_path, chat_history, verification_attempts=verification_log
+                                    session.log_path,
+                                    chat_history,
+                                    verification_attempts=verification_log,
+                                    last_event=self._last_event_info(session),
                                 )
                                 break
 
@@ -3314,7 +3357,10 @@ class ChadWebUI:
                             break
 
                     self.session_logger.update_log(
-                        session.log_path, chat_history, verification_attempts=verification_log
+                        session.log_path,
+                        chat_history,
+                        verification_attempts=verification_log,
+                        last_event=self._last_event_info(session),
                     )
 
                 if verified is True:
@@ -3347,7 +3393,7 @@ class ChadWebUI:
                 chat_history.append({"role": "user", "content": failure_msg})
 
             if final_status:
-                full_history.append(("SYSTEM", f"\n\n[FINAL STATUS] {final_status}"))
+                full_history.append(_history_entry("SYSTEM", f"\n\n[FINAL STATUS] {final_status}"))
 
             # Determine final session status based on both task completion and verification
             overall_success = False
@@ -3375,6 +3421,7 @@ class ChadWebUI:
                 status=session_status,
                 verification_attempts=verification_log,
                 final_status=final_status,
+                last_event=self._last_event_info(session),
             )
             if session.log_path:
                 final_status += f"\n\n*Session log: {session.log_path}*"
@@ -3669,7 +3716,7 @@ class ChadWebUI:
         # Stream updates while waiting
         import time as time_module
 
-        full_history = []  # List of (ai_name, content) tuples
+        full_history = []  # List of (ai_name, content, timestamp) tuples
         current_ai = "CODING AI"
         display_buffer = LiveStreamDisplayBuffer()
         last_yield_time = 0.0
@@ -3684,7 +3731,7 @@ class ChadWebUI:
                 if msg_type == "stream":
                     chunk = msg[1]
                     if chunk.strip():
-                        full_history.append((current_ai, chunk))
+                        full_history.append(_history_entry(current_ai, chunk))
                         display_buffer.append(chunk)
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
@@ -4401,11 +4448,17 @@ class ChadWebUI:
 
         return "\n".join(context_parts)
 
+    def _last_event_info(self, session: Session) -> dict | None:
+        """Return the last event snapshot from the provider if available."""
+        provider = getattr(session, "provider", None)
+        info = getattr(provider, "last_event_info", None) if provider else None
+        return info if info else None
+
     def _update_session_log(
         self,
         session: Session,
         chat_history: list,
-        streaming_history: list[tuple[str, str]] | None = None,
+        streaming_history: list[tuple[str, str] | tuple[str, str, str]] | None = None,
         verification_attempts: list | None = None,
     ):
         """Update the session log with current state.
@@ -4413,7 +4466,7 @@ class ChadWebUI:
         Args:
             session: The session to update
             chat_history: Current chat history
-            streaming_history: Optional streaming history as (ai_name, content) tuples
+            streaming_history: Optional streaming history as (ai_name, content, timestamp) tuples
         """
         if session.log_path:
             self.session_logger.update_log(
@@ -4422,6 +4475,7 @@ class ChadWebUI:
                 streaming_history=streaming_history,
                 status="continued",
                 verification_attempts=verification_attempts,
+                last_event=self._last_event_info(session),
             )
 
     def _create_session_ui(self, session_id: str, is_first: bool = False):

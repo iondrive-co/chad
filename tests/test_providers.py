@@ -986,7 +986,7 @@ class TestOpenAICodexProvider:
             {"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}},
         ]
 
-        def fake_stream(_p, _fd, on_chunk, _t, idle_timeout=None):
+        def fake_stream(_p, _fd, on_chunk, _t, idle_timeout=None, idle_timeout_callback=None):
             for event in events:
                 on_chunk(json.dumps(event) + "\n")
             return "", False, False
@@ -1009,7 +1009,7 @@ class TestOpenAICodexProvider:
     def test_reconnect_error_without_recovery(self):
         events = [{"type": "error", "message": "Reconnecting... 5/5"}]
 
-        def fake_stream(_p, _fd, on_chunk, _t, idle_timeout=None):
+        def fake_stream(_p, _fd, on_chunk, _t, idle_timeout=None, idle_timeout_callback=None):
             for event in events:
                 on_chunk(json.dumps(event) + "\n")
             return "", False, False
@@ -1091,7 +1091,7 @@ class TestImportOnWindows:
         # First call stalls, second call succeeds
         stall_count = [0]
 
-        def fake_stream(_p, _fd, on_chunk, _t, idle_timeout=None):
+        def fake_stream(_p, _fd, on_chunk, _t, idle_timeout=None, idle_timeout_callback=None):
             stall_count[0] += 1
             if stall_count[0] == 1:
                 # First call: stall

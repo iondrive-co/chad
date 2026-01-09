@@ -9,6 +9,7 @@ import subprocess
 import time
 import threading
 import queue
+from datetime import datetime, UTC
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,7 +40,9 @@ def _get_env_float(name: str, default: float) -> float:
 
 
 # Idle timeout after a command completes (waiting for next action from API)
-CODEX_IDLE_TIMEOUT = _get_env_float("CODEX_IDLE_TIMEOUT", 180.0)
+CODEX_IDLE_TIMEOUT = _get_env_float("CODEX_IDLE_TIMEOUT", 90.0)
+CODEX_THINK_IDLE_TIMEOUT = _get_env_float("CODEX_THINK_IDLE_TIMEOUT", 240.0)
+CODEX_COMMAND_IDLE_TIMEOUT = _get_env_float("CODEX_COMMAND_IDLE_TIMEOUT", 420.0)
 # Shorter timeout during pure "thinking" phases (no command running)
 CODEX_THINKING_TIMEOUT = _get_env_float("CODEX_THINKING_TIMEOUT", 60.0)
 
@@ -418,6 +421,7 @@ def _stream_pipe_output(
     on_chunk: Callable[[str], None] | None,
     timeout: float,
     idle_timeout: float | None = None,
+    idle_timeout_callback: Callable[[float], bool] | None = None,
 ) -> tuple[str, bool, bool]:
     """Stream output from a pipe-backed process until completion or timeout.
 
@@ -489,6 +493,10 @@ def _stream_pipe_output(
                 last_activity = start_time
 
             if idle_timeout and (time.time() - last_activity) >= idle_timeout:
+                elapsed = time.time() - last_activity
+                if idle_timeout_callback and not idle_timeout_callback(elapsed):
+                    last_activity = time.time()
+                    continue
                 idle_stalled = True
                 break
 
@@ -555,15 +563,22 @@ def _stream_pty_output(
     on_chunk: Callable[[str], None] | None,
     timeout: float,
     idle_timeout: float | None = None,
+    idle_timeout_callback: Callable[[float], bool] | None = None,
 ) -> tuple[str, bool, bool]:
     """Stream output from a PTY-backed process until completion or timeout.
 
     Returns (output, timed_out, idle_stalled):
-    - idle_stalled is True only if process has exited AND no output for idle_timeout
-    - If process is still running, we wait until overall timeout before killing
+    - idle_stalled is True when no output for idle_timeout (or callback signals stall)
+    - If process is still running, we still respect idle_timeout_callback to decide whether to keep waiting
     """
     if master_fd is None:
-        return _stream_pipe_output(process, on_chunk, timeout, idle_timeout=idle_timeout)
+        return _stream_pipe_output(
+            process,
+            on_chunk,
+            timeout,
+            idle_timeout=idle_timeout,
+            idle_timeout_callback=idle_timeout_callback,
+        )
 
     output_chunks: list[str] = []
     start_time = time.time()
@@ -594,19 +609,21 @@ def _stream_pty_output(
                         on_chunk(decoded)
                     last_activity = time.time()
 
-            # Only treat silence as a stall if the child process has exited
-            # If process is still running (waiting for API), we give it more time
             if idle_timeout and (time.time() - last_activity) >= idle_timeout:
-                if process.poll() is not None:
-                    # Process has exited and no output - true stall
-                    idle_stalled = True
-                    break
-                # Process still running - continue waiting until overall timeout
+                elapsed = time.time() - last_activity
+                if idle_timeout_callback and not idle_timeout_callback(elapsed):
+                    last_activity = time.time()
+                    continue
+                idle_stalled = True
+                break
 
         timed_out = process.poll() is None and not idle_stalled
-        if timed_out:
-            process.kill()
-            process.wait()
+        if timed_out or idle_stalled:
+            try:
+                process.kill()
+                process.wait()
+            except Exception:
+                pass
         else:
             try:
                 process.wait(timeout=0.1)
@@ -934,6 +951,7 @@ class OpenAICodexProvider(AIProvider):
         self.system_prompt: str | None = None
         self.master_fd: int | None = None
         self.thread_id: str | None = None  # For multi-turn conversation support
+        self.last_event_info: dict | None = None
 
     def _get_isolated_home(self) -> str:
         """Get the isolated HOME directory for this account."""
@@ -979,7 +997,7 @@ class OpenAICodexProvider(AIProvider):
         else:
             self.current_message = message
 
-    def get_response(self, timeout: float = 1800.0, _is_recovery: bool = False) -> str:  # noqa: C901
+    def get_response(self, timeout: float = 1500.0, _is_recovery: bool = False) -> str:  # noqa: C901
         import json
 
         if not self.current_message:
@@ -1115,7 +1133,8 @@ class OpenAICodexProvider(AIProvider):
 
             api_error = [None]  # Track API errors
             # Track last event for adaptive timeout and diagnostics
-            last_event_info = {"kind": None, "time": time.time(), "command": None}
+            last_event_info = {"kind": "start", "time": time.time(), "command": None}
+            idle_diag = {"elapsed": 0.0, "limit": CODEX_THINK_IDLE_TIMEOUT, "kind": "start"}
 
             def process_chunk(chunk: str) -> None:
                 # Parse JSON events and convert to human-readable text
@@ -1164,6 +1183,12 @@ class OpenAICodexProvider(AIProvider):
                             last_event_info["kind"] = item_type
                             if item_type == "command_execution":
                                 last_event_info["command"] = item.get("command", "")[:80]
+                            idle_diag["limit"] = (
+                                CODEX_COMMAND_IDLE_TIMEOUT
+                                if item_type == "command_execution"
+                                else CODEX_THINK_IDLE_TIMEOUT
+                            )
+                            idle_diag["kind"] = item_type
                             # Also send activity notifications for status bar
                             if item_type == "reasoning":
                                 self._notify_activity("thinking", item.get("text", "")[:80])
@@ -1176,23 +1201,54 @@ class OpenAICodexProvider(AIProvider):
                         # Non-JSON line in JSON mode - might be stderr, skip
                         pass
 
+            def _idle_timeout_callback(elapsed: float) -> bool:
+                """Decide whether a silent period should be treated as a stall."""
+                idle_diag["elapsed"] = elapsed
+                limit = idle_diag.get("limit", CODEX_THINK_IDLE_TIMEOUT)
+                return elapsed >= limit
+
             output, timed_out, idle_stalled = _stream_pty_output(
-                self.process, self.master_fd, process_chunk, timeout, idle_timeout=CODEX_IDLE_TIMEOUT
+                self.process,
+                self.master_fd,
+                process_chunk,
+                timeout,
+                idle_timeout=CODEX_IDLE_TIMEOUT,
+                idle_timeout_callback=_idle_timeout_callback,
             )
 
             self.current_message = None
             self.process = None
             self.master_fd = None
+            event_dt = datetime.fromtimestamp(last_event_info.get("time", time.time()), tz=UTC)
+            self.last_event_info = {
+                "kind": last_event_info.get("kind") or "unknown",
+                "command": last_event_info.get("command") or "",
+                "event_time": event_dt.isoformat(),
+                "captured_at": datetime.now(UTC).isoformat(),
+                "last_event_age": max(0.0, time.time() - last_event_info.get("time", time.time())),
+            }
+            if idle_diag.get("elapsed"):
+                self.last_event_info["last_silence"] = {
+                    "elapsed": idle_diag["elapsed"],
+                    "limit": idle_diag.get("limit"),
+                    "kind": idle_diag.get("kind"),
+                }
 
             if idle_stalled:
                 # Build diagnostic info for logging
-                stall_duration = time.time() - last_event_info["time"]
+                stall_duration = idle_diag.get("elapsed") or (time.time() - last_event_info["time"])
                 last_kind = last_event_info["kind"] or "none"
                 last_cmd = last_event_info["command"] or ""
+                stall_limit = idle_diag.get("limit", CODEX_IDLE_TIMEOUT)
                 diag_msg = (
                     f"last_event={last_kind}, stall_duration={stall_duration:.1f}s"
                     + (f", last_cmd={last_cmd}" if last_cmd else "")
                 )
+                self.last_event_info["stall"] = {
+                    "duration": stall_duration,
+                    "limit": stall_limit,
+                    "kind": last_kind,
+                }
 
                 # Single recovery attempt if we have a thread_id and this isn't already a recovery
                 if self.thread_id and not _is_recovery:
@@ -1208,9 +1264,15 @@ class OpenAICodexProvider(AIProvider):
 
                 # No thread_id or already tried recovery - fail with diagnostic info
                 raise RuntimeError(
-                    f"Codex stalled waiting for output for {int(CODEX_IDLE_TIMEOUT)}s ({diag_msg})"
+                    "Codex stalled waiting for output "
+                    f"(~{stall_duration:.0f}s silence, limit {int(stall_limit)}s; {diag_msg})"
                 )
             if timed_out:
+                self.last_event_info["timeout"] = {
+                    "timeout": timeout,
+                    "last_event": last_event_info.get("kind"),
+                    "command": last_event_info.get("command") or "",
+                }
                 raise RuntimeError(f"Codex execution timed out ({int(timeout / 60)} minutes)")
 
             # Check for API errors (model not supported, etc.)
