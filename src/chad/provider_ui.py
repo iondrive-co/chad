@@ -329,7 +329,12 @@ class ProviderUIManager:
         return platform_path(base_home / ".chad" / "codex-homes" / account_name)
 
     def _sync_codex_home(self, account_name: str) -> None:
-        """Sync real-home Codex data into the isolated home."""
+        """Sync real-home Codex data into the isolated home.
+
+        IMPORTANT: This only syncs files that DON'T already exist in the isolated home.
+        Once an account has its own auth.json, it should never be overwritten by the
+        real home's auth - that would cause multiple accounts to share credentials.
+        """
         isolated_home = platform_path(self._get_codex_home(account_name) / ".codex")
         real_home = platform_path(safe_home(ignore_temp_home=True) / ".codex")
         if not real_home.exists():
@@ -337,26 +342,30 @@ class ProviderUIManager:
 
         isolated_home.mkdir(parents=True, exist_ok=True)
 
-        def sync_file(src: Path, dest: Path) -> None:
+        def sync_file_if_missing(src: Path, dest: Path) -> None:
+            """Only copy if destination doesn't exist - never overwrite existing auth."""
             try:
-                if not dest.exists() or src.stat().st_mtime > dest.stat().st_mtime:
+                if not dest.exists():
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src, dest)
             except OSError:
                 return
 
-        def sync_tree(src_dir: Path, dest_dir: Path) -> None:
+        def sync_tree_if_missing(src_dir: Path, dest_dir: Path) -> None:
+            """Sync tree but never overwrite existing files."""
             for root, _, files in os.walk(src_dir):
                 for filename in files:
                     src_path = platform_path(root) / filename
                     rel_path = src_path.relative_to(src_dir)
                     dest_path = dest_dir / rel_path
-                    sync_file(src_path, dest_path)
+                    sync_file_if_missing(src_path, dest_path)
 
-        sync_file(real_home / "auth.json", isolated_home / "auth.json")
-        sync_file(real_home / "config.toml", isolated_home / "config.toml")
+        # Only sync auth.json if the isolated home doesn't have one yet
+        # This prevents overwriting account-specific credentials
+        sync_file_if_missing(real_home / "auth.json", isolated_home / "auth.json")
+        sync_file_if_missing(real_home / "config.toml", isolated_home / "config.toml")
         if (real_home / "sessions").exists():
-            sync_tree(real_home / "sessions", isolated_home / "sessions")
+            sync_tree_if_missing(real_home / "sessions", isolated_home / "sessions")
 
     def _get_claude_config_dir(self, account_name: str) -> Path:
         """Get the isolated CLAUDE_CONFIG_DIR for a Claude account.
