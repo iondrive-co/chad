@@ -44,3 +44,23 @@ def test_session_logger_prunes_old_logs(tmp_path, monkeypatch):
     assert new_path.exists()
     remaining_after = sorted(p.name for p in log_dir.glob("chad_session_*.json"))
     assert len(remaining_after) == 2
+
+
+def test_update_log_includes_timestamp(tmp_path, monkeypatch):
+    env_dir = tmp_path / "env_logs"
+    monkeypatch.setenv("CHAD_SESSION_LOG_DIR", str(env_dir))
+    logger = SessionLogger()
+
+    path = logger.precreate_log()
+    logger.update_log(
+        path,
+        [{"role": "user", "content": "hi"}],
+        streaming_history=[("AI", "chunk1"), ("AI", "chunk2")],
+        verification_attempts=[{"attempt": 1, "status": "failed"}],
+    )
+
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    assert "last_updated" in data
+    assert all("timestamp" in entry for entry in data.get("streaming_history", []))

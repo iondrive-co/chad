@@ -151,13 +151,15 @@ class SessionLogger:
 
             session_data["conversation"] = list(chat_history)
             session_data["status"] = status
+            session_data["last_updated"] = datetime.now().isoformat()
             if verification_attempts is not None:
                 session_data["verification_attempts"] = verification_attempts
 
             # Store structured streaming history with AI names preserved
             if streaming_history is not None:
+                now = datetime.now().isoformat()
                 session_data["streaming_history"] = [
-                    {"agent": agent, "content": content} for agent, content in streaming_history
+                    {"agent": agent, "content": content, "timestamp": now} for agent, content in streaming_history
                 ]
                 # Also create flat transcript for backward compatibility
                 session_data["streaming_transcript"] = "".join(chunk for _, chunk in streaming_history)
