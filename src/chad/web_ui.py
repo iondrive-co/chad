@@ -2851,6 +2851,8 @@ class ChadWebUI:
             full_history = []  # Infinite history - list of (ai_name, content) tuples
             display_buffer = LiveStreamDisplayBuffer()
             last_yield_time = 0.0
+            last_log_update_time = time_module.time()
+            log_update_interval = 10.0  # Update session log every 10 seconds
             min_yield_interval = 0.05
             pending_message_idx = None
             render_state = LiveStreamRenderState()
@@ -2967,6 +2969,15 @@ class ChadWebUI:
                             yield make_yield(chat_history, current_status, current_live_stream)
                             render_state.record(rendered_stream)
                             last_yield_time = now
+
+                    # Periodically update session log with streaming history
+                    if full_history and now - last_log_update_time >= log_update_interval:
+                        self.session_logger.update_log(
+                            session.log_path,
+                            chat_history,
+                            streaming_history=full_history,
+                        )
+                        last_log_update_time = now
 
             if session.cancel_requested:
                 for idx in range(len(chat_history) - 1, -1, -1):
