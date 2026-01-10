@@ -42,6 +42,7 @@ def _get_env_float(name: str, default: float) -> float:
 
 # Idle timeout after a command completes (waiting for next action from API)
 CODEX_IDLE_TIMEOUT = _get_env_float("CODEX_IDLE_TIMEOUT", 90.0)
+CODEX_START_IDLE_TIMEOUT = _get_env_float("CODEX_START_IDLE_TIMEOUT", 120.0)
 CODEX_THINK_IDLE_TIMEOUT = _get_env_float("CODEX_THINK_IDLE_TIMEOUT", 240.0)
 CODEX_COMMAND_IDLE_TIMEOUT = _get_env_float("CODEX_COMMAND_IDLE_TIMEOUT", 420.0)
 # Shorter timeout during pure "thinking" phases (no command running)
@@ -541,7 +542,6 @@ def _stream_pipe_output(
             if idle_timeout and (time.time() - last_activity) >= idle_timeout:
                 elapsed = time.time() - last_activity
                 if idle_timeout_callback and not idle_timeout_callback(elapsed):
-                    last_activity = time.time()
                     continue
                 # Before declaring stall, check if data arrived in the queue
                 if not output_queue.empty():
@@ -649,7 +649,6 @@ def _stream_pty_output(
             if idle_timeout and (time.time() - last_activity) >= idle_timeout:
                 elapsed = time.time() - last_activity
                 if idle_timeout_callback and not idle_timeout_callback(elapsed):
-                    last_activity = time.time()
                     continue
                 # Before declaring stall, try one final drain - data may have arrived
                 chunks_before = len(output_chunks)
@@ -1181,7 +1180,7 @@ class OpenAICodexProvider(AIProvider):
             api_error = [None]  # Track API errors
             # Track last event for adaptive timeout and diagnostics
             last_event_info = {"kind": "start", "time": time.time(), "command": None}
-            idle_diag = {"elapsed": 0.0, "limit": CODEX_THINK_IDLE_TIMEOUT, "kind": "start"}
+            idle_diag = {"elapsed": 0.0, "limit": CODEX_START_IDLE_TIMEOUT, "kind": "start"}
             # Track command categories for session analysis
             cmd_stats = {"total": 0, "exploration": 0, "implementation": 0, "commands": []}
 

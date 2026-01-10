@@ -1201,6 +1201,48 @@ def test_stream_pty_kills_process_group_on_idle():
     assert pid_alive(child_pid) is False, "Child process survived stall termination"
 
 
+def test_pipe_idle_callback_does_not_reset_clock(monkeypatch):
+    """Stall detection should respect cumulative silence even when callback defers it."""
+    import chad.providers as providers
+
+    class DummyStdout:
+        def readline(self):
+            time.sleep(0.001)
+            return b""
+
+    class DummyProcess:
+        def __init__(self):
+            self.stdout = DummyStdout()
+            self.killed = False
+            self.pid = None
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            return 0
+
+    proc = DummyProcess()
+
+    start = time.time()
+    output, timed_out, idle_stalled = providers._stream_pipe_output(
+        proc,
+        None,
+        timeout=0.2,
+        idle_timeout=0.01,
+        idle_timeout_callback=lambda elapsed: elapsed >= 0.03,
+    )
+
+    assert idle_stalled is True
+    assert timed_out is False
+    assert proc.killed is True
+    assert time.time() - start < 1.0
+    assert output == ""
+
+
 def test_stream_pipe_output_buffers_partial_lines(monkeypatch):
     """Test that _stream_pipe_output properly buffers partial lines for JSON parsing.
 
