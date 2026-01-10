@@ -785,6 +785,53 @@ body, .gradio-container, .gradio-container * {
   background: rgba(97, 175, 239, 1);
 }
 
+/* Inline live content in chat bubbles */
+#agent-chatbot .inline-live-header {
+  background: #2a2a3e;
+  color: #a8d4ff;
+  padding: 4px 10px;
+  border-radius: 6px 6px 0 0;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  margin: 8px 0 0 0;
+}
+#agent-chatbot .inline-live-content {
+  background: #1e1e2e !important;
+  color: #e2e8f0 !important;
+  border: 1px solid #555 !important;
+  border-top: none !important;
+  border-radius: 0 0 6px 6px !important;
+  padding: 10px !important;
+  margin: 0 !important;
+  max-height: 350px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+}
+/* Diff highlighting in inline live content */
+#agent-chatbot .inline-live-content .diff-add {
+  color: #98c379 !important;
+  background: rgba(152, 195, 121, 0.1) !important;
+}
+#agent-chatbot .inline-live-content .diff-remove {
+  color: #e06c75 !important;
+  background: rgba(224, 108, 117, 0.1) !important;
+}
+#agent-chatbot .inline-live-content .diff-header {
+  color: #61afef !important;
+  font-weight: bold;
+}
+/* Syntax highlighting in inline live content */
+#agent-chatbot .inline-live-content .keyword { color: #c678dd !important; }
+#agent-chatbot .inline-live-content .string { color: #98c379 !important; }
+#agent-chatbot .inline-live-content .comment { color: #5c6370 !important; font-style: italic; }
+#agent-chatbot .inline-live-content .function { color: #61afef !important; }
+#agent-chatbot .inline-live-content .number { color: #d19a66 !important; }
+
 /* Role status row: keep status and session log button on one line, aligned with button row below */
 #role-status-row {
   display: flex;
@@ -1988,6 +2035,25 @@ def build_live_stream_html(content: str, ai_name: str = "CODING AI") -> str:
     return f"{header}\n{body}"
 
 
+def build_inline_live_html(content: str, ai_name: str = "CODING AI") -> str:
+    """Render live stream as inline HTML for embedding in chat bubbles.
+
+    This formats the streaming content to display directly in the Chatbot
+    component instead of a separate live stream panel.
+    """
+    cleaned = normalize_live_stream_spacing(content)
+    if not cleaned.strip():
+        return f"**{ai_name}**\n\n*Working...*"
+    html_content = ansi_to_html(cleaned)
+    html_content = html.unescape(html_content)
+    html_content = highlight_diffs(html_content)
+    html_content = highlight_code_syntax(html_content)
+    # Format for inline display in chat bubble
+    header = f'<div class="inline-live-header">▶ {ai_name} (Live)</div>'
+    body = f'<div class="inline-live-content">{html_content}</div>'
+    return f"**{ai_name}**\n\n{header}\n{body}"
+
+
 def summarize_content(content: str, max_length: int = 200) -> str:
     """Create a meaningful summary of content for collapsed view.
 
@@ -2975,12 +3041,16 @@ class ChadWebUI:
                             display_buffer.append(chunk)
                             now = time_module.time()
                             if now - last_yield_time >= min_yield_interval:
-                                display_content = display_buffer.content
-                                rendered_stream = build_live_stream_html(display_content, current_ai)
-                                if render_state.should_render(rendered_stream):
-                                    current_live_stream = rendered_stream
-                                    yield make_yield(chat_history, current_status, current_live_stream)
-                                    render_state.record(rendered_stream)
+                                # Update chat bubble with inline live content
+                                inline_html = build_inline_live_html(display_buffer.content, current_ai)
+                                if render_state.should_render(inline_html):
+                                    if pending_message_idx is not None:
+                                        chat_history[pending_message_idx] = {
+                                            "role": "assistant",
+                                            "content": inline_html,
+                                        }
+                                    yield make_yield(chat_history, current_status, "")
+                                    render_state.record(inline_html)
                                     last_yield_time = now
 
                     elif msg_type == "activity":
@@ -2990,30 +3060,36 @@ class ChadWebUI:
                             display_content = display_buffer.content
                             if display_content:
                                 content = display_content + f"\n\n{last_activity}"
-                                rendered_stream = build_live_stream_html(content, current_ai)
                             else:
-                                rendered_stream = f"**Live:** {last_activity}"
-                            if render_state.should_render(rendered_stream):
-                                current_live_stream = rendered_stream
-                                yield make_yield(chat_history, current_status, current_live_stream)
-                                render_state.record(rendered_stream)
+                                content = last_activity
+                            # Update chat bubble with inline live content
+                            inline_html = build_inline_live_html(content, current_ai)
+                            if render_state.should_render(inline_html):
+                                if pending_message_idx is not None:
+                                    chat_history[pending_message_idx] = {
+                                        "role": "assistant",
+                                        "content": inline_html,
+                                    }
+                                yield make_yield(chat_history, current_status, "")
+                                render_state.record(inline_html)
                                 last_yield_time = now
 
                 except queue.Empty:
                     now = time_module.time()
                     if now - last_yield_time >= 0.3:
                         display_content = display_buffer.content
-                        if display_content:
-                            rendered_stream = build_live_stream_html(display_content, current_ai)
-                        elif last_activity:
-                            rendered_stream = f"**Live:** {last_activity}"
-                        else:
-                            rendered_stream = ""
-                        if render_state.should_render(rendered_stream):
-                            current_live_stream = rendered_stream
-                            yield make_yield(chat_history, current_status, current_live_stream)
-                            render_state.record(rendered_stream)
-                            last_yield_time = now
+                        if display_content or last_activity:
+                            content = display_content if display_content else last_activity
+                            inline_html = build_inline_live_html(content, current_ai)
+                            if render_state.should_render(inline_html):
+                                if pending_message_idx is not None:
+                                    chat_history[pending_message_idx] = {
+                                        "role": "assistant",
+                                        "content": inline_html,
+                                    }
+                                yield make_yield(chat_history, current_status, "")
+                                render_state.record(inline_html)
+                                last_yield_time = now
 
                     # Periodically update session log with streaming history
                     if full_history and now - last_log_update_time >= log_update_interval:
@@ -3159,26 +3235,11 @@ class ChadWebUI:
                     verification_thread = threading.Thread(target=run_verification_thread, daemon=True)
                     verification_thread.start()
 
-                    # Poll message queue while verification runs (live stream updates)
-                    verif_display_buffer = LiveStreamDisplayBuffer()
-                    verif_render_state = LiveStreamRenderState()
-                    verif_last_yield = 0.0
+                    # Poll message queue while verification runs
+                    # Note: verification streaming is silent (no inline display) since it's usually fast
                     while not verification_complete.is_set() and not session.cancel_requested:
                         try:
-                            msg = message_queue.get(timeout=0.05)
-                            if msg[0] == "stream":
-                                chunk = msg[1]
-                                if chunk.strip():
-                                    verif_display_buffer.append(chunk)
-                                    now = time_module.time()
-                                    if now - verif_last_yield >= min_yield_interval:
-                                        rendered = build_live_stream_html(
-                                            verif_display_buffer.content, "VERIFICATION AI"
-                                        )
-                                        if verif_render_state.should_render(rendered):
-                                            yield make_yield(chat_history, verify_status, rendered)
-                                            verif_render_state.record(rendered)
-                                            verif_last_yield = now
+                            message_queue.get(timeout=0.05)  # Drain queue
                         except queue.Empty:
                             pass
 
@@ -3750,11 +3811,15 @@ class ChadWebUI:
                         display_buffer.append(chunk)
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
-                            display_content = display_buffer.content
-                            live_stream = build_live_stream_html(display_content)
-                            if render_state.should_render(live_stream):
-                                yield make_followup_yield(chat_history, live_stream, working=True)
-                                render_state.record(live_stream)
+                            # Update chat bubble with inline live content
+                            inline_html = build_inline_live_html(display_buffer.content, current_ai)
+                            if render_state.should_render(inline_html):
+                                chat_history[pending_idx] = {
+                                    "role": "assistant",
+                                    "content": inline_html,
+                                }
+                                yield make_followup_yield(chat_history, "", working=True)
+                                render_state.record(inline_html)
                                 last_yield_time = now
 
                 elif msg_type == "activity":
@@ -3763,12 +3828,17 @@ class ChadWebUI:
                         display_content = display_buffer.content
                         if display_content:
                             content = display_content + f"\n\n{msg[1]}"
-                            live_stream = build_live_stream_html(content)
                         else:
-                            live_stream = f"**Live:** {msg[1]}"
-                        if render_state.should_render(live_stream):
-                            yield make_followup_yield(chat_history, live_stream, working=True)
-                            render_state.record(live_stream)
+                            content = msg[1]
+                        # Update chat bubble with inline live content
+                        inline_html = build_inline_live_html(content, current_ai)
+                        if render_state.should_render(inline_html):
+                            chat_history[pending_idx] = {
+                                "role": "assistant",
+                                "content": inline_html,
+                            }
+                            yield make_followup_yield(chat_history, "", working=True)
+                            render_state.record(inline_html)
                             last_yield_time = now
 
             except queue.Empty:
@@ -3776,13 +3846,15 @@ class ChadWebUI:
                 if now - last_yield_time >= 0.3:
                     display_content = display_buffer.content
                     if display_content:
-                        live_stream = build_live_stream_html(display_content)
-                    else:
-                        live_stream = ""
-                    if render_state.should_render(live_stream):
-                        yield make_followup_yield(chat_history, live_stream, working=True)
-                        render_state.record(live_stream)
-                        last_yield_time = now
+                        inline_html = build_inline_live_html(display_content, current_ai)
+                        if render_state.should_render(inline_html):
+                            chat_history[pending_idx] = {
+                                "role": "assistant",
+                                "content": inline_html,
+                            }
+                            yield make_followup_yield(chat_history, "", working=True)
+                            render_state.record(inline_html)
+                            last_yield_time = now
 
         relay_thread.join(timeout=1)
 
@@ -4502,8 +4574,6 @@ class ChadWebUI:
         """
         session = self.get_session(session_id)
         default_path = os.environ.get("CHAD_PROJECT_PATH", str(Path.cwd()))
-        screenshot_mode = os.environ.get("CHAD_SCREENSHOT_MODE") == "1"
-        initial_live_stream = "Live output will appear here." if screenshot_mode and is_first else ""
 
         accounts_map = self.security_mgr.list_accounts()
         account_choices = list(accounts_map.keys())
@@ -4708,9 +4778,8 @@ class ChadWebUI:
                 elem_id="agent-chatbot" if is_first else None,
             )
 
-        # Live activity stream - below agent communication
-        with gr.Column(elem_id="live-stream-box" if is_first else None, elem_classes=["live-stream-box"]):
-            live_stream = gr.Markdown(initial_live_stream, visible=True)
+        # Live stream panel hidden - content now streams inline in chat bubbles
+        live_stream = gr.Markdown("", visible=False, elem_id="live-stream-box" if is_first else None)
 
         with gr.Row(visible=False, key=f"followup-row-{session_id}") as followup_row:
             followup_input = gr.TextArea(
