@@ -861,6 +861,7 @@ def inject_live_stream_content(page: "Page", html_content: str, container_select
     while (node) {
         if (node.classList) {
             node.classList.remove('hide-container');
+            node.classList.remove('live-stream-hidden');
         }
         if (node.style) {
             node.style.setProperty('display', 'block', 'important');
