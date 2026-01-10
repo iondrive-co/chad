@@ -117,8 +117,8 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         component="agent-communication",
         tests=["TestCodingSummaryExtraction"],
         source_file="chad/web_ui.py",
-        keywords=["hypothesis", "screenshot link", "summary bubble", "change_summary", "before screenshot",
-                  "after screenshot"],
+        keywords=["hypothesis", "inline screenshot", "summary bubble", "change_summary", "before screenshot",
+                  "after screenshot", "screenshot comparison"],
     ),
     "TASK_DESCRIPTION": UIComponent(
         tab="run",

@@ -2206,19 +2206,37 @@ More details here...
         # Should use heuristic extraction (starts with "I've updated...")
         assert "I've updated the authentication module" in message["content"]
 
-    def test_make_chat_message_displays_hypothesis_and_screenshots(self):
-        """make_chat_message should show hypothesis and screenshot links."""
+    def test_make_chat_message_displays_hypothesis_and_screenshots(self, tmp_path):
+        """make_chat_message should show hypothesis and inline screenshot images."""
         from chad.web_ui import make_chat_message
 
+        # Create minimal PNG files for testing
+        before_png = tmp_path / "before.png"
+        after_png = tmp_path / "after.png"
+        # Minimal valid PNG (1x1 transparent pixel)
+        png_bytes = bytes([
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,  # PNG signature
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,  # IHDR chunk
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,  # 1x1 dimensions
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89,  # bit depth, color type, CRC
+            0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54,  # IDAT chunk
+            0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01,  # compressed data
+            0x0D, 0x0A, 0x2D, 0xB4,  # CRC
+            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,  # IEND chunk
+            0xAE, 0x42, 0x60, 0x82  # CRC
+        ])
+        before_png.write_bytes(png_bytes)
+        after_png.write_bytes(png_bytes)
+
         content = '''Working on the task...
-''' + "x" * 300 + '''
+''' + "x" * 300 + f'''
 ```json
-{
+{{
   "change_summary": "Fixed the display issue",
   "hypothesis": "CSS z-index conflict",
-  "before_screenshot": "/tmp/screenshots/before.png",
-  "after_screenshot": "/tmp/screenshots/after.png"
-}
+  "before_screenshot": "{before_png}",
+  "after_screenshot": "{after_png}"
+}}
 ```
 '''
         message = make_chat_message("CODING AI", content)
@@ -2227,10 +2245,12 @@ More details here...
         assert "Fixed the display issue" in summary_part
         assert "Hypothesis:" in summary_part
         assert "CSS z-index conflict" in summary_part
-        assert "Before:" in summary_part
-        assert "file:///tmp/screenshots/before.png" in summary_part
-        assert "After:" in summary_part
-        assert "file:///tmp/screenshots/after.png" in summary_part
+        # Screenshots are now inline images, not links
+        assert "screenshot-comparison" in summary_part
+        assert "screenshot-label" in summary_part
+        assert "Before" in summary_part
+        assert "After" in summary_part
+        assert "data:image/png;base64," in summary_part
 
 
 class TestVerificationPrompt:
