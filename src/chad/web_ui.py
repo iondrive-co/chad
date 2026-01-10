@@ -1569,17 +1569,19 @@ function() {
             // Primary method: Check the visibility state element (more reliable)
             // Query handles both container mode (input inside .merge-visibility-state)
             // and container=False mode (class directly on input/textarea)
-            let stateInput = mergeSection.querySelector('.merge-visibility-state input,
-                .merge-visibility-state textarea');
+            let stateInput =
+                mergeSection.querySelector('.merge-visibility-state input, .merge-visibility-state textarea');
             if (!stateInput) {
                 // Fallback: container=False puts class directly on the element
-                stateInput = mergeSection.querySelector('input.merge-visibility-state,
-                    textarea.merge-visibility-state');
+                stateInput =
+                    mergeSection.querySelector('input.merge-visibility-state, textarea.merge-visibility-state');
             }
             if (!stateInput) {
                 // Last resort: find by ID pattern
-                stateInput = mergeSection.querySelector('[id^="merge-visibility-"] input,
-                [id^="merge-visibility-"] textarea, input[id^="merge-visibility-"], textarea[id^="merge-visibility-"]');
+                stateInput = mergeSection.querySelector(
+                    '[id^="merge-visibility-"] input, [id^="merge-visibility-"] textarea,
+                      input[id^="merge-visibility-"], textarea[id^="merge-visibility-"]'
+                );
             }
             let shouldHide = false;
 
@@ -5521,6 +5523,8 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
   };
   setInterval(wirePlus, 400);
   setTimeout(wirePlus, 80);
+  setInterval(ensureDiscardEditable, 200);
+  setTimeout(ensureDiscardEditable, 120);
 })();
 </script>
 """
@@ -5558,6 +5562,25 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                     };
                     walk(document);
                     return results;
+                  };
+                  const ensureDiscardEditable = () => {
+                    const statuses = collectAll('.task-status-header, [id*=\"task-status\"], [class*=\"task-status\"]');
+                    const hasDiscarded =
+                        statuses.some((el) => (el.textContent || '').toLowerCase().includes('discarded'));
+                    if (!hasDiscarded) return;
+                    const textareas = collectAll('textarea');
+                    textareas.forEach((ta) => {
+                      const ph = (ta.getAttribute('placeholder') || '').toLowerCase();
+                      if (!ph.includes('task') || !ph.includes('description')) return;
+                      ta.removeAttribute('disabled');
+                      ta.removeAttribute('aria-disabled');
+                      ta.disabled = false;
+                      const fieldset = ta.closest('fieldset');
+                      if (fieldset) {
+                        fieldset.removeAttribute('disabled');
+                        fieldset.removeAttribute('aria-disabled');
+                      }
+                    });
                   };
                   const fixAriaLinks = () => {
                     const root = getRoot();
