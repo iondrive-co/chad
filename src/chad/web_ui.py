@@ -510,6 +510,11 @@ body, .gradio-container, .gradio-container * {
   overflow-y: auto;
 }
 
+/* Hide live stream box but keep in DOM - removed by inject_live_stream_content */
+.live-stream-hidden {
+  display: none !important;
+}
+
 #live-stream-box,
 .live-stream-box {
   margin-top: 8px;
@@ -4856,8 +4861,13 @@ class ChadWebUI:
                 allow_tags=["img", "div", "span", "pre", "code"],  # Allow inline screenshots and code
             )
 
-        # Live stream panel hidden - content now streams inline in chat bubbles
-        live_stream = gr.Markdown("", visible=False, elem_id="live-stream-box" if is_first else None)
+        # Live stream kept in DOM (visible=True) but hidden via CSS for visual tests
+        live_stream = gr.Markdown(
+            "",
+            visible=True,
+            elem_id="live-stream-box" if is_first else None,
+            elem_classes=["live-stream-hidden", "live-stream-box"],
+        )
 
         with gr.Row(visible=False, key=f"followup-row-{session_id}") as followup_row:
             followup_input = gr.TextArea(
@@ -5523,8 +5533,6 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
   };
   setInterval(wirePlus, 400);
   setTimeout(wirePlus, 80);
-  setInterval(ensureDiscardEditable, 200);
-  setTimeout(ensureDiscardEditable, 120);
 })();
 </script>
 """
@@ -5565,13 +5573,19 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                   };
                   const ensureDiscardEditable = () => {
                     const statuses = collectAll('.task-status-header, [id*=\"task-status\"], [class*=\"task-status\"]');
-                    const hasDiscarded =
-                        statuses.some((el) => (el.textContent || '').toLowerCase().includes('discarded'));
+                    const hasDiscarded = statuses.some((el) => {
+                      const text = (el.textContent || '').toLowerCase().replace(/[^a-z]/g, '');
+                      return text.includes('discarded');
+                    });
                     if (!hasDiscarded) return;
                     const textareas = collectAll('textarea');
                     textareas.forEach((ta) => {
-                      const ph = (ta.getAttribute('placeholder') || '').toLowerCase();
-                      if (!ph.includes('task') || !ph.includes('description')) return;
+                      // Find textarea by associated label text "Task Description"
+                      const container = ta.closest('.gradio-container, .task-entry-bubble, [class*="textbox"], [class*="textarea"]');
+                      const labelEl = container ? container.querySelector('label, span.label') : null;
+                      const labelText = labelEl ? (labelEl.textContent || '').toLowerCase() : '';
+                      const ariaLabel = (ta.getAttribute('aria-label') || '').toLowerCase();
+                      if (!labelText.includes('task description') && !ariaLabel.includes('task description')) return;
                       ta.removeAttribute('disabled');
                       ta.removeAttribute('aria-disabled');
                       ta.disabled = false;
@@ -5666,6 +5680,7 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                   const tickAll = () => {
                     wirePlus();
                     fixAriaLinks();
+                    ensureDiscardEditable();
                   };
                   setInterval(tickAll, 400);
                   setTimeout(tickAll, 80);
