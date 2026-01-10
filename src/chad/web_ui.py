@@ -1,5 +1,6 @@
 """Gradio web interface for Chad."""
 
+import base64
 import os
 import json
 import re
@@ -83,7 +84,7 @@ class VerificationDropdownState:
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\][^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")
 
-DEFAULT_CODING_TIMEOUT = 1500.0
+DEFAULT_CODING_TIMEOUT = 900.0
 DEFAULT_VERIFICATION_TIMEOUT = 600.0
 MAX_VERIFICATION_PROMPT_CHARS = 6000
 
@@ -831,6 +832,41 @@ body, .gradio-container, .gradio-container * {
 #agent-chatbot .inline-live-content .comment { color: #5c6370 !important; font-style: italic; }
 #agent-chatbot .inline-live-content .function { color: #61afef !important; }
 #agent-chatbot .inline-live-content .number { color: #d19a66 !important; }
+
+/* Screenshot comparison in chat bubbles */
+#agent-chatbot .screenshot-comparison {
+  display: flex;
+  gap: 12px;
+  margin: 12px 0;
+  flex-wrap: wrap;
+}
+#agent-chatbot .screenshot-panel {
+  flex: 1 1 45%;
+  min-width: 200px;
+  max-width: 100%;
+}
+#agent-chatbot .screenshot-single {
+  margin: 12px 0;
+  max-width: 100%;
+}
+#agent-chatbot .screenshot-label {
+  background: #2a2a3e;
+  color: #a8d4ff;
+  padding: 4px 10px;
+  border-radius: 6px 6px 0 0;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+}
+#agent-chatbot .screenshot-comparison img,
+#agent-chatbot .screenshot-single img {
+  width: 100%;
+  height: auto;
+  border: 1px solid #555;
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  display: block;
+}
 
 /* Role status row: keep status and session log button on one line, aligned with button row below */
 #role-status-row {
@@ -2054,6 +2090,29 @@ def build_inline_live_html(content: str, ai_name: str = "CODING AI") -> str:
     return f"**{ai_name}**\n\n{header}\n{body}"
 
 
+def image_to_data_url(path: str) -> str | None:
+    """Convert an image file to a base64 data URL for inline display.
+
+    Args:
+        path: Path to the image file
+
+    Returns:
+        Data URL string or None if file doesn't exist or can't be read
+    """
+    try:
+        p = Path(path)
+        if not p.exists():
+            return None
+        suffix = p.suffix.lower()
+        mime_types = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif"}
+        mime = mime_types.get(suffix, "image/png")
+        data = p.read_bytes()
+        b64 = base64.b64encode(data).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        return None
+
+
 def summarize_content(content: str, max_length: int = 200) -> str:
     """Create a meaningful summary of content for collapsed view.
 
@@ -2126,13 +2185,29 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
             extra_parts = []
             if coding_summary.hypothesis:
                 extra_parts.append(f"**Hypothesis:** {coding_summary.hypothesis}")
-            if coding_summary.before_screenshot:
+            # Display before/after screenshots inline side by side
+            before_url = (
+                image_to_data_url(coding_summary.before_screenshot)) if coding_summary.before_screenshot else None
+            after_url = image_to_data_url(coding_summary.after_screenshot) if coding_summary.after_screenshot else None
+            if before_url and after_url:
+                # Both screenshots - display side by side
                 extra_parts.append(
-                    f"**Before:** [screenshot](file://{coding_summary.before_screenshot})"
+                    '<div class="screenshot-comparison">'
+                    f'<div class="screenshot-panel"><div class="screenshot-label">Before</div>'
+                    f'<img src="{before_url}" alt="Before screenshot"></div>'
+                    f'<div class="screenshot-panel"><div class="screenshot-label">After</div>'
+                    f'<img src="{after_url}" alt="After screenshot"></div>'
+                    '</div>'
                 )
-            if coding_summary.after_screenshot:
+            elif before_url:
                 extra_parts.append(
-                    f"**After:** [screenshot](file://{coding_summary.after_screenshot})"
+                    f'<div class="screenshot-single"><div class="screenshot-label">Before</div>'
+                    f'<img src="{before_url}" alt="Before screenshot"></div>'
+                )
+            elif after_url:
+                extra_parts.append(
+                    f'<div class="screenshot-single"><div class="screenshot-label">After</div>'
+                    f'<img src="{after_url}" alt="After screenshot"></div>'
                 )
             if extra_parts:
                 summary_text = f"{summary_text}\n\n" + "\n\n".join(extra_parts)

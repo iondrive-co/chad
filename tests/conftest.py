@@ -9,8 +9,10 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_PATH = PROJECT_ROOT / "src"
 
-if str(SRC_PATH) not in sys.path:
-    sys.path.insert(0, str(SRC_PATH))
+# Force current worktree src to the front of sys.path so imports use this tree,
+# not any installed or sibling worktrees.
+SRC_STR = str(SRC_PATH)
+sys.path = [SRC_STR] + [p for p in sys.path if p != SRC_STR]
 
 
 @pytest.fixture(autouse=True)
