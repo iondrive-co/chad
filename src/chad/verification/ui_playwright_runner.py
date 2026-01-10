@@ -894,6 +894,72 @@ def inject_live_stream_content(page: "Page", html_content: str, container_select
     page.wait_for_timeout(100)
 
 
+def inject_chatbot_message(page: "Page", messages: list[dict], container_selector: str | None = None) -> None:
+    """Inject chat messages into the chatbot for testing.
+
+    Each message dict should have 'role' ('user' or 'assistant') and 'content'.
+    The content will be processed through make_chat_message for proper formatting.
+    """
+    # Import here to avoid circular deps
+    from chad.web_ui import make_chat_message
+
+    # Convert messages to Gradio chatbot format
+    formatted_messages = []
+    for msg in messages:
+        if msg["role"] == "user":
+            formatted_messages.append({"role": "user", "content": msg["content"]})
+        else:
+            # Use make_chat_message to get proper formatting with inline screenshots
+            formatted = make_chat_message("CODING AI", msg["content"], collapsible=True)
+            formatted_messages.append(formatted)
+
+    target_selector = container_selector or "#agent-chatbot"
+    try:
+        page.wait_for_selector(target_selector, state="attached", timeout=5000)
+    except Exception:
+        return
+
+    # Inject the formatted messages into the chatbot
+    page.evaluate(
+        """
+({ messages, selector }) => {
+    const chatbot = document.querySelector(selector);
+    if (!chatbot) return false;
+
+    // Find the message container
+    const messageContainer = chatbot.querySelector('.chatbot, [data-testid="chatbot"]')
+        || chatbot.querySelector('.messages')
+        || chatbot;
+
+    // Clear existing messages
+    const existingMessages = messageContainer.querySelectorAll('.message, .message-row');
+    existingMessages.forEach(m => m.remove());
+
+    // Add each message
+    for (const msg of messages) {
+        const wrapper = document.createElement('div');
+        wrapper.className = msg.role === 'user' ? 'message-row user-row' : 'message-row bot-row';
+
+        const bubble = document.createElement('div');
+        bubble.className = msg.role === 'user' ? 'message user-message' : 'message bot-message';
+        bubble.innerHTML = msg.content
+            .replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>')
+            .replace(/\\n/g, '<br>');
+
+        wrapper.appendChild(bubble);
+        messageContainer.appendChild(wrapper);
+    }
+
+    // Scroll to bottom
+    messageContainer.scrollTop = messageContainer.scrollHeight;
+    return true;
+}
+""",
+        {"messages": formatted_messages, "selector": target_selector},
+    )
+    page.wait_for_timeout(200)
+
+
 def check_live_stream_colors(page: "Page", container_selector: str | None = None) -> LiveStreamTestResult:
     """Check if colors in the live stream are readable.
 
