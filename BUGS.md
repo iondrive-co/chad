@@ -3,8 +3,6 @@ The merge function doesn't seem to be working: ❌ error: Your local changes to 
 When adding a new provider after completing login flow it shows as a grey box until the refresh button is pressed. This refresh should happen automatically.
 Also it does not show up as a new coding agent in that dropdown until the app is restarted
 
-Show screenshots inline rather than links (which don't work)
-
 Stop live view scrolling down to bottom when new lines are added, as a starting point consider:
 src/chad/verification/visual_test_map.py
 Original
