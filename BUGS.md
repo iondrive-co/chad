@@ -50,3 +50,5 @@ Modified
     }
 
 Once a task is discarded the task description should be made editable again
+
+Remove the linting requirement preventing commits with blank space at end of line or lines longer than 120 chars

@@ -423,3 +423,82 @@ model = "codestral-25.01"
 """
     with open(vibe_dir / "config.toml", "w", encoding="utf-8") as f:
         f.write(config_content)
+
+
+# Minimal valid PNG (1x1 red pixel for "before", 1x1 green pixel for "after")
+MINIMAL_PNG_RED = bytes([
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,  # PNG signature
+    0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,  # IHDR
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,  # 1x1
+    0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,  # RGB
+    0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54,  # IDAT
+    0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x01, 0x01, 0x01, 0x00,  # red pixel
+    0x1B, 0xB6, 0xEE, 0x56,  # CRC
+    0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82  # IEND
+])
+
+MINIMAL_PNG_GREEN = bytes([
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,  # PNG signature
+    0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,  # IHDR
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,  # 1x1
+    0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,  # RGB
+    0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54,  # IDAT
+    0x08, 0xD7, 0x63, 0x90, 0xFB, 0xCF, 0x00, 0x00, 0x01, 0x01, 0x01, 0x00,  # green pixel
+    0x5D, 0xD8, 0xD5, 0x1B,  # CRC
+    0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82  # IEND
+])
+
+
+def create_sample_screenshots(tmp_dir: Path) -> tuple[Path, Path]:
+    """Create sample before/after screenshot files for testing.
+
+    Returns:
+        Tuple of (before_path, after_path)
+    """
+    screenshots_dir = tmp_dir / "screenshots"
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+
+    before_path = screenshots_dir / "before.png"
+    after_path = screenshots_dir / "after.png"
+
+    before_path.write_bytes(MINIMAL_PNG_RED)
+    after_path.write_bytes(MINIMAL_PNG_GREEN)
+
+    return before_path, after_path
+
+
+def get_chat_history_with_screenshots(before_path: Path, after_path: Path) -> list[dict]:
+    """Get chat history with before/after screenshots embedded.
+
+    Args:
+        before_path: Path to before screenshot
+        after_path: Path to after screenshot
+
+    Returns:
+        List of chat messages including one with screenshot JSON
+    """
+    # Build content with JSON block containing screenshot paths
+    content = f"""I've investigated the UI issue and found the root cause.
+
+**Analysis:**
+The dropdown was being cut off due to a CSS overflow:hidden on the parent container.
+
+**Fix Applied:**
+- Modified `.run-top-row` to use `overflow: visible`
+- Added `z-index: 100` to ensure dropdown appears above other elements
+
+{"x" * 200}
+
+```json
+{{
+  "change_summary": "Fixed dropdown overflow issue by adjusting CSS overflow and z-index properties",
+  "hypothesis": "Parent container had overflow:hidden which clipped the dropdown menu",
+  "before_screenshot": "{before_path}",
+  "after_screenshot": "{after_path}"
+}}
+```
+"""
+    return [
+        {"role": "user", "content": "The reasoning effort dropdown is getting cut off when opened"},
+        {"role": "assistant", "content": content},
+    ]
