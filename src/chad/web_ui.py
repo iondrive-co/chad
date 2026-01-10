@@ -4851,6 +4851,7 @@ class ChadWebUI:
                 height=400,
                 key=f"chatbot-{session_id}",
                 elem_id="agent-chatbot" if is_first else None,
+                allow_tags=["img", "div", "span", "pre", "code"],  # Allow inline screenshots and code
             )
 
         # Live stream panel hidden - content now streams inline in chat bubbles
