@@ -5678,13 +5678,42 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                     const btn = root.querySelector('#add-new-task-btn');
                     if (btn) hideButton(btn);
                   };
+                  const syncMergeSectionVisibility = () => {
+                    const mergeSections = document.querySelectorAll('.merge-section');
+                    mergeSections.forEach(mergeSection => {
+                      let stateInput = mergeSection.querySelector('.merge-visibility-state input, .merge-visibility-state textarea');
+                      if (!stateInput) {
+                        stateInput = mergeSection.querySelector('input.merge-visibility-state, textarea.merge-visibility-state');
+                      }
+                      let shouldHide = false;
+                      if (stateInput) {
+                        shouldHide = stateInput.value === 'hidden' || stateInput.value === '';
+                      }
+                      if (shouldHide) {
+                        mergeSection.classList.add('merge-section-hidden');
+                        mergeSection.style.cssText = 'display: none !important; visibility: hidden !important;';
+                      } else if (stateInput && stateInput.value === 'visible') {
+                        mergeSection.classList.remove('merge-section-hidden');
+                        mergeSection.style.cssText = '';
+                        mergeSection.querySelectorAll('*').forEach(child => {
+                          if (!child.classList.contains('merge-visibility-state') &&
+                              !child.classList.contains('visually-hidden') &&
+                              !child.closest('.visually-hidden')) {
+                            child.style.cssText = '';
+                          }
+                        });
+                      }
+                    });
+                  };
                   const tickAll = () => {
                     wirePlus();
                     fixAriaLinks();
                     ensureDiscardEditable();
+                    syncMergeSectionVisibility();
                   };
                   setInterval(tickAll, 400);
                   setTimeout(tickAll, 80);
+                  setInterval(syncMergeSectionVisibility, 100);
                   document.addEventListener('click', (event) => {
                     const tab = event.target && event.target.closest
                       ? event.target.closest('[role=\"tab\"]')
