@@ -58,6 +58,8 @@ Screenshots use synthetic data for realistic UI captures. See `src/chad/screensh
 
 ## File Structure
 
+The readme file is `README.md` (all caps), not `Readme.md`.
+
 ```
 src/chad/
 ├── __main__.py       # Entry point
