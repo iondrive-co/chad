@@ -1109,3 +1109,78 @@ class TestMergeDiscardReset:
         )
 
         assert has_function, "Page should be fully loaded with custom JavaScript"
+
+    @pytest.mark.visual
+    def test_merge_section_shows_when_visibility_state_is_visible(self, page: Page):
+        """Verify merge section becomes visible when visibility state is set to 'visible'.
+
+        This is the critical test for the merge section showing after task completion.
+        The JS syncMergeSectionVisibility should:
+        1. Find the merge-visibility-state textbox
+        2. When its value is 'visible', remove the merge-section-hidden class
+        3. Make the merge section visible to the user
+        """
+        result = page.evaluate(
+            """
+        () => {
+            // Find the merge section
+            const mergeSection = document.querySelector('.merge-section');
+            if (!mergeSection) {
+                return { error: 'merge-section not found in DOM' };
+            }
+
+            // Find the visibility state textbox inside it
+            let stateInput = mergeSection.querySelector(
+                '.merge-visibility-state input, .merge-visibility-state textarea, ' +
+                'input.merge-visibility-state, textarea.merge-visibility-state'
+            );
+            if (!stateInput) {
+                // Try by ID
+                stateInput = mergeSection.querySelector(
+                    '[id^="merge-visibility-"] input, [id^="merge-visibility-"] textarea'
+                );
+            }
+            if (!stateInput) {
+                return { error: 'visibility state textbox not found', mergeSectionHtml: mergeSection.outerHTML.slice(0, 500) };
+            }
+
+            // Get initial state
+            const initialValue = stateInput.value;
+            const initialDisplay = window.getComputedStyle(mergeSection).display;
+            const initialHasHiddenClass = mergeSection.classList.contains('merge-section-hidden');
+
+            // Set visibility state to 'visible'
+            stateInput.value = 'visible';
+            // Trigger input event to notify any listeners
+            stateInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+            // Wait for JS interval to run (syncMergeSectionVisibility runs every 100ms)
+            return new Promise((resolve) => {
+                setTimeout(() => {
+                    const section = document.querySelector('.merge-section');
+                    const display = window.getComputedStyle(section).display;
+                    const hasHiddenClass = section.classList.contains('merge-section-hidden');
+
+                    resolve({
+                        initialValue,
+                        initialDisplay,
+                        initialHasHiddenClass,
+                        finalDisplay: display,
+                        finalHasHiddenClass: hasHiddenClass,
+                        isVisible: display !== 'none'
+                    });
+                }, 300);  // Wait for 100ms interval to run a few times
+            });
+        }
+        """
+        )
+
+        # Check for errors
+        assert "error" not in result, f"Test setup failed: {result.get('error')}"
+
+        # The merge section should now be visible
+        assert result.get("isVisible"), (
+            f"Merge section should be visible after setting visibility state to 'visible'. "
+            f"Initial: display={result.get('initialDisplay')}, hasHiddenClass={result.get('initialHasHiddenClass')}. "
+            f"Final: display={result.get('finalDisplay')}, hasHiddenClass={result.get('finalHasHiddenClass')}"
+        )
