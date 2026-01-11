@@ -48,6 +48,10 @@ CODEX_COMMAND_IDLE_TIMEOUT = _get_env_float("CODEX_COMMAND_IDLE_TIMEOUT", 420.0)
 # Shorter timeout during pure "thinking" phases (no command running)
 CODEX_THINKING_TIMEOUT = _get_env_float("CODEX_THINKING_TIMEOUT", 60.0)
 
+# Maximum exploration commands without implementation before triggering early timeout
+# Prevents agents from getting stuck in endless search/read loops
+CODEX_MAX_EXPLORATION_WITHOUT_IMPL = int(_get_env_float("CODEX_MAX_EXPLORATION_WITHOUT_IMPL", 40.0))
+
 
 def find_cli_executable(name: str) -> str:
     """Find a CLI executable, checking common locations if not in PATH.
@@ -1183,6 +1187,7 @@ class OpenAICodexProvider(AIProvider):
             idle_diag = {"elapsed": 0.0, "limit": CODEX_START_IDLE_TIMEOUT, "kind": "start"}
             # Track command categories for session analysis
             cmd_stats = {"total": 0, "exploration": 0, "implementation": 0, "commands": []}
+            exploration_loop_detected = [False]  # Flag to detect stuck exploration loops
 
             def process_chunk(chunk: str) -> None:
                 # Parse JSON events and convert to human-readable text
@@ -1247,6 +1252,11 @@ class OpenAICodexProvider(AIProvider):
                                 cmd_stats["commands"].append(cmd[:100])
                                 if len(cmd_stats["commands"]) > 20:
                                     cmd_stats["commands"] = cmd_stats["commands"][-20:]
+
+                                # Detect exploration loop: many exploration commands, zero implementation
+                                if (cmd_stats["exploration"] >= CODEX_MAX_EXPLORATION_WITHOUT_IMPL
+                                        and cmd_stats["implementation"] == 0):
+                                    exploration_loop_detected[0] = True
                             idle_diag["limit"] = (
                                 CODEX_COMMAND_IDLE_TIMEOUT
                                 if item_type == "command_execution"
@@ -1268,6 +1278,9 @@ class OpenAICodexProvider(AIProvider):
             def _idle_timeout_callback(elapsed: float) -> bool:
                 """Decide whether a silent period should be treated as a stall."""
                 idle_diag["elapsed"] = elapsed
+                # Early exit if exploration loop detected (agent stuck in search/read mode)
+                if exploration_loop_detected[0]:
+                    return True  # Signal stall to exit streaming loop
                 limit = idle_diag.get("limit", CODEX_THINK_IDLE_TIMEOUT)
                 return elapsed >= limit
 
@@ -1306,6 +1319,34 @@ class OpenAICodexProvider(AIProvider):
                     "kind": idle_diag.get("kind"),
                 }
 
+            # Check for exploration loop FIRST (it also sets idle_stalled via callback)
+            if exploration_loop_detected[0]:
+                self.last_event_info["exploration_loop"] = {
+                    "exploration": cmd_stats["exploration"],
+                    "implementation": cmd_stats["implementation"],
+                    "limit": CODEX_MAX_EXPLORATION_WITHOUT_IMPL,
+                    "last_commands": cmd_stats["commands"][-5:],
+                }
+                # Try recovery by prompting the agent to implement
+                if self.thread_id and not _is_recovery:
+                    self._notify_activity(
+                        "stream",
+                        f"\033[33m• Exploration loop detected ({cmd_stats['exploration']} searches, "
+                        f"0 implementations), prompting to implement...\033[0m\n"
+                    )
+                    self.current_message = (
+                        "IMPORTANT: You've spent significant time searching and reading without making "
+                        "any changes. Please proceed to implement the fix now. If you need to make a "
+                        "decision, make your best choice and implement it. Do not continue exploring."
+                    )
+                    return self.get_response(timeout=timeout, _is_recovery=True)
+                # Already tried recovery - fail with diagnostic info
+                raise RuntimeError(
+                    f"Codex stuck in exploration loop ({cmd_stats['exploration']} exploration commands, "
+                    f"0 implementation commands). Agent may be confused about the task."
+                )
+
+            # Check for idle stall (no output for a while) - only if not already handled above
             if idle_stalled:
                 # Build diagnostic info for logging
                 stall_duration = idle_diag.get("elapsed") or (time.time() - last_event_info["time"])
@@ -1339,6 +1380,7 @@ class OpenAICodexProvider(AIProvider):
                     "Codex stalled waiting for output "
                     f"(~{stall_duration:.0f}s silence, limit {int(stall_limit)}s; {diag_msg})"
                 )
+
             if timed_out:
                 self.last_event_info["timeout"] = {
                     "timeout": timeout,
