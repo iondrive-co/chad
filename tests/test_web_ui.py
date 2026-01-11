@@ -281,19 +281,17 @@ class TestChadWebUI:
         outputs = web_ui.discard_worktree_changes(session_id)
 
         # Index 11 should be task_description update (no_change to preserve it)
-        # Note: 15 outputs total (includes merge_visibility_state, merge_section_header, diff_content)
-        assert len(outputs) >= 15, "Discard should return 15 outputs including visibility controls"
+        # Note: 14 outputs total (includes merge_section_header, diff_content)
+        assert len(outputs) >= 14, "Discard should return 14 outputs"
         task_desc_update = outputs[11]
         assert task_desc_update.get("value") == session.task_description, (
             "Task description value should be preserved for retry"
         )
         assert task_desc_update.get("interactive") is True, "Task description should become editable after discard"
 
-        # Verify visibility state outputs for JS workaround
-        visibility_state = outputs[12]
-        header_text = outputs[13]
-        diff_content = outputs[14]
-        assert visibility_state == "hidden", "Visibility state should be 'hidden' after discard"
+        # Verify header and diff cleared after discard
+        header_text = outputs[12]
+        diff_content = outputs[13]
         assert header_text == "", "Header should be cleared after discard"
         assert diff_content == "", "Diff content should be cleared after discard"
 
@@ -320,8 +318,8 @@ class TestChadWebUI:
         outputs = web_ui.attempt_merge(session_id, "msg", "main")
 
         # Index 11 should be task_description update (direct value "" or gr.update)
-        # Note: 15 outputs total (includes merge_visibility_state, merge_section_header, diff_content)
-        assert len(outputs) >= 15, "Merge should return 15 outputs including visibility controls"
+        # Note: 14 outputs total (includes merge_section_header, diff_content)
+        assert len(outputs) >= 14, "Merge should return 14 outputs"
         task_desc_update = outputs[11]
         # Handle both direct value "" and gr.update(value="")
         if isinstance(task_desc_update, str):
@@ -329,11 +327,9 @@ class TestChadWebUI:
         else:
             assert task_desc_update.get("value") == "", "Task description should be cleared"
 
-        # Verify visibility state outputs for JS workaround
-        visibility_state = outputs[12]
-        header_text = outputs[13]
-        diff_content = outputs[14]
-        assert visibility_state == "hidden", "Visibility state should be 'hidden' after merge"
+        # Verify header and diff cleared after merge
+        header_text = outputs[12]
+        diff_content = outputs[13]
         assert header_text == "", "Header should be cleared after merge"
         assert diff_content == "", "Diff content should be cleared after merge"
 
@@ -493,20 +489,6 @@ class TestPortResolution:
         box_block = css[brace_idx + 1 : end_idx]
         assert "display:" not in box_block
         assert "visibility:" not in box_block
-
-
-def test_live_stream_scroll_state_initializes_with_null():
-    """Live stream scroll state should use null savedScrollTop to distinguish 'not scrolled' from 'scrolled to 0'."""
-    from chad.web_ui import CUSTOM_JS
-
-    # Verify the initialization uses null (not 0) for savedScrollTop
-    assert "savedScrollTop: null" in CUSTOM_JS, (
-        "savedScrollTop must initialize to null to properly handle scrolling to position 0"
-    )
-    # Verify the restore check uses !== null (not > 0)
-    assert "savedScrollTop !== null" in CUSTOM_JS, (
-        "Scroll restore must check !== null to properly restore scroll position 0"
-    )
 
 
 def test_live_stream_display_buffer_trims_to_tail():
@@ -2079,20 +2061,21 @@ class TestSessionLogFailureVisibility:
         assert "Simulated timeout" in transcript
 
     @patch("chad.web_ui.create_provider")
-    def test_merge_section_hidden_after_main_failure(
+    def test_merge_section_shown_after_failure_if_changes_exist(
         self, mock_create_provider, web_ui, tmp_path, git_repo, monkeypatch
     ):
-        """Changes-ready UI should stay hidden when the coding task itself fails."""
+        """Changes-ready UI should show when worktree has changes, even if task fails."""
         mock_create_provider.return_value = self._FailingProvider()
         web_ui.session_logger.base_dir = tmp_path
         monkeypatch.setattr(web_ui, "check_worktree_changes", lambda *_: (True, "dirty worktree"))
 
-        session = web_ui.create_session("hide-merge")
+        session = web_ui.create_session("show-merge")
         outputs = list(web_ui.start_chad_task(session.id, str(git_repo), "broken task", "claude"))
         final_output = outputs[-1]
 
+        # Merge section should be visible if there are changes, regardless of task success
         merge_section_update = final_output[12]
-        assert merge_section_update.get("visible") is False
+        assert merge_section_update.get("visible") is True
 
 
 class TestCodingSummaryExtraction:

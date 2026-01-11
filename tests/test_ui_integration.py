@@ -991,199 +991,62 @@ class TestMergeDiscardReset:
     Note: The handler logic is also verified via unit tests in test_web_ui.py.
     """
 
-    def test_merge_section_not_in_dom_when_hidden(self, page: Page):
-        """Verify merge section is not rendered when initially hidden.
+    def test_merge_section_initially_empty(self, page: Page):
+        """Verify merge section Group starts hidden (empty content).
 
-        Gradio doesn't render components that start with visible=False,
-        which is actually the correct behavior. This test confirms this.
+        The merge section uses a gr.Group that starts with visible=False,
+        so its content (header, summary, buttons) should not be visible initially.
         """
-        # Check that merge section is not visible (either not in DOM or hidden)
+        # Check that merge section content is not visible
         merge_info = page.evaluate(
             """
         () => {
-            const mergeSection = document.querySelector('.merge-section') ||
-                                document.querySelector('[key*="merge-section"]');
-            if (!mergeSection) {
-                return { exists: false, visible: false };
-            }
-            const style = window.getComputedStyle(mergeSection);
-            const visible = style.display !== 'none' && style.visibility !== 'hidden';
-            return { exists: true, visible };
-        }
-        """
-        )
-
-        # Either not in DOM or hidden - both are acceptable for initial state
-        assert not merge_info["visible"], (
-            "Merge section should not be visible initially"
-        )
-
-    def test_javascript_hides_merge_section_on_status_change(self, page: Page):
-        """Verify the JavaScript workaround hides merge section when status contains 'discarded'.
-
-        This tests the fix for Gradio's Column visibility bug. When the status
-        message contains 'discarded', the JavaScript should hide the merge section.
-        """
-        # Simulate a status change containing 'discarded' and verify JS hides section
-        result = page.evaluate(
-            """
-        () => {
-            // Find a status element - look for #task-status-header or any element with task-status in key
-            const statusEl = document.getElementById('task-status-header') ||
-                            document.querySelector('[key*="task-status"]') ||
-                            document.querySelector('[id*="task-status"]');
-            if (!statusEl) {
-                return { statusFound: false };
-            }
-
-            // Get the merge section - it may not be in DOM if Gradio rendered it hidden
             const mergeSection = document.querySelector('.merge-section');
-
-            // If there's no merge section in DOM, the test passes trivially
-            // (Gradio doesn't render hidden components)
             if (!mergeSection) {
-                return { statusFound: true, mergeSectionHidden: true, note: 'no-section-in-dom' };
+                return { exists: false, hasContent: false };
             }
-
-            // Make merge section visible for the test
-            mergeSection.style.display = 'block';
-
-            // Set status text to trigger JS hiding
-            const originalText = statusEl.textContent;
-            statusEl.textContent = 'Changes discarded.';
-
-            // Wait for JS to process (syncMergeSectionVisibility runs on interval)
-            return new Promise((resolve) => {
-                setTimeout(() => {
-                    const section = document.querySelector('.merge-section');
-                    const isHidden = !section || window.getComputedStyle(section).display === 'none';
-                    resolve({
-                        statusFound: true,
-                        mergeSectionHidden: isHidden
-                    });
-                }, 600);  // Wait for the 500ms interval to run
-            });
+            // Check if the accept/merge button is visible (it's inside the Group)
+            const mergeBtn = mergeSection.querySelector('.accept-merge-btn');
+            if (!mergeBtn) {
+                return { exists: true, hasContent: false };
+            }
+            const style = window.getComputedStyle(mergeBtn);
+            const visible = style.display !== 'none' && style.visibility !== 'hidden';
+            return { exists: true, hasContent: visible };
         }
         """
         )
 
-        # Status element should now always be in DOM (visible=True with CSS hiding)
-        assert result.get("statusFound"), (
-            "Status element should be in DOM - task_status has visible=True and elem_classes=['task-status-header']"
+        # Content should not be visible initially
+        assert not merge_info.get("hasContent", False), (
+            "Merge section content should not be visible initially"
         )
 
-        # The JavaScript fix should have hidden the merge section
-        assert result.get("mergeSectionHidden", True), (
-            "JavaScript should hide merge section when status contains 'discarded'"
-        )
-
-    def test_fresh_panel_has_no_merge_section(self, page: Page):
-        """Verify a fresh task panel has no visible merge section."""
-        # Check initial state - merge section should not be visible
-        initial_visible = page.evaluate(
+    def test_merge_section_column_exists(self, page: Page):
+        """Verify merge section Column is in DOM (for Gradio component binding)."""
+        # The Column should always be in DOM for Gradio to bind events
+        exists = page.evaluate(
             """
         () => {
-            const mergeSection = document.querySelector('.merge-section') ||
-                                document.querySelector('[key*="merge-section"]');
-            if (!mergeSection) return false;
-            const style = window.getComputedStyle(mergeSection);
-            return style.display !== 'none' && style.visibility !== 'hidden';
+            const mergeSection = document.querySelector('.merge-section');
+            return !!mergeSection;
         }
         """
         )
 
-        assert not initial_visible, "Fresh task panel should not show merge section"
+        assert exists, "Merge section Column should be in DOM for event binding"
 
-    def test_javascript_workaround_in_custom_js(self, page: Page):
-        """Verify the syncMergeSectionVisibility function exists in the page JavaScript."""
-        # Check that our JS fix function is defined
-        has_function = page.evaluate(
+    def test_page_fully_loaded(self, page: Page):
+        """Verify the page has fully loaded with all JavaScript."""
+        has_loaded = page.evaluate(
             """
         () => {
-            // The function is defined inside an IIFE, so we can't access it directly
-            // Instead, check that the interval is running by looking at visible behaviors
-            // Check if the page has loaded and our custom JS is present
             return document.readyState === 'complete';
         }
         """
         )
 
-        assert has_function, "Page should be fully loaded with custom JavaScript"
-
-    @pytest.mark.visual
-    def test_merge_section_shows_when_visibility_state_is_visible(self, page: Page):
-        """Verify merge section becomes visible when visibility state is set to 'visible'.
-
-        This is the critical test for the merge section showing after task completion.
-        The JS syncMergeSectionVisibility should:
-        1. Find the merge-visibility-state textbox
-        2. When its value is 'visible', remove the merge-section-hidden class
-        3. Make the merge section visible to the user
-        """
-        result = page.evaluate(
-            """
-        () => {
-            // Find the merge section
-            const mergeSection = document.querySelector('.merge-section');
-            if (!mergeSection) {
-                return { error: 'merge-section not found in DOM' };
-            }
-
-            // Find the visibility state textbox inside it
-            let stateInput = mergeSection.querySelector(
-                '.merge-visibility-state input, .merge-visibility-state textarea, ' +
-                'input.merge-visibility-state, textarea.merge-visibility-state'
-            );
-            if (!stateInput) {
-                // Try by ID
-                stateInput = mergeSection.querySelector(
-                    '[id^="merge-visibility-"] input, [id^="merge-visibility-"] textarea'
-                );
-            }
-            if (!stateInput) {
-                return { error: 'visibility state textbox not found', mergeSectionHtml: mergeSection.outerHTML.slice(0, 500) };
-            }
-
-            // Get initial state
-            const initialValue = stateInput.value;
-            const initialDisplay = window.getComputedStyle(mergeSection).display;
-            const initialHasHiddenClass = mergeSection.classList.contains('merge-section-hidden');
-
-            // Set visibility state to 'visible'
-            stateInput.value = 'visible';
-            // Trigger input event to notify any listeners
-            stateInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-            // Wait for JS interval to run (syncMergeSectionVisibility runs every 100ms)
-            return new Promise((resolve) => {
-                setTimeout(() => {
-                    const section = document.querySelector('.merge-section');
-                    const display = window.getComputedStyle(section).display;
-                    const hasHiddenClass = section.classList.contains('merge-section-hidden');
-
-                    resolve({
-                        initialValue,
-                        initialDisplay,
-                        initialHasHiddenClass,
-                        finalDisplay: display,
-                        finalHasHiddenClass: hasHiddenClass,
-                        isVisible: display !== 'none'
-                    });
-                }, 300);  // Wait for 100ms interval to run a few times
-            });
-        }
-        """
-        )
-
-        # Check for errors
-        assert "error" not in result, f"Test setup failed: {result.get('error')}"
-
-        # The merge section should now be visible
-        assert result.get("isVisible"), (
-            f"Merge section should be visible after setting visibility state to 'visible'. "
-            f"Initial: display={result.get('initialDisplay')}, hasHiddenClass={result.get('initialHasHiddenClass')}. "
-            f"Final: display={result.get('finalDisplay')}, hasHiddenClass={result.get('finalHasHiddenClass')}"
-        )
+        assert has_loaded, "Page should be fully loaded"
 
 
 class TestInlineScreenshots:

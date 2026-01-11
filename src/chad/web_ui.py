@@ -385,15 +385,12 @@ body, .gradio-container, .gradio-container * {
   display: none !important;
 }
 
-/* Hide merge/conflict sections completely when merged/discarded */
-.merge-section-hidden,
+/* Hide conflict sections completely when merged/discarded */
 .conflict-section-hidden {
   display: none !important;
   visibility: hidden !important;
 }
 
-/* Ensure ALL children of hidden merge section are also hidden */
-.merge-section-hidden *,
 .conflict-section-hidden * {
   display: none !important;
   visibility: hidden !important;
@@ -1309,357 +1306,6 @@ if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
     from .verification.screenshot_fixtures import LIVE_VIEW_CONTENT
 
     SCREENSHOT_LIVE_VIEW_HTML = json.dumps(LIVE_VIEW_CONTENT)
-CUSTOM_JS = (
-    """
-function() {
-    const screenshotMode = """
-    + SCREENSHOT_MODE_JS
-    + """;
-    const screenshotLiveViewHtml = """
-    + SCREENSHOT_LIVE_VIEW_HTML
-    + """;
-    // Fix for Gradio not properly updating column visibility after initial render
-    function fixProviderCardVisibility() {
-        const columns = document.querySelectorAll('.column');
-        columns.forEach(col => {
-            const headerRow = col.querySelector('.provider-card__header-row');
-            const headerText = col.querySelector(
-                '.provider-card__header-text, .provider-card__header-text-secondary'
-            );
-
-            if (headerRow) {
-                // This is a provider card column
-                if (headerText && headerText.textContent.trim().length > 0) {
-                    // Has content - show it
-                    col.style.display = '';
-                    col.style.visibility = '';
-                } else {
-                    // Empty card - hide it to prevent gap
-                    col.style.display = 'none';
-                }
-            }
-        });
-    }
-    function normalizeProviderHeaderClasses() {
-        if (!screenshotMode) return;
-        const headers = document.querySelectorAll('.provider-card__header-text');
-        headers.forEach((header, idx) => {
-            if (idx === 0) return;
-            header.classList.remove('provider-card__header-text');
-            header.classList.add('provider-card__header-text-secondary');
-        });
-    }
-    function getLiveStreamBoxes() {
-        return Array.from(document.querySelectorAll('#live-stream-box, .live-stream-box'));
-    }
-    function ensureLiveStreamVisible() {
-        if (!screenshotMode) return;
-        const liveBoxes = getLiveStreamBoxes();
-        if (!liveBoxes.length) return;
-        liveBoxes.forEach((liveBox) => {
-            liveBox.classList.remove('hide-container');
-            liveBox.style.display = 'block';
-            liveBox.style.visibility = 'visible';
-            liveBox.removeAttribute('hidden');
-            if (screenshotLiveViewHtml && !liveBox.querySelector('.live-output-content')) {
-                liveBox.innerHTML = screenshotLiveViewHtml;
-            }
-        });
-    }
-    function ensureTabAriaLinks() {
-        const tabHost = document.getElementById('main-tabs')?.parentElement || document;
-        const tablist = tabHost.querySelector('[role=\"tablist\"]');
-        const tabs = tablist ? Array.from(tablist.querySelectorAll('[role=\"tab\"]')) : [];
-        const panels = Array.from(tabHost.querySelectorAll('[role=\"tabpanel\"]'));
-        if (!tabs.length || !panels.length) return;
-        const usedPanelIds = new Set();
-        const usedTabIds = new Set();
-        tabs.forEach((tab, idx) => {
-            const panel = panels[idx];
-            if (!panel) return;
-            let panelId = panel.id && panel.id.trim() ? panel.id : `tabpanel-${idx}`;
-            if (usedPanelIds.has(panelId)) {
-                panelId = `tabpanel-${idx}-${idx}`;
-            }
-            let tabId = tab.id && tab.id.trim() ? tab.id : `tab-${idx}`;
-            if (usedTabIds.has(tabId)) {
-                tabId = `tab-${idx}-${idx}`;
-            }
-            panel.id = panelId;
-            tab.id = tabId;
-            usedPanelIds.add(panelId);
-            usedTabIds.add(tabId);
-            tab.setAttribute('aria-controls', panelId);
-            panel.setAttribute('aria-labelledby', tabId);
-            if (!panel.getAttribute('role')) {
-                panel.setAttribute('role', 'tabpanel');
-            }
-        });
-    }
-    function ensureTabListVisible() {
-        const tablist = document.querySelector('[role=\"tablist\"]');
-        if (!tablist) return;
-        tablist.style.display = 'flex';
-        tablist.style.visibility = 'visible';
-        tablist.removeAttribute('hidden');
-    }
-    setInterval(() => {
-        normalizeProviderHeaderClasses();
-        fixProviderCardVisibility();
-        ensureLiveStreamVisible();
-        ensureTabAriaLinks();
-        ensureTabListVisible();
-    }, 500);
-    const visObserver = new MutationObserver(() => {
-        fixProviderCardVisibility();
-        ensureTabAriaLinks();
-        ensureTabListVisible();
-    });
-    visObserver.observe(document.body, { childList: true, subtree: true, attributes: true });
-    setTimeout(ensureLiveStreamVisible, 100);
-    setTimeout(ensureTabAriaLinks, 100);
-
-    // Live stream scroll preservation
-    window._liveStreamScroll = window._liveStreamScroll || new WeakMap();
-    const scrollStates = window._liveStreamScroll;
-
-    function getScrollState(container) {
-        if (!container) return null;
-        if (!scrollStates.has(container)) {
-            scrollStates.set(container, {
-                userScrolledUp: false,
-                savedScrollTop: null,  // null = no user scroll yet, number = user's scroll position
-                lastUserScrollTime: 0,
-                ignoreNextScroll: false
-            });
-        }
-        return scrollStates.get(container);
-    }
-
-    function getScrollContainer(liveBox) {
-        if (!liveBox) return null;
-        return liveBox.querySelector('.live-output-content') ||
-               liveBox.querySelector('[data-testid="markdown"]') ||
-               liveBox;
-    }
-
-    function handleUserScroll(e) {
-        const container = e.target;
-        const state = getScrollState(container);
-        if (!container || !state || state.ignoreNextScroll) {
-            if (state) state.ignoreNextScroll = false;
-            return;
-        }
-        const now = Date.now();
-        if (now - state.lastUserScrollTime < 50) return;
-        state.lastUserScrollTime = now;
-
-        const scrollBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-        const isAtBottom = scrollBottom < 50;
-
-        // User is NOT at bottom = they scrolled away from auto-scroll position
-        state.userScrolledUp = !isAtBottom;
-        state.savedScrollTop = container.scrollTop;
-    }
-
-    function restoreScrollPosition(container) {
-        const state = getScrollState(container);
-        if (!container || !state) return;
-        state.ignoreNextScroll = true;
-        requestAnimationFrame(() => {
-            // null = user hasn't scrolled, use container's current position (allow auto-scroll)
-            // number = user scrolled to that position, restore it (including 0 for top)
-            const targetScrollTop =
-                state.savedScrollTop !== null ? state.savedScrollTop : container.scrollTop;
-            container.scrollTop = targetScrollTop;
-            setTimeout(() => { state.ignoreNextScroll = false; }, 100);
-        });
-    }
-
-    function attachScrollListener(container) {
-        if (!container || container._liveScrollAttached) return;
-        container._liveScrollAttached = true;
-        container.addEventListener('scroll', handleUserScroll, { passive: true });
-    }
-
-    function initScrollTracking() {
-        const liveBoxes = getLiveStreamBoxes();
-        if (!liveBoxes.length) {
-            setTimeout(initScrollTracking, 200);
-            return;
-        }
-
-        liveBoxes.forEach((liveBox) => {
-            let lastContainer = null;
-            const syncContainer = () => {
-                const container = getScrollContainer(liveBox);
-                if (!container) return;
-                if (container !== lastContainer) {
-                    attachScrollListener(container);
-                    lastContainer = container;
-                }
-                restoreScrollPosition(container);
-            };
-
-            const observer = new MutationObserver(syncContainer);
-            observer.observe(liveBox, {
-                childList: true,
-                subtree: true,
-                characterData: true
-            });
-
-            syncContainer();
-        });
-    }
-
-    setTimeout(initScrollTracking, 100);
-
-    // Auto-click "Add New Task" button when + tab is clicked
-    function setupPlusTabAutoClick() {
-        const tabButtons = document.querySelectorAll('button[role="tab"]');
-        tabButtons.forEach(tab => {
-            if (tab.textContent.trim() === '➕' && !tab._plusClickSetup) {
-                tab._plusClickSetup = true;
-                tab.addEventListener('click', () => {
-                    // Small delay to let tab panel become visible
-                    setTimeout(() => {
-                        const addBtn = document.getElementById('add-new-task-btn');
-                        if (addBtn) {
-                            addBtn.click();
-                        }
-                    }, 50);
-                });
-            }
-        });
-    }
-    function ensurePlusTabExists() {
-        const existing = Array.from(document.querySelectorAll('[role=\"tab\"]')).find(
-            (tab) => tab.textContent && tab.textContent.trim() === '➕'
-        );
-        if (existing) return;
-        const addBtn = document.getElementById('add-new-task-btn');
-        if (!addBtn) return;
-        let fallback = document.getElementById('fallback-plus-tab');
-        if (!fallback) {
-            fallback = document.createElement('button');
-            fallback.id = 'fallback-plus-tab';
-            fallback.setAttribute('role', 'tab');
-            fallback.setAttribute('aria-label', '➕');
-            fallback.textContent = '➕';
-            fallback.style.position = 'fixed';
-            fallback.style.top = '12px';
-            fallback.style.right = '12px';
-            fallback.style.zIndex = '9999';
-            fallback.style.padding = '6px 10px';
-            fallback.style.fontSize = '16px';
-            fallback.style.cursor = 'pointer';
-            document.body.appendChild(fallback);
-        }
-        fallback.onclick = () => addBtn.click();
-    }
-
-    // Run setup periodically to catch dynamically added tabs
-    setInterval(setupPlusTabAutoClick, 500);
-    setTimeout(setupPlusTabAutoClick, 100);
-    setInterval(ensurePlusTabExists, 500);
-    setTimeout(ensurePlusTabExists, 100);
-
-    // Fix for Gradio Column visibility not updating after merge/discard
-    // Since gr.update(visible=False) doesn't work for Columns in Gradio 6.x,
-    // we use a hidden state element to control visibility reliably via JavaScript
-    function syncMergeSectionVisibility() {
-        // Find all merge sections in all task panels
-        const mergeSections = document.querySelectorAll('.merge-section');
-        mergeSections.forEach(mergeSection => {
-            // Primary method: Check the visibility state element (more reliable)
-            // Query handles both container mode (input inside .merge-visibility-state)
-            // and container=False mode (class directly on input/textarea)
-            let stateInput =
-                mergeSection.querySelector('.merge-visibility-state input, .merge-visibility-state textarea');
-            if (!stateInput) {
-                // Fallback: container=False puts class directly on the element
-                stateInput =
-                    mergeSection.querySelector('input.merge-visibility-state, textarea.merge-visibility-state');
-            }
-            if (!stateInput) {
-                // Last resort: find by ID pattern
-                stateInput = mergeSection.querySelector(
-                    '[id^="merge-visibility-"] input, [id^="merge-visibility-"] textarea,
-                      input[id^="merge-visibility-"], textarea[id^="merge-visibility-"]'
-                );
-            }
-            let shouldHide = false;
-
-            if (stateInput) {
-                // Use the explicit visibility state from Python
-                shouldHide = stateInput.value === 'hidden' || stateInput.value === '';
-            } else {
-                // Fallback: Check status text (for backward compatibility)
-                const taskPanel = mergeSection.closest('.tabitem, [role="tabpanel"]');
-                if (taskPanel) {
-                    const statusEl = taskPanel.querySelector('.task-status-header') ||
-                                    taskPanel.querySelector('[id*="task-status"]') ||
-                                    taskPanel.querySelector('[class*="task-status"]');
-                    const statusText = statusEl ? (statusEl.textContent || '') : '';
-                    shouldHide = statusText.includes('merged') || statusText.includes('discarded');
-                }
-            }
-
-            if (shouldHide) {
-                // Hide the entire section and ALL its children completely
-                mergeSection.classList.add('merge-section-hidden');
-                mergeSection.style.cssText = 'display: none !important; visibility: hidden !important;';
-                // Hide all child elements to ensure nothing bleeds through
-                mergeSection.querySelectorAll('*').forEach(child => {
-                    if (!child.classList.contains('merge-visibility-state') &&
-                        !child.closest('.merge-visibility-state')) {
-                        child.style.cssText = 'display: none !important; visibility: hidden !important;';
-                    }
-                });
-            } else if (stateInput && stateInput.value === 'visible') {
-                // Explicitly show the section and restore all children
-                mergeSection.classList.remove('merge-section-hidden');
-                mergeSection.style.cssText = '';
-                mergeSection.querySelectorAll('*').forEach(child => {
-                    if (!child.classList.contains('merge-visibility-state') &&
-                        !child.classList.contains('visually-hidden') &&
-                        !child.closest('.visually-hidden')) {
-                        child.style.cssText = '';
-                    }
-                });
-            }
-        });
-
-        // Also handle conflict sections (still using status text for these)
-        const conflictSections = document.querySelectorAll('.conflict-section');
-        conflictSections.forEach(conflictSection => {
-            const taskPanel = conflictSection.closest('.tabitem, [role="tabpanel"]');
-            if (!taskPanel) return;
-
-            const statusEl = taskPanel.querySelector('.task-status-header') ||
-                            taskPanel.querySelector('[id*="task-status"]') ||
-                            taskPanel.querySelector('[class*="task-status"]');
-            const statusText = statusEl ? (statusEl.textContent || '') : '';
-            const shouldHide = statusText.includes('merged') || statusText.includes('discarded');
-
-            if (shouldHide) {
-                conflictSection.classList.add('conflict-section-hidden');
-                conflictSection.style.cssText = 'display: none !important; visibility: hidden !important;';
-            } else if (conflictSection.classList.contains('conflict-section-hidden')) {
-                conflictSection.classList.remove('conflict-section-hidden');
-                conflictSection.style.cssText = '';
-            }
-        });
-    }
-
-    // Run frequently and on DOM changes for responsive UI
-    setInterval(syncMergeSectionVisibility, 100);
-    const mergeSectionObserver = new MutationObserver(syncMergeSectionVisibility);
-    mergeSectionObserver.observe(document.body,
-        { childList: true, subtree: true, characterData: true, attributes: true });
-}
-"""
-)
 
 
 def _brighten_color(r: int, g: int, b: int, min_brightness: int = 140) -> tuple[int, int, int]:
@@ -2832,8 +2478,6 @@ class ChadWebUI:
                 branch_update = gr.update(choices=branch_choices, value=branch_choices[0])
             else:
                 branch_update = gr.update()
-            # Determine visibility state for merge section (controls via JS workaround)
-            visibility_state = "visible" if show_merge else "hidden"
             header_text = "### Changes Ready to Merge" if show_merge else ""
             return (
                 display_history,
@@ -2849,11 +2493,10 @@ class ChadWebUI:
                 gr.update(value=""),  # Clear followup input
                 gr.update(visible=show_followup),  # Show/hide followup row
                 gr.update(interactive=show_followup),  # Enable/disable send button
-                gr.update(visible=show_merge),  # Show/hide merge section (Gradio - may not work)
+                gr.update(visible=show_merge),  # Show/hide merge section group
                 gr.update(value=merge_summary),  # Merge changes summary
                 branch_update,  # Branch dropdown choices
                 gr.update(value=diff_full),  # Full diff content
-                visibility_state,  # merge_visibility_state - controls via JS
                 header_text,  # merge_section_header - dynamic header
             )
 
@@ -3622,8 +3265,9 @@ class ChadWebUI:
                 final_summary = f"{status_prefix}{final_status}"
 
             # Check for worktree changes to show merge section
+            # Show merge section whenever there are changes, regardless of task success
             has_changes, merge_summary_text = self.check_worktree_changes(session_id)
-            show_merge = has_changes and overall_success
+            show_merge = has_changes
 
             # Get available branches and rendered diff for merge target
             branches = []
@@ -4209,10 +3853,10 @@ class ChadWebUI:
     ) -> tuple:
         """Attempt to merge worktree changes to a target branch.
 
-        Returns 15 values for merge_outputs:
-        [merge_section, changes_summary, conflict_section, conflict_info, conflicts_html,
+        Returns 14 values for merge_outputs:
+        [merge_section_group, changes_summary, conflict_section, conflict_info, conflicts_html,
          task_status, chatbot, start_btn, cancel_btn, live_stream, followup_row, task_description,
-         merge_visibility_state, merge_section_header, diff_content]
+         merge_section_header, diff_content]
         """
         session = self.get_session(session_id)
         no_change = gr.update()
@@ -4221,7 +3865,7 @@ class ChadWebUI:
                 gr.update(visible=False), no_change, gr.update(visible=False),
                 no_change, no_change, gr.update(value="❌ No worktree to merge.", visible=True),
                 no_change, no_change, no_change, no_change, no_change, no_change,
-                "hidden", "", "",  # merge_visibility_state, merge_section_header, diff_content
+                "", "",  # merge_section_header, diff_content
             )
 
         try:
@@ -4241,23 +3885,21 @@ class ChadWebUI:
                 session.task_description = ""
                 session.chat_history = []
                 # Full reset - return tab to initial state
-                # Use direct values where possible to match working make_yield pattern
                 return (
-                    gr.update(visible=False),                    # merge_section
-                    "",                                          # changes_summary - direct value
+                    gr.update(visible=False),                    # merge_section_group
+                    "",                                          # changes_summary
                     gr.update(visible=False),                    # conflict_section
-                    "",                                          # conflict_info - direct value
-                    "",                                          # conflicts_html - direct value
+                    "",                                          # conflict_info
+                    "",                                          # conflicts_html
                     gr.update(value=f"✓ Changes merged to {target_name}.", visible=True),
-                    [],                                          # chatbot - direct empty list
-                    gr.update(interactive=True),                 # start_btn - enable
-                    gr.update(interactive=False),                # cancel_btn - disable
-                    "",                                          # live_stream - direct value
-                    gr.update(visible=False),                    # followup_row - hide
-                    "",                                          # task_description - direct value
-                    "hidden",                                    # merge_visibility_state - hide via JS
-                    "",                                          # merge_section_header - clear
-                    "",                                          # diff_content - clear diff view
+                    [],                                          # chatbot
+                    gr.update(interactive=True),                 # start_btn
+                    gr.update(interactive=False),                # cancel_btn
+                    "",                                          # live_stream
+                    gr.update(visible=False),                    # followup_row
+                    "",                                          # task_description
+                    "",                                          # merge_section_header
+                    "",                                          # diff_content
                 )
             elif conflicts:
                 session.merge_conflicts = conflicts
@@ -4265,33 +3907,33 @@ class ChadWebUI:
                 file_count = len(conflicts or [])
                 conflict_msg = f"**{file_count} file(s)** with **{conflict_count} conflict(s)** need resolution."
                 return (
-                    gr.update(visible=False),                    # merge_section
+                    gr.update(visible=False),                    # merge_section_group
                     no_change,                                   # changes_summary
                     gr.update(visible=True),                     # conflict_section
                     gr.update(value=conflict_msg),               # conflict_info
                     gr.update(value=self._render_conflicts_html(conflicts or [])),
                     no_change,                                   # task_status
                     no_change, no_change, no_change, no_change, no_change, no_change,
-                    "hidden", "", "",                       # merge_visibility_state, merge_section_header, diff_content
+                    "", "",                                      # merge_section_header, diff_content
                 )
             else:
                 error_detail = error_msg or "Merge failed. Check git status and commit hooks."
                 return (
-                    gr.update(visible=True),                     # merge_section remains visible
+                    gr.update(visible=True),                     # merge_section_group remains visible
                     no_change,                                   # changes_summary unchanged
                     gr.update(visible=False),                    # conflict_section hidden
                     gr.update(value=""),                         # conflict_info cleared
                     gr.update(value=""),                         # conflicts_html cleared
                     gr.update(value=f"❌ {error_detail}", visible=True),
                     no_change, no_change, no_change, no_change, no_change, no_change,
-                    "visible", no_change, no_change,        # merge_visibility_state, merge_section_header, diff_content
+                    no_change, no_change,                        # merge_section_header, diff_content
                 )
         except Exception as e:
             return (
                 no_change, no_change, no_change, no_change, no_change,
                 gr.update(value=f"❌ Merge error: {e}", visible=True),
                 no_change, no_change, no_change, no_change, no_change, no_change,
-                no_change, no_change, no_change,            # merge_visibility_state, merge_section_header, diff_content
+                no_change, no_change,                            # merge_section_header, diff_content
             )
 
     def _render_conflicts_html(self, conflicts: list[MergeConflict]) -> str:
@@ -4478,7 +4120,7 @@ class ChadWebUI:
     def resolve_all_conflicts(self, session_id: str, use_incoming: bool) -> tuple:
         """Resolve all conflicts by choosing all original or all incoming.
 
-        Returns 15 values for merge_outputs.
+        Returns 14 values for merge_outputs.
         """
         session = self.get_session(session_id)
         no_change = gr.update()
@@ -4487,7 +4129,7 @@ class ChadWebUI:
                 no_change, no_change, gr.update(visible=False),
                 no_change, no_change, gr.update(value="❌ No project path set.", visible=True),
                 no_change, no_change, no_change, no_change, no_change, no_change,
-                no_change, no_change, no_change,  # merge_visibility_state, merge_section_header, diff_content
+                no_change, no_change,  # merge_section_header, diff_content
             )
 
         try:
@@ -4505,43 +4147,41 @@ class ChadWebUI:
                 session.task_description = ""
                 session.chat_history = []
                 # Full reset - return tab to initial state
-                # Use direct values where possible to match working make_yield pattern
                 return (
-                    gr.update(visible=False),                    # merge_section
-                    "",                                          # changes_summary - direct value
+                    gr.update(visible=False),                    # merge_section_group
+                    "",                                          # changes_summary
                     gr.update(visible=False),                    # conflict_section
-                    "",                                          # conflict_info - direct value
-                    "",                                          # conflicts_html - direct value
+                    "",                                          # conflict_info
+                    "",                                          # conflicts_html
                     gr.update(value="✓ All conflicts resolved. Merge complete.", visible=True),
-                    [],                                          # chatbot - direct empty list
-                    gr.update(interactive=True),                 # start_btn - enable
-                    gr.update(interactive=False),                # cancel_btn - disable
-                    "",                                          # live_stream - direct value
-                    gr.update(visible=False),                    # followup_row - hide
-                    "",                                          # task_description - direct value
-                    "hidden",                                    # merge_visibility_state - hide via JS
-                    "",                                          # merge_section_header - clear
-                    "",                                          # diff_content - clear diff view
+                    [],                                          # chatbot
+                    gr.update(interactive=True),                 # start_btn
+                    gr.update(interactive=False),                # cancel_btn
+                    "",                                          # live_stream
+                    gr.update(visible=False),                    # followup_row
+                    "",                                          # task_description
+                    "",                                          # merge_section_header
+                    "",                                          # diff_content
                 )
             else:
                 return (
                     no_change, no_change, no_change, no_change, no_change,
                     gr.update(value="❌ Failed to complete merge. Check git status.", visible=True),
                     no_change, no_change, no_change, no_change, no_change, no_change,
-                    no_change, no_change, no_change,  # merge_visibility_state, merge_section_header, diff_content
+                    no_change, no_change,  # merge_section_header, diff_content
                 )
         except Exception as e:
             return (
                 no_change, no_change, no_change, no_change, no_change,
                 gr.update(value=f"❌ Error resolving conflicts: {e}", visible=True),
                 no_change, no_change, no_change, no_change, no_change, no_change,
-                no_change, no_change, no_change,  # merge_visibility_state, merge_section_header, diff_content
+                no_change, no_change,  # merge_section_header, diff_content
             )
 
     def abort_merge_action(self, session_id: str) -> tuple:
         """Abort an in-progress merge, return to merge section.
 
-        Returns 15 values for merge_outputs.
+        Returns 14 values for merge_outputs.
         """
         session = self.get_session(session_id)
         no_change = gr.update()
@@ -4550,7 +4190,7 @@ class ChadWebUI:
                 no_change, no_change, gr.update(visible=False),
                 no_change, no_change, no_change,
                 no_change, no_change, no_change, no_change, no_change, no_change,
-                no_change, no_change, no_change,  # merge_visibility_state, merge_section_header, diff_content
+                no_change, no_change,  # merge_section_header, diff_content
             )
 
         git_mgr = GitWorktreeManager(Path(session.project_path))
@@ -4559,26 +4199,24 @@ class ChadWebUI:
 
         # Check if worktree still has changes - show merge section if so
         has_changes, summary = self.check_worktree_changes(session_id)
-        visibility_state = "visible" if has_changes else "hidden"
         header_text = "### Changes Ready to Merge" if has_changes else ""
 
         return (
-            gr.update(visible=has_changes),              # merge_section
+            gr.update(visible=has_changes),              # merge_section_group
             gr.update(value=summary if has_changes else ""),  # changes_summary
             gr.update(visible=False),                    # conflict_section
             no_change,                                   # conflict_info
             no_change,                                   # conflicts_html
             gr.update(value="⚠️ Merge aborted. Changes remain in worktree.", visible=True),
             no_change, no_change, no_change, no_change, no_change, no_change,  # no tab reset on abort
-            visibility_state,                            # merge_visibility_state
             header_text,                                 # merge_section_header
-            no_change,                                   # diff_content - keep as is
+            no_change,                                   # diff_content
         )
 
     def discard_worktree_changes(self, session_id: str) -> tuple:
         """Discard worktree and all changes, reset merge UI but keep task description.
 
-        Returns 15 values for merge_outputs. Task description is preserved so user
+        Returns 14 values for merge_outputs. Task description is preserved so user
         can retry the task with the same description.
         """
         session = self.get_session(session_id)
@@ -4593,23 +4231,21 @@ class ChadWebUI:
             session.chat_history = []
 
         # Reset merge UI but keep task description for retry
-        # Use direct values where possible to match working make_yield pattern
         return (
-            gr.update(visible=False),                    # merge_section
-            "",                                          # changes_summary - direct value
+            gr.update(visible=False),                    # merge_section_group
+            "",                                          # changes_summary
             gr.update(visible=False),                    # conflict_section
-            "",                                          # conflict_info - direct value
-            "",                                          # conflicts_html - direct value
+            "",                                          # conflict_info
+            "",                                          # conflicts_html
             gr.update(value="🗑️ Changes discarded.", visible=True),  # task_status
-            [],                                          # chatbot - direct empty list
-            gr.update(interactive=True),                 # start_btn - enable
-            gr.update(interactive=False),                # cancel_btn - disable
-            "",                                          # live_stream - direct value
-            gr.update(visible=False),                    # followup_row - hide
-            gr.update(value=session.task_description or "", interactive=True),  # task_description - enable editing
-            "hidden",                                    # merge_visibility_state - hide via JS
-            "",                                          # merge_section_header - clear
-            "",                                          # diff_content - clear diff view
+            [],                                          # chatbot
+            gr.update(interactive=True),                 # start_btn
+            gr.update(interactive=False),                # cancel_btn
+            "",                                          # live_stream
+            gr.update(visible=False),                    # followup_row
+            gr.update(value=session.task_description or "", interactive=True),  # task_description
+            "",                                          # merge_section_header
+            "",                                          # diff_content
         )
 
     def _build_handoff_context(self, chat_history: list) -> str:
@@ -4912,59 +4548,49 @@ class ChadWebUI:
             )
 
         # Merge section - shown when worktree has changes
-        # Note: Column uses visible=True so it's always in DOM; JS controls actual visibility
-        # via merge_visibility_state since Gradio 6 Column visibility updates don't work reliably
-        with gr.Column(visible=True, key=f"merge-section-{session_id}",
-                       elem_classes=["merge-section", "merge-section-hidden"]) as merge_section:
-            # Hidden state element controls visibility - JS watches this value
-            # "visible" = show section, "hidden" = hide section
-            # Note: Using visible=True with CSS hiding so element is always in DOM for JS to find
-            merge_visibility_state = gr.Textbox(
-                value="hidden",
-                visible=True,
-                elem_classes=["merge-visibility-state", "visually-hidden"],
-                elem_id=f"merge-visibility-{session_id}",
-                key=f"merge-visibility-{session_id}",
-                container=False,
-            )
-            merge_section_header = gr.Markdown("")  # Populated when changes exist
-            changes_summary = gr.Markdown(
-                "",
-                key=f"changes-summary-{session_id}",
-            )
-            with gr.Accordion("View Changes", open=False):
-                diff_content = gr.HTML(
-                    value="",
-                    elem_id=f"diff-content-{session_id}",
+        # Using gr.Group inside Column for reliable Gradio 6 visibility toggling
+        with gr.Column(key=f"merge-section-{session_id}",
+                       elem_classes=["merge-section"]):
+            merge_section_group = gr.Group(visible=False)
+            with merge_section_group:
+                merge_section_header = gr.Markdown("")  # Populated when changes exist
+                changes_summary = gr.Markdown(
+                    "",
+                    key=f"changes-summary-{session_id}",
                 )
-            with gr.Row():
-                merge_commit_msg = gr.Textbox(
-                    label="Commit Message",
-                    placeholder="Describe the changes being merged...",
-                    value="",
-                    scale=3,
-                    key=f"merge-commit-msg-{session_id}",
-                )
-                merge_target_branch = gr.Dropdown(
-                    label="Target Branch",
-                    choices=["main"],
-                    value="main",
-                    scale=1,
-                    key=f"merge-target-branch-{session_id}",
-                )
-            with gr.Row():
-                accept_merge_btn = gr.Button(
-                    "✓ Accept & Merge",
-                    variant="primary",
-                    interactive=True,
-                    key=f"accept-merge-{session_id}",
-                    elem_classes=["accept-merge-btn"],
-                )
-                discard_btn = gr.Button(
-                    "✗ Discard Changes",
-                    variant="stop",
-                    key=f"discard-{session_id}",
-                )
+                with gr.Accordion("View Changes", open=False):
+                    diff_content = gr.HTML(
+                        value="",
+                        elem_id=f"diff-content-{session_id}",
+                    )
+                with gr.Row():
+                    merge_commit_msg = gr.Textbox(
+                        label="Commit Message",
+                        placeholder="Describe the changes being merged...",
+                        value="",
+                        scale=3,
+                        key=f"merge-commit-msg-{session_id}",
+                    )
+                    merge_target_branch = gr.Dropdown(
+                        label="Target Branch",
+                        choices=["main"],
+                        value="main",
+                        scale=1,
+                        key=f"merge-target-branch-{session_id}",
+                    )
+                with gr.Row():
+                    accept_merge_btn = gr.Button(
+                        "✓ Accept & Merge",
+                        variant="primary",
+                        interactive=True,
+                        key=f"accept-merge-{session_id}",
+                        elem_classes=["accept-merge-btn"],
+                    )
+                    discard_btn = gr.Button(
+                        "✗ Discard Changes",
+                        variant="stop",
+                        key=f"discard-{session_id}",
+                    )
 
         # Conflict resolution section - shown when merge has conflicts
         with gr.Column(visible=False, key=f"conflict-section-{session_id}",
@@ -5088,12 +4714,11 @@ class ChadWebUI:
                 followup_input,
                 followup_row,
                 send_followup_btn,
-                merge_section,
+                merge_section_group,
                 changes_summary,
                 merge_target_branch,
                 diff_content,
-                merge_visibility_state,  # Controls visibility via JS
-                merge_section_header,    # Dynamic header text
+                merge_section_header,
             ],
         )
 
@@ -5137,9 +4762,8 @@ class ChadWebUI:
             return self.abort_merge_action(session_id)
 
         # Full reset outputs - includes components needed to reset tab to initial state
-        # Note: merge_visibility_state at index 12 controls visibility via JS (Gradio 6 Column bug workaround)
         merge_outputs = [
-            merge_section,          # 0: Hide merge section (Gradio visibility - may not work)
+            merge_section_group,    # 0: Hide merge section group
             changes_summary,        # 1: Clear summary
             conflict_section,       # 2: Hide conflict section
             conflict_info,          # 3: Clear conflict info
@@ -5151,9 +4775,8 @@ class ChadWebUI:
             live_stream,            # 9: Clear live stream
             followup_row,           # 10: Hide followup row
             task_description,       # 11: Clear task description
-            merge_visibility_state,  # 12: Set to "hidden" to hide section via JS
-            merge_section_header,    # 13: Clear header when hiding
-            diff_content,            # 14: Clear diff view inside accordion
+            merge_section_header,   # 12: Clear header when hiding
+            diff_content,           # 13: Clear diff view inside accordion
         ]
 
         accept_merge_btn.click(
@@ -5704,42 +5327,13 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                     const btn = root.querySelector('#add-new-task-btn');
                     if (btn) hideButton(btn);
                   };
-                  const syncMergeSectionVisibility = () => {
-                    const mergeSections = document.querySelectorAll('.merge-section');
-                    mergeSections.forEach(mergeSection => {
-                      let stateInput = mergeSection.querySelector('.merge-visibility-state input, .merge-visibility-state textarea');
-                      if (!stateInput) {
-                        stateInput = mergeSection.querySelector('input.merge-visibility-state, textarea.merge-visibility-state');
-                      }
-                      let shouldHide = false;
-                      if (stateInput) {
-                        shouldHide = stateInput.value === 'hidden' || stateInput.value === '';
-                      }
-                      if (shouldHide) {
-                        mergeSection.classList.add('merge-section-hidden');
-                        mergeSection.style.cssText = 'display: none !important; visibility: hidden !important;';
-                      } else if (stateInput && stateInput.value === 'visible') {
-                        mergeSection.classList.remove('merge-section-hidden');
-                        mergeSection.style.cssText = '';
-                        mergeSection.querySelectorAll('*').forEach(child => {
-                          if (!child.classList.contains('merge-visibility-state') &&
-                              !child.classList.contains('visually-hidden') &&
-                              !child.closest('.visually-hidden')) {
-                            child.style.cssText = '';
-                          }
-                        });
-                      }
-                    });
-                  };
                   const tickAll = () => {
                     wirePlus();
                     fixAriaLinks();
                     ensureDiscardEditable();
-                    syncMergeSectionVisibility();
                   };
                   setInterval(tickAll, 400);
                   setTimeout(tickAll, 80);
-                  setInterval(syncMergeSectionVisibility, 100);
                   document.addEventListener('click', (event) => {
                     const tab = event.target && event.target.closest
                       ? event.target.closest('[role=\"tab\"]')
