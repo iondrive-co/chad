@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "command": "if echo \"$CLAUDE_TOOL_INPUT\" | grep -q '\"file_path\".*Readme\\.md'; then echo '{\"decision\": \"block\", \"reason\": \"Use README.md (uppercase) instead of Readme.md\"}'; fi"
+      }
+    ]
+  }
+}
