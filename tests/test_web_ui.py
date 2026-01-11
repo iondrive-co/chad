@@ -2252,6 +2252,53 @@ More details here...
         assert "After" in summary_part
         assert "data:image/png;base64," in summary_part
 
+    def test_strip_screenshot_links_removes_markdown_links(self):
+        """AI-generated screenshot links should be stripped from content."""
+        from chad.web_ui import _strip_screenshot_links
+
+        # Test various formats the AI might output
+        assert _strip_screenshot_links("Before: [screenshot](file:///tmp/before.png)") == ""
+        assert _strip_screenshot_links("**Before:** [screenshot](file:///tmp/before.png)") == ""
+        assert _strip_screenshot_links("After: [screenshot](/tmp/after.png)") == ""
+        assert _strip_screenshot_links("**After:** [screenshot](file:///tmp/test.png)") == ""
+
+        # Standalone screenshot links should also be removed
+        assert "screenshot" not in _strip_screenshot_links("[screenshot](file:///tmp/x.png)")
+
+        # Normal text should be preserved
+        assert _strip_screenshot_links("Normal text") == "Normal text"
+
+        # Text around links should be preserved (minus the link)
+        result = _strip_screenshot_links("Start Before: [screenshot](file:///tmp/x.png) End")
+        assert "Start" in result
+        assert "End" in result
+        assert "file://" not in result
+
+    def test_make_chat_message_strips_screenshot_links_from_output(self, tmp_path):
+        """make_chat_message should strip AI screenshot links from displayed content."""
+        from chad.web_ui import make_chat_message
+
+        content = """Analysis complete.
+
+Before: [screenshot](file:///tmp/before.png)
+After: [screenshot](file:///tmp/after.png)
+
+""" + "x" * 300 + """
+
+```json
+{
+  "change_summary": "Fixed the issue",
+  "before_screenshot": "/tmp/before.png",
+  "after_screenshot": "/tmp/after.png"
+}
+```
+"""
+        msg = make_chat_message("CODING AI", content)
+        # Should not contain any file:// links
+        assert "file://" not in msg["content"]
+        # Should not contain markdown screenshot links
+        assert "[screenshot]" not in msg["content"]
+
 
 class TestVerificationPrompt:
     """Ensure verification prompts include task context and summaries."""
