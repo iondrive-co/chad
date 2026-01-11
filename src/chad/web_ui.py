@@ -5222,27 +5222,60 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                     return results;
                   };
                   const ensureDiscardEditable = () => {
-                    const statuses = collectAll('.task-status-header, [id*=\"task-status\"], [class*=\"task-status\"]');
+                    // Find status elements more broadly
+                    const statuses = collectAll('.task-status-header, [id*=\"task-status\"], [class*=\"task-status\"], [class*=\"status\"]');
+                    // Also check for any element containing "discarded" text
+                    const allElements = collectAll('*');
+                    const allWithDiscarded = allElements.filter(el => {
+                      const text = (el.textContent || '').toLowerCase();
+                      return text.includes('discarded') || text.includes('🗑️');
+                    });
+
                     const hasDiscarded = statuses.some((el) => {
                       const text = (el.textContent || '').toLowerCase().replace(/[^a-z]/g, '');
                       return text.includes('discarded');
-                    });
+                    }) || allWithDiscarded.length > 0;
+
                     if (!hasDiscarded) return;
+
+                    // Find task description textareas more specifically
                     const textareas = collectAll('textarea');
                     textareas.forEach((ta) => {
-                      // Find textarea by associated label text "Task Description"
+                      // Check multiple ways to identify task description textarea
                       const container = ta.closest('.gradio-container, .task-entry-bubble, [class*="textbox"], [class*="textarea"]');
                       const labelEl = container ? container.querySelector('label, span.label') : null;
                       const labelText = labelEl ? (labelEl.textContent || '').toLowerCase() : '';
                       const ariaLabel = (ta.getAttribute('aria-label') || '').toLowerCase();
-                      if (!labelText.includes('task description') && !ariaLabel.includes('task description')) return;
+                      const placeholder = (ta.getAttribute('placeholder') || '').toLowerCase();
+                      const key = ta.getAttribute('key') || '';
+
+                      // Match task description by multiple criteria
+                      const isTaskDesc = labelText.includes('task description') ||
+                                       ariaLabel.includes('task description') ||
+                                       placeholder.includes('describe what you want done') ||
+                                       key.includes('task-desc');
+
+                      if (!isTaskDesc) return;
+
+                      // Enable the textarea
                       ta.removeAttribute('disabled');
                       ta.removeAttribute('aria-disabled');
                       ta.disabled = false;
+                      ta.readOnly = false;
+
+                      // Also enable any parent fieldset
                       const fieldset = ta.closest('fieldset');
                       if (fieldset) {
                         fieldset.removeAttribute('disabled');
                         fieldset.removeAttribute('aria-disabled');
+                        fieldset.disabled = false;
+                      }
+
+                      // Make sure any Gradio wrapper is also enabled
+                      const gradioWrapper = ta.closest('.gr-textbox, .gradio-textbox');
+                      if (gradioWrapper) {
+                        gradioWrapper.classList.remove('disabled');
+                        gradioWrapper.removeAttribute('disabled');
                       }
                     });
                   };
