@@ -51,4 +51,4 @@ Modified
 
 Once a task is discarded the task description should be made editable again
 
-Remove the linting requirement preventing commits with blank space at end of line or lines longer than 120 chars
+Claude always initially attempts to find file Readme.md rather than README.md, can I prevent this with a claude hook?

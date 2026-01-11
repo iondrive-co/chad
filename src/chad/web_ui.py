@@ -4886,9 +4886,10 @@ class ChadWebUI:
             )
 
         # Merge section - shown when worktree has changes
-        # Note: visibility controlled via merge_visibility_state due to Gradio 6 Column visibility bug
-        with gr.Column(visible=False, key=f"merge-section-{session_id}",
-                       elem_classes=["merge-section"]) as merge_section:
+        # Note: Column uses visible=True so it's always in DOM; JS controls actual visibility
+        # via merge_visibility_state since Gradio 6 Column visibility updates don't work reliably
+        with gr.Column(visible=True, key=f"merge-section-{session_id}",
+                       elem_classes=["merge-section", "merge-section-hidden"]) as merge_section:
             # Hidden state element controls visibility - JS watches this value
             # "visible" = show section, "hidden" = hide section
             # Note: Using visible=True with CSS hiding so element is always in DOM for JS to find
