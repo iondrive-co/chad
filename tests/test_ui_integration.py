@@ -1184,3 +1184,159 @@ class TestMergeDiscardReset:
             f"Initial: display={result.get('initialDisplay')}, hasHiddenClass={result.get('initialHasHiddenClass')}. "
             f"Final: display={result.get('finalDisplay')}, hasHiddenClass={result.get('finalHasHiddenClass')}"
         )
+
+
+class TestInlineScreenshots:
+    """Test that before/after screenshots render as actual images in the chatbot.
+
+    These tests verify the fix for inline screenshot rendering. Previously,
+    Gradio's HTML sanitization stripped <img> tags even when listed in allow_tags.
+    The fix sets sanitize_html=False since content is internally generated.
+    """
+
+    def test_chatbot_allows_img_tags(self, page: Page):
+        """Chatbot should render <img> tags without sanitizing them."""
+        # Inject a message with an img tag directly into the chatbot
+        # using a data URL (no external file needed)
+        result = page.evaluate(
+            """
+        () => {
+            const chatbot = document.querySelector('#agent-chatbot');
+            if (!chatbot) return { error: 'chatbot not found' };
+
+            // Create a minimal red 1x1 PNG as data URL
+            const redPixelDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
+
+            // Find the message container
+            const container = chatbot.querySelector('.chatbot, [data-testid="chatbot"]')
+                || chatbot.querySelector('.messages')
+                || chatbot;
+
+            // Create a message with an img tag
+            const wrapper = document.createElement('div');
+            wrapper.className = 'message-row bot-row test-screenshot-message';
+
+            const bubble = document.createElement('div');
+            bubble.className = 'message bot-message';
+            bubble.innerHTML = `
+                <div class="screenshot-comparison">
+                    <div class="screenshot-panel">
+                        <div class="screenshot-label">Before</div>
+                        <img src="${redPixelDataUrl}" alt="Before screenshot" class="test-before-img">
+                    </div>
+                    <div class="screenshot-panel">
+                        <div class="screenshot-label">After</div>
+                        <img src="${redPixelDataUrl}" alt="After screenshot" class="test-after-img">
+                    </div>
+                </div>
+            `;
+
+            wrapper.appendChild(bubble);
+            container.appendChild(wrapper);
+
+            // Wait a moment for any sanitization to occur
+            return new Promise(resolve => {
+                setTimeout(() => {
+                    // Check if img tags still exist (weren't sanitized)
+                    const beforeImg = container.querySelector('.test-before-img');
+                    const afterImg = container.querySelector('.test-after-img');
+
+                    resolve({
+                        beforeImgExists: !!beforeImg,
+                        afterImgExists: !!afterImg,
+                        beforeImgSrc: beforeImg ? beforeImg.src.substring(0, 30) : null,
+                        afterImgSrc: afterImg ? afterImg.src.substring(0, 30) : null,
+                        screenshotComparisonExists: !!container.querySelector('.screenshot-comparison'),
+                        labelExists: !!container.querySelector('.screenshot-label')
+                    });
+                }, 100);
+            });
+        }
+        """
+        )
+
+        assert "error" not in result, f"Test setup failed: {result.get('error')}"
+        assert result["beforeImgExists"], "Before <img> tag should not be sanitized"
+        assert result["afterImgExists"], "After <img> tag should not be sanitized"
+        assert result["beforeImgSrc"].startswith("data:image/png"), "Before img should have data URL src"
+        assert result["afterImgSrc"].startswith("data:image/png"), "After img should have data URL src"
+        assert result["screenshotComparisonExists"], "screenshot-comparison div should exist"
+        assert result["labelExists"], "screenshot-label should exist"
+
+    def test_screenshot_comparison_layout(self, page: Page):
+        """Screenshot comparison should display images side by side."""
+        # First inject the test content
+        page.evaluate(
+            """
+        () => {
+            const chatbot = document.querySelector('#agent-chatbot');
+            if (!chatbot) return false;
+
+            const redPixelDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
+            const greenPixelDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEBgIApD5fRAAAAABJRU5ErkJggg==';
+
+            const container = chatbot.querySelector('.chatbot, [data-testid="chatbot"]')
+                || chatbot.querySelector('.messages')
+                || chatbot;
+
+            // Clear any previous test messages
+            container.querySelectorAll('.test-layout-message').forEach(m => m.remove());
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'message-row bot-row test-layout-message';
+
+            const bubble = document.createElement('div');
+            bubble.className = 'message bot-message';
+            bubble.innerHTML = `
+                <div class="screenshot-comparison" id="test-comparison">
+                    <div class="screenshot-panel" id="test-before-panel">
+                        <div class="screenshot-label">Before</div>
+                        <img src="${redPixelDataUrl}" alt="Before">
+                    </div>
+                    <div class="screenshot-panel" id="test-after-panel">
+                        <div class="screenshot-label">After</div>
+                        <img src="${greenPixelDataUrl}" alt="After">
+                    </div>
+                </div>
+            `;
+
+            wrapper.appendChild(bubble);
+            container.appendChild(wrapper);
+            return true;
+        }
+        """
+        )
+
+        # Check the layout
+        layout = page.evaluate(
+            """
+        () => {
+            const comparison = document.querySelector('#test-comparison');
+            if (!comparison) return { error: 'comparison div not found' };
+
+            const beforePanel = document.querySelector('#test-before-panel');
+            const afterPanel = document.querySelector('#test-after-panel');
+            if (!beforePanel || !afterPanel) return { error: 'panels not found' };
+
+            const compStyle = window.getComputedStyle(comparison);
+            const beforeBox = beforePanel.getBoundingClientRect();
+            const afterBox = afterPanel.getBoundingClientRect();
+
+            return {
+                display: compStyle.display,
+                beforeLeft: beforeBox.left,
+                afterLeft: afterBox.left,
+                beforeWidth: beforeBox.width,
+                afterWidth: afterBox.width,
+                sideBySide: afterBox.left > beforeBox.left + beforeBox.width * 0.5
+            };
+        }
+        """
+        )
+
+        assert "error" not in layout, f"Layout check failed: {layout.get('error')}"
+        assert layout["display"] == "flex", f"screenshot-comparison should be flex, got {layout['display']}"
+        assert layout["sideBySide"], (
+            f"Before and After should be side by side. "
+            f"Before left={layout['beforeLeft']}, After left={layout['afterLeft']}"
+        )

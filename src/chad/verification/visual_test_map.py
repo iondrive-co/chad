@@ -115,7 +115,7 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
     "CODING_SUMMARY_BUBBLE": UIComponent(
         tab="run",
         component="agent-communication",
-        tests=["TestCodingSummaryExtraction"],
+        tests=["TestCodingSummaryExtraction", "TestInlineScreenshots"],
         source_file="chad/web_ui.py",
         keywords=["hypothesis", "inline screenshot", "summary bubble", "change_summary", "before screenshot",
                   "after screenshot", "screenshot comparison"],
@@ -312,6 +312,7 @@ VISUAL_TEST_MAP: dict[str, list[str]] = {
         "TestScreenshots",
         "TestProviderTwoColumnLayout",
         "TestTaskTabs",
+        "TestInlineScreenshots",
     ],
     # Security manager - affects provider authentication display
     "chad/security.py": [

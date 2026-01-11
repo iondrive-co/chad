@@ -51,4 +51,4 @@ Modified
 
 Once a task is discarded the task description should be made editable again
 
-Claude always initially attempts to find file Readme.md rather than README.md, can I prevent this with a claude hook?
+Get rid of status line which is wrong and doesn't update: "✓ Ready — Coding: codex-home (openai, gpt-5.2-codex)"

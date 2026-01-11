@@ -4858,7 +4858,7 @@ class ChadWebUI:
                 height=400,
                 key=f"chatbot-{session_id}",
                 elem_id="agent-chatbot" if is_first else None,
-                allow_tags=["img", "div", "span", "pre", "code"],  # Allow inline screenshots and code
+                sanitize_html=False,  # Required for inline screenshots - content is internally generated
             )
 
         # Live stream kept in DOM (visible=True) but hidden via CSS for visual tests
