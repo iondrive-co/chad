@@ -1141,6 +1141,84 @@ class TestImportOnWindows:
         # Verify exactly 2 attempts were made (initial + single recovery)
         assert mock_stream.call_count == 2
 
+    @patch("chad.providers._start_pty_process")
+    def test_exploration_loop_detection(self, mock_start):
+        """Exploration loop should be detected when too many exploration commands without implementation."""
+        import json
+
+        mock_process = Mock()
+        mock_process.stdin = Mock()
+        mock_start.return_value = (mock_process, 11)
+
+        call_count = [0]
+
+        def fake_stream(process, master_fd, on_chunk, timeout, **kwargs):
+            call_count[0] += 1
+            # Simulate many exploration commands (>40 which is the default limit)
+            for i in range(45):
+                on_chunk(json.dumps({
+                    "type": "item.completed",
+                    "item": {"type": "command_execution", "command": f"rg -n 'pattern{i}' src/"}
+                }) + "\n")
+            # Simulate the idle callback being called and returning True due to exploration limit
+            return "", False, True
+
+        with patch("chad.providers._stream_pty_output", side_effect=fake_stream):
+            config = ModelConfig(provider="openai", model_name="gpt-4")
+            provider = OpenAICodexProvider(config)
+            provider.project_path = "/tmp/test_project"
+            provider.current_message = "Hello"
+            provider.cli_path = "/bin/codex"
+            provider.thread_id = None  # No thread_id so no recovery
+
+            with pytest.raises(RuntimeError, match="exploration loop"):
+                provider.get_response(timeout=1.0)
+
+    @patch("chad.providers._start_pty_process")
+    def test_exploration_loop_recovery_attempt(self, mock_start):
+        """Exploration loop should attempt recovery by prompting agent to implement."""
+        import json
+
+        mock_process = Mock()
+        mock_process.stdin = Mock()
+        mock_start.return_value = (mock_process, 11)
+
+        call_count = [0]
+
+        def fake_stream(process, master_fd, on_chunk, timeout, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First call: simulate exploration loop
+                for i in range(45):
+                    on_chunk(json.dumps({
+                        "type": "item.completed",
+                        "item": {"type": "command_execution", "command": f"rg -n 'pattern{i}' src/"}
+                    }) + "\n")
+                return "", False, True
+            else:
+                # Second call (recovery): simulate successful implementation
+                on_chunk(json.dumps({
+                    "type": "item.completed",
+                    "item": {"type": "command_execution", "command": "edit src/file.py"}
+                }) + "\n")
+                on_chunk(json.dumps({
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Fixed the bug!"}
+                }) + "\n")
+                return "", False, False
+
+        with patch("chad.providers._stream_pty_output", side_effect=fake_stream):
+            config = ModelConfig(provider="openai", model_name="gpt-4")
+            provider = OpenAICodexProvider(config)
+            provider.project_path = "/tmp/test_project"
+            provider.current_message = "Hello"
+            provider.cli_path = "/bin/codex"
+            provider.thread_id = "thread-123"  # Has thread_id so recovery is possible
+
+            result = provider.get_response(timeout=1.0)
+            assert "Fixed the bug!" in result
+            assert call_count[0] == 2  # Initial + recovery
+
 
 def test_stream_output_without_pty(monkeypatch):
     import chad.providers as providers
