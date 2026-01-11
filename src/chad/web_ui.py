@@ -2175,6 +2175,28 @@ def summarize_content(content: str, max_length: int = 200) -> str:
     return first_para[:max_length].rsplit(" ", 1)[0] + "..."
 
 
+def _strip_screenshot_links(content: str) -> str:
+    """Remove markdown screenshot links from content since we display images inline.
+
+    AI agents often output markdown links like:
+      Before: [screenshot](file:///tmp/screenshot.png)
+      **After:** [screenshot](file:///tmp/after.png)
+
+    These are redundant when we display inline images from the JSON block.
+    """
+    import re
+    # Match markdown links to file:// URLs or /tmp/ paths containing screenshot
+    # Patterns: [screenshot](file://...) or [text](file://...screenshot...) or [text](/tmp/...png)
+    pattern = r'\*{0,2}(?:Before|After):?\*{0,2}\s*\[(?:screenshot|[^\]]*)\]\((?:file://)?[^\)]*(?:screenshot|\.png)[^\)]*\)\s*'
+    cleaned = re.sub(pattern, '', content, flags=re.IGNORECASE)
+    # Also remove standalone screenshot links not prefixed with Before/After
+    pattern2 = r'\[screenshot\]\((?:file://)?/[^\)]+\.png\)\s*'
+    cleaned = re.sub(pattern2, '', cleaned, flags=re.IGNORECASE)
+    # Clean up any resulting blank lines
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    return cleaned
+
+
 def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> dict:
     """Create a Gradio 6.x compatible chat message.
 
@@ -2220,12 +2242,16 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
                 summary_text = f"{summary_text}\n\n" + "\n\n".join(extra_parts)
         else:
             summary_text = summarize_content(content)
+        # Strip redundant screenshot links from full output since we display images inline
+        clean_content = _strip_screenshot_links(content)
         formatted = (
             f"**{speaker}**\n\n{summary_text}\n\n"
-            f"<details><summary>Show full output</summary>\n\n{content}\n\n</details>"
+            f"<details><summary>Show full output</summary>\n\n{clean_content}\n\n</details>"
         )
     else:
-        formatted = f"**{speaker}**\n\n{content}"
+        # Strip screenshot links even in non-collapsible case
+        clean_content = _strip_screenshot_links(content)
+        formatted = f"**{speaker}**\n\n{clean_content}"
 
     return {"role": role, "content": formatted}
 
