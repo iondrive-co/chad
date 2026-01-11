@@ -1,8 +1,63 @@
 """Git worktree management for parallel task execution."""
 
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+def cleanup_stale_pth_entries(venv_path: Path, worktree_base: Path, current_worktree_id: str | None = None) -> int:
+    """Remove stale/conflicting worktree paths from venv's .pth files.
+
+    When worktrees share a venv via symlink, editable installs (pip install -e .)
+    can pollute the venv with paths to worktrees. This causes Python to import
+    from the wrong worktree, confusing agents.
+
+    Removes entries where:
+    - The worktree no longer exists (stale)
+    - The worktree is different from current_worktree_id (conflicting)
+
+    Returns number of entries removed.
+    """
+    removed = 0
+    site_packages = list(venv_path.glob("lib/python*/site-packages"))
+    if not site_packages:
+        return 0
+
+    # Match both plain paths and sys.path.insert patterns
+    worktree_pattern = re.compile(
+        rf"{re.escape(str(worktree_base))}/([a-f0-9]+)/src"
+    )
+
+    for sp in site_packages:
+        for pth_file in sp.glob("*.pth"):
+            try:
+                content = pth_file.read_text()
+                lines = content.splitlines()
+                new_lines = []
+                modified = False
+
+                for line in lines:
+                    # Check if line references a worktree src path
+                    match = worktree_pattern.search(line)
+                    if match:
+                        worktree_id = match.group(1)
+                        worktree_path = worktree_base / worktree_id
+                        # Remove if worktree doesn't exist OR if it's not the current one
+                        if not worktree_path.exists() or (
+                            current_worktree_id and worktree_id != current_worktree_id
+                        ):
+                            removed += 1
+                            modified = True
+                            continue
+                    new_lines.append(line)
+
+                if modified:
+                    pth_file.write_text("\n".join(new_lines) + "\n" if new_lines else "")
+            except (OSError, PermissionError):
+                continue
+
+    return removed
 
 
 @dataclass
@@ -163,6 +218,9 @@ class GitWorktreeManager:
         main_venv = self.project_path / "venv"
         worktree_venv = worktree_path / "venv"
         if main_venv.exists() and main_venv.is_dir() and not worktree_venv.exists():
+            # Clean up stale/conflicting .pth entries from old worktrees before symlinking
+            # This prevents Python from importing from wrong worktrees
+            cleanup_stale_pth_entries(main_venv, self.worktree_base, current_worktree_id=task_id)
             worktree_venv.symlink_to(main_venv)
 
         return worktree_path, base_commit

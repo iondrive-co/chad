@@ -106,6 +106,61 @@ class TestGitWorktreeManager:
         assert worktree_venv.resolve() == main_venv.resolve()
         assert (worktree_venv / "bin" / "python").exists()
 
+    def test_create_worktree_cleans_stale_pth_entries(self, git_repo):
+        """Test that creating a worktree cleans up stale .pth entries from old worktrees."""
+        from chad.git_worktree import cleanup_stale_pth_entries
+
+        # Create a venv with site-packages
+        main_venv = git_repo / "venv"
+        site_packages = main_venv / "lib" / "python3.12" / "site-packages"
+        site_packages.mkdir(parents=True)
+
+        # Create worktree base directory
+        worktree_base = git_repo / ".chad-worktrees"
+        worktree_base.mkdir(exist_ok=True)
+
+        # Create a .pth file with stale entries (worktrees that don't exist)
+        pth_file = site_packages / "test.pth"
+        stale_worktree = f"{worktree_base}/deadbeef/src"
+        valid_path = "/some/other/path"
+        pth_file.write_text(f"{stale_worktree}\n{valid_path}\n")
+
+        # Run cleanup
+        removed = cleanup_stale_pth_entries(main_venv, worktree_base)
+
+        assert removed == 1
+        content = pth_file.read_text()
+        assert stale_worktree not in content
+        assert valid_path in content
+
+    def test_cleanup_removes_conflicting_worktree_entries(self, git_repo):
+        """Test that cleanup removes entries from other worktrees when current_worktree_id is specified."""
+        from chad.git_worktree import cleanup_stale_pth_entries
+
+        # Create a venv with site-packages
+        main_venv = git_repo / "venv"
+        site_packages = main_venv / "lib" / "python3.12" / "site-packages"
+        site_packages.mkdir(parents=True)
+
+        # Create worktree base directory with an existing worktree
+        worktree_base = git_repo / ".chad-worktrees"
+        worktree_base.mkdir(exist_ok=True)
+        (worktree_base / "aaaaaaaa").mkdir()  # Existing worktree
+
+        # Create a .pth file with entry from existing but conflicting worktree
+        pth_file = site_packages / "test.pth"
+        conflicting = f'import sys; sys.path.insert(0, "{worktree_base}/aaaaaaaa/src")'
+        valid_path = "/some/other/path"
+        pth_file.write_text(f"{conflicting}\n{valid_path}\n")
+
+        # Run cleanup with current_worktree_id - should remove the conflicting entry
+        removed = cleanup_stale_pth_entries(main_venv, worktree_base, current_worktree_id="bbbbbbbb")
+
+        assert removed == 1
+        content = pth_file.read_text()
+        assert "aaaaaaaa" not in content
+        assert valid_path in content
+
     def test_worktree_exists(self, git_repo):
         """Test checking if worktree exists."""
         mgr = GitWorktreeManager(git_repo)
