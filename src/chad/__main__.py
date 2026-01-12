@@ -48,6 +48,24 @@ def _start_parent_watchdog() -> None:
     thread.start()
 
 
+def _check_chad_import_path() -> None:
+    """Warn if multiple chad packages are in sys.path (can cause wrong code to run)."""
+    import chad
+    chad_paths = []
+    for path in sys.path:
+        candidate = Path(path) / "chad"
+        if candidate.is_dir() and (candidate / "__init__.py").exists():
+            chad_paths.append(str(candidate))
+
+    if len(chad_paths) > 1:
+        actual = Path(chad.__file__).parent
+        print("⚠️  Warning: Multiple 'chad' packages found in sys.path:")
+        for p in chad_paths:
+            marker = " (active)" if Path(p) == actual else ""
+            print(f"   - {p}{marker}")
+        print("   This can cause wrong code to run. Check for stale .pth files.")
+
+
 SCS = [
     "Chad wants to make you its reverse centaur",
     "Chad is a singleton and ready to mingle-a-ton",
@@ -70,6 +88,9 @@ def main() -> int:
     """Main entry point for Chad web interface."""
     # Start watchdog if spawned by a parent process (e.g., tests)
     _start_parent_watchdog()
+
+    # Check for import path issues that can cause wrong code to run
+    _check_chad_import_path()
 
     parser = argparse.ArgumentParser(description="Chad: YOLO AI")
     parser.add_argument(

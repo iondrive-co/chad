@@ -245,6 +245,11 @@ class GitWorktreeManager:
 
                 shutil.rmtree(worktree_path, ignore_errors=True)
 
+        # Clean up any .pth files that reference this worktree
+        main_venv = self.project_path / "venv"
+        if main_venv.exists():
+            cleanup_stale_pth_entries(main_venv, self.worktree_base)
+
         # Always try to delete the branch (it might exist without the worktree)
         self._run_git("branch", "-D", branch_name, check=False)
 
