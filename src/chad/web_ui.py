@@ -791,7 +791,7 @@ body, .gradio-container, .gradio-container * {
 }
 
 /* Inline live content in chat bubbles */
-#agent-chatbot .inline-live-header {
+.agent-chatbot .inline-live-header {
   background: #2a2a3e;
   color: #a8d4ff;
   padding: 4px 10px;
@@ -801,7 +801,7 @@ body, .gradio-container, .gradio-container * {
   letter-spacing: 0.05em;
   margin: 8px 0 0 0;
 }
-#agent-chatbot .inline-live-content {
+.agent-chatbot .inline-live-content {
   background: #1e1e2e !important;
   color: #e2e8f0 !important;
   border: 1px solid #555 !important;
@@ -818,42 +818,42 @@ body, .gradio-container, .gradio-container * {
   line-height: 1.4;
 }
 /* Diff highlighting in inline live content */
-#agent-chatbot .inline-live-content .diff-add {
+.agent-chatbot .inline-live-content .diff-add {
   color: #98c379 !important;
   background: rgba(152, 195, 121, 0.1) !important;
 }
-#agent-chatbot .inline-live-content .diff-remove {
+.agent-chatbot .inline-live-content .diff-remove {
   color: #e06c75 !important;
   background: rgba(224, 108, 117, 0.1) !important;
 }
-#agent-chatbot .inline-live-content .diff-header {
+.agent-chatbot .inline-live-content .diff-header {
   color: #61afef !important;
   font-weight: bold;
 }
 /* Syntax highlighting in inline live content */
-#agent-chatbot .inline-live-content .keyword { color: #c678dd !important; }
-#agent-chatbot .inline-live-content .string { color: #98c379 !important; }
-#agent-chatbot .inline-live-content .comment { color: #5c6370 !important; font-style: italic; }
-#agent-chatbot .inline-live-content .function { color: #61afef !important; }
-#agent-chatbot .inline-live-content .number { color: #d19a66 !important; }
+.agent-chatbot .inline-live-content .keyword { color: #c678dd !important; }
+.agent-chatbot .inline-live-content .string { color: #98c379 !important; }
+.agent-chatbot .inline-live-content .comment { color: #5c6370 !important; font-style: italic; }
+.agent-chatbot .inline-live-content .function { color: #61afef !important; }
+.agent-chatbot .inline-live-content .number { color: #d19a66 !important; }
 
 /* Screenshot comparison in chat bubbles */
-#agent-chatbot .screenshot-comparison {
+.agent-chatbot .screenshot-comparison {
   display: flex;
   gap: 12px;
   margin: 12px 0;
   flex-wrap: wrap;
 }
-#agent-chatbot .screenshot-panel {
+.agent-chatbot .screenshot-panel {
   flex: 1 1 45%;
   min-width: 200px;
   max-width: 100%;
 }
-#agent-chatbot .screenshot-single {
+.agent-chatbot .screenshot-single {
   margin: 12px 0;
   max-width: 100%;
 }
-#agent-chatbot .screenshot-label {
+.agent-chatbot .screenshot-label {
   background: #2a2a3e;
   color: #a8d4ff;
   padding: 4px 10px;
@@ -862,8 +862,8 @@ body, .gradio-container, .gradio-container * {
   font-size: 11px;
   letter-spacing: 0.05em;
 }
-#agent-chatbot .screenshot-comparison img,
-#agent-chatbot .screenshot-single img {
+.agent-chatbot .screenshot-comparison img,
+.agent-chatbot .screenshot-single img {
   width: 100%;
   height: auto;
   border: 1px solid #555;
@@ -911,17 +911,17 @@ body, .gradio-container, .gradio-container * {
 }
 
 /* Agent communication chatbot - full-width speech bubbles */
-#agent-chatbot .message-row,
-#agent-chatbot .message {
+.agent-chatbot .message-row,
+.agent-chatbot .message {
   width: 100% !important;
   max-width: 100% !important;
   align-self: stretch !important;
 }
 
-#agent-chatbot .bubble-wrap,
-#agent-chatbot .bubble,
-#agent-chatbot .message-content,
-#agent-chatbot .message .prose {
+.agent-chatbot .bubble-wrap,
+.agent-chatbot .bubble,
+.agent-chatbot .message-content,
+.agent-chatbot .message .prose {
   width: 100% !important;
   max-width: 100% !important;
 }
@@ -1845,6 +1845,26 @@ def _strip_screenshot_links(content: str) -> str:
     return cleaned
 
 
+def _strip_links_from_history(history: list) -> list:
+    """Strip screenshot links from all messages in a chat history list.
+
+    This ensures old sessions with baked-in markdown links are cleaned
+    when displayed, regardless of when they were created.
+    """
+    result = []
+    for msg in history:
+        if isinstance(msg, dict) and "content" in msg:
+            content = msg["content"]
+            if isinstance(content, str):
+                cleaned = _strip_screenshot_links(content)
+                result.append({**msg, "content": cleaned})
+            else:
+                result.append(msg)
+        else:
+            result.append(msg)
+    return result
+
+
 def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> dict:
     """Create a Gradio 6.x compatible chat message.
 
@@ -1890,7 +1910,8 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
                 summary_text = f"{summary_text}\n\n" + "\n\n".join(extra_parts)
         else:
             summary_text = summarize_content(content)
-        # Strip redundant screenshot links from full output since we display images inline
+        # Strip redundant screenshot links from both summary and full output
+        summary_text = _strip_screenshot_links(summary_text)
         clean_content = _strip_screenshot_links(content)
         formatted = (
             f"**{speaker}**\n\n{summary_text}\n\n"
@@ -2475,6 +2496,8 @@ class ChadWebUI:
                 content = history[0].get("content", "")
                 if isinstance(content, str) and content.startswith("**Task**"):
                     display_history = history[1:]
+            # Strip screenshot links from all messages (handles old sessions with baked-in links)
+            display_history = _strip_links_from_history(display_history)
             # Build branch dropdown update
             if branch_choices:
                 branch_update = gr.update(choices=branch_choices, value=branch_choices[0])
@@ -3357,8 +3380,10 @@ class ChadWebUI:
             working: bool = False,
         ):
             """Format output for follow-up responses."""
+            # Strip screenshot links from all messages (handles old sessions with baked-in links)
+            display_history = _strip_links_from_history(history)
             return (
-                history,
+                display_history,
                 live_stream,
                 gr.update(value="" if not working else followup_message),  # Clear input when not working
                 gr.update(visible=show_followup),  # Follow-up row visibility
@@ -4522,6 +4547,7 @@ class ChadWebUI:
                 height=400,
                 key=f"chatbot-{session_id}",
                 elem_id="agent-chatbot" if is_first else None,
+                elem_classes=["agent-chatbot"],  # CSS targets this class
                 sanitize_html=False,  # Required for inline screenshots - content is internally generated
             )
 
