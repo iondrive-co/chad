@@ -49,6 +49,4 @@ Modified
         });
     }
 
-Once a task is discarded the task description should be made editable again
 
-Get rid of status line which is wrong and doesn't update: "✓ Ready — Coding: codex-home (openai, gpt-5.2-codex)"
