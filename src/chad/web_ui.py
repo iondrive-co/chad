@@ -5150,6 +5150,101 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
   setInterval(wirePlus, 400);
   setTimeout(wirePlus, 80);
 })();
+
+// Live view scroll tracking to prevent auto-scroll when user has scrolled up
+window._liveStreamScroll = window._liveStreamScroll || new WeakMap();
+
+function initializeLiveStreamScrollTracking() {
+    const getRoot = () => {
+        const app = document.querySelector('gradio-app');
+        return (app && app.shadowRoot) ? app.shadowRoot : document;
+    };
+
+    function setupScrollTracking(container) {
+        if (window._liveStreamScroll.has(container)) {
+            return; // Already setup
+        }
+
+        // Initialize state for this container
+        const state = {
+            userScrolledUp: false,      // True when user actively scrolled away from bottom
+            savedScrollTop: null,       // User's scroll position (null = auto-scroll, number = restore position)
+            ignoreNextScroll: false,    // Prevent feedback loops when setting scrollTop programmatically
+            lastScrollHeight: container.scrollHeight
+        };
+
+        window._liveStreamScroll.set(container, state);
+
+        // Track user scroll behavior
+        container.addEventListener('scroll', () => {
+            if (state.ignoreNextScroll) return;
+
+            const isAtBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 1;
+
+            if (isAtBottom) {
+                // User scrolled back to bottom - resume auto-scrolling
+                state.userScrolledUp = false;
+                state.savedScrollTop = null;
+            } else {
+                // User scrolled up from bottom - preserve their position
+                state.userScrolledUp = true;
+                state.savedScrollTop = container.scrollTop;
+            }
+        });
+
+        // Watch for content changes using MutationObserver
+        const observer = new MutationObserver(() => {
+            if (container.scrollHeight !== state.lastScrollHeight) {
+                state.lastScrollHeight = container.scrollHeight;
+                restoreScrollPosition(container, state);
+            }
+        });
+
+        observer.observe(container, {
+            childList: true,
+            subtree: true,
+            characterData: true
+        });
+    }
+
+    function restoreScrollPosition(container, state) {
+        if (!container || !state) return;
+        state.ignoreNextScroll = true;
+
+        requestAnimationFrame(() => {
+            // If user has scrolled away from bottom, maintain their position
+            if (state.userScrolledUp && state.savedScrollTop !== null) {
+                container.scrollTop = state.savedScrollTop;
+            }
+            // Otherwise, if user is at bottom or hasn't scrolled, scroll to bottom for new content
+            else if (!state.userScrolledUp) {
+                container.scrollTop = container.scrollHeight;
+            }
+
+            setTimeout(() => { state.ignoreNextScroll = false; }, 100);
+        });
+    }
+
+    function findAndSetupContainers() {
+        const root = getRoot();
+        const containers = [
+            ...root.querySelectorAll('#live-stream-box .live-output-content'),
+            ...root.querySelectorAll('.live-stream-box .live-output-content')
+        ];
+
+        containers.forEach(container => {
+            if (container && container.scrollHeight > container.clientHeight) {
+                setupScrollTracking(container);
+            }
+        });
+    }
+
+    // Setup scroll tracking for existing and future containers
+    setInterval(findAndSetupContainers, 500);
+    setTimeout(findAndSetupContainers, 100);
+}
+
+initializeLiveStreamScrollTracking();
 </script>
 """
             )
