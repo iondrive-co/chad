@@ -385,12 +385,14 @@ body, .gradio-container, .gradio-container * {
   display: none !important;
 }
 
-/* Hide conflict sections completely when merged/discarded */
+/* Hide merge/conflict sections when hidden class is present */
+.merge-section-hidden,
 .conflict-section-hidden {
   display: none !important;
   visibility: hidden !important;
 }
 
+.merge-section-hidden *,
 .conflict-section-hidden * {
   display: none !important;
   visibility: hidden !important;
@@ -4548,49 +4550,48 @@ class ChadWebUI:
             )
 
         # Merge section - shown when worktree has changes
-        # Using gr.Group inside Column for reliable Gradio 6 visibility toggling
-        with gr.Column(key=f"merge-section-{session_id}",
-                       elem_classes=["merge-section"]):
-            merge_section_group = gr.Group(visible=False)
-            with merge_section_group:
-                merge_section_header = gr.Markdown("")  # Populated when changes exist
-                changes_summary = gr.Markdown(
-                    "",
-                    key=f"changes-summary-{session_id}",
+        # Use visible=True so element is rendered to DOM, hide via CSS initially
+        # Gradio 6 doesn't render components with visible=False
+        with gr.Column(visible=True, render=True, key=f"merge-section-{session_id}",
+                       elem_classes=["merge-section", "merge-section-hidden"]) as merge_section_group:
+            merge_section_header = gr.Markdown("")  # Populated when changes exist
+            changes_summary = gr.Markdown(
+                "",
+                key=f"changes-summary-{session_id}",
+            )
+            with gr.Accordion("View Changes", open=False):
+                diff_content = gr.HTML(
+                    value="",
+                    elem_id=f"diff-content-{session_id}",
                 )
-                with gr.Accordion("View Changes", open=False):
-                    diff_content = gr.HTML(
-                        value="",
-                        elem_id=f"diff-content-{session_id}",
-                    )
-                with gr.Row():
-                    merge_commit_msg = gr.Textbox(
-                        label="Commit Message",
-                        placeholder="Describe the changes being merged...",
-                        value="",
-                        scale=3,
-                        key=f"merge-commit-msg-{session_id}",
-                    )
-                    merge_target_branch = gr.Dropdown(
-                        label="Target Branch",
-                        choices=["main"],
-                        value="main",
-                        scale=1,
-                        key=f"merge-target-branch-{session_id}",
-                    )
-                with gr.Row():
-                    accept_merge_btn = gr.Button(
-                        "✓ Accept & Merge",
-                        variant="primary",
-                        interactive=True,
-                        key=f"accept-merge-{session_id}",
-                        elem_classes=["accept-merge-btn"],
-                    )
-                    discard_btn = gr.Button(
-                        "✗ Discard Changes",
-                        variant="stop",
-                        key=f"discard-{session_id}",
-                    )
+            with gr.Row():
+                merge_commit_msg = gr.Textbox(
+                    label="Commit Message",
+                    placeholder="Describe the changes being merged...",
+                    value="",
+                    scale=3,
+                    key=f"merge-commit-msg-{session_id}",
+                )
+                merge_target_branch = gr.Dropdown(
+                    label="Target Branch",
+                    choices=["main"],
+                    value="main",
+                    scale=1,
+                    key=f"merge-target-branch-{session_id}",
+                )
+            with gr.Row():
+                accept_merge_btn = gr.Button(
+                    "✓ Accept & Merge",
+                    variant="primary",
+                    interactive=True,
+                    key=f"accept-merge-{session_id}",
+                    elem_classes=["accept-merge-btn"],
+                )
+                discard_btn = gr.Button(
+                    "✗ Discard Changes",
+                    variant="stop",
+                    key=f"discard-{session_id}",
+                )
 
         # Conflict resolution section - shown when merge has conflicts
         with gr.Column(visible=False, key=f"conflict-section-{session_id}",
@@ -5360,13 +5361,39 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                     const btn = root.querySelector('#add-new-task-btn');
                     if (btn) hideButton(btn);
                   };
+                  const syncMergeSectionVisibility = () => {
+                    // Find all merge sections and show/hide based on content
+                    const mergeSections = collectAll('.merge-section');
+                    mergeSections.forEach(section => {
+                      // Check if the section has meaningful content (header with text)
+                      const header = section.querySelector('h3, [data-testid="markdown"] h3');
+                      const hasContent = header && header.textContent.trim().length > 0;
+                      // Also check for changes summary text
+                      const summary = section.querySelector('[key*="changes-summary"]');
+                      const hasSummary = summary && summary.textContent.trim().length > 0;
+
+                      if (hasContent || hasSummary) {
+                        section.classList.remove('merge-section-hidden');
+                        section.style.cssText = '';
+                        // Also show children
+                        section.querySelectorAll('*').forEach(child => {
+                          child.style.display = '';
+                          child.style.visibility = '';
+                        });
+                      } else {
+                        section.classList.add('merge-section-hidden');
+                      }
+                    });
+                  };
                   const tickAll = () => {
                     wirePlus();
                     fixAriaLinks();
                     ensureDiscardEditable();
+                    syncMergeSectionVisibility();
                   };
                   setInterval(tickAll, 400);
                   setTimeout(tickAll, 80);
+                  setInterval(syncMergeSectionVisibility, 200);
                   document.addEventListener('click', (event) => {
                     const tab = event.target && event.target.closest
                       ? event.target.closest('[role=\"tab\"]')
