@@ -1,8 +1,8 @@
 v0.7 Touring complete
 
-Screenshots and hypothesis in task summaries
-New conversation bubbles when hypothesis changes
 Integrated live view
+Screenshots and hypothesis in task summaries
+Early initial summary with screenshot of problem/proposed feature, description of what it shows, where in the code the problem lies/new code that needs to be implemented
 Testing the mistral and gemini providers and add qwen code
 Fix Chatbox scrollbar keeps resetting to the bottom
 
@@ -22,8 +22,15 @@ Telegram and slack integrations
 Packaging for different platforms
 Bug fixing
 
+---- Repeated failures ----
 
-Handoff log:
+Ask the coding agent to answer the following questions:
+- Is this a temporary fix or will it work in the future?
+- What about the structure of the code cause so many failed attempts to fix this? 
+- How could the code be improved so that fewer attempts are needed for similar issues in the future?
+- Is there any redundant code from the failed attempts that could be removed?
+
+----Handoff log-----
 
 Change format of precreated chad_session_*.json
 
