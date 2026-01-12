@@ -1823,48 +1823,6 @@ def summarize_content(content: str, max_length: int = 200) -> str:
     return first_para[:max_length].rsplit(" ", 1)[0] + "..."
 
 
-def _strip_screenshot_links(content: str) -> str:
-    """Remove markdown screenshot links from content since we display images inline.
-
-    AI agents often output markdown links like:
-      Before: [screenshot](file:///tmp/screenshot.png)
-      **After:** [screenshot](file:///tmp/after.png)
-
-    These are redundant when we display inline images from the JSON block.
-    """
-    import re
-    # Match markdown links to file:// URLs or /tmp/ paths containing screenshot
-    # Patterns: [screenshot](file://...) or [text](file://...screenshot...) or [text](/tmp/...png)
-    pattern = r'\*{0,2}(?:Before|After):?\*{0,2}\s*\[(?:screenshot|[^\]]*)\]\((?:file://)?[^\)]*(?:screenshot|\.png)[^\)]*\)\s*'
-    cleaned = re.sub(pattern, '', content, flags=re.IGNORECASE)
-    # Also remove standalone screenshot links not prefixed with Before/After
-    pattern2 = r'\[screenshot\]\((?:file://)?/[^\)]+\.png\)\s*'
-    cleaned = re.sub(pattern2, '', cleaned, flags=re.IGNORECASE)
-    # Clean up any resulting blank lines
-    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
-    return cleaned
-
-
-def _strip_links_from_history(history: list) -> list:
-    """Strip screenshot links from all messages in a chat history list.
-
-    This ensures old sessions with baked-in markdown links are cleaned
-    when displayed, regardless of when they were created.
-    """
-    result = []
-    for msg in history:
-        if isinstance(msg, dict) and "content" in msg:
-            content = msg["content"]
-            if isinstance(content, str):
-                cleaned = _strip_screenshot_links(content)
-                result.append({**msg, "content": cleaned})
-            else:
-                result.append(msg)
-        else:
-            result.append(msg)
-    return result
-
-
 def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> dict:
     """Create a Gradio 6.x compatible chat message.
 
@@ -1873,8 +1831,6 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
         content: The message content
         collapsible: Whether to make long messages collapsible with a summary
     """
-    role = "assistant"
-
     if collapsible and len(content) > 300:
         coding_summary = extract_coding_summary(content)
         if coding_summary:
@@ -1882,47 +1838,34 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
             extra_parts = []
             if coding_summary.hypothesis:
                 extra_parts.append(f"**Hypothesis:** {coding_summary.hypothesis}")
-            # Display before/after screenshots inline side by side
-            before_url = (
-                image_to_data_url(coding_summary.before_screenshot)) if coding_summary.before_screenshot else None
+            before_url = image_to_data_url(coding_summary.before_screenshot) if coding_summary.before_screenshot else None
             after_url = image_to_data_url(coding_summary.after_screenshot) if coding_summary.after_screenshot else None
-            if before_url and after_url:
-                # Both screenshots - display side by side
-                extra_parts.append(
-                    '<div class="screenshot-comparison">'
-                    f'<div class="screenshot-panel"><div class="screenshot-label">Before</div>'
-                    f'<img src="{before_url}" alt="Before screenshot"></div>'
-                    f'<div class="screenshot-panel"><div class="screenshot-label">After</div>'
-                    f'<img src="{after_url}" alt="After screenshot"></div>'
-                    '</div>'
-                )
-            elif before_url:
-                extra_parts.append(
-                    f'<div class="screenshot-single"><div class="screenshot-label">Before</div>'
-                    f'<img src="{before_url}" alt="Before screenshot"></div>'
-                )
-            elif after_url:
-                extra_parts.append(
-                    f'<div class="screenshot-single"><div class="screenshot-label">After</div>'
-                    f'<img src="{after_url}" alt="After screenshot"></div>'
-                )
+            if before_url or after_url:
+                screenshot_html = '<div class="screenshot-comparison">'
+                if before_url:
+                    screenshot_html += (
+                        f'<div class="screenshot-panel"><div class="screenshot-label">Before</div>'
+                        f'<img src="{before_url}" alt="Before screenshot"></div>'
+                    )
+                if after_url:
+                    screenshot_html += (
+                        f'<div class="screenshot-panel"><div class="screenshot-label">After</div>'
+                        f'<img src="{after_url}" alt="After screenshot"></div>'
+                    )
+                screenshot_html += '</div>'
+                extra_parts.append(screenshot_html)
             if extra_parts:
                 summary_text = f"{summary_text}\n\n" + "\n\n".join(extra_parts)
         else:
             summary_text = summarize_content(content)
-        # Strip redundant screenshot links from both summary and full output
-        summary_text = _strip_screenshot_links(summary_text)
-        clean_content = _strip_screenshot_links(content)
         formatted = (
             f"**{speaker}**\n\n{summary_text}\n\n"
-            f"<details><summary>Show full output</summary>\n\n{clean_content}\n\n</details>"
+            f"<details><summary>Show full output</summary>\n\n{content}\n\n</details>"
         )
     else:
-        # Strip screenshot links even in non-collapsible case
-        clean_content = _strip_screenshot_links(content)
-        formatted = f"**{speaker}**\n\n{clean_content}"
+        formatted = f"**{speaker}**\n\n{content}"
 
-    return {"role": role, "content": formatted}
+    return {"role": "assistant", "content": formatted}
 
 
 def _truncate_verification_output(text: str, limit: int = MAX_VERIFICATION_PROMPT_CHARS) -> str:
@@ -2496,8 +2439,6 @@ class ChadWebUI:
                 content = history[0].get("content", "")
                 if isinstance(content, str) and content.startswith("**Task**"):
                     display_history = history[1:]
-            # Strip screenshot links from all messages (handles old sessions with baked-in links)
-            display_history = _strip_links_from_history(display_history)
             # Build branch dropdown update
             if branch_choices:
                 branch_update = gr.update(choices=branch_choices, value=branch_choices[0])
@@ -3380,10 +3321,8 @@ class ChadWebUI:
             working: bool = False,
         ):
             """Format output for follow-up responses."""
-            # Strip screenshot links from all messages (handles old sessions with baked-in links)
-            display_history = _strip_links_from_history(history)
             return (
-                display_history,
+                history,
                 live_stream,
                 gr.update(value="" if not working else followup_message),  # Clear input when not working
                 gr.update(visible=show_followup),  # Follow-up row visibility
