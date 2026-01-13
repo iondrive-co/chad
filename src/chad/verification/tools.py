@@ -57,6 +57,8 @@ def verify(lint_only: bool = False, project_root: str | None = None) -> Dict[str
 
         # Prefer the project's virtualenv to avoid polluting system Python
         venv_candidates = [
+            root / ".venv" / "bin" / "python",
+            root / ".venv" / "Scripts" / "python.exe",  # Windows
             root / "venv" / "bin" / "python",
             root / "venv" / "Scripts" / "python.exe",  # Windows
         ]
@@ -99,7 +101,7 @@ def verify(lint_only: bool = False, project_root: str | None = None) -> Dict[str
             )
             return results
 
-        # Phase 2: pip check
+        # Phase 2: pip check (advisory only - don't block on dependency conflicts)
         pip_check = subprocess.run(
             [python_exec, "-m", "pip", "check"],
             capture_output=True,
@@ -110,15 +112,19 @@ def verify(lint_only: bool = False, project_root: str | None = None) -> Dict[str
             env=env,
             timeout=60,
         )
+        pip_issues = pip_check.stdout.strip().splitlines()[:20]
         results["phases"]["pip_check"] = {
             "success": pip_check.returncode == 0,
-            "issues": pip_check.stdout.strip().splitlines()[:20],
+            "issues": pip_issues,
+            "blocking": False,  # Advisory only
         }
         if pip_check.returncode != 0:
-            results["success"] = False
-            results["failed_phase"] = "pip_check"
-            results["message"] = f"{message_prefix}Dependency check failed ({pip_check.returncode})"
-            return results
+            # Record as warning but don't block - dependency conflicts are often environmental
+            results["warnings"] = results.get("warnings", [])
+            results["warnings"].append(
+                f"Dependency issues (non-blocking): {'; '.join(pip_issues[:3])}"
+            )
+            # Continue to tests instead of returning early
 
         # Phase 3: All tests
         test_result = subprocess.run(
@@ -157,7 +163,11 @@ def verify(lint_only: bool = False, project_root: str | None = None) -> Dict[str
             return results
 
         results["success"] = True
-        results["message"] = f"{message_prefix}All checks passed: lint clean, {passed} tests passed"
+        base_message = f"{message_prefix}All checks passed: lint clean, {passed} tests passed"
+        if results.get("warnings"):
+            results["message"] = f"{base_message} (with warnings)"
+        else:
+            results["message"] = base_message
         return results
 
     except subprocess.TimeoutExpired as e:

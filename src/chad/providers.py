@@ -10,7 +10,7 @@ import subprocess
 import time
 import threading
 import queue
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -1296,12 +1296,12 @@ class OpenAICodexProvider(AIProvider):
             self.current_message = None
             self.process = None
             self.master_fd = None
-            event_dt = datetime.fromtimestamp(last_event_info.get("time", time.time()), tz=UTC)
+            event_dt = datetime.fromtimestamp(last_event_info.get("time", time.time()), tz=timezone.utc)
             self.last_event_info = {
                 "kind": last_event_info.get("kind") or "unknown",
                 "command": last_event_info.get("command") or "",
                 "event_time": event_dt.isoformat(),
-                "captured_at": datetime.now(UTC).isoformat(),
+                "captured_at": datetime.now(timezone.utc).isoformat(),
                 "last_event_age": max(0.0, time.time() - last_event_info.get("time", time.time())),
             }
             # Add command statistics for session analysis

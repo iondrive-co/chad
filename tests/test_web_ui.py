@@ -2307,7 +2307,7 @@ class TestVerificationPrompt:
                 return "default"
 
         # Patch verification tool to avoid running real lint/tests
-        def fake_verify():
+        def fake_verify(project_root=None):
             return {
                 "success": False,
                 "message": "Preflight failed",

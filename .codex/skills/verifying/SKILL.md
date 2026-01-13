@@ -8,12 +8,12 @@ metadata:
 # Verifying Changes
 
 ```bash
-./venv/bin/python -m flake8 src/chad
+./.venv/bin/python -m flake8 src/chad
 # Core/unit/integration (visuals are marker-excluded)
-./venv/bin/python -m pytest tests/ -v --tb=short -n auto -m "not visual"
+./.venv/bin/python -m pytest tests/ -v --tb=short -n auto -m "not visual"
 
 # Targeted visual tests (only those mapped to files you changed)
-VTESTS=$(./venv/bin/python - <<'PY'
+VTESTS=$(./.venv/bin/python - <<'PY'
 import subprocess
 from chad.verification.visual_test_map import tests_for_paths
 changed = subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines()
@@ -22,7 +22,7 @@ print(" or ".join(tests))
 PY
 )
 if [ -n "$VTESTS" ]; then
-  ./venv/bin/python -m pytest tests/test_ui_integration.py tests/test_ui_playwright_runner.py -v --tb=short -m "visual" -k "$VTESTS"
+  ./.venv/bin/python -m pytest tests/test_ui_integration.py tests/test_ui_playwright_runner.py -v --tb=short -m "visual" -k "$VTESTS"
 fi
 # If you add/change UI, update src/chad/verification/visual_test_map.py so this stays accurate.
 ```

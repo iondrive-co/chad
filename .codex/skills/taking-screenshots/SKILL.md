@@ -8,7 +8,7 @@ metadata:
 # Taking Screenshots
 
 ```bash
-./venv/bin/python scripts/screenshot_ui.py --tab run --headless
+./.venv/bin/python scripts/screenshot_ui.py --tab run --headless
 ```
 
 ## Options

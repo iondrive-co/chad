@@ -7,7 +7,7 @@ repos:
     rev: 7.1.2
     hooks:
       - id: flake8
-        args: [--max-line-length=120, --extend-ignore=E203,W503,C901]
+        args: [--extend-ignore=E203,W503,C901]
         additional_dependencies: []
 
   - repo: https://github.com/pre-commit/pre-commit-hooks

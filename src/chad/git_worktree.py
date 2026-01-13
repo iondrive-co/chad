@@ -6,6 +6,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def find_main_venv(project_path: Path) -> Path | None:
+    """Find the main project's virtual environment directory.
+
+    Looks for .venv or venv as actual directories (not symlinks) to avoid
+    circular symlink issues when worktrees symlink to the main venv.
+
+    Returns:
+        Path to the venv directory, or None if not found.
+    """
+    for name in [".venv", "venv"]:
+        candidate = project_path / name
+        # Only use actual directories, not symlinks (to avoid circular refs)
+        if candidate.exists() and candidate.is_dir() and not candidate.is_symlink():
+            return candidate
+    return None
+
+
 def cleanup_stale_pth_entries(venv_path: Path, worktree_base: Path, current_worktree_id: str | None = None) -> int:
     """Remove stale/conflicting worktree paths from venv's .pth files.
 
@@ -215,13 +232,12 @@ class GitWorktreeManager:
         )
 
         # Symlink the main project's venv so agents don't need to reinstall deps
-        main_venv = self.project_path / "venv"
-        worktree_venv = worktree_path / "venv"
-        if main_venv.exists() and main_venv.is_dir() and not worktree_venv.exists():
-            # Clean up stale/conflicting .pth entries from old worktrees before symlinking
-            # This prevents Python from importing from wrong worktrees
-            cleanup_stale_pth_entries(main_venv, self.worktree_base, current_worktree_id=task_id)
-            worktree_venv.symlink_to(main_venv)
+        main_venv = find_main_venv(self.project_path)
+        if main_venv:
+            worktree_venv = worktree_path / main_venv.name
+            if not worktree_venv.exists():
+                cleanup_stale_pth_entries(main_venv, self.worktree_base, current_worktree_id=task_id)
+                worktree_venv.symlink_to(main_venv)
 
         return worktree_path, base_commit
 
@@ -246,8 +262,8 @@ class GitWorktreeManager:
                 shutil.rmtree(worktree_path, ignore_errors=True)
 
         # Clean up any .pth files that reference this worktree
-        main_venv = self.project_path / "venv"
-        if main_venv.exists():
+        main_venv = find_main_venv(self.project_path)
+        if main_venv:
             cleanup_stale_pth_entries(main_venv, self.worktree_base)
 
         # Always try to delete the branch (it might exist without the worktree)

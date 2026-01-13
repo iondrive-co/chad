@@ -415,7 +415,9 @@ def run_screenshot_subprocess(
     parts.append(tab)
     filename = "_".join(parts) + ".png"
     output_path = artifacts_dir / filename
-    python_exec = PROJECT_ROOT / "venv" / "bin" / "python"
+    python_exec = PROJECT_ROOT / ".venv" / "bin" / "python"
+    if not python_exec.exists():
+        python_exec = PROJECT_ROOT / "venv" / "bin" / "python"
     if not python_exec.exists():
         python_exec = Path(sys.executable)
 
