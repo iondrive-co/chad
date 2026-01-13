@@ -1,8 +1,8 @@
-The merge function doesn't seem to be working: ❌ error: Your local changes to the following files would be overwritten by merge: src/chad/web_ui.py Please commit your changes or stash them before you merge. Aborting Merge with strategy ort failed.
+A fix to stop the scroll position on the Coding AI (Live) inner panel resetting to top when new input is added, as instead made it only a few lines high, make it go back to its normal height but also make sure the fix to stop the reset works
 
-When adding a new provider after completing login flow it shows as a grey box until the refresh button is pressed. This refresh should happen automatically.
-Also it does not show up as a new coding agent in that dropdown until the app is restarted
+Cannot start task after cancel
 
-Stop live view scrolling down to bottom when new lines are added, as a starting point consider:
+Merge should allow session continuation after
 
-
+-> View changes panel no longer expands when there are changes
+-> Live view does not show when "⏳ Working on revisions..."

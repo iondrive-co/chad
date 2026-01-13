@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Iterable
 
 
+import re
+
+
 def _parse_positive_int(value: str | None, default: int | None) -> int | None:
     """Parse a positive integer environment value."""
     if not value:
@@ -17,6 +20,35 @@ def _parse_positive_int(value: str | None, default: int | None) -> int | None:
         return parsed if parsed > 0 else default
     except ValueError:
         return default
+
+
+# Pattern to match base64 data URLs in img tags
+_BASE64_IMG_PATTERN = re.compile(
+    r'(<img[^>]*src=")data:image/[a-z]+;base64,[A-Za-z0-9+/=]+("[^>]*>)',
+    re.IGNORECASE
+)
+
+
+def _strip_base64_images(content: str) -> str:
+    """Replace base64 image data URLs with placeholder text.
+
+    This reduces session log file sizes dramatically while preserving structure.
+    """
+    return _BASE64_IMG_PATTERN.sub(r'\1[base64 image data stripped]\2', content)
+
+
+def _strip_base64_from_chat(chat_history: list) -> list:
+    """Strip base64 image data from chat history entries."""
+    cleaned = []
+    for entry in chat_history:
+        if isinstance(entry, dict):
+            new_entry = entry.copy()
+            if "content" in new_entry and isinstance(new_entry["content"], str):
+                new_entry["content"] = _strip_base64_images(new_entry["content"])
+            cleaned.append(new_entry)
+        else:
+            cleaned.append(entry)
+    return cleaned
 
 
 class SessionLogger:
@@ -151,7 +183,8 @@ class SessionLogger:
             with open(filepath, encoding="utf-8") as f:
                 session_data = json.load(f)
 
-            session_data["conversation"] = list(chat_history)
+            # Strip base64 image data to keep log files small
+            session_data["conversation"] = _strip_base64_from_chat(list(chat_history))
             session_data["status"] = status
             session_data["last_updated"] = datetime.now().isoformat()
             if verification_attempts is not None:
@@ -174,6 +207,8 @@ class SessionLogger:
                         agent = entry.get("agent", "")
                         content = entry.get("content", "")
                         timestamp = entry.get("timestamp", timestamp)
+                    # Strip base64 from streaming content
+                    content = _strip_base64_images(content) if content else ""
                     session_data["streaming_history"].append(
                         {"agent": agent, "content": content, "timestamp": timestamp}
                     )
@@ -182,7 +217,7 @@ class SessionLogger:
                 # Also create flat transcript for backward compatibility
                 session_data["streaming_transcript"] = "".join(transcript_parts)
             elif streaming_transcript is not None:
-                session_data["streaming_transcript"] = streaming_transcript
+                session_data["streaming_transcript"] = _strip_base64_images(streaming_transcript)
 
             if success is not None:
                 session_data["success"] = success

@@ -9,7 +9,7 @@ import threading
 import queue
 import uuid
 import html
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
@@ -24,8 +24,10 @@ from .model_catalog import ModelCatalog
 from .prompts import (
     build_coding_prompt,
     extract_coding_summary,
+    extract_progress_update,
     get_verification_prompt,
     parse_verification_response,
+    ProgressUpdate,
     VerificationParseError,
 )
 from .git_worktree import GitWorktreeManager, MergeConflict, FileDiff
@@ -57,7 +59,7 @@ class Session:
 
 def _history_entry(agent: str, content: str) -> tuple[str, str, str]:
     """Create a streaming history entry with a timestamp."""
-    return (agent, content, datetime.now(UTC).isoformat())
+    return (agent, content, datetime.now(timezone.utc).isoformat())
 
 
 def _history_contents(history: list[tuple]) -> list[str]:
@@ -392,12 +394,6 @@ body, .gradio-container, .gradio-container * {
   visibility: hidden !important;
 }
 
-.merge-section-hidden *,
-.conflict-section-hidden * {
-  display: none !important;
-  visibility: hidden !important;
-}
-
 /* Visually hidden but still in DOM for JS access */
 .visually-hidden {
   position: absolute !important;
@@ -504,10 +500,6 @@ body, .gradio-container, .gradio-container * {
   }
 }
 
-#live-output-box {
-  max-height: 220px;
-  overflow-y: auto;
-}
 
 /* Hide live stream box but keep in DOM - removed by inject_live_stream_content */
 .live-stream-hidden {
@@ -542,9 +534,10 @@ body, .gradio-container, .gradio-container * {
   border-radius: 0 0 8px 8px !important;
   padding: 12px !important;
   margin: 0 !important;
-  max-height: 400px;
-  overflow-y: auto;
-  overflow-anchor: none;
+  max-height: 400px !important;
+  min-height: 100px !important;
+  overflow-y: auto !important;
+  overflow-anchor: none !important;
   white-space: pre-wrap;
   word-wrap: break-word;
   font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
@@ -866,6 +859,21 @@ body, .gradio-container, .gradio-container * {
 .agent-chatbot .screenshot-single img {
   width: 100%;
   height: auto;
+  border: 1px solid #555;
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  display: block;
+}
+
+/* Full-width screenshot for progress updates and single after screenshots */
+.agent-chatbot .screenshot-full-width {
+  margin: 12px 0;
+  width: 100%;
+}
+.agent-chatbot .screenshot-full-width img {
+  width: 100%;
+  max-height: 600px;
+  object-fit: contain;
   border: 1px solid #555;
   border-top: none;
   border-radius: 0 0 6px 6px;
@@ -1745,15 +1753,17 @@ def build_inline_live_html(content: str, ai_name: str = "CODING AI") -> str:
     return f"**{ai_name}**\n\n{header}\n{body}"
 
 
-def image_to_data_url(path: str) -> str | None:
+def image_to_data_url(path: str | None) -> str | None:
     """Convert an image file to a base64 data URL for inline display.
 
     Args:
-        path: Path to the image file
+        path: Path to the image file, or None
 
     Returns:
         Data URL string or None if file doesn't exist or can't be read
     """
+    if not path:
+        return None
     try:
         p = Path(path)
         if not p.exists():
@@ -1841,18 +1851,30 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
             before_url = image_to_data_url(coding_summary.before_screenshot) if coding_summary.before_screenshot else None
             after_url = image_to_data_url(coding_summary.after_screenshot) if coding_summary.after_screenshot else None
             if before_url or after_url:
-                screenshot_html = '<div class="screenshot-comparison">'
-                if before_url:
+                # Use side-by-side comparison when both exist, full-width for single screenshot
+                if before_url and after_url:
+                    screenshot_html = '<div class="screenshot-comparison">'
                     screenshot_html += (
                         f'<div class="screenshot-panel"><div class="screenshot-label">Before</div>'
                         f'<img src="{before_url}" alt="Before screenshot"></div>'
                     )
-                if after_url:
                     screenshot_html += (
                         f'<div class="screenshot-panel"><div class="screenshot-label">After</div>'
                         f'<img src="{after_url}" alt="After screenshot"></div>'
                     )
-                screenshot_html += '</div>'
+                    screenshot_html += '</div>'
+                elif after_url:
+                    # Single after screenshot - use full width
+                    screenshot_html = (
+                        f'<div class="screenshot-full-width"><div class="screenshot-label">After</div>'
+                        f'<img src="{after_url}" alt="After screenshot"></div>'
+                    )
+                else:
+                    # Single before screenshot - use full width
+                    screenshot_html = (
+                        f'<div class="screenshot-full-width"><div class="screenshot-label">Before</div>'
+                        f'<img src="{before_url}" alt="Before screenshot"></div>'
+                    )
                 extra_parts.append(screenshot_html)
             if extra_parts:
                 summary_text = f"{summary_text}\n\n" + "\n\n".join(extra_parts)
@@ -1866,6 +1888,26 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
         formatted = f"**{speaker}**\n\n{content}"
 
     return {"role": "assistant", "content": formatted}
+
+
+def make_progress_message(progress: ProgressUpdate) -> dict:
+    """Create a chat message for an intermediate progress update.
+
+    Shows the before screenshot full-width with a summary and location.
+    """
+    screenshot_url = image_to_data_url(progress.before_screenshot)
+    parts = ["**CODING AI** *(Progress)*"]
+    if progress.summary:
+        parts.append(f"\n\n{progress.summary}")
+    if progress.location:
+        parts.append(f"\n\n**Location:** `{progress.location}`")
+    if screenshot_url:
+        parts.append(
+            f'\n\n<div class="screenshot-full-width">'
+            f'<div class="screenshot-label">Before</div>'
+            f'<img src="{screenshot_url}" alt="Before screenshot"></div>'
+        )
+    return {"role": "assistant", "content": "".join(parts)}
 
 
 def _truncate_verification_output(text: str, limit: int = MAX_VERIFICATION_PROMPT_CHARS) -> str:
@@ -2063,7 +2105,7 @@ class ChadWebUI:
             if on_activity:
                 on_activity("system", "Running verification (flake8 + tests)...")
 
-            verify_result = run_verify()
+            verify_result = run_verify(project_root=project_path)
             if not verify_result.get("success", False):
                 issues: list[str] = []
                 failure_message = verify_result.get("message") or verify_result.get("error")
@@ -2682,6 +2724,7 @@ class ChadWebUI:
             min_yield_interval = 0.05
             pending_message_idx = None
             render_state = LiveStreamRenderState()
+            progress_emitted = False  # Track if we've shown a progress update bubble
 
             while not relay_complete.is_set() and not session.cancel_requested:
                 try:
@@ -2756,6 +2799,30 @@ class ChadWebUI:
                             streaming_buffer += chunk
                             full_history.append(_history_entry(current_ai, chunk))
                             display_buffer.append(chunk)
+
+                            # Check for progress update in streaming buffer
+                            if not progress_emitted:
+                                progress = extract_progress_update(streaming_buffer)
+                                if progress:
+                                    progress_emitted = True
+                                    # Insert progress bubble before the current working bubble
+                                    progress_msg = make_progress_message(progress)
+                                    if pending_message_idx is not None:
+                                        chat_history.insert(pending_message_idx, progress_msg)
+                                        pending_message_idx += 1
+                                        # Reset the live view placeholder to fresh state
+                                        chat_history[pending_message_idx] = {
+                                            "role": "assistant",
+                                            "content": f"**{current_ai}**\n\n*Continuing...*",
+                                        }
+                                        # Reset display buffer so live view starts fresh after progress
+                                        display_buffer = LiveStreamDisplayBuffer()
+                                        render_state.reset()
+                                    else:
+                                        chat_history.append(progress_msg)
+                                    yield make_yield(chat_history, current_status, "")
+                                    last_yield_time = time_module.time()
+
                             now = time_module.time()
                             if now - last_yield_time >= min_yield_interval:
                                 # Update chat bubble with inline live content
@@ -3055,7 +3122,9 @@ class ChadWebUI:
                                 session.log_path, chat_history, last_event=self._last_event_info(session)
                             )
                             revision_status_msg = f"{status_prefix}⏳ Coding agent working on revisions..."
-                            yield make_yield(chat_history, revision_status_msg, "")
+                            # Show live stream placeholder during revision setup
+                            revision_placeholder = build_live_stream_html("⏳ Preparing revision...", "CODING AI")
+                            yield make_yield(chat_history, revision_status_msg, revision_placeholder)
 
                             # Run revision in a thread so we can stream output to live view
                             revision_result: list = [None, None]  # [response, error]
@@ -3716,7 +3785,9 @@ class ChadWebUI:
                         self._update_session_log(
                             session, chat_history, full_history, verification_attempts=verification_log
                         )
-                        yield make_followup_yield(chat_history, "🔄 Revision in progress...", working=True)
+                        # Show live stream placeholder during revision
+                        revision_placeholder = build_live_stream_html("🔄 Revision in progress...", "CODING AI")
+                        yield make_followup_yield(chat_history, revision_placeholder, working=True)
 
                         revision_request = (
                             "The verification agent found issues with your work. "
@@ -5233,7 +5304,7 @@ function initializeLiveStreamScrollTracking() {
         ];
 
         containers.forEach(container => {
-            if (container && container.scrollHeight > container.clientHeight) {
+            if (container) {
                 setupScrollTracking(container);
             }
         });
@@ -5435,8 +5506,8 @@ initializeLiveStreamScrollTracking();
                       if (hasContent || hasSummary) {
                         section.classList.remove('merge-section-hidden');
                         section.style.cssText = '';
-                        // Also show children
-                        section.querySelectorAll('*').forEach(child => {
+                        // Show direct children only - skip accordion internals to preserve open/close state
+                        section.querySelectorAll(':scope > *').forEach(child => {
                           child.style.display = '';
                           child.style.visibility = '';
                         });

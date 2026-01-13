@@ -30,6 +30,13 @@ smallest causal change and add a regression test that fails before the fix and p
 
 For UI changes add any new display functionality to `verification/visual_test_map.py`.
 
+### Test Index Awareness
+
+When modifying functions that return tuples (e.g., `make_yield`, generator functions) and adding/removing elements:
+1. Search for tests that access tuple elements by index (e.g., `result[12]`, `output[N]`)
+2. Update all affected indices to match the new tuple structure
+3. Common patterns to search: `result[`, `output[`, `[pending_message_idx]`
+
 ## After making changes
 
 1. Take an after screenshot if the issue has a visual component
@@ -80,6 +87,26 @@ src/chad/
 ## Configuration
 
 Config stored in `~/.chad.conf` with encrypted provider tokens.
+
+## Virtual Environment
+
+The project uses `.venv` (not `venv`). To create a fresh virtual environment:
+
+```bash
+rm -rf .venv
+uv venv .venv --python 3.10
+uv pip install -e ".[dev]" --python .venv/bin/python
+```
+
+Or without uv:
+
+```bash
+rm -rf .venv
+python3.10 -m venv .venv
+.venv/bin/pip install -e ".[dev]"
+```
+
+Worktrees automatically symlink to the main project's `.venv` so agents don't need to reinstall dependencies.
 
 ## Session Logs
 

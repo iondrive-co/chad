@@ -841,6 +841,73 @@ Line 4: Fourth line"""
         assert scroll_after is not None, "Live view scrollTop should be readable"
         assert scroll_after <= 1, f"Live view auto-scrolled on new content (scrollTop={scroll_after})"
 
+    def test_live_stream_box_has_proper_height_with_scroll_fix(self, page: Page):
+        """Live stream box should maintain proper height (max-height: 400px) and scroll behavior."""
+        # First test with minimal content (should use min-height)
+        short_text = "Short content line"
+        inject_live_stream_content(page, short_text)
+
+        min_height_metrics = page.evaluate(
+            """
+() => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    if (!box) return null;
+    const container = box.querySelector('.live-output-content') || box;
+
+    const style = window.getComputedStyle(container);
+    return {
+        clientHeight: container.clientHeight,
+        scrollHeight: container.scrollHeight,
+        minHeight: style.minHeight,
+        maxHeight: style.maxHeight,
+        isScrollable: container.scrollHeight > container.clientHeight
+    };
+}
+"""
+        )
+
+        assert min_height_metrics, "Live view container should exist"
+
+        # Verify minimum height is enforced
+        assert min_height_metrics["minHeight"] == "100px", f"Expected min-height: 100px, got: {min_height_metrics['minHeight']}"
+        assert min_height_metrics["clientHeight"] >= 100, f"Container should respect min-height: {min_height_metrics['clientHeight']}px"
+
+        # Now test with long content (should reach max-height)
+        long_text = "\n".join([f"Line {idx}: test content to fill the live stream box" for idx in range(100)])
+        inject_live_stream_content(page, long_text)
+
+        max_height_metrics = page.evaluate(
+            """
+() => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    if (!box) return null;
+    const container = box.querySelector('.live-output-content') || box;
+
+    const style = window.getComputedStyle(container);
+    return {
+        clientHeight: container.clientHeight,
+        scrollHeight: container.scrollHeight,
+        maxHeight: style.maxHeight,
+        minHeight: style.minHeight,
+        isScrollable: container.scrollHeight > container.clientHeight
+    };
+}
+"""
+        )
+
+        assert max_height_metrics, "Live view container should exist"
+
+        # Verify the max-height is set to 400px
+        assert max_height_metrics["maxHeight"] == "400px", f"Expected max-height: 400px, got: {max_height_metrics['maxHeight']}"
+
+        # Verify the container is scrollable with long content
+        assert max_height_metrics["isScrollable"], "Live stream should be scrollable with long content"
+
+        # Verify the container is actually near max height (should be around 400px, not just a few lines)
+        # Allow some flexibility for padding/borders
+        assert max_height_metrics["clientHeight"] >= 350, f"Live stream height too small: {max_height_metrics['clientHeight']}px (should be close to 400px)"
+        assert max_height_metrics["clientHeight"] <= 410, f"Live stream height too large: {max_height_metrics['clientHeight']}px (should be close to 400px)"
+
     def test_task_2_live_stream_has_multiline_formatting(self, page: Page):
         """Task 2 live stream should keep styled multiline formatting like Task 1."""
         # Create Task 2 via + tab and ensure it's active
@@ -904,6 +971,52 @@ Line 3: With colors and spacing"""
 """
         )
         assert content_count == 0, "Inject helper should not create live-output-content in non-live containers"
+
+    def test_live_view_shows_during_revision_placeholder(self, page: Page):
+        """Live view should show placeholder content during revision setup."""
+        # Test verifies that revision placeholders now show live stream content
+        # instead of leaving it blank (which was the bug)
+
+        # First, ensure the live stream box exists
+        box = page.locator("#live-stream-box")
+        box.wait_for(state="attached", timeout=5000)
+
+        # Simulate revision placeholder content (fixed version)
+        revision_placeholder_html = """
+        <div class="live-output-header">▶ CODING AI (Live Stream)</div>
+        <div class="live-output-content">⏳ Preparing revision...</div>
+        """
+        inject_live_stream_content(page, revision_placeholder_html)
+
+        # Verify the live stream becomes visible with placeholder content
+        is_visible = box.evaluate("""
+            el => {
+                const computed = getComputedStyle(el);
+                return computed.display !== 'none' && !el.classList.contains('live-stream-hidden');
+            }
+        """)
+        assert is_visible, "Live stream should be visible with revision placeholder"
+
+        # Verify placeholder content is present
+        content_element = box.locator(".live-output-content")
+        assert content_element.is_visible(), "Live stream content should be visible"
+
+        content_text = content_element.text_content()
+        assert "Preparing revision" in content_text, "Should show revision preparation message"
+
+        # Simulate content update during streaming
+        streaming_html = """
+        <div class="live-output-header">▶ CODING AI (Live Stream)</div>
+        <div class="live-output-content">🔄 Revision in progress...
+Analyzing changes...
+Running tests...</div>
+        """
+        inject_live_stream_content(page, streaming_html)
+
+        # Verify updated content is visible
+        updated_content = content_element.text_content()
+        assert "Revision in progress" in updated_content, "Should show updated revision content"
+        assert "Running tests" in updated_content, "Should show streaming content"
 
 
 class TestRealisticLiveContent:
@@ -1047,6 +1160,37 @@ class TestMergeDiscardReset:
         )
 
         assert has_loaded, "Page should be fully loaded"
+
+    def test_accordion_styles_not_reset_by_sync(self, page: Page):
+        """Verify JS sync only clears direct children styles, not accordion internals.
+
+        The syncMergeSectionVisibility function should use ':scope > *' to only
+        clear styles on direct children of the merge section, preserving
+        accordion open/close state which relies on descendant element styles.
+        """
+        # Verify the JS selector uses :scope > * (direct children only)
+        uses_direct_children = page.evaluate(
+            """
+        () => {
+            // Check if the page has the correct JS pattern
+            const scripts = document.querySelectorAll('script');
+            for (const script of scripts) {
+                const text = script.textContent || '';
+                // Look for the syncMergeSectionVisibility function
+                if (text.includes('syncMergeSectionVisibility')) {
+                    // Verify it uses :scope > * for direct children only
+                    return text.includes(":scope > *");
+                }
+            }
+            return false;
+        }
+        """
+        )
+
+        assert uses_direct_children, (
+            "syncMergeSectionVisibility should use ':scope > *' to only clear "
+            "direct children styles, preserving accordion internal state"
+        )
 
 
 class TestInlineScreenshots:

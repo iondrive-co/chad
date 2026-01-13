@@ -24,32 +24,33 @@ You need to complete the following task:
 ---
 Use the following sequence to complete the task:
 1. Explore the code to understand the task.
-2. if code changes are required, write test(s) which should fail until they are done. If the task affects the UI,
-then see if the project has a means (i.e. tools, agent skills, etc) to take a screenshot, if it does then ensure your
-test(s) can set up the UI to the point it can that it can display the issue, then take a "before" screenshot and review
-it to confirm you understand the issue/current state.
-3. If changes are required, make them here, adjusting tests and making more screenshots if required. If they are not
-required, then complete your investigation and move to step 7.
-4. Once you have completed your changes for the task, take an after screenshot (if that is supported) to confirm
+2. Once you understand what needs to be done, you MUST output a progress update so the user can see what you found:
+```json
+{{"type": "progress", "summary": "One line describing the issue/feature", "location": "src/file.py:123 - where changes will be made", "before_screenshot": "/path/to/before.png (optional, include if you took one)"}}
+```
+For UI tasks: take a "before" screenshot first and include the path. For non-UI tasks: omit before_screenshot.
+3. Write test(s) that should fail until the fix/feature is implemented.
+4. Make the changes, adjusting tests as needed. If no changes are required, skip to step 9.
+5. Once you have completed your changes for the task, take an after screenshot (if that is supported) to confirm
 that the user's request is fixed/done.
-5. You MUST run verification before completing your task, for example (keep it lean and skip heavy visuals by default):
-- Run linting: ./venv/bin/python -m flake8 src/chad
-- Run core tests (visuals excluded by marker): ./venv/bin/python -m pytest tests/ -v --tb=short -n auto \\
+6. You MUST run verification before completing your task, for example (keep it lean and skip heavy visuals by default):
+- Run linting: ./.venv/bin/python -m flake8 src/chad
+- Run core tests (visuals excluded by marker): ./.venv/bin/python -m pytest tests/ -v --tb=short -n auto \\
                                                -m \"not visual\"
 - Run only the visual tests mapped to the UI you touched (see src/chad/verification/visual_test_map.py):
-    VTESTS=$(./venv/bin/python - <<'PY'
+    VTESTS=$(./.venv/bin/python - <<'PY'
 import subprocess
 from chad.verification.visual_test_map import tests_for_paths
 changed = subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines()
 print(" or ".join(tests_for_paths(changed)))
 PY
 )
-    if [ -n "$VTESTS" ]; then ./venv/bin/python -m pytest tests/test_ui_integration.py \\
+    if [ -n "$VTESTS" ]; then ./.venv/bin/python -m pytest tests/test_ui_integration.py \\
                                                        tests/test_ui_playwright_runner.py -v --tb=short \\
                                                        -m \"visual\" -k "$VTESTS"; fi
   If you add or change UI components, update visual_test_map.py so future runs pick the right visual tests.
-6. Fix ALL failures and retest if required.
-7. End your response with a JSON summary block like this:
+7. Fix ALL failures and retest if required.
+8. End your response with a JSON summary block like this:
 ```json
 {{
   "change_summary": "One sentence describing what was changed",
@@ -162,6 +163,15 @@ class CodingSummary:
     after_screenshot: str | None = None
 
 
+@dataclass
+class ProgressUpdate:
+    """Intermediate progress update from coding agent."""
+
+    summary: str
+    location: str
+    before_screenshot: str | None = None
+
+
 def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
     """Parse the JSON response from the verification agent.
 
@@ -269,6 +279,49 @@ def extract_coding_summary(response: str) -> CodingSummary | None:
     json_match = re.search(r'\{\s*"change_summary"\s*:\s*"([^"]+)"\s*\}', response)
     if json_match:
         return CodingSummary(change_summary=json_match.group(1))
+
+    return None
+
+
+def extract_progress_update(response: str) -> ProgressUpdate | None:
+    """Extract a progress update from coding agent streaming output.
+
+    Args:
+        response: Raw response chunk from the coding agent
+
+    Returns:
+        ProgressUpdate if found, None otherwise
+    """
+    import json
+    import re
+
+    # Look for JSON block with type: "progress"
+    json_match = re.search(r'```json\s*(\{[^`]*"type"\s*:\s*"progress"[^`]*\})\s*```', response, re.DOTALL)
+    if json_match:
+        try:
+            data = json.loads(json_match.group(1))
+            if data.get("type") == "progress":
+                return ProgressUpdate(
+                    summary=data.get("summary", ""),
+                    location=data.get("location", ""),
+                    before_screenshot=data.get("before_screenshot"),
+                )
+        except json.JSONDecodeError:
+            pass
+
+    # Try to find raw JSON with type: progress (fallback)
+    raw_match = re.search(r'\{\s*"type"\s*:\s*"progress"[^}]+\}', response)
+    if raw_match:
+        try:
+            data = json.loads(raw_match.group(0))
+            if data.get("type") == "progress":
+                return ProgressUpdate(
+                    summary=data.get("summary", ""),
+                    location=data.get("location", ""),
+                    before_screenshot=data.get("before_screenshot"),
+                )
+        except json.JSONDecodeError:
+            pass
 
     return None
 

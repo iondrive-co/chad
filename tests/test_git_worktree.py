@@ -11,6 +11,7 @@ from chad.git_worktree import (
     DiffLine,
     DiffHunk,
     FileDiff,
+    find_main_venv,
 )
 
 
@@ -105,6 +106,47 @@ class TestGitWorktreeManager:
         assert worktree_venv.is_symlink()
         assert worktree_venv.resolve() == main_venv.resolve()
         assert (worktree_venv / "bin" / "python").exists()
+
+    def test_create_worktree_symlinks_dotvenv(self, git_repo):
+        """Test that worktree creation symlinks .venv when that's what exists."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-dotvenv-symlink"
+
+        # Create a .venv in the main project
+        main_venv = git_repo / ".venv"
+        main_venv.mkdir()
+        (main_venv / "bin").mkdir()
+        (main_venv / "bin" / "python").write_text("#!/bin/bash\necho test")
+
+        worktree_path, _ = mgr.create_worktree(task_id)
+        worktree_venv = worktree_path / ".venv"
+
+        assert worktree_venv.is_symlink()
+        assert worktree_venv.resolve() == main_venv.resolve()
+        assert (worktree_venv / "bin" / "python").exists()
+
+    def test_create_worktree_prefers_dotvenv_over_venv(self, git_repo):
+        """Test that .venv is preferred when both .venv and venv exist."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-venv-preference"
+
+        # Create both .venv and venv
+        dotvenv = git_repo / ".venv"
+        dotvenv.mkdir()
+        (dotvenv / "bin").mkdir()
+        (dotvenv / "bin" / "python").write_text("dotvenv")
+
+        venv = git_repo / "venv"
+        venv.mkdir()
+        (venv / "bin").mkdir()
+        (venv / "bin" / "python").write_text("venv")
+
+        worktree_path, _ = mgr.create_worktree(task_id)
+
+        # Should use .venv, not venv
+        assert (worktree_path / ".venv").is_symlink()
+        assert not (worktree_path / "venv").exists()
+        assert (worktree_path / ".venv" / "bin" / "python").read_text() == "dotvenv"
 
     def test_create_worktree_cleans_stale_pth_entries(self, git_repo):
         """Test that creating a worktree cleans up stale .pth entries from old worktrees."""
@@ -709,3 +751,63 @@ class TestDiffDataClasses:
         assert file_diff.is_new is True
         assert file_diff.is_deleted is False
         assert file_diff.is_binary is False
+
+
+class TestFindMainVenv:
+    """Test cases for find_main_venv function."""
+
+    def test_finds_dotvenv(self, tmp_path):
+        """Test finding .venv directory."""
+        dotvenv = tmp_path / ".venv"
+        dotvenv.mkdir()
+        (dotvenv / "bin").mkdir()
+
+        result = find_main_venv(tmp_path)
+        assert result == dotvenv
+
+    def test_finds_venv(self, tmp_path):
+        """Test finding venv directory when .venv doesn't exist."""
+        venv = tmp_path / "venv"
+        venv.mkdir()
+        (venv / "bin").mkdir()
+
+        result = find_main_venv(tmp_path)
+        assert result == venv
+
+    def test_prefers_dotvenv_over_venv(self, tmp_path):
+        """Test that .venv is preferred when both exist."""
+        dotvenv = tmp_path / ".venv"
+        dotvenv.mkdir()
+
+        venv = tmp_path / "venv"
+        venv.mkdir()
+
+        result = find_main_venv(tmp_path)
+        assert result == dotvenv
+
+    def test_returns_none_when_no_venv(self, tmp_path):
+        """Test that None is returned when no venv exists."""
+        result = find_main_venv(tmp_path)
+        assert result is None
+
+    def test_ignores_symlinks(self, tmp_path):
+        """Test that symlinks are ignored to prevent circular references."""
+        # Create a real .venv
+        real_venv = tmp_path / ".venv"
+        real_venv.mkdir()
+
+        # Create a circular venv symlink (pointing to itself)
+        venv_link = tmp_path / "venv"
+        venv_link.symlink_to(venv_link)  # This creates a broken circular symlink
+
+        result = find_main_venv(tmp_path)
+        assert result == real_venv  # Should ignore the symlink
+
+    def test_ignores_symlink_when_only_symlink_exists(self, tmp_path):
+        """Test that None is returned when only a symlink exists."""
+        # Create a venv symlink pointing to nonexistent target
+        venv_link = tmp_path / "venv"
+        venv_link.symlink_to("/nonexistent/path")
+
+        result = find_main_venv(tmp_path)
+        assert result is None
