@@ -4559,6 +4559,7 @@ class ChadWebUI:
                 elem_id="agent-chatbot" if is_first else None,
                 elem_classes=["agent-chatbot"],  # CSS targets this class
                 sanitize_html=False,  # Required for inline screenshots - content is internally generated
+                type="messages",  # Use OpenAI-style dicts with 'role' and 'content' keys
             )
 
         # Live stream kept in DOM (visible=True) but hidden via CSS for visual tests
@@ -5085,7 +5086,7 @@ class ChadWebUI:
             gr.Markdown("Click to add another provider. Close the accordion to retract without adding.")
             new_provider_name = gr.Textbox(label="Provider Name", placeholder="e.g., work-claude")
             new_provider_type = gr.Dropdown(
-                choices=["anthropic", "openai", "gemini", "mistral"],
+                choices=["anthropic", "openai", "gemini", "mistral", "mock"],
                 label="Provider Type",
                 value="anthropic",
             )
@@ -5166,7 +5167,71 @@ class ChadWebUI:
         initial_session = self.create_session("Task 1")
         initial_session.log_path = self.session_logger.precreate_log()
 
-        with gr.Blocks(title="Chad") as interface:
+        with gr.Blocks(title="Chad", js="""
+        () => {
+            const getRoot = () => {
+                const app = document.querySelector('gradio-app');
+                return (app && app.shadowRoot) ? app.shadowRoot : document;
+            };
+            const isPlus = (el) => {
+                const label = (el.textContent || el.getAttribute('aria-label') || '').trim();
+                return label === '➕';
+            };
+            const hideButton = (btn) => {
+                btn.style.visibility = 'hidden';
+                btn.style.opacity = '0';
+            };
+            const clickAddTask = () => {
+                const root = getRoot();
+                let attempts = 0;
+                const tryClick = () => {
+                    const btn = root.querySelector('#add-new-task-btn');
+                    if (btn) {
+                        hideButton(btn);
+                        btn.click();
+                        return true;
+                    }
+                    attempts += 1;
+                    if (attempts <= 15) setTimeout(tryClick, 80);
+                    return false;
+                };
+                return tryClick();
+            };
+            const isPlusSelected = () => {
+                const root = getRoot();
+                return Array.from(root.querySelectorAll('[role="tab"]')).some(
+                    (tab) => isPlus(tab) && tab.getAttribute('aria-selected') === 'true'
+                );
+            };
+            const wirePlusButtons = () => {
+                const root = getRoot();
+                const candidates = [
+                    ...root.querySelectorAll('[role="tab"]'),
+                    ...document.querySelectorAll('#initial-static-plus-tab, #fallback-plus-tab, #static-plus-tab')
+                ];
+                candidates.forEach((tab) => {
+                    if (!tab || tab._plusClickSetup || !isPlus(tab)) return;
+                    tab._plusClickSetup = true;
+                    tab.addEventListener('click', () => setTimeout(clickAddTask, 60));
+                });
+                if (isPlusSelected()) setTimeout(clickAddTask, 60);
+                const addBtn = root.querySelector('#add-new-task-btn');
+                if (addBtn) hideButton(addBtn);
+            };
+
+            const observer = new MutationObserver(() => {
+                if (isPlusSelected()) clickAddTask();
+            });
+            observer.observe(document, { childList: true, subtree: true });
+            const rootObserverTarget = getRoot();
+            if (rootObserverTarget && rootObserverTarget !== document) {
+                observer.observe(rootObserverTarget, { childList: true, subtree: true });
+            }
+
+            setInterval(wirePlusButtons, 400);
+            setTimeout(wirePlusButtons, 80);
+        }
+        """) as interface:
             # Inject custom CSS
             gr.HTML(f"<style>{PROVIDER_PANEL_CSS}</style>")
 
@@ -5746,71 +5811,6 @@ def launch_web_ui(password: str = None, port: int = 7860) -> tuple[None, int]:
         share=False,
         inbrowser=open_browser,  # Don't open browser for screenshot mode
         quiet=False,
-        js="""
-        () => {
-            const getRoot = () => {
-                const app = document.querySelector('gradio-app');
-                return (app && app.shadowRoot) ? app.shadowRoot : document;
-            };
-            const isPlus = (el) => {
-                const label = (el.textContent || el.getAttribute('aria-label') || '').trim();
-                return label === '➕';
-            };
-            const hideButton = (btn) => {
-                btn.style.visibility = 'hidden';
-                btn.style.opacity = '0';
-            };
-            const clickAddTask = () => {
-                const root = getRoot();
-                let attempts = 0;
-                const tryClick = () => {
-                    const btn = root.querySelector('#add-new-task-btn');
-                    if (btn) {
-                        hideButton(btn);
-                        btn.click();
-                        return true;
-                    }
-                    attempts += 1;
-                    if (attempts <= 15) setTimeout(tryClick, 80);
-                    return false;
-                };
-                return tryClick();
-            };
-            const isPlusSelected = () => {
-                const root = getRoot();
-                return Array.from(root.querySelectorAll('[role=\"tab\"]')).some(
-                    (tab) => isPlus(tab) && tab.getAttribute('aria-selected') === 'true'
-                );
-            };
-            const wirePlusButtons = () => {
-                const root = getRoot();
-                const candidates = [
-                    ...root.querySelectorAll('[role=\"tab\"]'),
-                    ...document.querySelectorAll('#initial-static-plus-tab, #fallback-plus-tab, #static-plus-tab')
-                ];
-                candidates.forEach((tab) => {
-                    if (!tab || tab._plusClickSetup || !isPlus(tab)) return;
-                    tab._plusClickSetup = true;
-                    tab.addEventListener('click', () => setTimeout(clickAddTask, 60));
-                });
-                if (isPlusSelected()) setTimeout(clickAddTask, 60);
-                const addBtn = root.querySelector('#add-new-task-btn');
-                if (addBtn) hideButton(addBtn);
-            };
-
-            const observer = new MutationObserver(() => {
-                if (isPlusSelected()) clickAddTask();
-            });
-            observer.observe(document, { childList: true, subtree: true });
-            const rootObserverTarget = getRoot();
-            if (rootObserverTarget && rootObserverTarget !== document) {
-                observer.observe(rootObserverTarget, { childList: true, subtree: true });
-            }
-
-            setInterval(wirePlusButtons, 400);
-            setTimeout(wirePlusButtons, 80);
-        }
-        """,
     )
 
     return None, port

@@ -42,8 +42,7 @@ When modifying functions that return tuples (e.g., `make_yield`, generator funct
 1. Take an after screenshot if the issue has a visual component
 2. Run verification to ensure tests pass and lint is clean
 3. Perform a critical self-review and note any outstanding issues
-
-**CRITICAL: All tests must pass - no skipping allowed.** Never use `@pytest.mark.skip` or skip tests for any reason.
+4. All tests must pass even if you did not break them, never skip tests for any reason.
 
 ## Screenshot Fixtures
 
@@ -94,7 +93,7 @@ The project uses `.venv` (not `venv`). To create a fresh virtual environment:
 
 ```bash
 rm -rf .venv
-uv venv .venv --python 3.10
+uv venv .venv --python 3.13
 uv pip install -e ".[dev]" --python .venv/bin/python
 ```
 
@@ -102,7 +101,7 @@ Or without uv:
 
 ```bash
 rm -rf .venv
-python3.10 -m venv .venv
+python3.13 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 ```
 

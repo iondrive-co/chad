@@ -1772,43 +1772,191 @@ class MistralVibeProvider(AIProvider):
 
 
 class MockProvider(AIProvider):
-    """Mock provider for testing. Returns predictable responses."""
+    """Mock provider for testing UI without real API calls.
+
+    This provider simulates realistic coding and verification agent behavior:
+    - Generates live streaming output with tool activities
+    - Makes actual file changes to BUGS.md in the worktree
+    - Returns proper JSON responses
+    - Rejects first verification attempt, accepts second
+    """
 
     def __init__(self, config: ModelConfig):
         super().__init__(config)
         self._alive = False
-        self._messages = []
-        self._response_queue = []
+        self._messages: list[str] = []
+        self._response_queue: list[str] = []
+        self._project_path: str | None = None
+        self._coding_turn_count = 0
+        self._verification_count = 0
+        self._is_verification_mode = False
 
     def queue_response(self, response: str) -> None:
-        """Queue a response to be returned by get_response."""
+        """Queue a response to be returned by get_response (for unit tests)."""
         self._response_queue.append(response)
 
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         self._alive = True
+        self._project_path = project_path
         self._notify_activity("text", "Mock session started")
         return True
 
     def send_message(self, message: str) -> None:
         self._messages.append(message)
-        self._notify_activity("tool", "MockTool: processing")
+        # Detect if this is a verification prompt
+        self._is_verification_mode = "DO NOT modify or create any files" in message
+
+    def _simulate_delay(self, seconds: float = 0.1) -> None:
+        """Simulate processing delay."""
+        import time
+        time.sleep(seconds)
+
+    def _modify_bugs_file(self, marker: str) -> str:
+        """Modify BUGS.md in the worktree, creating if needed. Return the path."""
+        from pathlib import Path
+
+        if not self._project_path:
+            return ""
+
+        bugs_path = Path(self._project_path) / "BUGS.md"
+
+        if bugs_path.exists():
+            content = bugs_path.read_text()
+            # Add marker at the end
+            content = content.rstrip() + f"\n{marker}\n"
+        else:
+            content = f"# Known Bugs\n\n{marker}\n"
+
+        bugs_path.write_text(content)
+        return str(bugs_path)
+
+    def _generate_coding_response(self) -> str:
+        """Generate a realistic coding agent response."""
+        self._coding_turn_count += 1
+        is_followup = self._coding_turn_count > 1
+
+        # Simulate some streaming output
+        self._notify_activity("tool", "Read: src/chad/providers.py")
+        self._simulate_delay(0.15)
+        self._notify_activity("stream", "Analyzing the codebase structure...\n")
+        self._simulate_delay(0.1)
+
+        if is_followup:
+            self._notify_activity("stream", "Processing follow-up request...\n")
+            self._simulate_delay(0.1)
+            self._notify_activity("tool", "Grep: searching for relevant code")
+            self._simulate_delay(0.15)
+            self._notify_activity("stream", "Found the area that needs updating.\n")
+            marker = f"<!-- Mock follow-up change {self._coding_turn_count} -->"
+        else:
+            self._notify_activity("stream", "Understanding the task requirements...\n")
+            self._simulate_delay(0.1)
+            self._notify_activity("tool", "Glob: **/*.py")
+            self._simulate_delay(0.15)
+            self._notify_activity("stream", "Located relevant files.\n")
+            marker = "<!-- Mock initial change -->"
+
+        # Simulate progress update
+        self._simulate_delay(0.1)
+        progress_json = (
+            '```json\n'
+            '{"type": "progress", "summary": "Mock task in progress", '
+            f'"location": "BUGS.md - adding test marker"}}\n'
+            '```\n'
+        )
+        self._notify_activity("stream", progress_json)
+
+        # Make the actual file change
+        self._simulate_delay(0.1)
+        self._notify_activity("tool", "Edit: BUGS.md")
+        bugs_path = self._modify_bugs_file(marker)
+        self._simulate_delay(0.1)
+        self._notify_activity("stream", f"Modified {bugs_path}\n")
+
+        # Simulate running tests
+        self._simulate_delay(0.15)
+        self._notify_activity("tool", "Bash: ./.venv/bin/python -m pytest tests/ -v --tb=short")
+        self._simulate_delay(0.2)
+        self._notify_activity("stream", "===== 42 passed in 3.21s =====\n")
+
+        # Simulate linting
+        self._notify_activity("tool", "Bash: ./.venv/bin/python -m flake8 src/chad")
+        self._simulate_delay(0.1)
+        self._notify_activity("stream", "Linting passed.\n")
+
+        # Build the full response
+        if is_followup:
+            change_desc = f"Applied follow-up change #{self._coding_turn_count} to BUGS.md"
+        else:
+            change_desc = "Applied initial mock change to BUGS.md"
+
+        response = f"""I've analyzed the codebase and made the requested changes.
+
+## Changes Made
+
+I modified BUGS.md to add a test marker.
+
+## Verification
+
+- ✓ All 42 tests passed
+- ✓ Linting clean
+
+```json
+{{"change_summary": "{change_desc}"}}
+```
+"""
+        return response
+
+    def _generate_verification_response(self) -> str:
+        """Generate a realistic verification agent response."""
+        self._verification_count += 1
+
+        # Simulate verification activities
+        self._notify_activity("tool", "Read: BUGS.md")
+        self._simulate_delay(0.15)
+        self._notify_activity("stream", "Reviewing the changes made...\n")
+        self._simulate_delay(0.1)
+        self._notify_activity("tool", "Bash: git diff")
+        self._simulate_delay(0.15)
+        self._notify_activity("stream", "Checking diff output...\n")
+        self._simulate_delay(0.1)
+
+        # First verification: reject with a reason
+        if self._verification_count == 1:
+            self._notify_activity("stream", "Found an issue with the changes.\n")
+            return """{
+  "passed": false,
+  "summary": "The mock change marker should include a timestamp for traceability",
+  "issues": [
+    "Mock change marker does not include timestamp",
+    "Consider adding more descriptive content to BUGS.md"
+  ]
+}"""
+
+        # Subsequent verifications: accept
+        self._notify_activity("stream", "Changes look good.\n")
+        return """{
+  "passed": true,
+  "summary": "Verified that BUGS.md was updated correctly with the mock marker. All tests pass and linting is clean."
+}"""
 
     def get_response(self, timeout: float = 30.0) -> str:
-        import time
+        self._simulate_delay(0.1)
 
-        time.sleep(0.1)  # Simulate some processing
-        self._notify_activity("text", "Mock response ready")
-
+        # If there's a queued response (for unit tests), use it
         if self._response_queue:
             return self._response_queue.pop(0)
 
-        # Default response for breakdown requests
+        # Check for breakdown requests (for compatibility)
         last_msg = self._messages[-1] if self._messages else ""
         if "subtask" in last_msg.lower() or "break" in last_msg.lower():
             return '{"subtasks": [{"id": "1", "description": "Mock task", "dependencies": []}]}'
 
-        # Default response for other requests
-        return "Mock response: Task completed successfully."
+        # Generate appropriate response based on mode
+        if self._is_verification_mode:
+            return self._generate_verification_response()
+        else:
+            return self._generate_coding_response()
 
     def stop_session(self) -> None:
         self._alive = False
@@ -1817,7 +1965,7 @@ class MockProvider(AIProvider):
         return self._alive
 
     def supports_multi_turn(self) -> bool:
-        return True  # Mock provider supports multi-turn for testing
+        return True
 
 
 def create_provider(config: ModelConfig) -> AIProvider:

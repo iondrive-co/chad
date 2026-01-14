@@ -18,7 +18,7 @@ from .installer import AIToolInstaller
 class ProviderUIManager:
     """Provider management and display helpers for the web UI."""
 
-    SUPPORTED_PROVIDERS = {"anthropic", "openai", "gemini", "mistral"}
+    SUPPORTED_PROVIDERS = {"anthropic", "openai", "gemini", "mistral", "mock"}
     OPENAI_REASONING_LEVELS = ["default", "low", "medium", "high", "xhigh"]
 
     def __init__(
@@ -890,6 +890,9 @@ class ProviderUIManager:
                 if vibe_config.exists():
                     return True, "Logged in"
                 return False, "Not logged in"
+
+            if provider_type == "mock":
+                return True, "Mock provider (no login required)"
 
             return False, "Unknown provider type"
 
