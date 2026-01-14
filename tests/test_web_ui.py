@@ -333,6 +333,56 @@ class TestChadWebUI:
         assert header_text == "", "Header should be cleared after merge"
         assert diff_content == "", "Diff content should be cleared after merge"
 
+    def test_merge_preserves_chatbot_and_followup(self, web_ui, git_repo, monkeypatch):
+        """Successful merge should preserve chatbot and followup_row for follow-up conversations."""
+        session_id = "merge-preserve-chat-test"
+        session = web_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = Path(git_repo / ".chad-worktrees" / session_id)
+        session.worktree_path.mkdir(parents=True, exist_ok=True)
+        session.worktree_branch = f"chad-task-{session_id}"
+        session.chat_history = [{"role": "user", "content": "Test message"}]
+
+        def fake_merge(self, task_id, commit_message=None, target_branch=None):
+            return True, None, None  # success, no conflicts, no error
+
+        def fake_cleanup(self, task_id):
+            pass
+
+        monkeypatch.setattr(GitWorktreeManager, "merge_to_main", fake_merge)
+        monkeypatch.setattr(GitWorktreeManager, "cleanup_after_merge", fake_cleanup)
+        monkeypatch.setattr(GitWorktreeManager, "get_main_branch", lambda self: "main")
+
+        outputs = web_ui.attempt_merge(session_id, "msg", "main")
+
+        # Index 6 is chatbot - should NOT be cleared (use no_change)
+        chatbot_update = outputs[6]
+        assert not isinstance(chatbot_update, list), "Chatbot should not be cleared to empty list"
+
+        # Index 10 is followup_row - should remain visible
+        followup_update = outputs[10]
+        assert followup_update.get("visible") is not False, "Followup row should remain visible"
+
+    def test_discard_preserves_chatbot_and_followup(self, web_ui, git_repo):
+        """Discard should preserve chatbot and followup_row for follow-up conversations."""
+        session_id = "discard-preserve-chat-test"
+        session = web_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = Path(git_repo / ".chad-worktrees" / session_id)
+        session.worktree_path.mkdir(parents=True, exist_ok=True)
+        session.worktree_branch = f"chad-task-{session_id}"
+        session.chat_history = [{"role": "user", "content": "Test message"}]
+
+        outputs = web_ui.discard_worktree_changes(session_id)
+
+        # Index 6 is chatbot - should NOT be cleared (use no_change)
+        chatbot_update = outputs[6]
+        assert not isinstance(chatbot_update, list), "Chatbot should not be cleared to empty list"
+
+        # Index 10 is followup_row - should remain visible
+        followup_update = outputs[10]
+        assert followup_update.get("visible") is not False, "Followup row should remain visible"
+
     def test_set_reasoning_success(self, web_ui, mock_security_mgr):
         """Test setting reasoning level for an account."""
         result = web_ui.set_reasoning("claude", "high")[0]

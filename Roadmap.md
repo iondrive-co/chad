@@ -1,13 +1,15 @@
 v0.7 Touring complete
 
-Integrated live view
+Windows support
+Integrated live view with stable scrollbar
 Screenshots and hypothesis in task summaries
-Early initial summary with screenshot of problem/proposed feature, description of what it shows, where in the code the problem lies/new code that needs to be implemented
-Testing the mistral and gemini providers and add qwen code
-Fix Chatbox scrollbar keeps resetting to the bottom
+Early initial summary report
+Allow continue conversation after merge
+Switch from MCP usage to skills
 
 v0.8 Hack-propagation
 
+Testing the mistral and gemini providers and add qwen code
 Load balance based on usage, user preference, context limits hit, etc.
 Structured log format for better inter-provider handoff
 Use of /agents
