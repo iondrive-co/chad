@@ -2328,6 +2328,7 @@ class ChadWebUI:
         """Cancel the running task for a specific session."""
         session = self.get_session(session_id)
         session.cancel_requested = True
+        session.active = False  # Mark session as inactive to allow restart
         if session.provider:
             session.provider.stop_session()
             session.provider = None

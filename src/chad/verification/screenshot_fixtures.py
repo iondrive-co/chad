@@ -161,7 +161,8 @@ def generate_codex_usage(account_data: dict) -> str:
         result += f"[{bar}] {util}% used\n"
         result += f"Resets {reset_date}\n\n"
 
-    result += f"*Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}*\n"
+    # Use local time for consistency with actual usage display
+    result += f"*Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}*\n"
     return result
 
 
