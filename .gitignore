@@ -57,11 +57,13 @@ coverage.xml
 
 # Virtual environments
 venv/
+venv
 env/
 ENV/
 env.bak/
 venv.bak/
 .venv/
+.venv
 
 # mypy
 .mypy_cache/
