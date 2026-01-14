@@ -46,7 +46,7 @@ coverage.xml
 .pytest_cache/
 
 # PyCharm
-.idea/
+.idea/*
 !.idea/runConfigurations/
 *.iml
 *.iws
