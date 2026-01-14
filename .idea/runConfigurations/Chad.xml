@@ -10,7 +10,7 @@
     <option name="ADD_SOURCE_ROOTS" value="true" />
     <module name="chad" />
     <option name="SCRIPT_NAME" value="chad" />
-    <option name="PARAMETERS" value="" />
+    <option name="PARAMETERS" value="--dev" />
     <option name="SHOW_COMMAND_LINE" value="false" />
     <option name="EMULATE_TERMINAL" value="true" />
     <option name="MODULE_MODE" value="true" />

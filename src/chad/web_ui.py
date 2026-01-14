@@ -1937,13 +1937,14 @@ class ChadWebUI:
     VERIFICATION_NONE = "__verification_none__"
     VERIFICATION_NONE_LABEL = "None"
 
-    def __init__(self, security_mgr: SecurityManager, main_password: str):
+    def __init__(self, security_mgr: SecurityManager, main_password: str, dev_mode: bool = False):
         self.security_mgr = security_mgr
         self.main_password = main_password
+        self.dev_mode = dev_mode
         self.sessions: dict[str, Session] = {}
         self.provider_card_count = 10
         self.model_catalog = ModelCatalog(security_mgr)
-        self.provider_ui = ProviderUIManager(security_mgr, main_password, self.model_catalog)
+        self.provider_ui = ProviderUIManager(security_mgr, main_password, self.model_catalog, dev_mode=dev_mode)
         self.session_logger = SessionLogger()
         # Store dropdown references for cross-tab updates
         self._session_dropdowns: dict[str, dict] = {}
@@ -2020,6 +2021,10 @@ class ChadWebUI:
 
     def _get_mistral_usage(self) -> str:
         return self.provider_ui._get_mistral_usage()
+
+    def get_provider_choices(self) -> list[str]:
+        """Get ordered list of provider type choices for dropdowns."""
+        return self.provider_ui.get_provider_choices()
 
     def _read_project_docs(self, project_path: Path) -> str | None:
         """Read project documentation if present.
@@ -5093,7 +5098,7 @@ class ChadWebUI:
             gr.Markdown("Click to add another provider. Close the accordion to retract without adding.")
             new_provider_name = gr.Textbox(label="Provider Name", placeholder="e.g., work-claude")
             new_provider_type = gr.Dropdown(
-                choices=["anthropic", "openai", "gemini", "mistral", "mock"],
+                choices=self.get_provider_choices(),
                 label="Provider Type",
                 value="anthropic",
             )
@@ -5744,12 +5749,13 @@ initializeLiveStreamScrollTracking();
             return interface
 
 
-def launch_web_ui(password: str = None, port: int = 7860) -> tuple[None, int]:
+def launch_web_ui(password: str = None, port: int = 7860, dev_mode: bool = False) -> tuple[None, int]:
     """Launch the Chad web interface.
 
     Args:
         password: Main password. If not provided, will prompt via CLI
         port: Port to run on. Use 0 for ephemeral port.
+        dev_mode: If True, enable development features like mock provider
 
     Returns:
         Tuple of (None, actual_port) where actual_port is the port used
@@ -5792,7 +5798,7 @@ def launch_web_ui(password: str = None, port: int = 7860) -> tuple[None, int]:
             main_password = security_mgr.verify_main_password()
 
     # Create and launch UI
-    ui = ChadWebUI(security_mgr, main_password)
+    ui = ChadWebUI(security_mgr, main_password, dev_mode=dev_mode)
     app = ui.create_interface()
 
     requested_port = port
