@@ -2191,7 +2191,8 @@ class ChadWebUI:
                     verifier.stop_session()
 
                     if passed:
-                        if not check_verification_mentioned(coding_output):
+                        # Skip automated verification for mock provider (testing mode)
+                        if verification_provider != "mock" and not check_verification_mentioned(coding_output):
                             verified, feedback = _run_automated_verification()
                             if not verified:
                                 return False, feedback or "Verification failed"
