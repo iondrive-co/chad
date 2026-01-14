@@ -522,6 +522,38 @@ class GitWorktreeManager:
 
         return True, None
 
+    def _has_main_uncommitted_changes(self) -> bool:
+        """Check if the main repo has uncommitted changes."""
+        result = self._run_git("status", "--porcelain", check=False)
+        return bool(result.stdout.strip())
+
+    def _stash_main_changes(self) -> bool:
+        """Stash uncommitted changes in the main repo. Returns True if stash was created."""
+        if not self._has_main_uncommitted_changes():
+            return False
+        result = self._run_git("stash", "push", "-m", "chad-merge-stash", check=False)
+        return result.returncode == 0
+
+    def _pop_stash(self) -> tuple[bool, bool]:
+        """Pop the stash. Returns (success, had_conflicts)."""
+        result = self._run_git("stash", "pop", check=False)
+        if result.returncode == 0:
+            return True, False
+        # Check if there was a conflict during stash pop
+        if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
+            return False, True
+        return False, False
+
+    def _has_chad_stash(self) -> bool:
+        """Check if there's a stash created by chad merge."""
+        result = self._run_git("stash", "list", check=False)
+        return "chad-merge-stash" in result.stdout
+
+    def _pop_chad_stash_if_exists(self) -> None:
+        """Pop the chad merge stash if it exists."""
+        if self._has_chad_stash():
+            self._pop_stash()
+
     def merge_to_main(
         self,
         task_id: str,
@@ -557,11 +589,17 @@ class GitWorktreeManager:
                 detail = f"{commit_error}: {status}"
             return False, None, detail
 
+        # Stash any uncommitted changes in main repo before checkout/merge
+        stashed = self._stash_main_changes()
+
         # Switch to target branch in the main repo
         current_branch = self.get_current_branch()
         if current_branch != merge_target:
             result = self._run_git("checkout", merge_target, check=False)
             if result.returncode != 0:
+                # Restore stash if checkout failed
+                if stashed:
+                    self._pop_stash()
                 detail = result.stderr.strip() or result.stdout.strip() or "Failed to checkout target branch"
                 return False, None, detail
 
@@ -572,14 +610,21 @@ class GitWorktreeManager:
         result = self._run_git("merge", "--no-ff", branch_name, "-m", merge_msg, check=False)
 
         if result.returncode == 0:
+            # Pop stash after successful merge
+            if stashed:
+                self._pop_stash()
             return True, None, None
 
         # Check for conflicts
         if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
             conflicts = self._parse_conflicts()
+            # Don't pop stash yet - let user resolve merge conflicts first
+            # The stash will be popped after merge is complete
             return False, conflicts, None
 
-        # Other error
+        # Other error - restore stash
+        if stashed:
+            self._pop_stash()
         detail = result.stderr.strip() or result.stdout.strip() or "Merge failed"
         return False, None, detail
 
@@ -729,7 +774,11 @@ class GitWorktreeManager:
     def abort_merge(self) -> bool:
         """Abort an in-progress merge."""
         result = self._run_git("merge", "--abort", check=False)
-        return result.returncode == 0
+        if result.returncode != 0:
+            return False
+        # Restore any stashed changes from before the merge
+        self._pop_chad_stash_if_exists()
+        return True
 
     def complete_merge(self) -> bool:
         """Complete the merge after all conflicts resolved."""
@@ -745,7 +794,12 @@ class GitWorktreeManager:
 
         # Commit the merge
         result = self._run_git("commit", "--no-edit", check=False)
-        return result.returncode == 0
+        if result.returncode != 0:
+            return False
+
+        # Pop any stashed changes from before the merge
+        self._pop_chad_stash_if_exists()
+        return True
 
     def cleanup_after_merge(self, task_id: str) -> bool:
         """Delete worktree and branch after successful merge."""
