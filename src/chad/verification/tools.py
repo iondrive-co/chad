@@ -15,7 +15,10 @@ from pathlib import Path
 from typing import Dict
 
 from chad.config import resolve_project_root
-from chad.verification.ui_playwright_runner import run_screenshot_subprocess
+from chad.verification.ui_playwright_runner import (
+    ensure_playwright_browsers,
+    run_screenshot_subprocess,
+)
 
 
 def _failure(message: str) -> Dict[str, object]:
@@ -127,6 +130,20 @@ def verify(lint_only: bool = False, project_root: str | None = None) -> Dict[str
             # Continue to tests instead of returning early
 
         # Phase 3: All tests
+        try:
+            ensure_playwright_browsers()
+        except Exception as exc:
+            results["phases"]["tests"] = {
+                "success": False,
+                "passed": 0,
+                "failed": 0,
+                "output": f"Playwright setup failed: {exc}",
+            }
+            results["success"] = False
+            results["failed_phase"] = "tests"
+            results["message"] = f"{message_prefix}Playwright setup failed: {exc}"
+            return results
+
         # Check if pytest-xdist is available for parallel execution
         pytest_args = [python_exec, "-m", "pytest", "-v", "--tb=short"]
         try:
