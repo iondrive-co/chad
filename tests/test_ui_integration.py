@@ -1107,6 +1107,168 @@ Running tests...</div>
         assert "Running tests" in updated_content, "Should show streaming content"
 
 
+class TestJsPatchLiveContent:
+    """Test JavaScript live content patching for scroll/selection preservation."""
+
+    def test_js_patch_function_exists(self, page: Page):
+        """The _patchLiveContent JavaScript function should be available."""
+        has_function = page.evaluate("() => typeof window._patchLiveContent === 'function'")
+        assert has_function, "_patchLiveContent function should exist on window"
+
+    def test_js_patch_preserves_scroll_position(self, page: Page):
+        """JS patching should preserve scroll position when updating inline content."""
+        # Create a container with data-live-id attribute
+        page.evaluate("""
+        () => {
+            const chatbot = document.querySelector('#agent-chatbot') || document.querySelector('.agent-chatbot');
+            if (!chatbot) return false;
+
+            // Create a mock inline live content container with scrollable content
+            const container = document.createElement('div');
+            container.className = 'inline-live-content';
+            container.setAttribute('data-live-id', 'test-scroll-1');
+            container.style.cssText = 'max-height: 100px; overflow-y: auto; white-space: pre-wrap;';
+
+            // Add enough content to make it scrollable
+            const lines = [];
+            for (let i = 0; i < 50; i++) {
+                lines.push('Line ' + i + ': Some test content here');
+            }
+            container.innerHTML = lines.join('\\n');
+
+            chatbot.appendChild(container);
+            return true;
+        }
+        """)
+        page.wait_for_timeout(100)
+
+        # Get initial metrics and scroll to middle
+        page.evaluate("""
+        () => {
+            const container = document.querySelector('[data-live-id="test-scroll-1"]');
+            if (!container) return;
+            // Scroll to a specific position (middle-ish)
+            container.scrollTop = 200;
+
+            // Mark user as scrolled up so JS knows to preserve position
+            if (window._liveStreamScroll) {
+                const state = window._liveStreamScroll.get(container);
+                if (state) {
+                    state.userScrolledUp = true;
+                    state.savedScrollTop = 200;
+                }
+            }
+        }
+        """)
+        page.wait_for_timeout(100)
+
+        # Get scroll position before patch
+        scroll_before = page.evaluate("""
+        () => {
+            const container = document.querySelector('[data-live-id="test-scroll-1"]');
+            return container ? container.scrollTop : null;
+        }
+        """)
+        assert scroll_before is not None, "Container should exist"
+        assert scroll_before >= 190, f"Expected scrollTop ~200, got {scroll_before}"
+
+        # Patch content with new lines
+        page.evaluate("""
+        () => {
+            const lines = [];
+            for (let i = 0; i < 60; i++) {
+                lines.push('Updated Line ' + i + ': New content');
+            }
+            const newHtml = lines.join('\\n');
+            window._patchLiveContent('test-scroll-1', newHtml);
+        }
+        """)
+        page.wait_for_timeout(150)
+
+        # Verify scroll position is preserved
+        scroll_after = page.evaluate("""
+        () => {
+            const container = document.querySelector('[data-live-id="test-scroll-1"]');
+            return container ? container.scrollTop : null;
+        }
+        """)
+        assert scroll_after is not None, "Container should still exist after patch"
+        # Allow some tolerance for the scroll position
+        assert abs(scroll_after - scroll_before) <= 10, (
+            f"Scroll position not preserved: before={scroll_before}, after={scroll_after}"
+        )
+
+    def test_js_patch_updates_content(self, page: Page):
+        """JS patching should actually update the content."""
+        # Create a container
+        page.evaluate("""
+        () => {
+            const chatbot = document.querySelector('#agent-chatbot') || document.querySelector('.agent-chatbot');
+            if (!chatbot) return false;
+
+            const container = document.createElement('div');
+            container.className = 'inline-live-content';
+            container.setAttribute('data-live-id', 'test-update-1');
+            container.innerHTML = 'Initial content';
+            chatbot.appendChild(container);
+            return true;
+        }
+        """)
+
+        # Patch with new content
+        result = page.evaluate("""
+        () => {
+            const success = window._patchLiveContent('test-update-1', '<b>Updated content</b>');
+            const container = document.querySelector('[data-live-id="test-update-1"]');
+            return {
+                success,
+                content: container ? container.innerHTML : null
+            };
+        }
+        """)
+
+        assert result["success"], "_patchLiveContent should return true"
+        assert "<b>Updated content</b>" in result["content"], "Content should be updated"
+
+    def test_js_patch_returns_false_for_missing_container(self, page: Page):
+        """JS patching should return false if container doesn't exist."""
+        result = page.evaluate("""
+        () => window._patchLiveContent('nonexistent-id', 'content')
+        """)
+        assert result is False, "_patchLiveContent should return false for missing container"
+
+    def test_inline_live_content_scroll_tracking(self, page: Page):
+        """Inline live content containers should get scroll tracking set up."""
+        # Create an inline live content container
+        page.evaluate("""
+        () => {
+            const chatbot = document.querySelector('#agent-chatbot') || document.querySelector('.agent-chatbot');
+            if (!chatbot) return false;
+
+            const container = document.createElement('div');
+            container.className = 'inline-live-content';
+            container.setAttribute('data-live-id', 'test-tracking-1');
+            container.style.cssText = 'max-height: 100px; overflow-y: auto;';
+            container.innerHTML = 'Test content';
+            chatbot.appendChild(container);
+            return true;
+        }
+        """)
+
+        # Wait for the scroll tracking to be set up (runs on interval)
+        page.wait_for_timeout(600)
+
+        # Check if scroll tracking is set up
+        has_tracking = page.evaluate("""
+        () => {
+            const container = document.querySelector('[data-live-id="test-tracking-1"]');
+            if (!container) return false;
+            return window._liveStreamScroll && window._liveStreamScroll.has(container);
+        }
+        """)
+        assert has_tracking, "Inline live content should have scroll tracking set up"
+
+
 class TestRealisticLiveContent:
     """Test live view with realistic CLI-like content to verify all text is visible."""
 
