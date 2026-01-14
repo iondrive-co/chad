@@ -3163,10 +3163,20 @@ class ChadWebUI:
                                             rev_display_buffer.append(chunk)
                                             now = time_module.time()
                                             if now - rev_last_yield >= min_yield_interval:
+                                                # Update both the separate live stream box AND the chat bubble
                                                 rendered = build_live_stream_html(
                                                     rev_display_buffer.content, "CODING AI"
                                                 )
+                                                # Update chat bubble with inline live content (like normal flow)
+                                                inline_html = build_inline_live_html(
+                                                    rev_display_buffer.content, "CODING AI"
+                                                )
                                                 if rev_render_state.should_render(rendered):
+                                                    # Update the chat bubble placeholder with streaming content
+                                                    chat_history[revision_pending_idx] = {
+                                                        "role": "assistant",
+                                                        "content": inline_html,
+                                                    }
                                                     yield make_yield(chat_history, revision_status_msg, rendered)
                                                     rev_render_state.record(rendered)
                                                     rev_last_yield = now
