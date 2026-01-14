@@ -388,6 +388,77 @@ class TestGitWorktreeManager:
         # Abort the merge to clean up
         mgr.abort_merge()
 
+    def test_merge_stashes_uncommitted_main_changes(self, git_repo):
+        """Test that merge stashes uncommitted changes in main repo before merging."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-stash-merge"
+
+        # Create worktree and add a new file
+        worktree_path, _ = mgr.create_worktree(task_id)
+        (worktree_path / "new_feature.txt").write_text("Feature content\n")
+        subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Add feature"],
+            cwd=worktree_path,
+            check=True,
+            capture_output=True,
+        )
+
+        # Create uncommitted changes in the main repo (different file)
+        (git_repo / "local_work.txt").write_text("Local uncommitted work\n")
+
+        # Merge should succeed despite uncommitted changes (they get stashed)
+        success, conflicts, error = mgr.merge_to_main(task_id)
+        assert success is True
+        assert conflicts is None
+        assert error is None
+
+        # Verify merged content exists
+        assert (git_repo / "new_feature.txt").exists()
+        assert (git_repo / "new_feature.txt").read_text() == "Feature content\n"
+
+        # Verify uncommitted changes are preserved (stash was popped)
+        assert (git_repo / "local_work.txt").exists()
+        assert (git_repo / "local_work.txt").read_text() == "Local uncommitted work\n"
+
+    def test_merge_stashes_conflicting_uncommitted_changes(self, git_repo):
+        """Test merge when main has uncommitted changes to the same file being merged.
+
+        When the stash is popped after merge and conflicts with merged changes,
+        git creates conflict markers. The user's uncommitted changes are preserved
+        in the 'Stashed changes' section of the conflict.
+        """
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-stash-conflict"
+
+        # Create worktree and modify README
+        worktree_path, _ = mgr.create_worktree(task_id)
+        (worktree_path / "README.md").write_text("# Worktree changes\n")
+        subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Modify README"],
+            cwd=worktree_path,
+            check=True,
+            capture_output=True,
+        )
+
+        # Create uncommitted changes to README in main (same file)
+        (git_repo / "README.md").write_text("# Uncommitted local changes\n")
+
+        # Merge should stash the uncommitted changes and succeed
+        success, conflicts, error = mgr.merge_to_main(task_id)
+        assert success is True
+        assert conflicts is None
+        assert error is None
+
+        # When stash pops with conflicts, the user's changes are preserved
+        # in conflict markers - this is expected git behavior
+        content = (git_repo / "README.md").read_text()
+        # The merged content is in "Updated upstream" section
+        assert "# Worktree changes" in content
+        # The user's uncommitted changes are preserved in "Stashed changes" section
+        assert "# Uncommitted local changes" in content
+
     def test_resolve_all_conflicts_ours(self, git_repo):
         """Test resolving all conflicts with ours (original)."""
         mgr = GitWorktreeManager(git_repo)

@@ -4,25 +4,30 @@ Windows support
 Integrated live view with stable scrollbar
 Screenshots and hypothesis in task summaries
 Early initial summary report
-Allow continue conversation after merge
+Allow continued conversation after merge
 Switch from MCP usage to skills
+Pycharm launcher with dev mode for starting a mock provider for better testing
 
-v0.8 Hack-propagation
+v0.8 Paper maximiser
 
+Split ui code from core
+API allows for live stream from agent (rather than json)
+New text only ui for testing
+Simplify tests
+Structured log format 
+
+v0.9 Hack-propagation
+
+Full inter-provider handoff including summarize progress and resume from checkpoints
 Testing the mistral and gemini providers and add qwen code
 Load balance based on usage, user preference, context limits hit, etc.
-Structured log format for better inter-provider handoff
+
+v0.10 Slip slop slap
+
 Use of /agents
-Rollback:
-  - Failed hypothesis
-  - summarize progress and resume from checkpoints
-  - Revert failed changes
-
-v0.9 Slip slop slap
-
 Telegram and slack integrations
 Packaging for different platforms
-Bug fixing
+Repeated failures
 
 ---- Repeated failures ----
 
@@ -32,7 +37,7 @@ Ask the coding agent to answer the following questions:
 - How could the code be improved so that fewer attempts are needed for similar issues in the future?
 - Is there any redundant code from the failed attempts that could be removed?
 
-----Handoff log-----
+----Structured log format-----
 
 Change format of precreated chad_session_*.json
 
