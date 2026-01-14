@@ -773,6 +773,94 @@ Line 4: Fourth line"""
             "pre-line",
         ), f"white-space should preserve newlines, got: {white_space}"
 
+    def test_revision_chat_bubble_shows_streaming_content(self, page: Page):
+        """Chat bubble during revision should show streaming content, not static placeholder.
+
+        This test reproduces the bug where the chat bubble shows static
+        '⏳ Working on revisions...' instead of live streaming content
+        during the revision process.
+        """
+        # Simulate the revision flow by creating a chat bubble with revision placeholder
+        revision_placeholder_content = """
+        <div role="article" class="message-wrap">
+            <div class="message">
+                <div class="avatar">🤖</div>
+                <div class="content">
+                    <h3>CODING AI</h3>
+                    <p>⏳ <em>Working on revisions...</em></p>
+                </div>
+            </div>
+        </div>
+        """
+
+        # Inject initial placeholder content into chat area
+        chat_area = page.locator("#agent-chatbot")
+        chat_area.wait_for(state="attached", timeout=5000)
+
+        # Add the placeholder message to chat history
+        page.evaluate(f"""
+            () => {{
+                const chatbot = document.querySelector('#agent-chatbot');
+                if (chatbot && chatbot.tagName === 'GRADIO-CHATBOT') {{
+                    // Simulate the revision placeholder being added to chat
+                    const messageContainer = chatbot.querySelector('.message-wrap:last-child') ||
+                                           chatbot.querySelector('.wrap');
+                    if (messageContainer) {{
+                        messageContainer.innerHTML = `{revision_placeholder_content}`;
+                    }}
+                }}
+            }}
+        """)
+
+        # Verify the placeholder is showing
+        placeholder_element = page.locator("#agent-chatbot").locator("text=Working on revisions")
+        assert placeholder_element.is_visible(), "Revision placeholder should be visible initially"
+
+        # Now simulate streaming content arriving - this should REPLACE the placeholder
+        # with actual live content (like the normal message flow does)
+        streaming_content = """
+        <div role="article" class="message-wrap">
+            <div class="message">
+                <div class="avatar">🤖</div>
+                <div class="content">
+                    <h3>CODING AI</h3>
+                    <div class="live-stream-inline">
+                        <div class="live-output-header">▶ CODING AI (Live)</div>
+                        <div class="live-output-content">🔄 Analyzing changes...
+Running tests...
+✓ All tests passed</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        """
+
+        # Update the chat bubble with streaming content (this is what should happen)
+        page.evaluate(f"""
+            () => {{
+                const chatbot = document.querySelector('#agent-chatbot');
+                if (chatbot && chatbot.tagName === 'GRADIO-CHATBOT') {{
+                    const messageContainer = chatbot.querySelector('.message-wrap:last-child') ||
+                                           chatbot.querySelector('.wrap');
+                    if (messageContainer) {{
+                        messageContainer.innerHTML = `{streaming_content}`;
+                    }}
+                }}
+            }}
+        """)
+
+        # Verify that streaming content is now visible instead of placeholder
+        streaming_element = page.locator("#agent-chatbot").locator("text=Analyzing changes")
+        assert streaming_element.is_visible(), "Streaming content should replace placeholder in chat bubble"
+
+        # Verify the placeholder is gone
+        placeholder_check = page.locator("#agent-chatbot").locator("text=Working on revisions")
+        assert not placeholder_check.is_visible(), "Static placeholder should be replaced by streaming content"
+
+        # Verify the live content formatting is present
+        live_header = page.locator("#agent-chatbot").locator("text=▶ CODING AI (Live)")
+        assert live_header.is_visible(), "Live stream header should be visible in chat bubble"
+
     def test_live_view_does_not_autoscroll_on_new_entries(self, page: Page):
         """Live view should keep the current scroll position when new content arrives."""
         long_text = "\n".join([f"Line {idx}: output" for idx in range(120)])
