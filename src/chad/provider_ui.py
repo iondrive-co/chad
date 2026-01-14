@@ -558,7 +558,9 @@ class ProviderUIManager:
         if timestamp:
             try:
                 update_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                result += f"*Last updated: {update_dt.strftime('%Y-%m-%d %H:%M UTC')}*\n"
+                # Convert to local time for display
+                local_dt = update_dt.astimezone()
+                result += f"*Last updated: {local_dt.strftime('%Y-%m-%d %H:%M')}*\n"
             except ValueError:
                 pass
 
