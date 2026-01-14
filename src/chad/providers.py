@@ -1781,14 +1781,16 @@ class MockProvider(AIProvider):
     - Rejects first verification attempt, accepts second
     """
 
+    # Class-level state to persist across provider instances (keyed by project path)
+    _verification_counts: dict[str, int] = {}
+    _coding_turn_counts: dict[str, int] = {}
+
     def __init__(self, config: ModelConfig):
         super().__init__(config)
         self._alive = False
         self._messages: list[str] = []
         self._response_queue: list[str] = []
         self._project_path: str | None = None
-        self._coding_turn_count = 0
-        self._verification_count = 0
         self._is_verification_mode = False
 
     def queue_response(self, response: str) -> None:
@@ -1830,10 +1832,24 @@ class MockProvider(AIProvider):
         bugs_path.write_text(content)
         return str(bugs_path)
 
+    def _get_coding_turn_count(self) -> int:
+        """Get and increment the coding turn count for this project."""
+        key = self._project_path or ""
+        count = MockProvider._coding_turn_counts.get(key, 0) + 1
+        MockProvider._coding_turn_counts[key] = count
+        return count
+
+    def _get_verification_count(self) -> int:
+        """Get and increment the verification count for this project."""
+        key = self._project_path or ""
+        count = MockProvider._verification_counts.get(key, 0) + 1
+        MockProvider._verification_counts[key] = count
+        return count
+
     def _generate_coding_response(self) -> str:
         """Generate a realistic coding agent response."""
-        self._coding_turn_count += 1
-        is_followup = self._coding_turn_count > 1
+        turn_count = self._get_coding_turn_count()
+        is_followup = turn_count > 1
 
         # Simulate some streaming output
         self._notify_activity("tool", "Read: src/chad/providers.py")
@@ -1847,7 +1863,7 @@ class MockProvider(AIProvider):
             self._notify_activity("tool", "Grep: searching for relevant code")
             self._simulate_delay(0.15)
             self._notify_activity("stream", "Found the area that needs updating.\n")
-            marker = f"<!-- Mock follow-up change {self._coding_turn_count} -->"
+            marker = f"<!-- Mock follow-up change {turn_count} -->"
         else:
             self._notify_activity("stream", "Understanding the task requirements...\n")
             self._simulate_delay(0.1)
@@ -1861,7 +1877,7 @@ class MockProvider(AIProvider):
         progress_json = (
             '```json\n'
             '{"type": "progress", "summary": "Mock task in progress", '
-            f'"location": "BUGS.md - adding test marker"}}\n'
+            '"location": "BUGS.md - adding test marker"}\n'
             '```\n'
         )
         self._notify_activity("stream", progress_json)
@@ -1886,7 +1902,7 @@ class MockProvider(AIProvider):
 
         # Build the full response
         if is_followup:
-            change_desc = f"Applied follow-up change #{self._coding_turn_count} to BUGS.md"
+            change_desc = f"Applied follow-up change #{turn_count} to BUGS.md"
         else:
             change_desc = "Applied initial mock change to BUGS.md"
 
@@ -1909,7 +1925,7 @@ I modified BUGS.md to add a test marker.
 
     def _generate_verification_response(self) -> str:
         """Generate a realistic verification agent response."""
-        self._verification_count += 1
+        verification_count = self._get_verification_count()
 
         # Simulate verification activities
         self._notify_activity("tool", "Read: BUGS.md")
@@ -1922,7 +1938,7 @@ I modified BUGS.md to add a test marker.
         self._simulate_delay(0.1)
 
         # First verification: reject with a reason
-        if self._verification_count == 1:
+        if verification_count == 1:
             self._notify_activity("stream", "Found an issue with the changes.\n")
             return """{
   "passed": false,
@@ -1947,9 +1963,9 @@ I modified BUGS.md to add a test marker.
         if self._response_queue:
             return self._response_queue.pop(0)
 
-        # Check for breakdown requests (for compatibility)
+        # Check for explicit breakdown requests (for unit test compatibility)
         last_msg = self._messages[-1] if self._messages else ""
-        if "subtask" in last_msg.lower() or "break" in last_msg.lower():
+        if "break down into subtasks" in last_msg.lower() or "breakdown" in last_msg.lower():
             return '{"subtasks": [{"id": "1", "description": "Mock task", "dependencies": []}]}'
 
         # Generate appropriate response based on mode

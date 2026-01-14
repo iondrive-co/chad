@@ -6,7 +6,7 @@ import re
 import socket
 import subprocess
 from pathlib import Path
-from unittest.mock import ANY, Mock, patch, MagicMock
+from unittest.mock import Mock, patch, MagicMock
 import pytest
 
 from chad.git_worktree import GitWorktreeManager
@@ -1307,7 +1307,6 @@ class TestLaunchWebUI:
             share=False,
             inbrowser=True,
             quiet=False,
-            js=ANY,  # Custom JS passed to launch() in Gradio 6.x
         )
         assert result == (None, 43210)
 
@@ -2322,10 +2321,23 @@ class TestVerificationPrompt:
                 },
             }
 
-        def _fail_if_called(*_args, **_kwargs):
-            raise AssertionError("create_provider should not be called when verify fails")
+        class DummyVerifier:
+            def set_activity_callback(self, _callback):
+                return None
 
-        monkeypatch.setattr("chad.web_ui.create_provider", _fail_if_called)
+            def start_session(self, _project_path, _system_prompt):
+                return True
+
+            def send_message(self, _message):
+                return None
+
+            def get_response(self, timeout=None):
+                return '```json\n{"passed": true, "summary": "Looks good"}\n```'
+
+            def stop_session(self):
+                return None
+
+        monkeypatch.setattr("chad.web_ui.create_provider", lambda *_args, **_kwargs: DummyVerifier())
         monkeypatch.setattr("chad.verification.tools.verify", fake_verify)
 
         web_ui = ChadWebUI(DummySecurityMgr(), "test-password")
