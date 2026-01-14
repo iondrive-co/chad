@@ -254,7 +254,7 @@ def start_chad(env: TempChadEnv) -> ChadInstance:
         popen_kwargs["start_new_session"] = True
 
     process = subprocess.Popen(
-        [os.fspath(Path(sys.executable)), "-m", "chad", "--port", "0"],
+        [os.fspath(Path(sys.executable)), "-m", "chad", "--port", "0", "--dev"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,

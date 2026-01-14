@@ -18,8 +18,22 @@ from .installer import AIToolInstaller
 class ProviderUIManager:
     """Provider management and display helpers for the web UI."""
 
-    SUPPORTED_PROVIDERS = {"anthropic", "openai", "gemini", "mistral", "mock"}
+    _ALL_PROVIDERS = {"anthropic", "openai", "gemini", "mistral", "mock"}
+    SUPPORTED_PROVIDERS = {"anthropic", "openai", "gemini", "mistral", "mock"}  # For backwards compat
     OPENAI_REASONING_LEVELS = ["default", "low", "medium", "high", "xhigh"]
+
+    def get_supported_providers(self) -> set[str]:
+        """Get the set of supported providers based on dev mode."""
+        if self.dev_mode:
+            return self._ALL_PROVIDERS
+        return self._ALL_PROVIDERS - {"mock"}
+
+    def get_provider_choices(self) -> list[str]:
+        """Get ordered list of provider type choices for dropdowns."""
+        # Fixed order for consistent UI
+        order = ["anthropic", "openai", "gemini", "mistral", "mock"]
+        supported = self.get_supported_providers()
+        return [p for p in order if p in supported]
 
     def __init__(
         self,
@@ -27,11 +41,13 @@ class ProviderUIManager:
         main_password: str,
         model_catalog: ModelCatalog | None = None,
         installer: AIToolInstaller | None = None,
+        dev_mode: bool = False,
     ):
         self.security_mgr = security_mgr
         self.main_password = main_password
         self.model_catalog = model_catalog or ModelCatalog(security_mgr)
         self.installer = installer or AIToolInstaller()
+        self.dev_mode = dev_mode
 
     def list_providers(self) -> str:
         """Summarize all configured providers."""
@@ -934,7 +950,7 @@ class ProviderUIManager:
         accordion_state = gr.update(open=True)
 
         try:
-            if provider_type not in self.SUPPORTED_PROVIDERS:
+            if provider_type not in self.get_supported_providers():
                 base_response = self.provider_action_response(f"❌ Unsupported provider '{provider_type}'", card_slots)
                 return (*base_response, name_field_value, add_btn_state, accordion_state)
 
