@@ -25,6 +25,7 @@ from .prompts import (
     build_coding_prompt,
     extract_coding_summary,
     extract_progress_update,
+    check_verification_mentioned,
     get_verification_prompt,
     parse_verification_response,
     ProgressUpdate,
@@ -2099,59 +2100,61 @@ class ChadWebUI:
             return None, ("Verification aborted: coding agent output was empty. "
                           "Rerun after capturing the coding response.")
 
-        # First run automated verification (flake8 + tests)
-        try:
-            from .verification.tools import verify as run_verify
-            if on_activity:
-                on_activity("system", "Running verification (flake8 + tests)...")
+        def _run_automated_verification() -> tuple[bool, str | None]:
+            try:
+                from .verification.tools import verify as run_verify
+                if on_activity:
+                    on_activity("system", "Running verification (flake8 + tests)...")
 
-            verify_result = run_verify(project_root=project_path)
-            if not verify_result.get("success", False):
-                issues: list[str] = []
-                failure_message = verify_result.get("message") or verify_result.get("error")
-                if failure_message:
-                    issues.append(failure_message)
+                verify_result = run_verify(project_root=project_path)
+                if not verify_result.get("success", False):
+                    issues: list[str] = []
+                    failure_message = verify_result.get("message") or verify_result.get("error")
+                    if failure_message:
+                        issues.append(failure_message)
 
-                phases = verify_result.get("phases", {})
+                    phases = verify_result.get("phases", {})
 
-                lint_phase = phases.get("lint", {})
-                if not lint_phase.get("success", True):
-                    lint_issues = lint_phase.get("issues") or []
-                    if lint_issues:
-                        joined = "\n".join(f"- {issue}" for issue in lint_issues[:5])
-                        issues.append(f"Flake8 errors:\n{joined}")
-                    else:
-                        issues.append(f"Flake8 failed with {lint_phase.get('issue_count', 0)} errors")
+                    lint_phase = phases.get("lint", {})
+                    if not lint_phase.get("success", True):
+                        lint_issues = lint_phase.get("issues") or []
+                        if lint_issues:
+                            joined = "\n".join(f"- {issue}" for issue in lint_issues[:5])
+                            issues.append(f"Flake8 errors:\n{joined}")
+                        else:
+                            issues.append(f"Flake8 failed with {lint_phase.get('issue_count', 0)} errors")
 
-                pip_phase = phases.get("pip_check", {})
-                if not pip_phase.get("success", True):
-                    pip_issues = pip_phase.get("issues") or []
-                    if pip_issues:
-                        joined = "\n".join(f"- {issue}" for issue in pip_issues[:5])
-                        issues.append(f"Dependency issues:\n{joined}")
-                    else:
-                        issues.append("Package dependency issues found")
+                    pip_phase = phases.get("pip_check", {})
+                    if not pip_phase.get("success", True):
+                        pip_issues = pip_phase.get("issues") or []
+                        if pip_issues:
+                            joined = "\n".join(f"- {issue}" for issue in pip_issues[:5])
+                            issues.append(f"Dependency issues:\n{joined}")
+                        else:
+                            issues.append("Package dependency issues found")
 
-                test_phase = phases.get("tests", {})
-                if not test_phase.get("success", True):
-                    failed_count = test_phase.get("failed", 0)
-                    passed_count = test_phase.get("passed", 0)
-                    output_lines = (test_phase.get("output") or "").strip().splitlines()
-                    snippet = "\n".join(output_lines[-5:]) if output_lines else ""
-                    summary = f"Tests failed ({failed_count} failed, {passed_count} passed)"
-                    if snippet:
-                        summary += f":\n{snippet}"
-                    issues.append(summary)
+                    test_phase = phases.get("tests", {})
+                    if not test_phase.get("success", True):
+                        failed_count = test_phase.get("failed", 0)
+                        passed_count = test_phase.get("passed", 0)
+                        output_lines = (test_phase.get("output") or "").strip().splitlines()
+                        snippet = "\n".join(output_lines[-5:]) if output_lines else ""
+                        summary = f"Tests failed ({failed_count} failed, {passed_count} passed)"
+                        if snippet:
+                            summary += f":\n{snippet}"
+                        issues.append(summary)
 
-                if not issues:
-                    issues.append("Verification failed")
+                    if not issues:
+                        issues.append("Verification failed")
 
-                feedback = "Verification failed:\n" + "\n\n".join(issues)
-                return False, feedback
-        except Exception as e:
-            # If verification fails to run, log but continue with LLM verification
-            if on_activity:
-                on_activity("system", f"Warning: Verification could not run: {str(e)}")
+                    feedback = "Verification failed:\n" + "\n\n".join(issues)
+                    return False, feedback
+            except Exception as e:
+                # If verification fails to run, log but continue with LLM verification
+                if on_activity:
+                    on_activity("system", f"Warning: Verification could not run: {str(e)}")
+
+            return True, None
 
         coding_summary = extract_coding_summary(coding_output)
         change_summary = coding_summary.change_summary if coding_summary else None
@@ -2183,12 +2186,17 @@ class ChadWebUI:
                     verifier.stop_session()
 
                     if passed:
+                        # Skip automated verification for mock provider (testing mode)
+                        if verification_provider != "mock" and not check_verification_mentioned(coding_output):
+                            verified, feedback = _run_automated_verification()
+                            if not verified:
+                                return False, feedback or "Verification failed"
                         return True, summary
-                    else:
-                        feedback = summary
-                        if issues:
-                            feedback += "\n\nIssues:\n" + "\n".join(f"- {issue}" for issue in issues)
-                        return False, feedback
+
+                    feedback = summary
+                    if issues:
+                        feedback += "\n\nIssues:\n" + "\n".join(f"- {issue}" for issue in issues)
+                    return False, feedback
 
                 except VerificationParseError as e:
                     last_error = str(e)
