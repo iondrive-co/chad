@@ -25,7 +25,7 @@ class TestMain:
             result = main()
 
         assert result == 0
-        mock_launch.assert_called_once_with(None, port=7860)
+        mock_launch.assert_called_once_with(None, port=7860, dev_mode=False)
 
     @patch("chad.__main__.launch_web_ui")
     @patch("chad.__main__.SecurityManager")
@@ -43,7 +43,7 @@ class TestMain:
 
         assert result == 0
         mock_getpass.assert_called_once()
-        mock_launch.assert_called_once_with("test-password", port=7860)
+        mock_launch.assert_called_once_with("test-password", port=7860, dev_mode=False)
 
     @patch("chad.__main__.launch_web_ui")
     @patch("chad.__main__.SecurityManager")

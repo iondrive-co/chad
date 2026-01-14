@@ -111,11 +111,55 @@ class ChadInstance:
     env: TempChadEnv
 
 
+def _has_chromium_cache(browsers_path: Path) -> bool:
+    """Return True if a Chromium browser build exists in the given Playwright cache."""
+    chromium_roots = list(browsers_path.glob("chromium-*"))
+    if not chromium_roots:
+        return False
+    platform_dirs = [
+        "chrome-linux",
+        "chrome-win",
+        "chrome-mac",
+        "chrome-mac-arm64",
+    ]
+    for root in chromium_roots:
+        for platform_dir in platform_dirs:
+            if (root / platform_dir).exists():
+                return True
+    return False
+
+
+def ensure_playwright_browsers() -> None:
+    """Ensure Playwright browsers are installed in the shared cache."""
+    browsers_path = SHARED_BROWSERS_PATH
+    browsers_path.mkdir(parents=True, exist_ok=True)
+
+    if _has_chromium_cache(browsers_path):
+        return
+
+    env = os.environ.copy()
+    env["PLAYWRIGHT_BROWSERS_PATH"] = os.fspath(browsers_path)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "playwright", "install", "chromium"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        detail = f" ({stderr})" if stderr else ""
+        raise PlaywrightUnavailable(f"Failed to install Playwright browsers into {browsers_path}{detail}")
+
+
 def ensure_playwright():
     """Import Playwright, raising a clear error if unavailable."""
     try:
         from playwright.sync_api import sync_playwright  # type: ignore
 
+        ensure_playwright_browsers()
         return sync_playwright
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise PlaywrightUnavailable(

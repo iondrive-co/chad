@@ -5,6 +5,54 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 
+def test_ensure_playwright_browsers_skips_when_cache_present(monkeypatch, tmp_path):
+    from chad.verification import ui_playwright_runner as upr
+
+    browsers_path = tmp_path / "ms-playwright"
+    chromium_dir = browsers_path / "chromium-1234" / "chrome-linux"
+    chromium_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(upr, "SHARED_BROWSERS_PATH", browsers_path)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(browsers_path))
+    monkeypatch.setattr(
+        upr.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("install should not run")),
+    )
+
+    upr.ensure_playwright_browsers()
+
+
+def test_ensure_playwright_browsers_installs_when_missing(monkeypatch, tmp_path):
+    from chad.verification import ui_playwright_runner as upr
+
+    browsers_path = tmp_path / "ms-playwright"
+    monkeypatch.setattr(upr, "SHARED_BROWSERS_PATH", browsers_path)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(browsers_path))
+
+    captured = {}
+
+    class DummyResult:
+        def __init__(self):
+            self.returncode = 0
+            self.stdout = ""
+            self.stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env", {})
+        return DummyResult()
+
+    monkeypatch.setattr(upr.subprocess, "run", fake_run)
+
+    upr.ensure_playwright_browsers()
+
+    assert captured["cmd"][0] == sys.executable
+    assert captured["cmd"][1:] == ["-m", "playwright", "install", "chromium"]
+    assert captured["env"]["PLAYWRIGHT_BROWSERS_PATH"] == str(browsers_path)
+    assert browsers_path.exists()
+
+
 def test_run_screenshot_subprocess_builds_output(monkeypatch, tmp_path):
     from chad.verification import ui_playwright_runner as upr
 
