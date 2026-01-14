@@ -40,7 +40,12 @@ When modifying functions that return tuples (e.g., `make_yield`, generator funct
 ## After making changes
 
 1. Take an after screenshot if the issue has a visual component
-2. Run verification to ensure tests pass and lint is clean
+2. Run verification using the `verify()` function which handles Python detection automatically:
+   ```python
+   from chad.verification.tools import verify
+   result = verify()  # Runs flake8 + all tests
+   # Or: verify(lint_only=True)  # Just flake8
+   ```
 3. Perform a critical self-review and note any outstanding issues
 4. All tests must pass even if you did not break them, never skip tests for any reason.
 
@@ -89,7 +94,11 @@ Config stored in `~/.chad.conf` with encrypted provider tokens.
 
 ## Virtual Environment
 
-The project uses `.venv` (not `venv`). To create a fresh virtual environment:
+The project uses `.venv` (not `venv`). Worktrees automatically symlink to the main project's `.venv` so agents don't need to reinstall dependencies.
+
+**For running lint/tests**: Always use `verify()` from `chad.verification.tools` instead of hardcoded paths like `./.venv/bin/python`. The verify() function automatically detects the correct Python interpreter.
+
+To create a fresh virtual environment (rarely needed):
 
 ```bash
 rm -rf .venv
@@ -104,8 +113,6 @@ rm -rf .venv
 python3.13 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 ```
-
-Worktrees automatically symlink to the main project's `.venv` so agents don't need to reinstall dependencies.
 
 ## Session Logs
 

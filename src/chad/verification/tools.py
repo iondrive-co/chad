@@ -138,8 +138,12 @@ def verify(lint_only: bool = False, project_root: str | None = None) -> Dict[str
             timeout=120,
         )
 
+        combined_output = test_result.stdout or ""
+        if test_result.stderr:
+            combined_output = f"{combined_output}\n{test_result.stderr}" if combined_output else test_result.stderr
+
         passed = failed = 0
-        for line in test_result.stdout.split("\n"):
+        for line in (test_result.stdout or "").split("\n"):
             if "passed" in line or "failed" in line:
                 import re
                 match = re.search(r"(\d+) passed", line)
@@ -153,13 +157,18 @@ def verify(lint_only: bool = False, project_root: str | None = None) -> Dict[str
             "success": test_result.returncode == 0,
             "passed": passed,
             "failed": failed,
-            "output": test_result.stdout[-6000:] if len(test_result.stdout) > 6000 else test_result.stdout,
+            "output": combined_output[-6000:] if len(combined_output) > 6000 else combined_output,
         }
 
         if test_result.returncode != 0:
             results["success"] = False
             results["failed_phase"] = "tests"
-            results["message"] = f"{message_prefix}Tests failed: {failed} failed, {passed} passed"
+            if failed == 0 and passed == 0 and combined_output.strip():
+                snippet_lines = [line for line in combined_output.splitlines() if line.strip()]
+                snippet = "\n".join(snippet_lines[-5:])
+                results["message"] = f"{message_prefix}Tests failed to run:\n{snippet}"
+            else:
+                results["message"] = f"{message_prefix}Tests failed: {failed} failed, {passed} passed"
             return results
 
         results["success"] = True
