@@ -61,6 +61,34 @@ class TestVerify:
         assert result["success"] is True
         assert commands[0] == str(venv_python)
 
+    def test_verify_reports_pytest_stderr_on_error(self, monkeypatch, tmp_path):
+        """verify should surface stderr when pytest fails before running tests."""
+        from chad.verification.tools import verify
+
+        monkeypatch.setattr("chad.verification.tools.resolve_project_root", lambda: (tmp_path, "test"))
+
+        class Proc:
+            def __init__(self, returncode, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        def fake_run(cmd, **kwargs):
+            if cmd[2] == "flake8":
+                return Proc(0, "")
+            if cmd[2] == "pip":
+                return Proc(0, "")
+            return Proc(2, "", "ERROR: unrecognized arguments: -n")
+
+        monkeypatch.setattr("chad.verification.tools.subprocess.run", fake_run)
+
+        result = verify()
+
+        assert result["success"] is False
+        assert result["failed_phase"] == "tests"
+        assert "Tests failed to run" in result["message"]
+        assert "unrecognized arguments: -n" in result["message"]
+
 
 class TestScreenshot:
     """Test the screenshot function."""

@@ -2263,7 +2263,7 @@ class TestVerificationPrompt:
 
         class DummySecurityMgr:
             def list_accounts(self):
-                return {"verifier": "mock"}
+                return {"verifier": "anthropic"}
 
             def get_account_model(self, _):
                 return "default"
@@ -2294,6 +2294,8 @@ class TestVerificationPrompt:
     def test_run_verification_returns_rich_feedback(self, monkeypatch, tmp_path):
         """Verification failures should include lint and test details."""
         from chad.web_ui import ChadWebUI
+        import chad.web_ui as web_ui
+        import chad.verification.tools as verification_tools
 
         class DummySecurityMgr:
             def list_accounts(self):
@@ -2337,8 +2339,9 @@ class TestVerificationPrompt:
             def stop_session(self):
                 return None
 
-        monkeypatch.setattr("chad.web_ui.create_provider", lambda *_args, **_kwargs: DummyVerifier())
-        monkeypatch.setattr("chad.verification.tools.verify", fake_verify)
+        monkeypatch.setattr(web_ui, "create_provider", lambda *_args, **_kwargs: DummyVerifier())
+        monkeypatch.setattr(web_ui, "check_verification_mentioned", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(verification_tools, "verify", fake_verify)
 
         web_ui = ChadWebUI(DummySecurityMgr(), "test-password")
         verified, feedback = web_ui._run_verification(str(tmp_path), "output", "Task", "verifier")
