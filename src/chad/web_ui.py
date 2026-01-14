@@ -3943,8 +3943,8 @@ class ChadWebUI:
                 session.has_worktree_changes = False
                 session.worktree_base_commit = None
                 session.task_description = ""
-                session.chat_history = []
-                # Full reset - return tab to initial state
+                # Preserve chat_history for follow-up conversations
+                # Reset merge section but keep chatbot and followup visible
                 return (
                     gr.update(visible=False),                    # merge_section_group
                     "",                                          # changes_summary
@@ -3952,11 +3952,11 @@ class ChadWebUI:
                     "",                                          # conflict_info
                     "",                                          # conflicts_html
                     gr.update(value=f"✓ Changes merged to {target_name}.", visible=True),
-                    [],                                          # chatbot
+                    no_change,                                   # chatbot - preserve for follow-up
                     gr.update(interactive=True),                 # start_btn
                     gr.update(interactive=False),                # cancel_btn
                     "",                                          # live_stream
-                    gr.update(visible=False),                    # followup_row
+                    no_change,                                   # followup_row - preserve for follow-up
                     "",                                          # task_description
                     "",                                          # merge_section_header
                     "",                                          # diff_content
@@ -4205,8 +4205,8 @@ class ChadWebUI:
                 session.has_worktree_changes = False
                 session.worktree_base_commit = None
                 session.task_description = ""
-                session.chat_history = []
-                # Full reset - return tab to initial state
+                # Preserve chat_history for follow-up conversations
+                # Reset merge section but keep chatbot and followup visible
                 return (
                     gr.update(visible=False),                    # merge_section_group
                     "",                                          # changes_summary
@@ -4214,11 +4214,11 @@ class ChadWebUI:
                     "",                                          # conflict_info
                     "",                                          # conflicts_html
                     gr.update(value="✓ All conflicts resolved. Merge complete.", visible=True),
-                    [],                                          # chatbot
+                    no_change,                                   # chatbot - preserve for follow-up
                     gr.update(interactive=True),                 # start_btn
                     gr.update(interactive=False),                # cancel_btn
                     "",                                          # live_stream
-                    gr.update(visible=False),                    # followup_row
+                    no_change,                                   # followup_row - preserve for follow-up
                     "",                                          # task_description
                     "",                                          # merge_section_header
                     "",                                          # diff_content
@@ -4276,8 +4276,8 @@ class ChadWebUI:
     def discard_worktree_changes(self, session_id: str) -> tuple:
         """Discard worktree and all changes, reset merge UI but keep task description.
 
-        Returns 14 values for merge_outputs. Task description is preserved so user
-        can retry the task with the same description.
+        Returns 14 values for merge_outputs. Task description and chat history are
+        preserved so user can retry the task or continue the conversation.
         """
         session = self.get_session(session_id)
         if session.worktree_path and session.project_path:
@@ -4288,9 +4288,9 @@ class ChadWebUI:
             session.has_worktree_changes = False
             session.merge_conflicts = None
             session.worktree_base_commit = None
-            session.chat_history = []
+            # Preserve chat_history for follow-up conversations
 
-        # Reset merge UI but keep task description for retry
+        # Reset merge UI but keep task description and chat for follow-up
         return (
             gr.update(visible=False),                    # merge_section_group
             "",                                          # changes_summary
@@ -4298,11 +4298,11 @@ class ChadWebUI:
             "",                                          # conflict_info
             "",                                          # conflicts_html
             gr.update(value="🗑️ Changes discarded.", visible=True),  # task_status
-            [],                                          # chatbot
+            gr.update(),                                 # chatbot - preserve for follow-up
             gr.update(interactive=True),                 # start_btn
             gr.update(interactive=False),                # cancel_btn
             "",                                          # live_stream
-            gr.update(visible=False),                    # followup_row
+            gr.update(),                                 # followup_row - preserve for follow-up
             gr.update(value=session.task_description or "", interactive=True),  # task_description
             "",                                          # merge_section_header
             "",                                          # diff_content
