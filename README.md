@@ -3,7 +3,7 @@
 Coding agents need hand holding to implement complex features, but no one holds Chad's hand. 
 
 Add one or more Codex, Claude Code, Gemini, or Mistral Vibe coding agent sessions, ask for a coding task, and Chad will 
-verify and reprompt to deliver a one-shot result.
+verify and ralph loop to deliver a one-shot result.
 
 <p style="text-align: center;">
   <img src="docs/Chad.png" alt="Chad Code" width="80">
