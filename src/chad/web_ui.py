@@ -1735,22 +1735,45 @@ def build_live_stream_html(content: str, ai_name: str = "CODING AI") -> str:
     return f"{header}\n{body}"
 
 
-def build_inline_live_html(content: str, ai_name: str = "CODING AI") -> str:
-    """Render live stream as inline HTML for embedding in chat bubbles.
+def build_inline_live_inner_html(content: str) -> str:
+    """Build just the inner HTML content for a live stream container.
 
-    This formats the streaming content to display directly in the Chatbot
-    component instead of a separate live stream panel.
+    This is used for JS patching - updating innerHTML without replacing
+    the container element itself, preserving scroll position and selection.
     """
     cleaned = normalize_live_stream_spacing(content)
     if not cleaned.strip():
-        return f"**{ai_name}**\n\n*Working...*"
+        return ""
     html_content = ansi_to_html(cleaned)
     html_content = html.unescape(html_content)
     html_content = highlight_diffs(html_content)
     html_content = highlight_code_syntax(html_content)
+    return html_content
+
+
+def build_inline_live_html(
+    content: str, ai_name: str = "CODING AI", live_id: str | None = None
+) -> str:
+    """Render live stream as inline HTML for embedding in chat bubbles.
+
+    This formats the streaming content to display directly in the Chatbot
+    component instead of a separate live stream panel.
+
+    Args:
+        content: The streaming content to display
+        ai_name: Name of the AI to show in header
+        live_id: Optional stable ID for JS patching. When provided, the container
+                 gets a data-live-id attribute that JavaScript can use to update
+                 content in-place without replacing the DOM element.
+    """
+    html_content = build_inline_live_inner_html(content)
+    if not html_content:
+        return f"**{ai_name}**\n\n*Working...*"
     # Format for inline display in chat bubble
     header = f'<div class="inline-live-header">▶ {ai_name} (Live)</div>'
-    body = f'<div class="inline-live-content">{html_content}</div>'
+    # Add data-live-id for JS patching if provided
+    live_id_attr = f' data-live-id="{live_id}"' if live_id else ""
+    body = f'<div class="inline-live-content"{live_id_attr}>{html_content}</div>'
     return f"**{ai_name}**\n\n{header}\n{body}"
 
 
@@ -2479,8 +2502,16 @@ class ChadWebUI:
             merge_summary: str = "",
             branch_choices: list[str] | None = None,
             diff_full: str = "",
+            live_patch: tuple[str, str] | None = None,
         ):
-            """Format output tuple for Gradio with current UI state."""
+            """Format output tuple for Gradio with current UI state.
+
+            Args:
+                live_patch: Optional (live_id, inner_html) tuple for JS patching.
+                           When provided, JavaScript will patch the container with
+                           data-live-id=live_id using the inner_html content,
+                           preserving scroll position and text selection.
+            """
             display_stream = live_stream
             is_error = "❌" in status
             display_role_status = self.format_role_status()
@@ -2500,6 +2531,15 @@ class ChadWebUI:
             else:
                 branch_update = gr.update()
             header_text = "### Changes Ready to Merge" if show_merge else ""
+            # Build live patch trigger HTML if patch data provided
+            if live_patch:
+                live_id, inner_html = live_patch
+                # Escape HTML for safe embedding in data attribute
+                import html as html_module
+                escaped_html = html_module.escape(inner_html)
+                patch_html = f'<div data-live-patch="{live_id}" style="display:none">{escaped_html}</div>'
+            else:
+                patch_html = ""
             return (
                 display_history,
                 display_stream,
@@ -2519,6 +2559,7 @@ class ChadWebUI:
                 branch_update,  # Branch dropdown choices
                 gr.update(value=diff_full),  # Full diff content
                 header_text,  # merge_section_header - dynamic header
+                patch_html,  # live_patch_trigger - JS reads this to patch content
             )
 
         try:
@@ -2738,6 +2779,9 @@ class ChadWebUI:
             pending_message_idx = None
             render_state = LiveStreamRenderState()
             progress_emitted = False  # Track if we've shown a progress update bubble
+            # Live ID for JS patching - unique per pending message
+            live_id_counter = 0
+            current_live_id: str | None = None
 
             while not relay_complete.is_set() and not session.cancel_requested:
                 try:
@@ -2756,9 +2800,14 @@ class ChadWebUI:
 
                     elif msg_type == "message_start":
                         speaker = msg[1]
+                        # Create unique live_id for JS patching
+                        current_live_id = f"{session_id}-{live_id_counter}"
+                        live_id_counter += 1
+                        # Create placeholder with stable live container structure
+                        # The container has data-live-id for JS to patch in-place
                         placeholder = {
                             "role": "assistant",
-                            "content": f"**{speaker}**\n\n⏳ *Working...*",
+                            "content": build_inline_live_html("", speaker, live_id=current_live_id),
                         }
                         chat_history.append(placeholder)
                         pending_message_idx = len(chat_history) - 1
@@ -2823,10 +2872,13 @@ class ChadWebUI:
                                     if pending_message_idx is not None:
                                         chat_history.insert(pending_message_idx, progress_msg)
                                         pending_message_idx += 1
-                                        # Reset the live view placeholder to fresh state
+                                        # Create new live_id for the continuation placeholder
+                                        current_live_id = f"{session_id}-{live_id_counter}"
+                                        live_id_counter += 1
+                                        # Reset the live view placeholder with new live container
                                         chat_history[pending_message_idx] = {
                                             "role": "assistant",
-                                            "content": f"**{current_ai}**\n\n*Continuing...*",
+                                            "content": build_inline_live_html("", current_ai, live_id=current_live_id),
                                         }
                                         # Reset display buffer so live view starts fresh after progress
                                         display_buffer = LiveStreamDisplayBuffer()
@@ -2838,16 +2890,16 @@ class ChadWebUI:
 
                             now = time_module.time()
                             if now - last_yield_time >= min_yield_interval:
-                                # Update chat bubble with inline live content
-                                inline_html = build_inline_live_html(display_buffer.content, current_ai)
-                                if render_state.should_render(inline_html):
-                                    if pending_message_idx is not None:
-                                        chat_history[pending_message_idx] = {
-                                            "role": "assistant",
-                                            "content": inline_html,
-                                        }
-                                    yield make_yield(chat_history, current_status, "")
-                                    render_state.record(inline_html)
+                                # Use JS patching to update content in-place
+                                # This preserves scroll position and text selection
+                                inner_html = build_inline_live_inner_html(display_buffer.content)
+                                if inner_html and current_live_id and render_state.should_render(inner_html):
+                                    # Send patch command via live_patch - don't update chat_history
+                                    yield make_yield(
+                                        chat_history, current_status, "",
+                                        live_patch=(current_live_id, inner_html)
+                                    )
+                                    render_state.record(inner_html)
                                     last_yield_time = now
 
                     elif msg_type == "activity":
@@ -2859,16 +2911,14 @@ class ChadWebUI:
                                 content = display_content + f"\n\n{last_activity}"
                             else:
                                 content = last_activity
-                            # Update chat bubble with inline live content
-                            inline_html = build_inline_live_html(content, current_ai)
-                            if render_state.should_render(inline_html):
-                                if pending_message_idx is not None:
-                                    chat_history[pending_message_idx] = {
-                                        "role": "assistant",
-                                        "content": inline_html,
-                                    }
-                                yield make_yield(chat_history, current_status, "")
-                                render_state.record(inline_html)
+                            # Use JS patching to update content in-place
+                            inner_html = build_inline_live_inner_html(content)
+                            if inner_html and current_live_id and render_state.should_render(inner_html):
+                                yield make_yield(
+                                    chat_history, current_status, "",
+                                    live_patch=(current_live_id, inner_html)
+                                )
+                                render_state.record(inner_html)
                                 last_yield_time = now
 
                 except queue.Empty:
@@ -2877,15 +2927,14 @@ class ChadWebUI:
                         display_content = display_buffer.content
                         if display_content or last_activity:
                             content = display_content if display_content else last_activity
-                            inline_html = build_inline_live_html(content, current_ai)
-                            if render_state.should_render(inline_html):
-                                if pending_message_idx is not None:
-                                    chat_history[pending_message_idx] = {
-                                        "role": "assistant",
-                                        "content": inline_html,
-                                    }
-                                yield make_yield(chat_history, current_status, "")
-                                render_state.record(inline_html)
+                            # Use JS patching to update content in-place
+                            inner_html = build_inline_live_inner_html(content)
+                            if inner_html and current_live_id and render_state.should_render(inner_html):
+                                yield make_yield(
+                                    chat_history, current_status, "",
+                                    live_patch=(current_live_id, inner_html)
+                                )
+                                render_state.record(inner_html)
                                 last_yield_time = now
 
                     # Periodically update session log with streaming history
@@ -3123,11 +3172,13 @@ class ChadWebUI:
                                 "Please fix these issues and confirm when done."
                             )
 
-                            # Add placeholder for coding agent response
+                            # Add placeholder for coding agent response with live container
+                            revision_live_id = f"{session_id}-rev-{live_id_counter}"
+                            live_id_counter += 1
                             chat_history.append(
                                 {
                                     "role": "assistant",
-                                    "content": "**CODING AI**\n\n⏳ *Working on revisions...*",
+                                    "content": build_inline_live_html("", "CODING AI", live_id=revision_live_id),
                                 }
                             )
                             revision_pending_idx = len(chat_history) - 1
@@ -3169,22 +3220,18 @@ class ChadWebUI:
                                             rev_display_buffer.append(chunk)
                                             now = time_module.time()
                                             if now - rev_last_yield >= min_yield_interval:
-                                                # Update both the separate live stream box AND the chat bubble
+                                                # Update both the separate live stream box AND the chat bubble via JS patching
                                                 rendered = build_live_stream_html(
                                                     rev_display_buffer.content, "CODING AI"
                                                 )
-                                                # Update chat bubble with inline live content (like normal flow)
-                                                inline_html = build_inline_live_html(
-                                                    rev_display_buffer.content, "CODING AI"
-                                                )
-                                                if rev_render_state.should_render(rendered):
-                                                    # Update the chat bubble placeholder with streaming content
-                                                    chat_history[revision_pending_idx] = {
-                                                        "role": "assistant",
-                                                        "content": inline_html,
-                                                    }
-                                                    yield make_yield(chat_history, revision_status_msg, rendered)
-                                                    rev_render_state.record(rendered)
+                                                # Use JS patching for inline content to preserve scroll/selection
+                                                inner_html = build_inline_live_inner_html(rev_display_buffer.content)
+                                                if inner_html and rev_render_state.should_render(inner_html):
+                                                    yield make_yield(
+                                                        chat_history, revision_status_msg, rendered,
+                                                        live_patch=(revision_live_id, inner_html)
+                                                    )
+                                                    rev_render_state.record(inner_html)
                                                     rev_last_yield = now
                                 except queue.Empty:
                                     pass
@@ -3411,14 +3458,24 @@ class ChadWebUI:
             live_stream: str = "",
             show_followup: bool = True,
             working: bool = False,
+            live_patch: tuple[str, str] | None = None,
         ):
             """Format output for follow-up responses."""
+            # Build live patch trigger HTML if patch data provided
+            if live_patch:
+                live_id, inner_html = live_patch
+                import html as html_module
+                escaped_html = html_module.escape(inner_html)
+                patch_html = f'<div data-live-patch="{live_id}" style="display:none">{escaped_html}</div>'
+            else:
+                patch_html = ""
             return (
                 history,
                 live_stream,
                 gr.update(value="" if not working else followup_message),  # Clear input when not working
                 gr.update(visible=show_followup),  # Follow-up row visibility
                 gr.update(interactive=not working),  # Send button interactivity
+                patch_html,  # live_patch_trigger
             )
 
         if not followup_message or not followup_message.strip():
@@ -3563,8 +3620,12 @@ class ChadWebUI:
             user_content = f"**Follow-up**\n\n{followup_message}"
         chat_history.append({"role": "user", "content": user_content})
 
-        # Add placeholder for AI response
-        chat_history.append({"role": "assistant", "content": "**CODING AI**\n\n⏳ *Working...*"})
+        # Add placeholder for AI response with live container for JS patching
+        followup_live_id = f"{session_id}-followup-{len(chat_history)}"
+        chat_history.append({
+            "role": "assistant",
+            "content": build_inline_live_html("", "CODING AI", live_id=followup_live_id)
+        })
         pending_idx = len(chat_history) - 1
 
         yield make_followup_yield(chat_history, "⏳ Processing follow-up...", working=True)
@@ -3621,15 +3682,14 @@ class ChadWebUI:
                         display_buffer.append(chunk)
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
-                            # Update chat bubble with inline live content
-                            inline_html = build_inline_live_html(display_buffer.content, current_ai)
-                            if render_state.should_render(inline_html):
-                                chat_history[pending_idx] = {
-                                    "role": "assistant",
-                                    "content": inline_html,
-                                }
-                                yield make_followup_yield(chat_history, "", working=True)
-                                render_state.record(inline_html)
+                            # Use JS patching to update content in-place
+                            inner_html = build_inline_live_inner_html(display_buffer.content)
+                            if inner_html and render_state.should_render(inner_html):
+                                yield make_followup_yield(
+                                    chat_history, "", working=True,
+                                    live_patch=(followup_live_id, inner_html)
+                                )
+                                render_state.record(inner_html)
                                 last_yield_time = now
 
                 elif msg_type == "activity":
@@ -3640,15 +3700,14 @@ class ChadWebUI:
                             content = display_content + f"\n\n{msg[1]}"
                         else:
                             content = msg[1]
-                        # Update chat bubble with inline live content
-                        inline_html = build_inline_live_html(content, current_ai)
-                        if render_state.should_render(inline_html):
-                            chat_history[pending_idx] = {
-                                "role": "assistant",
-                                "content": inline_html,
-                            }
-                            yield make_followup_yield(chat_history, "", working=True)
-                            render_state.record(inline_html)
+                        # Use JS patching to update content in-place
+                        inner_html = build_inline_live_inner_html(content)
+                        if inner_html and render_state.should_render(inner_html):
+                            yield make_followup_yield(
+                                chat_history, "", working=True,
+                                live_patch=(followup_live_id, inner_html)
+                            )
+                            render_state.record(inner_html)
                             last_yield_time = now
 
             except queue.Empty:
@@ -3656,14 +3715,14 @@ class ChadWebUI:
                 if now - last_yield_time >= 0.3:
                     display_content = display_buffer.content
                     if display_content:
-                        inline_html = build_inline_live_html(display_content, current_ai)
-                        if render_state.should_render(inline_html):
-                            chat_history[pending_idx] = {
-                                "role": "assistant",
-                                "content": inline_html,
-                            }
-                            yield make_followup_yield(chat_history, "", working=True)
-                            render_state.record(inline_html)
+                        # Use JS patching to update content in-place
+                        inner_html = build_inline_live_inner_html(display_content)
+                        if inner_html and render_state.should_render(inner_html):
+                            yield make_followup_yield(
+                                chat_history, "", working=True,
+                                live_patch=(followup_live_id, inner_html)
+                            )
+                            render_state.record(inner_html)
                             last_yield_time = now
 
         relay_thread.join(timeout=1)
@@ -4593,6 +4652,16 @@ class ChadWebUI:
             elem_classes=["live-stream-hidden", "live-stream-box"],
         )
 
+        # Hidden HTML element for JS live content patching
+        # When this element's content changes, JS reads the data-live-patch attribute
+        # and patches the corresponding container's innerHTML in-place
+        live_patch_trigger = gr.HTML(
+            "",
+            visible=False,
+            key=f"live-patch-{session_id}",
+            elem_classes=["live-patch-trigger"],
+        )
+
         with gr.Row(visible=False, key=f"followup-row-{session_id}") as followup_row:
             followup_input = gr.TextArea(
                 label="Continue conversation...",
@@ -4780,6 +4849,7 @@ class ChadWebUI:
                 merge_target_branch,
                 diff_content,
                 merge_section_header,
+                live_patch_trigger,
             ],
         )
 
@@ -4803,6 +4873,7 @@ class ChadWebUI:
                 followup_input,
                 followup_row,
                 send_followup_btn,
+                live_patch_trigger,
             ],
         )
 
@@ -5388,7 +5459,10 @@ function initializeLiveStreamScrollTracking() {
         const root = getRoot();
         const containers = [
             ...root.querySelectorAll('#live-stream-box .live-output-content'),
-            ...root.querySelectorAll('.live-stream-box .live-output-content')
+            ...root.querySelectorAll('.live-stream-box .live-output-content'),
+            // Also track inline live content in chat bubbles
+            ...root.querySelectorAll('.inline-live-content'),
+            ...root.querySelectorAll('[data-live-id]')
         ];
 
         containers.forEach(container => {
@@ -5404,6 +5478,88 @@ function initializeLiveStreamScrollTracking() {
 }
 
 initializeLiveStreamScrollTracking();
+
+// Live content patching - update innerHTML without replacing container element
+// This preserves scroll position and text selection during streaming updates
+window._patchLiveContent = function(liveId, innerHtml) {
+    const getRoot = () => {
+        const app = document.querySelector('gradio-app');
+        return (app && app.shadowRoot) ? app.shadowRoot : document;
+    };
+
+    const root = getRoot();
+    const container = root.querySelector(`[data-live-id="${liveId}"]`);
+    if (!container) return false;
+
+    // Get scroll state before update
+    const scrollTop = container.scrollTop;
+    const scrollHeight = container.scrollHeight;
+    const clientHeight = container.clientHeight;
+    const wasAtBottom = scrollTop + clientHeight >= scrollHeight - 5;
+
+    // Check if user has scrolled up (use our tracking state if available)
+    let userScrolledUp = false;
+    if (window._liveStreamScroll && window._liveStreamScroll.has(container)) {
+        const state = window._liveStreamScroll.get(container);
+        userScrolledUp = state.userScrolledUp;
+    } else {
+        userScrolledUp = !wasAtBottom;
+    }
+
+    // Patch content in place
+    container.innerHTML = innerHtml;
+
+    // Restore scroll position
+    requestAnimationFrame(() => {
+        if (userScrolledUp) {
+            // User scrolled up - maintain their position
+            container.scrollTop = scrollTop;
+        } else {
+            // User was at bottom - scroll to new bottom
+            container.scrollTop = container.scrollHeight;
+        }
+    });
+
+    return true;
+};
+
+// Listen for live content patch events from Python
+window._setupLivePatchListener = function() {
+    const observer = new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+            for (const node of mutation.addedNodes) {
+                if (node.nodeType === Node.ELEMENT_NODE) {
+                    const patchData = node.querySelector && node.querySelector('[data-live-patch]');
+                    if (patchData) {
+                        try {
+                            const liveId = patchData.getAttribute('data-live-patch');
+                            const content = patchData.textContent;
+                            if (liveId && content) {
+                                window._patchLiveContent(liveId, content);
+                            }
+                        } catch (e) {
+                            console.error('Live patch error:', e);
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    const startObserver = () => {
+        const getRoot = () => {
+            const app = document.querySelector('gradio-app');
+            return (app && app.shadowRoot) ? app.shadowRoot : document;
+        };
+        const root = getRoot();
+        observer.observe(root.body || root, { childList: true, subtree: true });
+    };
+
+    // Start after a short delay to ensure DOM is ready
+    setTimeout(startObserver, 200);
+};
+
+window._setupLivePatchListener();
 </script>
 """
             )
