@@ -37,7 +37,11 @@ def cleanup_stale_pth_entries(venv_path: Path, worktree_base: Path, current_work
     Returns number of entries removed.
     """
     removed = 0
-    site_packages = list(venv_path.glob("lib/python*/site-packages"))
+    try:
+        site_packages = list(venv_path.glob("lib/python*/site-packages"))
+    except OSError:
+        # Handle broken symlinks or too many symlink levels
+        return 0
     if not site_packages:
         return 0
 
