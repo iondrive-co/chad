@@ -127,8 +127,24 @@ def verify(lint_only: bool = False, project_root: str | None = None) -> Dict[str
             # Continue to tests instead of returning early
 
         # Phase 3: All tests
+        # Check if pytest-xdist is available for parallel execution
+        pytest_args = [python_exec, "-m", "pytest", "-v", "--tb=short"]
+        try:
+            # Test if -n auto is supported
+            check_result = subprocess.run(
+                [python_exec, "-c", "import pytest_xdist"],
+                capture_output=True,
+                cwd=str(root),
+                env=env,
+                timeout=10,
+            )
+            if check_result.returncode == 0:
+                pytest_args.extend(["-n", "auto"])
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+            pass  # Continue without parallel execution
+
         test_result = subprocess.run(
-            [python_exec, "-m", "pytest", "-v", "--tb=short", "-n", "auto"],
+            pytest_args,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -143,15 +159,18 @@ def verify(lint_only: bool = False, project_root: str | None = None) -> Dict[str
             combined_output = f"{combined_output}\n{test_result.stderr}" if combined_output else test_result.stderr
 
         passed = failed = 0
-        for line in (test_result.stdout or "").split("\n"):
-            if "passed" in line or "failed" in line:
-                import re
-                match = re.search(r"(\d+) passed", line)
-                if match:
-                    passed = int(match.group(1))
-                match = re.search(r"(\d+) failed", line)
-                if match:
-                    failed = int(match.group(1))
+        # Parse test results from final summary line (e.g. "=== 6 failed, 332 passed, 1 skipped ===")
+        import re
+        output_lines = test_result.stdout.split("\n")
+        for line in reversed(output_lines):  # Start from the end to find summary line
+            if re.search(r"=+.*=+", line) and ("passed" in line or "failed" in line):
+                passed_match = re.search(r"(\d+) passed", line)
+                if passed_match:
+                    passed = int(passed_match.group(1))
+                failed_match = re.search(r"(\d+) failed", line)
+                if failed_match:
+                    failed = int(failed_match.group(1))
+                break
 
         results["phases"]["tests"] = {
             "success": test_result.returncode == 0,

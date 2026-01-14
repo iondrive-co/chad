@@ -33,14 +33,27 @@ For UI tasks: take a "before" screenshot first and include the path. For non-UI 
 4. Make the changes, adjusting tests as needed. If no changes are required, skip to step 9.
 5. Once you have completed your changes for the task, take an after screenshot (if that is supported) to confirm
 that the user's request is fixed/done.
-6. You MUST run verification before completing your task using the verify() function:
-```python
-from chad.verification.tools import verify
-result = verify()  # Runs flake8 + all tests with intelligent Python detection
-print(result)
-```
-This automatically finds the correct Python interpreter (.venv, venv, or system) and runs lint + tests.
-For UI changes, also update visual_test_map.py so future runs pick the right visual tests.
+6. You MUST run verification before completing your task. Use the built-in verify() function for efficiency:
+- Recommended approach: python -c \"from chad.verification.tools import verify; result = verify(); print('✓ Passed' if result['success'] else f'✗ Failed at {{result.get(\"failed_phase\", \"unknown\")}}'); exit(0 if result['success'] else 1)\"
+- For visual-only tests when needed: python -c \"from chad.verification.tools import verify; result = verify(visual_only=True); print('✓ Passed' if result['success'] else f'✗ Failed at {{result.get(\"failed_phase\", \"unknown\")}}'); exit(0 if result['success'] else 1)\"
+
+If verify() is unavailable, use manual commands with intelligent Python detection:
+- Detect Python: Use ./.venv/bin/python if exists, otherwise ./.venv/Scripts/python.exe (Windows), ./venv/bin/python, ./venv/Scripts/python.exe (Windows), or fallback to python3
+- Run linting: {{detected_python}} -m flake8 src/chad
+- Run core tests (visuals excluded by marker): {{detected_python}} -m pytest tests/ -v --tb=short -n auto \\
+                                               -m \"not visual\"
+- Run only the visual tests mapped to the UI you touched (see src/chad/verification/visual_test_map.py):
+    VTESTS=$({{detected_python}} - <<'PY'
+import subprocess
+from chad.verification.visual_test_map import tests_for_paths
+changed = subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines()
+print(" or ".join(tests_for_paths(changed)))
+PY
+)
+    if [ -n "$VTESTS" ]; then {{detected_python}} -m pytest tests/test_ui_integration.py \\
+                                                       tests/test_ui_playwright_runner.py -v --tb=short \\
+                                                       -m \"visual\" -k "$VTESTS"; fi
+  If you add or change UI components, update visual_test_map.py so future runs pick the right visual tests.
 7. Fix ALL failures and retest if required.
 8. End your response with a JSON summary block like this:
 ```json
