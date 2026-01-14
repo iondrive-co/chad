@@ -96,6 +96,9 @@ def main() -> int:
     parser.add_argument(
         "--port", type=int, default=7860, help="Port to run on (default: 7860, use 0 for ephemeral; falls back if busy)"
     )
+    parser.add_argument(
+        "--dev", action="store_true", help="Enable development mode (enables mock provider)"
+    )
     args = parser.parse_args()
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -116,7 +119,7 @@ def main() -> int:
                 sys.stdout.flush()
                 main_password = getpass.getpass("Create main password for Chad: ")
 
-        launch_web_ui(main_password, port=args.port)
+        launch_web_ui(main_password, port=args.port, dev_mode=args.dev)
         return 0
     except ValueError as e:
         print(f"\n❌ Error: {e}")
