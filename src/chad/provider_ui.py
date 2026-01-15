@@ -1323,17 +1323,18 @@ class ProviderUIManager:
                             env = os.environ.copy()
                             env["TERM"] = "xterm-256color"
 
-                            child = pexpect.spawn(gemini_cli, timeout=120, encoding="utf-8", env=env)
+                            # Set terminal dimensions for proper rendering
+                            child = pexpect.spawn(
+                                gemini_cli, timeout=120, encoding="utf-8", env=env, dimensions=(50, 120)
+                            )
 
                             try:
                                 # Gemini CLI shows auth prompts on first run
-                                # Wait for and accept any prompts, then poll for oauth file
-                                try:
-                                    child.expect(["authenticate", "Google", "login", "Enter"], timeout=15)
-                                    time.sleep(1)
-                                    child.send("\r")
-                                except pexpect.TIMEOUT:
-                                    pass
+                                # Wait for it to render, then send Enter to proceed
+                                time.sleep(2)
+                                child.send("\r")
+                                time.sleep(2)
+                                child.send("\r")
 
                                 # Poll for oauth file while process runs
                                 start_time = time.time()
@@ -1416,27 +1417,49 @@ class ProviderUIManager:
                             except Exception:
                                 pass
                         else:
-                            # On Unix, use pexpect to interact with the CLI
+                            # On Unix, use pexpect for qwen OAuth flow
+                            # Qwen uses device authorization - CLI polls server after user approves
                             import pexpect
+                            import re
+                            import webbrowser
 
                             env = os.environ.copy()
                             env["TERM"] = "xterm-256color"
 
-                            child = pexpect.spawn(qwen_cli, timeout=120, encoding="utf-8", env=env)
+                            child = pexpect.spawn(
+                                qwen_cli, timeout=180, encoding="utf-8", env=env, dimensions=(50, 120)
+                            )
 
+                            browser_opened = False
                             try:
-                                # Qwen CLI shows auth selection on first run:
-                                # "How would you like to authenticate for this project?"
-                                # 1. Qwen OAuth (selected by default)
-                                # 2. OpenAI
-                                # "(Use Enter to Set Auth)"
+                                # Wait for auth menu to appear (fast, use expect)
+                                child.expect(["Qwen OAuth", "authenticate", "Enter"], timeout=10)
+                                child.send("\r")  # Select Qwen OAuth
 
-                                # Wait for the auth selection prompt
-                                child.expect(["authenticate", "Qwen OAuth", "Use Enter"], timeout=15)
+                                # Wait for auth URL to appear in output
+                                child.expect(
+                                    [r"https://chat\.qwen\.ai/auth", "Waiting for.*authentication"],
+                                    timeout=10,
+                                )
+
+                                # Read buffer to get full URL
                                 time.sleep(1)
-                                child.send("\r")  # Press Enter to select Qwen OAuth
+                                output = child.before + child.after if child.after else child.before
+                                try:
+                                    output += child.read_nonblocking(size=10000, timeout=1)
+                                except Exception:
+                                    pass
 
-                                # Poll for oauth file while waiting for user to complete browser auth
+                                # Extract and open auth URL (only once)
+                                auth_urls = re.findall(
+                                    r"https://chat\.qwen\.ai/auth\w*\?[^\s\x1b\]]+", output
+                                )
+                                if auth_urls and not browser_opened:
+                                    auth_url = re.sub(r"[\x1b\[\]0-9;m]*$", "", auth_urls[0])
+                                    webbrowser.open(auth_url)
+                                    browser_opened = True
+
+                                # Poll for oauth file - CLI is polling server in background
                                 start_time = time.time()
                                 timeout_secs = 120
                                 while time.time() - start_time < timeout_secs:
