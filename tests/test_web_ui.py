@@ -1254,6 +1254,10 @@ class TestChadWebUIInterface:
         mgr = Mock()
         mgr.list_accounts.return_value = {}
         mgr.list_role_assignments.return_value = {}
+        mgr.load_config.return_value = {}
+        mgr.load_preferences.return_value = {}
+        mgr.get_cleanup_days.return_value = 3
+        mgr.get_verification_agent.return_value = None
         return mgr
 
     @patch("chad.web_ui.gr")
