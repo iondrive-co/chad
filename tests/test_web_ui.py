@@ -1,14 +1,16 @@
 """Tests for web UI module."""
 
 import json
+import os
 import re
 import socket
 import subprocess
 from pathlib import Path
-from unittest.mock import ANY, Mock, patch, MagicMock
+from unittest.mock import Mock, patch, MagicMock
 import pytest
 
 from chad.git_worktree import GitWorktreeManager
+from chad.providers import ModelConfig, MockProvider
 
 
 @pytest.fixture
@@ -89,34 +91,16 @@ class TestChadWebUI:
         full_bar = web_ui._progress_bar(150)
         assert full_bar == "█" * 20
 
-    def test_list_providers_with_accounts(self, web_ui):
-        """Test listing providers when accounts exist."""
-        result = web_ui.list_providers()
-
-        assert "claude" in result
-        assert "anthropic" in result
-        assert "gpt" in result
-        assert "openai" in result
-
-    def test_list_providers_empty(self, mock_security_mgr):
-        """Test listing providers when no accounts exist."""
-        from chad.web_ui import ChadWebUI
-
-        mock_security_mgr.list_accounts.return_value = {}
-        mock_security_mgr.list_role_assignments.return_value = {}
-
-        web_ui = ChadWebUI(mock_security_mgr, "test-password")
-        result = web_ui.list_providers()
-
-        assert "No providers configured yet" in result
-
     @patch("subprocess.run")
     def test_add_provider_success(self, mock_run, web_ui, mock_security_mgr, tmp_path):
         """Test adding a new provider successfully (OpenAI/Codex)."""
         mock_security_mgr.list_accounts.return_value = {}
         mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
-        with patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)):
+        with (
+            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
+            patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)),
+        ):
             result = web_ui.add_provider("my-codex", "openai")[0]
 
         assert "✅" in result or "✓" in result
@@ -129,7 +113,10 @@ class TestChadWebUI:
         mock_security_mgr.list_accounts.return_value = {}
         mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
-        with patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)):
+        with (
+            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
+            patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)),
+        ):
             result = web_ui.add_provider("", "openai")[0]
 
         assert "✓" in result or "Provider" in result
@@ -142,7 +129,10 @@ class TestChadWebUI:
         mock_security_mgr.list_accounts.return_value = {"openai": "openai"}
         mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
-        with patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)):
+        with (
+            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
+            patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)),
+        ):
             result = web_ui.add_provider("", "openai")[0]
 
         # Should create openai-1
@@ -156,7 +146,10 @@ class TestChadWebUI:
         # Mock Codex login to fail
         mock_run.return_value = Mock(returncode=1, stderr="Login cancelled", stdout="")
 
-        with patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)):
+        with (
+            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
+            patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)),
+        ):
             result = web_ui.add_provider("test", "openai")[0]
 
         assert "❌" in result
@@ -268,19 +261,17 @@ class TestChadWebUI:
         outputs = web_ui.discard_worktree_changes(session_id)
 
         # Index 11 should be task_description update (no_change to preserve it)
-        # Note: 15 outputs total (includes merge_visibility_state, merge_section_header, diff_content)
-        assert len(outputs) >= 15, "Discard should return 15 outputs including visibility controls"
+        # Note: 14 outputs total (includes merge_section_header, diff_content)
+        assert len(outputs) >= 14, "Discard should return 14 outputs"
         task_desc_update = outputs[11]
-        # no_change is gr.update() which returns an empty dict
-        assert task_desc_update == {} or task_desc_update.get("value") is None, (
-            "Task description should be preserved (no_change) for retry"
+        assert task_desc_update.get("value") == session.task_description, (
+            "Task description value should be preserved for retry"
         )
+        assert task_desc_update.get("interactive") is False, "Task description should remain locked after task starts"
 
-        # Verify visibility state outputs for JS workaround
-        visibility_state = outputs[12]
-        header_text = outputs[13]
-        diff_content = outputs[14]
-        assert visibility_state == "hidden", "Visibility state should be 'hidden' after discard"
+        # Verify header and diff cleared after discard
+        header_text = outputs[12]
+        diff_content = outputs[13]
         assert header_text == "", "Header should be cleared after discard"
         assert diff_content == "", "Diff content should be cleared after discard"
 
@@ -307,8 +298,8 @@ class TestChadWebUI:
         outputs = web_ui.attempt_merge(session_id, "msg", "main")
 
         # Index 11 should be task_description update (direct value "" or gr.update)
-        # Note: 15 outputs total (includes merge_visibility_state, merge_section_header, diff_content)
-        assert len(outputs) >= 15, "Merge should return 15 outputs including visibility controls"
+        # Note: 14 outputs total (includes merge_section_header, diff_content)
+        assert len(outputs) >= 14, "Merge should return 14 outputs"
         task_desc_update = outputs[11]
         # Handle both direct value "" and gr.update(value="")
         if isinstance(task_desc_update, str):
@@ -316,13 +307,111 @@ class TestChadWebUI:
         else:
             assert task_desc_update.get("value") == "", "Task description should be cleared"
 
-        # Verify visibility state outputs for JS workaround
-        visibility_state = outputs[12]
-        header_text = outputs[13]
-        diff_content = outputs[14]
-        assert visibility_state == "hidden", "Visibility state should be 'hidden' after merge"
+        # Verify header and diff cleared after merge
+        header_text = outputs[12]
+        diff_content = outputs[13]
         assert header_text == "", "Header should be cleared after merge"
         assert diff_content == "", "Diff content should be cleared after merge"
+
+    def test_merge_preserves_chatbot_and_followup(self, web_ui, git_repo, monkeypatch):
+        """Successful merge should preserve chatbot and followup_row for follow-up conversations."""
+        session_id = "merge-preserve-chat-test"
+        session = web_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = Path(git_repo / ".chad-worktrees" / session_id)
+        session.worktree_path.mkdir(parents=True, exist_ok=True)
+        session.worktree_branch = f"chad-task-{session_id}"
+        session.chat_history = [{"role": "user", "content": "Test message"}]
+
+        def fake_merge(self, task_id, commit_message=None, target_branch=None):
+            return True, None, None  # success, no conflicts, no error
+
+        def fake_cleanup(self, task_id):
+            pass
+
+        monkeypatch.setattr(GitWorktreeManager, "merge_to_main", fake_merge)
+        monkeypatch.setattr(GitWorktreeManager, "cleanup_after_merge", fake_cleanup)
+        monkeypatch.setattr(GitWorktreeManager, "get_main_branch", lambda self: "main")
+
+        outputs = web_ui.attempt_merge(session_id, "msg", "main")
+
+        # Index 6 is chatbot - should NOT be cleared (use no_change)
+        chatbot_update = outputs[6]
+        assert not isinstance(chatbot_update, list), "Chatbot should not be cleared to empty list"
+
+        # Index 10 is followup_row - should remain visible
+        followup_update = outputs[10]
+        assert followup_update.get("visible") is not False, "Followup row should remain visible"
+
+    def test_discard_preserves_chatbot_and_followup(self, web_ui, git_repo):
+        """Discard should preserve chatbot and followup_row for follow-up conversations."""
+        session_id = "discard-preserve-chat-test"
+        session = web_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = Path(git_repo / ".chad-worktrees" / session_id)
+        session.worktree_path.mkdir(parents=True, exist_ok=True)
+        session.worktree_branch = f"chad-task-{session_id}"
+        session.chat_history = [{"role": "user", "content": "Test message"}]
+
+        outputs = web_ui.discard_worktree_changes(session_id)
+
+        # Index 6 is chatbot - should NOT be cleared (use no_change)
+        chatbot_update = outputs[6]
+        assert not isinstance(chatbot_update, list), "Chatbot should not be cleared to empty list"
+
+        # Index 10 is followup_row - should remain visible
+        followup_update = outputs[10]
+        assert followup_update.get("visible") is not False, "Followup row should remain visible"
+
+    def test_followup_after_discard_uses_clean_worktree(self, web_ui, git_repo, monkeypatch):
+        """Follow-up after discard should still operate in a clean worktree."""
+        session_id = "discard-followup-test"
+        git_mgr = GitWorktreeManager(git_repo)
+        worktree_path, base_commit = git_mgr.create_worktree(session_id)
+
+        session = web_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = worktree_path
+        session.worktree_branch = git_mgr._branch_name(session_id)
+        session.worktree_base_commit = base_commit
+        session.active = True
+        session.chat_history = [{"role": "user", "content": "**Task**\n\nModify BUGS.md"}]
+
+        # Speed up the mock provider
+        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
+        config = ModelConfig(provider="mock", model_name="default", account_name="claude")
+        provider = MockProvider(config)
+        provider.start_session(str(worktree_path))
+        session.provider = provider
+        session.coding_account = "claude"
+        session.config = config
+
+        # Simulate an initial coding turn to represent the first task run
+        provider.send_message("Initial coding turn")
+        provider.get_response()
+
+        # Discard before sending a follow-up
+        web_ui.discard_worktree_changes(session_id)
+
+        # Send a follow-up; this should succeed and write BUGS.md in the worktree
+        list(
+            web_ui.send_followup(
+                session_id,
+                "Add follow-up entry",
+                session.chat_history,
+                coding_agent="claude",
+                verification_agent=web_ui.VERIFICATION_NONE,
+            )
+        )
+
+        assert session.worktree_path is not None
+        bugs_file = session.worktree_path / "BUGS.md"
+        assert bugs_file.exists(), "BUGS.md should be present after follow-up"
+        content = bugs_file.read_text()
+        assert "follow-up" in content.lower(), "Follow-up marker should be added to BUGS.md"
+        assert not any(
+            "Error" in msg.get("content", "") for msg in session.chat_history if msg.get("role") == "assistant"
+        ), "Follow-up response should not include errors"
 
     def test_set_reasoning_success(self, web_ui, mock_security_mgr):
         """Test setting reasoning level for an account."""
@@ -1189,7 +1278,7 @@ class TestLaunchWebUI:
 
     @patch("chad.web_ui._resolve_port", return_value=(7860, False, False))
     @patch("chad.web_ui.ChadWebUI")
-    @patch("chad.web_ui.SecurityManager")
+    @patch("chad.web_ui.ConfigManager")
     def test_launch_with_existing_password(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """Test launching with existing user and provided password (trusted)."""
         from chad.web_ui import launch_web_ui
@@ -1211,14 +1300,14 @@ class TestLaunchWebUI:
 
         # When password is provided, verify_main_password should NOT be called
         mock_security.verify_main_password.assert_not_called()
-        mock_webui_class.assert_called_once_with(mock_security, "test-password")
+        mock_webui_class.assert_called_once_with(mock_security, "test-password", dev_mode=False)
         mock_app.launch.assert_called_once()
         mock_resolve_port.assert_called_once_with(7860)
         assert result == (None, 7860)
 
     @patch("chad.web_ui._resolve_port", return_value=(7860, False, False))
     @patch("chad.web_ui.ChadWebUI")
-    @patch("chad.web_ui.SecurityManager")
+    @patch("chad.web_ui.ConfigManager")
     def test_launch_without_password_verifies(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """Test launching without password triggers verification."""
         from chad.web_ui import launch_web_ui
@@ -1240,13 +1329,13 @@ class TestLaunchWebUI:
         result = launch_web_ui(None)
 
         mock_security.verify_main_password.assert_called_once()
-        mock_webui_class.assert_called_once_with(mock_security, "verified-password")
+        mock_webui_class.assert_called_once_with(mock_security, "verified-password", dev_mode=False)
         mock_resolve_port.assert_called_once_with(7860)
         assert result == (None, 7860)
 
     @patch("chad.web_ui._resolve_port", return_value=(7860, False, False))
     @patch("chad.web_ui.ChadWebUI")
-    @patch("chad.web_ui.SecurityManager")
+    @patch("chad.web_ui.ConfigManager")
     def test_launch_first_run_with_password(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """Test launching on first run with password provided."""
         from chad.web_ui import launch_web_ui
@@ -1274,7 +1363,7 @@ class TestLaunchWebUI:
 
     @patch("chad.web_ui._resolve_port", return_value=(43210, True, True))
     @patch("chad.web_ui.ChadWebUI")
-    @patch("chad.web_ui.SecurityManager")
+    @patch("chad.web_ui.ConfigManager")
     def test_launch_falls_back_when_port_busy(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """New launches should fall back to an ephemeral port if the default is in use."""
         from chad.web_ui import launch_web_ui
@@ -1298,7 +1387,6 @@ class TestLaunchWebUI:
             share=False,
             inbrowser=True,
             quiet=False,
-            js=ANY,  # Custom JS passed to launch() in Gradio 6.x
         )
         assert result == (None, 43210)
 
@@ -1616,7 +1704,7 @@ class TestClaudeMultiAccount:
 
         result = web_ui.provider_ui._setup_claude_account("test-account")
 
-        assert result == str(tmp_path / ".chad" / "claude-configs" / "test-account")
+        assert str(result) == str(tmp_path / ".chad" / "claude-configs" / "test-account")
         assert (tmp_path / ".chad" / "claude-configs" / "test-account").exists()
 
     @patch("pathlib.Path.home")
@@ -1713,11 +1801,20 @@ class TestClaudeMultiAccount:
         mock_child.send = Mock()
         mock_child.close = Mock()
 
-        with patch("pexpect.spawn", return_value=mock_child):
-            # Patch time to simulate timeout quickly
-            with patch("time.time", side_effect=[0, 0, 200]):  # Instant timeout
-                with patch("time.sleep"):
-                    result = web_ui.add_provider("my-claude", "anthropic")[0]
+        if os.name == "nt":
+            mock_process = Mock()
+            mock_process.terminate = Mock()
+            with patch("subprocess.Popen", return_value=mock_process):
+                # Patch time to simulate timeout quickly
+                with patch("time.time", side_effect=[0, 0, 200]):  # Instant timeout
+                    with patch("time.sleep"):
+                        result = web_ui.add_provider("my-claude", "anthropic")[0]
+        else:
+            with patch("pexpect.spawn", return_value=mock_child):
+                # Patch time to simulate timeout quickly
+                with patch("time.time", side_effect=[0, 0, 200]):  # Instant timeout
+                    with patch("time.sleep"):
+                        result = web_ui.add_provider("my-claude", "anthropic")[0]
 
         # Provider should NOT be stored (login timed out)
         mock_security_mgr.store_account.assert_not_called()
@@ -1868,6 +1965,55 @@ class TestSessionLogging:
             chad_dir.rmdir()
 
 
+def test_session_logger_preserves_streaming_history_with_agent_names():
+    """Session logger should preserve structured streaming history with agent names."""
+    from chad.session_logger import SessionLogger
+
+    logger = SessionLogger()
+    log_path = logger.create_log(
+        task_description="Test task",
+        project_path="/tmp/test",
+        coding_account="test",
+        coding_provider="anthropic",
+    )
+
+    streaming_history = [
+        ("CODING AI", "Processing request\n"),
+        ("CODING AI", "Making changes...\n"),
+        ("VERIFICATION AI", "Checking work...\n"),
+    ]
+
+    logger.update_log(
+        log_path,
+        [],
+        streaming_history=streaming_history,
+        status="completed",
+    )
+
+    with open(log_path) as f:
+        data = json.load(f)
+
+    # Verify structured history is preserved
+    assert "streaming_history" in data
+    assert len(data["streaming_history"]) == 3
+    first = data["streaming_history"][0]
+    last = data["streaming_history"][2]
+    assert first["agent"] == "CODING AI"
+    assert first["content"] == "Processing request\n"
+    assert "timestamp" in first
+    assert last["agent"] == "VERIFICATION AI"
+    assert last["content"] == "Checking work...\n"
+    assert "timestamp" in last
+
+    # Verify flat transcript is also created for backward compatibility
+    assert "streaming_transcript" in data
+    assert "Processing request" in data["streaming_transcript"]
+    assert "Checking work" in data["streaming_transcript"]
+
+    # Cleanup
+    log_path.unlink()
+
+
 class TestSessionLogIncludesTask:
     """Test that session log conversation includes the task description."""
 
@@ -1888,7 +2034,7 @@ class TestSessionLogIncludesTask:
 
         return ChadWebUI(mock_security_mgr, "test-password")
 
-    @patch("chad.providers.create_provider")
+    @patch("chad.web_ui.create_provider")
     def test_session_log_starts_with_task(self, mock_create_provider, web_ui, tmp_path, git_repo):
         """Session log should include task description as first message."""
         import json
@@ -1898,15 +2044,18 @@ class TestSessionLogIncludesTask:
         mock_provider.start_session.return_value = True
         mock_provider.get_response.return_value = "Task completed successfully"
         mock_provider.stop_session.return_value = None
-        mock_provider.is_alive.return_value = False  # Task completes immediately
+        mock_provider.is_alive.return_value = False
+        mock_provider.last_event_info = None  # Prevent MagicMock from breaking JSON serialization
         mock_create_provider.return_value = mock_provider
 
         task_description = "Fix the login bug"
 
-        # Create a session and run task
+        # Create a session and run task (verification disabled for speed)
         session = web_ui.create_session("test")
         session.log_path = web_ui.session_logger.precreate_log()
-        list(web_ui.start_chad_task(session.id, str(git_repo), task_description, "coding-ai"))
+        list(web_ui.start_chad_task(
+            session.id, str(git_repo), task_description, "coding-ai", "__verification_none__"
+        ))
 
         # Get the session log path
         session_log_path = session.log_path
@@ -1991,20 +2140,21 @@ class TestSessionLogFailureVisibility:
         assert "Simulated timeout" in transcript
 
     @patch("chad.web_ui.create_provider")
-    def test_merge_section_hidden_after_main_failure(
+    def test_merge_section_shown_after_failure_if_changes_exist(
         self, mock_create_provider, web_ui, tmp_path, git_repo, monkeypatch
     ):
-        """Changes-ready UI should stay hidden when the coding task itself fails."""
+        """Changes-ready UI should show when worktree has changes, even if task fails."""
         mock_create_provider.return_value = self._FailingProvider()
         web_ui.session_logger.base_dir = tmp_path
         monkeypatch.setattr(web_ui, "check_worktree_changes", lambda *_: (True, "dirty worktree"))
 
-        session = web_ui.create_session("hide-merge")
+        session = web_ui.create_session("show-merge")
         outputs = list(web_ui.start_chad_task(session.id, str(git_repo), "broken task", "claude"))
         final_output = outputs[-1]
 
+        # Merge section should be visible if there are changes, regardless of task success
         merge_section_update = final_output[12]
-        assert merge_section_update.get("visible") is False
+        assert merge_section_update.get("visible") is True
 
 
 class TestCodingSummaryExtraction:
@@ -2021,7 +2171,8 @@ class TestCodingSummaryExtraction:
 ```
 """
         result = extract_coding_summary(content)
-        assert result == "Fixed the authentication bug in login flow"
+        assert result is not None
+        assert result.change_summary == "Fixed the authentication bug in login flow"
 
     def test_extract_coding_summary_from_raw_json(self):
         """Extract summary from raw JSON without code block."""
@@ -2029,7 +2180,44 @@ class TestCodingSummaryExtraction:
 
         content = 'Done! {"change_summary": "Added new feature"}'
         result = extract_coding_summary(content)
-        assert result == "Added new feature"
+        assert result is not None
+        assert result.change_summary == "Added new feature"
+
+    def test_extract_coding_summary_with_all_fields(self):
+        """Extract summary with hypothesis and screenshots."""
+        from chad.prompts import extract_coding_summary
+
+        content = '''Done with the fix.
+
+```json
+{
+  "change_summary": "Fixed login bug",
+  "hypothesis": "Race condition in token refresh",
+  "before_screenshot": "/tmp/before.png",
+  "after_screenshot": "/tmp/after.png"
+}
+```
+'''
+        result = extract_coding_summary(content)
+        assert result is not None
+        assert result.change_summary == "Fixed login bug"
+        assert result.hypothesis == "Race condition in token refresh"
+        assert result.before_screenshot == "/tmp/before.png"
+        assert result.after_screenshot == "/tmp/after.png"
+
+    def test_extract_coding_summary_partial_fields(self):
+        """Extract summary with only some optional fields."""
+        from chad.prompts import extract_coding_summary
+
+        content = '''```json
+{"change_summary": "Added feature", "hypothesis": "User needs this"}
+```'''
+        result = extract_coding_summary(content)
+        assert result is not None
+        assert result.change_summary == "Added feature"
+        assert result.hypothesis == "User needs this"
+        assert result.before_screenshot is None
+        assert result.after_screenshot is None
 
     def test_extract_coding_summary_returns_none_when_missing(self):
         """Return None when no change_summary found."""
@@ -2080,6 +2268,52 @@ More details here...
         # Should use heuristic extraction (starts with "I've updated...")
         assert "I've updated the authentication module" in message["content"]
 
+    def test_make_chat_message_displays_hypothesis_and_screenshots(self, tmp_path):
+        """make_chat_message should show hypothesis and inline screenshot images."""
+        from chad.web_ui import make_chat_message
+
+        # Create minimal PNG files for testing
+        before_png = tmp_path / "before.png"
+        after_png = tmp_path / "after.png"
+        # Minimal valid PNG (1x1 transparent pixel)
+        png_bytes = bytes([
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,  # PNG signature
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,  # IHDR chunk
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,  # 1x1 dimensions
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89,  # bit depth, color type, CRC
+            0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54,  # IDAT chunk
+            0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01,  # compressed data
+            0x0D, 0x0A, 0x2D, 0xB4,  # CRC
+            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,  # IEND chunk
+            0xAE, 0x42, 0x60, 0x82  # CRC
+        ])
+        before_png.write_bytes(png_bytes)
+        after_png.write_bytes(png_bytes)
+
+        content = '''Working on the task...
+''' + "x" * 300 + f'''
+```json
+{{
+  "change_summary": "Fixed the display issue",
+  "hypothesis": "CSS z-index conflict",
+  "before_screenshot": "{before_png}",
+  "after_screenshot": "{after_png}"
+}}
+```
+'''
+        message = make_chat_message("CODING AI", content)
+        content_str = message["content"]
+        summary_part = content_str.split("<details>")[0]
+        assert "Fixed the display issue" in summary_part
+        assert "Hypothesis:" in summary_part
+        assert "CSS z-index conflict" in summary_part
+        # Screenshots are now inline images, not links
+        assert "screenshot-comparison" in summary_part
+        assert "screenshot-label" in summary_part
+        assert "Before" in summary_part
+        assert "After" in summary_part
+        assert "data:image/png;base64," in summary_part
+
 
 class TestVerificationPrompt:
     """Ensure verification prompts include task context and summaries."""
@@ -2109,7 +2343,7 @@ class TestVerificationPrompt:
 
         class DummySecurityMgr:
             def list_accounts(self):
-                return {"verifier": "mock"}
+                return {"verifier": "anthropic"}
 
             def get_account_model(self, _):
                 return "default"
@@ -2136,6 +2370,62 @@ class TestVerificationPrompt:
         )
         assert verified is None
         assert "coding agent output was empty" in feedback
+
+    def test_run_verification_returns_rich_feedback(self, monkeypatch, tmp_path):
+        """Verification failures should include lint details (tests no longer run)."""
+        from chad.web_ui import ChadWebUI
+        import chad.web_ui as web_ui
+        import chad.verification.tools as verification_tools
+
+        class DummySecurityMgr:
+            def list_accounts(self):
+                # Use anthropic (non-mock) to trigger automated verification
+                return {"verifier": "anthropic"}
+
+            def get_account_model(self, _):
+                return "default"
+
+            def get_account_reasoning(self, _):
+                return "default"
+
+        # Patch verification tool to avoid running real lint
+        # Note: verification now only runs lint (lint_only=True)
+        def fake_verify(project_root=None, lint_only=False):
+            return {
+                "success": False,
+                "message": "Lint failed",
+                "phases": {
+                    "lint": {"success": False, "issues": ["E123 line 5: bad import"]},
+                },
+            }
+
+        class DummyVerifier:
+            def set_activity_callback(self, _callback):
+                return None
+
+            def start_session(self, _project_path, _system_prompt):
+                return True
+
+            def send_message(self, _message):
+                return None
+
+            def get_response(self, timeout=None):
+                return '```json\n{"passed": true, "summary": "Looks good"}\n```'
+
+            def stop_session(self):
+                return None
+
+        monkeypatch.setattr(web_ui, "create_provider", lambda *_args, **_kwargs: DummyVerifier())
+        monkeypatch.setattr(web_ui, "check_verification_mentioned", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(verification_tools, "verify", fake_verify)
+
+        web_ui = ChadWebUI(DummySecurityMgr(), "test-password")
+        verified, feedback = web_ui._run_verification(str(tmp_path), "output", "Task", "verifier")
+
+        assert verified is False
+        assert "Verification failed" in feedback
+        assert "Flake8 errors" in feedback
+        assert "E123 line 5" in feedback
 
 
 class TestAnsiToHtml:
@@ -2232,3 +2522,82 @@ class TestAnsiToHtml:
         # The content before and after should be present
         assert "Before" in result
         assert "After" in result
+
+    def test_strips_background_colors(self):
+        """Background colors (40-47) should be stripped to prevent white-on-dark issues."""
+        from chad.web_ui import ansi_to_html
+
+        # White background (47) - would make text unreadable on dark theme
+        text = "\x1b[47mWhite bg text\x1b[0m"
+        result = ansi_to_html(text)
+        assert "White bg text" in result
+        assert "background" not in result
+        assert "\x1b" not in result
+
+        # Extended background (48;5;N) should also be stripped
+        text = "\x1b[48;5;231mBright bg\x1b[0m"
+        result = ansi_to_html(text)
+        assert "Bright bg" in result
+        assert "background" not in result
+
+        # Extended RGB background (48;2;R;G;B) should also be stripped
+        text = "\x1b[48;2;255;255;255mRGB white bg\x1b[0m"
+        result = ansi_to_html(text)
+        assert "RGB white bg" in result
+        assert "background" not in result
+
+
+class TestBuildInlineLiveHtml:
+    """Tests for build_inline_live_html function - critical for live view streaming."""
+
+    def test_empty_content_creates_container_with_live_id(self):
+        """Empty content must still create a container with data-live-id.
+
+        This is critical: without the data-live-id container, JS patching
+        can't find the element to update, and live view never works.
+        This was the root cause of the live view regression.
+        """
+        from chad.web_ui import build_inline_live_html
+
+        result = build_inline_live_html("", "CODING AI", live_id="test-123")
+
+        # Must contain data-live-id for JS to find and patch
+        assert 'data-live-id="test-123"' in result
+        # Must have the live content container
+        assert 'class="inline-live-content"' in result
+        # Must have the header
+        assert 'inline-live-header' in result
+        assert "CODING AI (Live)" in result
+        # Should show working placeholder
+        assert "Working" in result
+
+    def test_content_creates_container_with_live_id(self):
+        """Content should create a container with data-live-id."""
+        from chad.web_ui import build_inline_live_html
+
+        result = build_inline_live_html("Test output", "CODING AI", live_id="abc-456")
+
+        assert 'data-live-id="abc-456"' in result
+        assert 'class="inline-live-content"' in result
+        assert "Test output" in result
+
+    def test_no_live_id_still_creates_container(self):
+        """Without live_id, container should still be created (just without data attribute)."""
+        from chad.web_ui import build_inline_live_html
+
+        result = build_inline_live_html("Some output", "CODING AI", live_id=None)
+
+        assert 'class="inline-live-content"' in result
+        assert "data-live-id" not in result
+        assert "Some output" in result
+
+    def test_empty_content_without_live_id_still_creates_structure(self):
+        """Even empty content without live_id should create proper HTML structure."""
+        from chad.web_ui import build_inline_live_html
+
+        result = build_inline_live_html("", "TEST AI", live_id=None)
+
+        assert 'class="inline-live-content"' in result
+        assert 'inline-live-header' in result
+        assert "TEST AI (Live)" in result
+        assert "Working" in result

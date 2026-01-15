@@ -1,8 +1,84 @@
 """Git worktree management for parallel task execution."""
 
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+def find_main_venv(project_path: Path) -> Path | None:
+    """Find the main project's virtual environment directory.
+
+    Looks for .venv or venv as actual directories (not symlinks) to avoid
+    circular symlink issues when worktrees symlink to the main venv.
+
+    Returns:
+        Path to the venv directory, or None if not found.
+    """
+    for name in [".venv", "venv"]:
+        candidate = project_path / name
+        # Only use actual directories, not symlinks (to avoid circular refs)
+        if candidate.exists() and candidate.is_dir() and not candidate.is_symlink():
+            return candidate
+    return None
+
+
+def cleanup_stale_pth_entries(venv_path: Path, worktree_base: Path, current_worktree_id: str | None = None) -> int:
+    """Remove stale/conflicting worktree paths from venv's .pth files.
+
+    When worktrees share a venv via symlink, editable installs (pip install -e .)
+    can pollute the venv with paths to worktrees. This causes Python to import
+    from the wrong worktree, confusing agents.
+
+    Removes entries where:
+    - The worktree no longer exists (stale)
+    - The worktree is different from current_worktree_id (conflicting)
+
+    Returns number of entries removed.
+    """
+    removed = 0
+    try:
+        site_packages = list(venv_path.glob("lib/python*/site-packages"))
+    except OSError:
+        # Handle broken symlinks or too many symlink levels
+        return 0
+    if not site_packages:
+        return 0
+
+    # Match both plain paths and sys.path.insert patterns
+    worktree_pattern = re.compile(
+        rf"{re.escape(str(worktree_base))}/([a-f0-9]+)/src"
+    )
+
+    for sp in site_packages:
+        for pth_file in sp.glob("*.pth"):
+            try:
+                content = pth_file.read_text()
+                lines = content.splitlines()
+                new_lines = []
+                modified = False
+
+                for line in lines:
+                    # Check if line references a worktree src path
+                    match = worktree_pattern.search(line)
+                    if match:
+                        worktree_id = match.group(1)
+                        worktree_path = worktree_base / worktree_id
+                        # Remove if worktree doesn't exist OR if it's not the current one
+                        if not worktree_path.exists() or (
+                            current_worktree_id and worktree_id != current_worktree_id
+                        ):
+                            removed += 1
+                            modified = True
+                            continue
+                    new_lines.append(line)
+
+                if modified:
+                    pth_file.write_text("\n".join(new_lines) + "\n" if new_lines else "")
+            except (OSError, PermissionError):
+                continue
+
+    return removed
 
 
 @dataclass
@@ -77,6 +153,8 @@ class GitWorktreeManager:
             cwd=cwd or self.project_path,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=check,
         )
 
@@ -157,6 +235,14 @@ class GitWorktreeManager:
             base_commit,
         )
 
+        # Symlink the main project's venv so agents don't need to reinstall deps
+        main_venv = find_main_venv(self.project_path)
+        if main_venv:
+            worktree_venv = worktree_path / main_venv.name
+            if not worktree_venv.exists():
+                cleanup_stale_pth_entries(main_venv, self.worktree_base, current_worktree_id=task_id)
+                worktree_venv.symlink_to(main_venv)
+
         return worktree_path, base_commit
 
     def worktree_exists(self, task_id: str) -> bool:
@@ -179,9 +265,25 @@ class GitWorktreeManager:
 
                 shutil.rmtree(worktree_path, ignore_errors=True)
 
+        # Clean up any .pth files that reference this worktree
+        main_venv = find_main_venv(self.project_path)
+        if main_venv:
+            cleanup_stale_pth_entries(main_venv, self.worktree_base)
+
         # Always try to delete the branch (it might exist without the worktree)
         self._run_git("branch", "-D", branch_name, check=False)
 
+        return True
+
+    def reset_worktree(self, task_id: str, base_commit: str | None = None) -> bool:
+        """Reset a worktree to a clean state based on the provided base commit."""
+        worktree_path = self._worktree_path(task_id)
+        if not worktree_path.exists():
+            return False
+
+        target = base_commit or self.get_main_branch()
+        self._run_git("reset", "--hard", target, cwd=worktree_path, check=False)
+        self._run_git("clean", "-fd", cwd=worktree_path, check=False)
         return True
 
     def has_changes(self, task_id: str) -> bool:
@@ -235,7 +337,7 @@ class GitWorktreeManager:
         if uncommitted:
             summary_parts.append(f"**Uncommitted changes:**\n```\n{uncommitted}\n```")
 
-        return "\n\n".join(summary_parts) if summary_parts else "No changes detected"
+        return "\n\n".join(summary_parts)
 
     def get_full_diff(self, task_id: str, base_commit: str | None = None) -> str:
         """Get the full diff content for the worktree changes.
@@ -431,6 +533,38 @@ class GitWorktreeManager:
 
         return True, None
 
+    def _has_main_uncommitted_changes(self) -> bool:
+        """Check if the main repo has uncommitted changes."""
+        result = self._run_git("status", "--porcelain", check=False)
+        return bool(result.stdout.strip())
+
+    def _stash_main_changes(self) -> bool:
+        """Stash uncommitted changes in the main repo. Returns True if stash was created."""
+        if not self._has_main_uncommitted_changes():
+            return False
+        result = self._run_git("stash", "push", "-m", "chad-merge-stash", check=False)
+        return result.returncode == 0
+
+    def _pop_stash(self) -> tuple[bool, bool]:
+        """Pop the stash. Returns (success, had_conflicts)."""
+        result = self._run_git("stash", "pop", check=False)
+        if result.returncode == 0:
+            return True, False
+        # Check if there was a conflict during stash pop
+        if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
+            return False, True
+        return False, False
+
+    def _has_chad_stash(self) -> bool:
+        """Check if there's a stash created by chad merge."""
+        result = self._run_git("stash", "list", check=False)
+        return "chad-merge-stash" in result.stdout
+
+    def _pop_chad_stash_if_exists(self) -> None:
+        """Pop the chad merge stash if it exists."""
+        if self._has_chad_stash():
+            self._pop_stash()
+
     def merge_to_main(
         self,
         task_id: str,
@@ -456,8 +590,8 @@ class GitWorktreeManager:
             return False, None, "Worktree not found"
 
         # First commit any uncommitted changes in the worktree
-        pre_merge_msg = commit_message or "Agent changes"
-        commit_ok, commit_error = self.commit_all_changes(task_id, pre_merge_msg)
+        # Always use generic message for pre-merge commits; custom message is for merge itself
+        commit_ok, commit_error = self.commit_all_changes(task_id, "Agent changes")
         if not commit_ok:
             status_result = self._run_git("status", "--short", cwd=worktree_path, check=False)
             status = status_result.stdout.strip()
@@ -466,11 +600,17 @@ class GitWorktreeManager:
                 detail = f"{commit_error}: {status}"
             return False, None, detail
 
+        # Stash any uncommitted changes in main repo before checkout/merge
+        stashed = self._stash_main_changes()
+
         # Switch to target branch in the main repo
         current_branch = self.get_current_branch()
         if current_branch != merge_target:
             result = self._run_git("checkout", merge_target, check=False)
             if result.returncode != 0:
+                # Restore stash if checkout failed
+                if stashed:
+                    self._pop_stash()
                 detail = result.stderr.strip() or result.stdout.strip() or "Failed to checkout target branch"
                 return False, None, detail
 
@@ -481,14 +621,21 @@ class GitWorktreeManager:
         result = self._run_git("merge", "--no-ff", branch_name, "-m", merge_msg, check=False)
 
         if result.returncode == 0:
+            # Pop stash after successful merge
+            if stashed:
+                self._pop_stash()
             return True, None, None
 
         # Check for conflicts
         if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
             conflicts = self._parse_conflicts()
+            # Don't pop stash yet - let user resolve merge conflicts first
+            # The stash will be popped after merge is complete
             return False, conflicts, None
 
-        # Other error
+        # Other error - restore stash
+        if stashed:
+            self._pop_stash()
         detail = result.stderr.strip() or result.stdout.strip() or "Merge failed"
         return False, None, detail
 
@@ -505,7 +652,7 @@ class GitWorktreeManager:
             if not full_path.exists():
                 continue
 
-            content = full_path.read_text()
+            content = full_path.read_text(encoding="utf-8")
             hunks = self._parse_conflict_hunks(file_path, content)
             if hunks:
                 conflicts.append(MergeConflict(file_path=file_path, hunks=hunks))
@@ -569,7 +716,7 @@ class GitWorktreeManager:
         if not full_path.exists():
             return False
 
-        content = full_path.read_text()
+        content = full_path.read_text(encoding="utf-8")
         lines = content.split("\n")
         result_lines = []
         current_hunk = 0
@@ -638,7 +785,11 @@ class GitWorktreeManager:
     def abort_merge(self) -> bool:
         """Abort an in-progress merge."""
         result = self._run_git("merge", "--abort", check=False)
-        return result.returncode == 0
+        if result.returncode != 0:
+            return False
+        # Restore any stashed changes from before the merge
+        self._pop_chad_stash_if_exists()
+        return True
 
     def complete_merge(self) -> bool:
         """Complete the merge after all conflicts resolved."""
@@ -654,7 +805,12 @@ class GitWorktreeManager:
 
         # Commit the merge
         result = self._run_git("commit", "--no-edit", check=False)
-        return result.returncode == 0
+        if result.returncode != 0:
+            return False
+
+        # Pop any stashed changes from before the merge
+        self._pop_chad_stash_if_exists()
+        return True
 
     def cleanup_after_merge(self, task_id: str) -> bool:
         """Delete worktree and branch after successful merge."""

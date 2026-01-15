@@ -5,18 +5,20 @@ import os
 import re
 import select
 import shutil
+import signal
 import subprocess
 import time
 import threading
 import queue
+from datetime import datetime, timezone
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from chad.utils import platform_path, safe_home
 from .installer import AIToolInstaller
 from .installer import DEFAULT_TOOLS_DIR
-from .mcp_config import ensure_global_mcp_config
 
 try:
     import pty
@@ -25,7 +27,30 @@ except ImportError:  # pragma: no cover - only hit on Windows
 
 _HAS_PTY = pty is not None
 
-CODEX_IDLE_TIMEOUT = 180.0
+
+# Configurable timeouts via environment variables
+def _get_env_float(name: str, default: float) -> float:
+    """Get a float from environment variable, with fallback to default."""
+    val = os.environ.get(name)
+    if val:
+        try:
+            return float(val)
+        except ValueError:
+            pass
+    return default
+
+
+# Idle timeout after a command completes (waiting for next action from API)
+CODEX_IDLE_TIMEOUT = _get_env_float("CODEX_IDLE_TIMEOUT", 90.0)
+CODEX_START_IDLE_TIMEOUT = _get_env_float("CODEX_START_IDLE_TIMEOUT", 120.0)
+CODEX_THINK_IDLE_TIMEOUT = _get_env_float("CODEX_THINK_IDLE_TIMEOUT", 240.0)
+CODEX_COMMAND_IDLE_TIMEOUT = _get_env_float("CODEX_COMMAND_IDLE_TIMEOUT", 420.0)
+# Shorter timeout during pure "thinking" phases (no command running)
+CODEX_THINKING_TIMEOUT = _get_env_float("CODEX_THINKING_TIMEOUT", 60.0)
+
+# Maximum exploration commands without implementation before triggering early timeout
+# Prevents agents from getting stuck in endless search/read loops
+CODEX_MAX_EXPLORATION_WITHOUT_IMPL = int(_get_env_float("CODEX_MAX_EXPLORATION_WITHOUT_IMPL", 40.0))
 
 
 def find_cli_executable(name: str) -> str:
@@ -333,10 +358,59 @@ def _close_master_fd(master_fd: int | None) -> None:
         pass
 
 
+def _kill_process_tree(process: subprocess.Popen) -> None:
+    """Kill a process along with its entire process group."""
+    if process.poll() is not None:
+        return
+
+    pid = getattr(process, "pid", None)
+
+    if os.name == "nt":
+        if isinstance(pid, int):
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True,
+                    timeout=5,
+                )
+                return
+            except (subprocess.SubprocessError, OSError):
+                pass
+        try:
+            process.kill()
+        except Exception:
+            pass
+        return
+
+    if isinstance(pid, int):
+        try:
+            pgid = os.getpgid(pid)
+            if pgid == pid:
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                process.kill()
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                process.kill()
+                return
+            except Exception:
+                pass
+
+    try:
+        process.kill()
+    except Exception:
+        pass
+
+
 def _start_pty_process(
     cmd: list[str], cwd: str | None = None, env: dict | None = None
 ) -> tuple[subprocess.Popen, int | None]:
-    """Start a subprocess with a PTY attached for streaming output when available."""
+    """Start a subprocess with a PTY attached for streaming output when available.
+
+    On Unix, uses a PTY for proper terminal emulation.
+    On Windows, uses pipes with CREATE_NEW_PROCESS_GROUP for proper process tree termination.
+    """
     if _HAS_PTY:
         master_fd, slave_fd = pty.openpty()
         process = subprocess.Popen(
@@ -352,6 +426,16 @@ def _start_pty_process(
         os.close(slave_fd)
         return process, master_fd
 
+    # Windows: use pipes with flags for proper process management
+    creation_flags = 0
+    startupinfo = None
+    if os.name == "nt":
+        # CREATE_NEW_PROCESS_GROUP allows taskkill /T to terminate the tree
+        creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
+        # Hide console window and configure stdio handles properly
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESTDHANDLES
+
     process = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -359,6 +443,8 @@ def _start_pty_process(
         stderr=subprocess.STDOUT,
         cwd=cwd,
         env=env,
+        creationflags=creation_flags,
+        startupinfo=startupinfo,
     )
     return process, None
 
@@ -386,21 +472,33 @@ def _stream_pipe_output(
     on_chunk: Callable[[str], None] | None,
     timeout: float,
     idle_timeout: float | None = None,
+    idle_timeout_callback: Callable[[float], bool] | None = None,
 ) -> tuple[str, bool, bool]:
-    """Stream output from a pipe-backed process until completion or timeout."""
+    """Stream output from a pipe-backed process until completion or timeout.
+
+    On Windows, pipes can split output at arbitrary byte boundaries (unlike Unix PTYs
+    which typically preserve line boundaries). This can cause JSON lines to be split
+    across multiple read() calls. To handle this:
+    - We buffer raw bytes and decode complete lines
+    - Partial lines at the end of a chunk are held until more data arrives
+    - This ensures callbacks receive complete lines for JSON parsing
+    """
     output_chunks: list[str] = []
     start_time = time.time()
     last_activity = start_time
     idle_stalled = False
     output_queue: queue.Queue = queue.Queue()
     stop_event = threading.Event()
+    # Buffer for incomplete lines (Windows pipes can split at arbitrary boundaries)
+    line_buffer: list[bytes] = [b""]
 
     def _reader() -> None:
         try:
             if process.stdout is None:
                 return
             while not stop_event.is_set():
-                chunk = process.stdout.read(4096)
+                # Use readline() for responsive output regardless of platform
+                chunk = process.stdout.readline()
                 if not chunk:
                     break
                 output_queue.put(chunk)
@@ -413,6 +511,13 @@ def _stream_pipe_output(
     try:
         while time.time() - start_time < timeout:
             if process.poll() is not None and output_queue.empty() and stop_event.is_set():
+                # Process any remaining buffered content before exiting
+                if line_buffer[0]:
+                    decoded = line_buffer[0].decode("utf-8", errors="replace")
+                    output_chunks.append(decoded)
+                    if on_chunk:
+                        on_chunk(decoded)
+                    line_buffer[0] = b""
                 break
 
             try:
@@ -421,23 +526,62 @@ def _stream_pipe_output(
                 chunk = None
 
             if chunk:
-                decoded = chunk.decode("utf-8", errors="replace")
-                output_chunks.append(decoded)
-                if on_chunk:
-                    on_chunk(decoded)
+                # Combine with any buffered partial line from previous chunk
+                combined = line_buffer[0] + chunk
+                # Split into lines, keeping the last partial line in buffer
+                lines = combined.split(b"\n")
+                line_buffer[0] = lines[-1]  # Keep incomplete line for next iteration
+
+                # Process complete lines (all but the last split result)
+                if len(lines) > 1:
+                    complete_data = b"\n".join(lines[:-1]) + b"\n"
+                    decoded = complete_data.decode("utf-8", errors="replace")
+                    output_chunks.append(decoded)
+                    if on_chunk:
+                        on_chunk(decoded)
+
                 start_time = time.time()
                 last_activity = start_time
 
             if idle_timeout and (time.time() - last_activity) >= idle_timeout:
+                elapsed = time.time() - last_activity
+                if idle_timeout_callback and not idle_timeout_callback(elapsed):
+                    continue
+                # Before declaring stall, check if data arrived in the queue
+                if not output_queue.empty():
+                    last_activity = time.time()
+                    continue
                 idle_stalled = True
                 break
 
+        # Drain any remaining items from the queue before processing final buffer
+        while not output_queue.empty():
+            try:
+                chunk = output_queue.get_nowait()
+                if chunk:
+                    combined = line_buffer[0] + chunk
+                    lines = combined.split(b"\n")
+                    line_buffer[0] = lines[-1]
+                    if len(lines) > 1:
+                        complete_data = b"\n".join(lines[:-1]) + b"\n"
+                        decoded = complete_data.decode("utf-8", errors="replace")
+                        output_chunks.append(decoded)
+                        if on_chunk:
+                            on_chunk(decoded)
+            except queue.Empty:
+                break
+
+        # Process any remaining buffered content (from incomplete lines)
+        if line_buffer[0]:
+            decoded = line_buffer[0].decode("utf-8", errors="replace")
+            output_chunks.append(decoded)
+            if on_chunk:
+                on_chunk(decoded)
+            line_buffer[0] = b""
+
         timed_out = process.poll() is None and not idle_stalled
         if timed_out or idle_stalled:
-            try:
-                process.kill()
-            except Exception:
-                pass
+            _kill_process_tree(process)
         try:
             process.wait(timeout=0.1)
         except Exception:
@@ -460,10 +604,22 @@ def _stream_pty_output(
     on_chunk: Callable[[str], None] | None,
     timeout: float,
     idle_timeout: float | None = None,
+    idle_timeout_callback: Callable[[float], bool] | None = None,
 ) -> tuple[str, bool, bool]:
-    """Stream output from a PTY-backed process until completion or timeout."""
+    """Stream output from a PTY-backed process until completion or timeout.
+
+    Returns (output, timed_out, idle_stalled):
+    - idle_stalled is True when no output for idle_timeout (or callback signals stall)
+    - If process is still running, we still respect idle_timeout_callback to decide whether to keep waiting
+    """
     if master_fd is None:
-        return _stream_pipe_output(process, on_chunk, timeout, idle_timeout=idle_timeout)
+        return _stream_pipe_output(
+            process,
+            on_chunk,
+            timeout,
+            idle_timeout=idle_timeout,
+            idle_timeout_callback=idle_timeout_callback,
+        )
 
     output_chunks: list[str] = []
     start_time = time.time()
@@ -492,22 +648,32 @@ def _stream_pty_output(
                     output_chunks.append(decoded)
                     if on_chunk:
                         on_chunk(decoded)
-                    start_time = time.time()
-                    last_activity = start_time
+                    last_activity = time.time()
 
             if idle_timeout and (time.time() - last_activity) >= idle_timeout:
+                elapsed = time.time() - last_activity
+                if idle_timeout_callback and not idle_timeout_callback(elapsed):
+                    continue
+                # Before declaring stall, try one final drain - data may have arrived
+                chunks_before = len(output_chunks)
+                _drain_pty(master_fd, output_chunks, on_chunk)
+                if len(output_chunks) > chunks_before:
+                    # Got new data during drain, reset and continue
+                    last_activity = time.time()
+                    continue
                 idle_stalled = True
-                try:
-                    process.kill()
-                    process.wait()
-                except Exception:
-                    pass
                 break
 
         timed_out = process.poll() is None and not idle_stalled
-        if timed_out:
-            process.kill()
-            process.wait()
+        if timed_out or idle_stalled:
+            # Drain any final output before killing - process may have produced
+            # output that's still in the PTY buffer
+            _drain_pty(master_fd, output_chunks, on_chunk)
+            _kill_process_tree(process)
+            try:
+                process.wait(timeout=1)
+            except Exception:
+                pass
         else:
             try:
                 process.wait(timeout=0.1)
@@ -622,6 +788,7 @@ class ClaudeCodeProvider(AIProvider):
         """Get environment with isolated CLAUDE_CONFIG_DIR for this account."""
         env = os.environ.copy()
         env["CLAUDE_CONFIG_DIR"] = self._get_claude_config_dir()
+        env["PYTHONIOENCODING"] = "utf-8"
         return env
 
     def _ensure_mcp_permissions(self) -> None:
@@ -636,7 +803,7 @@ class ClaudeCodeProvider(AIProvider):
         settings = {}
         if settings_path.exists():
             try:
-                settings = json.loads(settings_path.read_text())
+                settings = json.loads(settings_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 settings = {}
 
@@ -678,6 +845,8 @@ class ClaudeCodeProvider(AIProvider):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=project_path,
                 bufsize=1,
                 env=env,
@@ -717,55 +886,77 @@ class ClaudeCodeProvider(AIProvider):
         idle_timeout = 2.0
         self.accumulated_text = []
 
-        while time.time() - start_time < timeout:
-            if self.process.poll() is not None:
-                break
+        # Use a thread-based approach for Windows compatibility
+        # (select.select doesn't work with pipes on Windows)
+        line_queue: queue.Queue = queue.Queue()
+        stop_reading = threading.Event()
 
-            ready, _, _ = select.select([self.process.stdout], [], [], idle_timeout)
-
-            if not ready:
-                if result_text is not None:
-                    break
-                continue
-
-            line = self.process.stdout.readline()
-            if not line:
-                if result_text is not None:
-                    break
-                continue
-
+        def reader_thread():
             try:
-                msg = json.loads(line.strip())
+                while not stop_reading.is_set() and self.process and self.process.stdout:
+                    line = self.process.stdout.readline()
+                    if line:
+                        line_queue.put(line)
+                    elif self.process.poll() is not None:
+                        break
+            except (OSError, ValueError):
+                pass
 
-                if msg.get("type") == "assistant":
-                    content = msg.get("message", {}).get("content", [])
-                    for item in content:
-                        if item.get("type") == "text":
-                            text = item.get("text", "")
-                            self.accumulated_text.append(text)
-                            # Stream the text to UI
-                            self._notify_activity("stream", text + "\n")
-                            self._notify_activity("text", text[:100])
-                        elif item.get("type") == "tool_use":
-                            tool_name = item.get("name", "unknown")
-                            tool_input = item.get("input", {})
-                            if tool_name in ("Read", "Edit", "Write"):
-                                detail = tool_input.get("file_path", "")
-                            elif tool_name == "Bash":
-                                detail = tool_input.get("command", "")[:50]
-                            elif tool_name in ("Glob", "Grep"):
-                                detail = tool_input.get("pattern", "")
-                            else:
-                                detail = ""
-                            self._notify_activity("tool", f"{tool_name}: {detail}")
+        reader = threading.Thread(target=reader_thread, daemon=True)
+        reader.start()
 
-                if msg.get("type") == "result":
-                    result_text = msg.get("result", "")
+        try:
+            while time.time() - start_time < timeout:
+                if self.process.poll() is not None and line_queue.empty():
                     break
 
-                start_time = time.time()
-            except json.JSONDecodeError:
-                continue
+                try:
+                    line = line_queue.get(timeout=idle_timeout)
+                except queue.Empty:
+                    if result_text is not None:
+                        break
+                    continue
+
+                if not line:
+                    if result_text is not None:
+                        break
+                    continue
+
+                try:
+                    msg = json.loads(line.strip())
+
+                    if msg.get("type") == "assistant":
+                        content = msg.get("message", {}).get("content", [])
+                        for item in content:
+                            if item.get("type") == "text":
+                                text = item.get("text", "")
+                                self.accumulated_text.append(text)
+                                # Stream the text to UI
+                                self._notify_activity("stream", text + "\n")
+                                self._notify_activity("text", text[:100])
+                            elif item.get("type") == "tool_use":
+                                tool_name = item.get("name", "unknown")
+                                tool_input = item.get("input", {})
+                                if tool_name in ("Read", "Edit", "Write"):
+                                    detail = tool_input.get("file_path", "")
+                                elif tool_name == "Bash":
+                                    detail = tool_input.get("command", "")[:50]
+                                elif tool_name in ("Glob", "Grep"):
+                                    detail = tool_input.get("pattern", "")
+                                else:
+                                    detail = ""
+                                self._notify_activity("tool", f"{tool_name}: {detail}")
+
+                    if msg.get("type") == "result":
+                        result_text = msg.get("result", "")
+                        break
+
+                    start_time = time.time()
+                except json.JSONDecodeError:
+                    continue
+        finally:
+            stop_reading.set()
+            reader.join(timeout=0.5)
 
         return result_text or ""
 
@@ -810,20 +1001,33 @@ class OpenAICodexProvider(AIProvider):
         self.system_prompt: str | None = None
         self.master_fd: int | None = None
         self.thread_id: str | None = None  # For multi-turn conversation support
+        self.last_event_info: dict | None = None
 
     def _get_isolated_home(self) -> str:
         """Get the isolated HOME directory for this account."""
-        from pathlib import Path
-
+        base_home = safe_home()
         if self.config.account_name:
-            return str(Path.home() / ".chad" / "codex-homes" / self.config.account_name)
-        return str(Path.home())
+            return str(base_home / ".chad" / "codex-homes" / self.config.account_name)
+        return str(base_home)
 
     def _get_env(self) -> dict:
         """Get environment with isolated HOME for this account."""
         env = os.environ.copy()
-        env["HOME"] = self._get_isolated_home()
+        isolated_home = self._get_isolated_home()
+        env["HOME"] = isolated_home
+        # On Windows, set all home-related variables to ensure Codex CLI
+        # uses our isolated config directory. Node.js apps may check any of these.
+        if os.name == "nt":
+            env["USERPROFILE"] = isolated_home
+            # HOMEDRIVE and HOMEPATH are used by Windows for home resolution
+            home_path = platform_path(isolated_home)
+            env["HOMEDRIVE"] = home_path.drive or "C:"
+            env["HOMEPATH"] = str(home_path.relative_to(home_path.anchor))
+            # Some Node.js apps use APPDATA/LOCALAPPDATA for config storage
+            env["APPDATA"] = str(home_path / "AppData" / "Roaming")
+            env["LOCALAPPDATA"] = str(home_path / "AppData" / "Local")
         env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         env["TERM"] = "xterm-256color"
         return env
 
@@ -832,7 +1036,6 @@ class OpenAICodexProvider(AIProvider):
         if not ok:
             return False
 
-        ensure_global_mcp_config(home=Path(self._get_isolated_home()))
         self.project_path = project_path
         self.system_prompt = system_prompt
         self.cli_path = detail
@@ -844,7 +1047,7 @@ class OpenAICodexProvider(AIProvider):
         else:
             self.current_message = message
 
-    def get_response(self, timeout: float = 1800.0) -> str:  # noqa: C901
+    def get_response(self, timeout: float = 1500.0, _is_recovery: bool = False) -> str:  # noqa: C901
         import json
 
         if not self.current_message:
@@ -859,12 +1062,9 @@ class OpenAICodexProvider(AIProvider):
                 codex_cli,
                 "exec",
                 "--json",  # Must be before 'resume' subcommand
-                "-c",
-                'sandbox_mode="workspace-write"',  # Match --full-auto sandbox mode
-                "-c",
-                'approval_policy="on-request"',  # Match --full-auto approval policy
-                "-c",
-                'network_access="enabled"',
+                # Use bypass flag for resume too - approval_policy=on-request
+                # doesn't work in non-interactive exec mode
+                "--dangerously-bypass-approvals-and-sandbox",
                 "resume",
                 self.thread_id,
                 "-",  # Read prompt from stdin
@@ -873,11 +1073,11 @@ class OpenAICodexProvider(AIProvider):
             cmd = [
                 codex_cli,
                 "exec",
-                "--full-auto",
+                # Use bypass flag because --full-auto sets approval_policy=on-request
+                # which falls back to 'never' in non-interactive exec mode (no user to ask)
+                "--dangerously-bypass-approvals-and-sandbox",
                 "--skip-git-repo-check",
                 "--json",
-                "-c",
-                'network_access="enabled"',
                 "-C",
                 self.project_path,
                 "-",  # Read from stdin
@@ -895,6 +1095,7 @@ class OpenAICodexProvider(AIProvider):
 
             if self.process.stdin:
                 self.process.stdin.write(self.current_message.encode())
+                self.process.stdin.flush()
                 self.process.stdin.close()
 
             # Both initial and resume use JSON output
@@ -981,6 +1182,12 @@ class OpenAICodexProvider(AIProvider):
                 return None
 
             api_error = [None]  # Track API errors
+            # Track last event for adaptive timeout and diagnostics
+            last_event_info = {"kind": "start", "time": time.time(), "command": None}
+            idle_diag = {"elapsed": 0.0, "limit": CODEX_START_IDLE_TIMEOUT, "kind": "start"}
+            # Track command categories for session analysis
+            cmd_stats = {"total": 0, "exploration": 0, "implementation": 0, "commands": []}
+            exploration_loop_detected = [False]  # Flag to detect stuck exploration loops
 
             def process_chunk(chunk: str) -> None:
                 # Parse JSON events and convert to human-readable text
@@ -1021,34 +1228,165 @@ class OpenAICodexProvider(AIProvider):
                         if readable:
                             self._notify_activity("stream", readable)
 
-                        # Also send activity notifications for status bar
+                        # Track last event for diagnostics and adaptive timeout
                         if event.get("type") == "item.completed":
                             item = event.get("item", {})
-                            if item.get("type") == "reasoning":
+                            item_type = item.get("type", "")
+                            last_event_info["time"] = time.time()
+                            last_event_info["kind"] = item_type
+                            if item_type == "command_execution":
+                                cmd = item.get("command", "")
+                                last_event_info["command"] = cmd[:80]
+                                # Categorize command for session analysis
+                                cmd_stats["total"] += 1
+                                cmd_lower = cmd.lower()
+                                # Implementation: file writes, edits, git commits
+                                if any(x in cmd_lower for x in [
+                                    "edit ", "write ", "> ", ">> ", "tee ",
+                                    "git add", "git commit", "patch ", "sed -i",
+                                ]):
+                                    cmd_stats["implementation"] += 1
+                                else:
+                                    cmd_stats["exploration"] += 1
+                                # Keep last N commands for diagnostics
+                                cmd_stats["commands"].append(cmd[:100])
+                                if len(cmd_stats["commands"]) > 20:
+                                    cmd_stats["commands"] = cmd_stats["commands"][-20:]
+
+                                # Detect exploration loop: many exploration commands, zero implementation
+                                if (cmd_stats["exploration"] >= CODEX_MAX_EXPLORATION_WITHOUT_IMPL
+                                        and cmd_stats["implementation"] == 0):
+                                    exploration_loop_detected[0] = True
+                            idle_diag["limit"] = (
+                                CODEX_COMMAND_IDLE_TIMEOUT
+                                if item_type == "command_execution"
+                                else CODEX_THINK_IDLE_TIMEOUT
+                            )
+                            idle_diag["kind"] = item_type
+                            # Also send activity notifications for status bar
+                            if item_type == "reasoning":
                                 self._notify_activity("thinking", item.get("text", "")[:80])
-                            elif item.get("type") == "agent_message":
+                            elif item_type == "agent_message":
                                 self._notify_activity("text", item.get("text", "")[:80])
-                            elif item.get("type") in ("mcp_tool_call", "command_execution"):
+                            elif item_type in ("mcp_tool_call", "command_execution"):
                                 name = item.get("tool", item.get("command", "tool"))[:50]
                                 self._notify_activity("tool", name)
                     except json.JSONDecodeError:
                         # Non-JSON line in JSON mode - might be stderr, skip
                         pass
 
+            def _idle_timeout_callback(elapsed: float) -> bool:
+                """Decide whether a silent period should be treated as a stall."""
+                idle_diag["elapsed"] = elapsed
+                # Early exit if exploration loop detected (agent stuck in search/read mode)
+                if exploration_loop_detected[0]:
+                    return True  # Signal stall to exit streaming loop
+                limit = idle_diag.get("limit", CODEX_THINK_IDLE_TIMEOUT)
+                return elapsed >= limit
+
             output, timed_out, idle_stalled = _stream_pty_output(
-                self.process, self.master_fd, process_chunk, timeout, idle_timeout=CODEX_IDLE_TIMEOUT
+                self.process,
+                self.master_fd,
+                process_chunk,
+                timeout,
+                idle_timeout=CODEX_IDLE_TIMEOUT,
+                idle_timeout_callback=_idle_timeout_callback,
             )
 
             self.current_message = None
             self.process = None
             self.master_fd = None
+            event_dt = datetime.fromtimestamp(last_event_info.get("time", time.time()), tz=timezone.utc)
+            self.last_event_info = {
+                "kind": last_event_info.get("kind") or "unknown",
+                "command": last_event_info.get("command") or "",
+                "event_time": event_dt.isoformat(),
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+                "last_event_age": max(0.0, time.time() - last_event_info.get("time", time.time())),
+            }
+            # Add command statistics for session analysis
+            if cmd_stats["total"] > 0:
+                self.last_event_info["cmd_stats"] = {
+                    "total": cmd_stats["total"],
+                    "exploration": cmd_stats["exploration"],
+                    "implementation": cmd_stats["implementation"],
+                    "last_commands": cmd_stats["commands"][-10:],  # Last 10 for brevity
+                }
+            if idle_diag.get("elapsed"):
+                self.last_event_info["last_silence"] = {
+                    "elapsed": idle_diag["elapsed"],
+                    "limit": idle_diag.get("limit"),
+                    "kind": idle_diag.get("kind"),
+                }
 
-            if idle_stalled:
+            # Check for exploration loop FIRST (it also sets idle_stalled via callback)
+            if exploration_loop_detected[0]:
+                self.last_event_info["exploration_loop"] = {
+                    "exploration": cmd_stats["exploration"],
+                    "implementation": cmd_stats["implementation"],
+                    "limit": CODEX_MAX_EXPLORATION_WITHOUT_IMPL,
+                    "last_commands": cmd_stats["commands"][-5:],
+                }
+                # Try recovery by prompting the agent to implement
+                if self.thread_id and not _is_recovery:
+                    self._notify_activity(
+                        "stream",
+                        f"\033[33m• Exploration loop detected ({cmd_stats['exploration']} searches, "
+                        f"0 implementations), prompting to implement...\033[0m\n"
+                    )
+                    self.current_message = (
+                        "IMPORTANT: You've spent significant time searching and reading without making "
+                        "any changes. Please proceed to implement the fix now. If you need to make a "
+                        "decision, make your best choice and implement it. Do not continue exploring."
+                    )
+                    return self.get_response(timeout=timeout, _is_recovery=True)
+                # Already tried recovery - fail with diagnostic info
                 raise RuntimeError(
-                    f"Codex stalled waiting for output for {int(CODEX_IDLE_TIMEOUT)}s "
-                    "— process likely waiting for input"
+                    f"Codex stuck in exploration loop ({cmd_stats['exploration']} exploration commands, "
+                    f"0 implementation commands). Agent may be confused about the task."
                 )
+
+            # Check for idle stall (no output for a while) - only if not already handled above
+            if idle_stalled:
+                # Build diagnostic info for logging
+                stall_duration = idle_diag.get("elapsed") or (time.time() - last_event_info["time"])
+                last_kind = last_event_info["kind"] or "none"
+                last_cmd = last_event_info["command"] or ""
+                stall_limit = idle_diag.get("limit", CODEX_IDLE_TIMEOUT)
+                diag_msg = (
+                    f"last_event={last_kind}, stall_duration={stall_duration:.1f}s"
+                    + (f", last_cmd={last_cmd}" if last_cmd else "")
+                )
+                self.last_event_info["stall"] = {
+                    "duration": stall_duration,
+                    "limit": stall_limit,
+                    "kind": last_kind,
+                }
+
+                # Single recovery attempt if we have a thread_id and this isn't already a recovery
+                if self.thread_id and not _is_recovery:
+                    self._notify_activity(
+                        "stream",
+                        f"\033[33m• API stream stalled ({diag_msg}), attempting resume...\033[0m\n"
+                    )
+                    self.current_message = (
+                        "Continue with the task. If you were running a command, report its result. "
+                        "If you had completed the task, provide your final summary."
+                    )
+                    return self.get_response(timeout=timeout, _is_recovery=True)
+
+                # No thread_id or already tried recovery - fail with diagnostic info
+                raise RuntimeError(
+                    "Codex stalled waiting for output "
+                    f"(~{stall_duration:.0f}s silence, limit {int(stall_limit)}s; {diag_msg})"
+                )
+
             if timed_out:
+                self.last_event_info["timeout"] = {
+                    "timeout": timeout,
+                    "last_event": last_event_info.get("kind"),
+                    "command": last_event_info.get("command") or "",
+                }
                 raise RuntimeError(f"Codex execution timed out ({int(timeout / 60)} minutes)")
 
             # Check for API errors (model not supported, etc.)
@@ -1124,12 +1462,30 @@ class OpenAICodexProvider(AIProvider):
         if self.process:
             try:
                 # Kill entire process group to stop child processes too
-                import signal
+                if os.name == "nt":
+                    # On Windows, use taskkill to terminate the process tree
+                    # /T kills child processes, /F forces termination
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", str(self.process.pid)],
+                            capture_output=True,
+                            timeout=5,
+                        )
+                    except (subprocess.SubprocessError, OSError):
+                        pass
+                else:
+                    # On Unix, kill the process group with SIGTERM then SIGKILL
+                    import signal
 
-                try:
-                    os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    pass
+                    try:
+                        pgid = os.getpgid(self.process.pid)
+                        os.killpg(pgid, signal.SIGTERM)
+                        # Give processes a moment to terminate gracefully
+                        time.sleep(0.2)
+                        # Force kill any remaining processes in the group
+                        os.killpg(pgid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
                 self.process.kill()
                 self.process.wait(timeout=5)
             except Exception:
@@ -1296,6 +1652,180 @@ class GeminiCodeAssistProvider(AIProvider):
         return True
 
 
+class QwenCodeProvider(AIProvider):
+    """Provider for Qwen Code CLI with multi-turn support.
+
+    Uses the `qwen` command-line interface in headless mode (-p)
+    with stream-json output for real-time streaming.
+    Supports multi-turn via `--resume <session_id>`.
+
+    Qwen Code is a fork of Gemini CLI, optimized for Qwen3-Coder models.
+    Authentication via QwenChat OAuth (2000 free daily requests) or API key.
+    """
+
+    def __init__(self, config: ModelConfig):
+        super().__init__(config)
+        self.project_path: str | None = None
+        self.system_prompt: str | None = None
+        self.current_message: str | None = None
+        self.process: object | None = None
+        self.master_fd: int | None = None
+        self.session_id: str | None = None  # For multi-turn support
+
+    def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
+        ok, detail = _ensure_cli_tool("qwen", self._notify_activity)
+        if not ok:
+            return False
+
+        self.project_path = project_path
+        self.system_prompt = system_prompt
+        self.cli_path = detail
+        return True
+
+    def send_message(self, message: str) -> None:
+        # Only prepend system prompt on first message (no session_id yet)
+        if self.system_prompt and not self.session_id:
+            self.current_message = f"{self.system_prompt}\n\n---\n\n{message}"
+        else:
+            self.current_message = message
+
+    def get_response(self, timeout: float = 1800.0) -> str:  # noqa: C901
+        import json
+
+        if not self.current_message:
+            return ""
+
+        qwen_cli = getattr(self, "cli_path", None) or find_cli_executable("qwen")
+
+        # Build command - use resume if we have a session_id (multi-turn)
+        if self.session_id:
+            cmd = [
+                qwen_cli,
+                "-p",
+                self.current_message,
+                "--output-format",
+                "stream-json",
+                "--resume",
+                self.session_id,
+            ]
+        else:
+            cmd = [
+                qwen_cli,
+                "-p",
+                self.current_message,
+                "--output-format",
+                "stream-json",
+                "--yolo",  # Auto-approve all tool calls
+            ]
+            if self.config.model_name and self.config.model_name != "default":
+                cmd.extend(["-m", self.config.model_name])
+
+        try:
+            env = os.environ.copy()
+            env["TERM"] = "xterm-256color"
+
+            json_events = []
+            response_parts = []
+
+            def handle_chunk(decoded: str) -> None:
+                # Stream raw output for live display
+                self._notify_activity("stream", decoded)
+                # Parse JSON lines
+                for line in decoded.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        if not isinstance(event, dict):
+                            continue
+                        json_events.append(event)
+                        # Extract session_id from system/init event
+                        if event.get("type") in ("system", "init") and "session_id" in event:
+                            self.session_id = event["session_id"]
+                        # Collect response content from assistant messages
+                        if event.get("type") == "message" and event.get("role") == "assistant":
+                            content = event.get("content", "")
+                            if content:
+                                response_parts.append(content)
+                                self._notify_activity("text", content[:80])
+                        # Also handle assistant type directly (Gemini CLI format)
+                        if event.get("type") == "assistant":
+                            message = event.get("message", {})
+                            content_blocks = message.get("content", [])
+                            for block in content_blocks:
+                                if isinstance(block, dict) and block.get("type") == "text":
+                                    text = block.get("text", "")
+                                    if text:
+                                        response_parts.append(text)
+                                        self._notify_activity("text", text[:80])
+                    except json.JSONDecodeError:
+                        # Non-JSON line (warnings, etc.) - just notify
+                        if line and len(line) > 10:
+                            self._notify_activity("text", line[:80])
+
+            self.process, self.master_fd = _start_pty_process(cmd, cwd=self.project_path, env=env)
+
+            if self.process.stdin:
+                self.process.stdin.close()
+
+            output, timed_out, idle_stalled = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
+
+            self.current_message = None
+            self.process = None
+            self.master_fd = None
+
+            if idle_stalled:
+                return f"Error: Qwen execution stalled (no output for {int(timeout)}s)"
+            if timed_out:
+                return f"Error: Qwen execution timed out ({int(timeout / 60)} minutes)"
+
+            # Return collected response parts if any
+            if response_parts:
+                return "".join(response_parts).strip()
+
+            # Fallback to raw output
+            output = _strip_ansi_codes(output)
+            return output.strip() if output else "No response from Qwen Code"
+
+        except FileNotFoundError:
+            self.current_message = None
+            self.process = None
+            _close_master_fd(self.master_fd)
+            self.master_fd = None
+            return (
+                "Failed to run Qwen Code: command not found\n\n"
+                "Install with: npm install -g @qwen-code/qwen-code\n"
+                "Or: brew install qwen-code"
+            )
+        except (PermissionError, OSError) as exc:
+            self.current_message = None
+            self.process = None
+            _close_master_fd(self.master_fd)
+            self.master_fd = None
+            return f"Failed to run Qwen Code: {exc}"
+
+    def stop_session(self) -> None:
+        self.current_message = None
+        self.session_id = None  # Clear session_id to end multi-turn
+        _close_master_fd(self.master_fd)
+        self.master_fd = None
+        if self.process:
+            try:
+                self.process.kill()
+                self.process.wait(timeout=5)
+            except Exception:
+                pass
+            self.process = None
+
+    def is_alive(self) -> bool:
+        # Session is "alive" if we have a session_id for resuming
+        return self.session_id is not None or (self.process is not None and self.process.poll() is None)
+
+    def supports_multi_turn(self) -> bool:
+        return True
+
+
 class MistralVibeProvider(AIProvider):
     """Provider for Mistral Vibe CLI with multi-turn support.
 
@@ -1416,43 +1946,207 @@ class MistralVibeProvider(AIProvider):
 
 
 class MockProvider(AIProvider):
-    """Mock provider for testing. Returns predictable responses."""
+    """Mock provider for testing UI without real API calls.
+
+    This provider simulates realistic coding and verification agent behavior:
+    - Generates live streaming output with tool activities
+    - Makes actual file changes to BUGS.md in the worktree
+    - Returns proper JSON responses
+    - Rejects first verification attempt, accepts second
+    """
+
+    # Class-level state to persist across provider instances (keyed by project path)
+    _verification_counts: dict[str, int] = {}
+    _coding_turn_counts: dict[str, int] = {}
 
     def __init__(self, config: ModelConfig):
         super().__init__(config)
         self._alive = False
-        self._messages = []
-        self._response_queue = []
+        self._messages: list[str] = []
+        self._response_queue: list[str] = []
+        self._project_path: str | None = None
+        self._is_verification_mode = False
 
     def queue_response(self, response: str) -> None:
-        """Queue a response to be returned by get_response."""
+        """Queue a response to be returned by get_response (for unit tests)."""
         self._response_queue.append(response)
 
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         self._alive = True
+        self._project_path = project_path
         self._notify_activity("text", "Mock session started")
         return True
 
     def send_message(self, message: str) -> None:
         self._messages.append(message)
-        self._notify_activity("tool", "MockTool: processing")
+        # Detect if this is a verification prompt
+        self._is_verification_mode = "DO NOT modify or create any files" in message
+
+    def _simulate_delay(self, seconds: float = 0.1) -> None:
+        """Simulate processing delay."""
+        import time
+        time.sleep(seconds)
+
+    def _modify_bugs_file(self, marker: str) -> str:
+        """Modify BUGS.md in the worktree, creating if needed. Return the path."""
+        from pathlib import Path
+
+        if not self._project_path:
+            return ""
+
+        bugs_path = Path(self._project_path) / "BUGS.md"
+
+        if bugs_path.exists():
+            content = bugs_path.read_text()
+            # Add marker at the end
+            content = content.rstrip() + f"\n{marker}\n"
+        else:
+            content = f"# Known Bugs\n\n{marker}\n"
+
+        bugs_path.write_text(content)
+        return str(bugs_path)
+
+    def _get_coding_turn_count(self) -> int:
+        """Get and increment the coding turn count for this project."""
+        key = self._project_path or ""
+        count = MockProvider._coding_turn_counts.get(key, 0) + 1
+        MockProvider._coding_turn_counts[key] = count
+        return count
+
+    def _get_verification_count(self) -> int:
+        """Get and increment the verification count for this project."""
+        key = self._project_path or ""
+        count = MockProvider._verification_counts.get(key, 0) + 1
+        MockProvider._verification_counts[key] = count
+        return count
+
+    def _generate_coding_response(self) -> str:
+        """Generate a realistic coding agent response."""
+        turn_count = self._get_coding_turn_count()
+        is_followup = turn_count > 1
+
+        # Simulate some streaming output
+        self._notify_activity("tool", "Read: src/chad/providers.py")
+        self._simulate_delay(0.15)
+        self._notify_activity("stream", "Analyzing the codebase structure...\n")
+        self._simulate_delay(0.1)
+
+        if is_followup:
+            self._notify_activity("stream", "Processing follow-up request...\n")
+            self._simulate_delay(0.1)
+            self._notify_activity("tool", "Grep: searching for relevant code")
+            self._simulate_delay(0.15)
+            self._notify_activity("stream", "Found the area that needs updating.\n")
+            marker = f"<!-- Mock follow-up change {turn_count} -->"
+        else:
+            self._notify_activity("stream", "Understanding the task requirements...\n")
+            self._simulate_delay(0.1)
+            self._notify_activity("tool", "Glob: **/*.py")
+            self._simulate_delay(0.15)
+            self._notify_activity("stream", "Located relevant files.\n")
+            marker = "<!-- Mock initial change -->"
+
+        # Simulate progress update
+        self._simulate_delay(0.1)
+        progress_json = (
+            '```json\n'
+            '{"type": "progress", "summary": "Mock task in progress", '
+            '"location": "BUGS.md - adding test marker"}\n'
+            '```\n'
+        )
+        self._notify_activity("stream", progress_json)
+
+        # Make the actual file change
+        self._simulate_delay(0.1)
+        self._notify_activity("tool", "Edit: BUGS.md")
+        bugs_path = self._modify_bugs_file(marker)
+        self._simulate_delay(0.1)
+        self._notify_activity("stream", f"Modified {bugs_path}\n")
+
+        # Simulate running tests
+        self._simulate_delay(0.15)
+        self._notify_activity("tool", "Bash: ./.venv/bin/python -m pytest tests/ -v --tb=short")
+        self._simulate_delay(0.2)
+        self._notify_activity("stream", "===== 42 passed in 3.21s =====\n")
+
+        # Simulate linting
+        self._notify_activity("tool", "Bash: ./.venv/bin/python -m flake8 src/chad")
+        self._simulate_delay(0.1)
+        self._notify_activity("stream", "Linting passed.\n")
+
+        # Build the full response
+        if is_followup:
+            change_desc = f"Applied follow-up change #{turn_count} to BUGS.md"
+        else:
+            change_desc = "Applied initial mock change to BUGS.md"
+
+        response = f"""I've analyzed the codebase and made the requested changes.
+
+## Changes Made
+
+I modified BUGS.md to add a test marker.
+
+## Verification
+
+- ✓ All 42 tests passed
+- ✓ Linting clean
+
+```json
+{{"change_summary": "{change_desc}"}}
+```
+"""
+        return response
+
+    def _generate_verification_response(self) -> str:
+        """Generate a realistic verification agent response."""
+        verification_count = self._get_verification_count()
+
+        # Simulate verification activities
+        self._notify_activity("tool", "Read: BUGS.md")
+        self._simulate_delay(0.15)
+        self._notify_activity("stream", "Reviewing the changes made...\n")
+        self._simulate_delay(0.1)
+        self._notify_activity("tool", "Bash: git diff")
+        self._simulate_delay(0.15)
+        self._notify_activity("stream", "Checking diff output...\n")
+        self._simulate_delay(0.1)
+
+        # First verification: reject with a reason
+        if verification_count == 1:
+            self._notify_activity("stream", "Found an issue with the changes.\n")
+            return """{
+  "passed": false,
+  "summary": "The mock change marker should include a timestamp for traceability",
+  "issues": [
+    "Mock change marker does not include timestamp",
+    "Consider adding more descriptive content to BUGS.md"
+  ]
+}"""
+
+        # Subsequent verifications: accept
+        self._notify_activity("stream", "Changes look good.\n")
+        return """{
+  "passed": true,
+  "summary": "Verified that BUGS.md was updated correctly with the mock marker. All tests pass and linting is clean."
+}"""
 
     def get_response(self, timeout: float = 30.0) -> str:
-        import time
+        self._simulate_delay(0.1)
 
-        time.sleep(0.1)  # Simulate some processing
-        self._notify_activity("text", "Mock response ready")
-
+        # If there's a queued response (for unit tests), use it
         if self._response_queue:
             return self._response_queue.pop(0)
 
-        # Default response for breakdown requests
+        # Check for explicit breakdown requests (for unit test compatibility)
         last_msg = self._messages[-1] if self._messages else ""
-        if "subtask" in last_msg.lower() or "break" in last_msg.lower():
+        if "break down into subtasks" in last_msg.lower() or "breakdown" in last_msg.lower():
             return '{"subtasks": [{"id": "1", "description": "Mock task", "dependencies": []}]}'
 
-        # Default response for other requests
-        return "Mock response: Task completed successfully."
+        # Generate appropriate response based on mode
+        if self._is_verification_mode:
+            return self._generate_verification_response()
+        else:
+            return self._generate_coding_response()
 
     def stop_session(self) -> None:
         self._alive = False
@@ -1461,7 +2155,7 @@ class MockProvider(AIProvider):
         return self._alive
 
     def supports_multi_turn(self) -> bool:
-        return True  # Mock provider supports multi-turn for testing
+        return True
 
 
 def create_provider(config: ModelConfig) -> AIProvider:
@@ -1482,6 +2176,8 @@ def create_provider(config: ModelConfig) -> AIProvider:
         return OpenAICodexProvider(config)
     elif config.provider == "gemini":
         return GeminiCodeAssistProvider(config)
+    elif config.provider == "qwen":
+        return QwenCodeProvider(config)
     elif config.provider == "mistral":
         return MistralVibeProvider(config)
     elif config.provider == "mock":
