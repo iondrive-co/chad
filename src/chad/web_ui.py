@@ -17,7 +17,7 @@ from typing import Iterator
 import gradio as gr
 
 from .provider_ui import ProviderUIManager
-from .config_manager import ConfigManager
+from .config_manager import ConfigManager, validate_config_keys
 from .session_logger import SessionLogger
 from .providers import ModelConfig, parse_codex_output, create_provider
 from .model_catalog import ModelCatalog
@@ -5234,12 +5234,12 @@ class ChadWebUI:
         }
 
     def _create_providers_ui(self):
-        """Create the Providers tab UI within @gr.render."""
+        """Create the Setup tab UI within @gr.render."""
         account_items = self.provider_ui.get_provider_card_items()
         self.provider_card_count = max(12, len(account_items) + 8)
 
         provider_feedback = gr.Markdown("")
-        gr.Markdown("### Providers", elem_classes=["provider-section-title"])
+        gr.Markdown("### Setup", elem_classes=["provider-section-title"])
 
         refresh_btn = gr.Button("🔄 Refresh", variant="secondary")
         pending_delete_state = gr.State(None)
@@ -5303,6 +5303,62 @@ class ChadWebUI:
             )
             add_btn = gr.Button("Add Provider", variant="primary", interactive=False)
 
+        with gr.Accordion(
+            "Config",
+            open=False,
+            elem_id="config-panel",
+            elem_classes=["config-accordion"],
+        ):
+            config_status = gr.Markdown("", elem_classes=["config-panel__status"])
+            # Validate config keys to force developers to update this panel when adding new settings
+            validate_config_keys(self.security_mgr.load_config(), allow=[])
+
+            preferences = self.security_mgr.load_preferences() or {}
+            retention_days = self.security_mgr.get_cleanup_days()
+            role_assignments = self.security_mgr.list_role_assignments()
+            coding_assignment = role_assignments.get("CODING", "")
+            accounts = self.security_mgr.list_accounts()
+            account_choices = list(accounts.keys())
+            coding_value = coding_assignment if coding_assignment in account_choices else None
+
+            verification_value = self.security_mgr.get_verification_agent() or self.SAME_AS_CODING
+            if verification_value not in account_choices:
+                verification_value = self.SAME_AS_CODING
+            verification_choices = [(self.SAME_AS_CODING, self.SAME_AS_CODING)] + [
+                (name, name) for name in account_choices
+            ]
+
+            gr.Markdown(
+                "Manage global settings that live in `.chad.conf`. Changes save immediately.",
+                elem_classes=["config-panel__intro"],
+            )
+            with gr.Row():
+                retention_input = gr.Number(
+                    label="Retention Days",
+                    value=retention_days,
+                    minimum=1,
+                    precision=0,
+                    step=1,
+                )
+                coding_pref = gr.Dropdown(
+                    label="Preferred Coding Agent",
+                    choices=account_choices,
+                    value=coding_value,
+                    allow_custom_value=False,
+                )
+            with gr.Row():
+                verification_pref = gr.Dropdown(
+                    label="Preferred Verification Agent",
+                    choices=verification_choices,
+                    value=verification_value,
+                    allow_custom_value=False,
+                )
+                project_path_pref = gr.Textbox(
+                    label="Default Project Path",
+                    placeholder="/path/to/project",
+                    value=preferences.get("project_path", ""),
+                )
+
         provider_outputs = [provider_feedback]
         for card in provider_cards:
             provider_outputs.extend(
@@ -5341,6 +5397,55 @@ class ChadWebUI:
             inputs=[new_provider_name, new_provider_type],
             outputs=provider_outputs + [new_provider_name, add_btn, add_provider_accordion],
         )
+
+        def on_retention_change(days):
+            try:
+                self.security_mgr.set_cleanup_days(int(days))
+                return "✅ Retention days saved"
+            except Exception as exc:
+                return f"❌ {exc}"
+
+        retention_input.change(on_retention_change, inputs=[retention_input], outputs=[config_status])
+
+        def on_coding_pref_change(account_name):
+            if not account_name:
+                try:
+                    self.security_mgr.clear_role("CODING")
+                    return "🧹 Cleared preferred coding agent"
+                except Exception as exc:
+                    return f"❌ {exc}"
+            try:
+                self.security_mgr.assign_role(account_name, "CODING")
+                return f"✅ Preferred coding agent saved: {account_name}"
+            except Exception as exc:
+                return f"❌ {exc}"
+
+        coding_pref.change(on_coding_pref_change, inputs=[coding_pref], outputs=[config_status])
+
+        def on_verification_pref_change(account_name):
+            if not account_name or account_name == self.SAME_AS_CODING:
+                try:
+                    self.security_mgr.set_verification_agent(None)
+                    return "✅ Verification agent set to same as coding"
+                except Exception as exc:
+                    return f"❌ {exc}"
+            try:
+                self.security_mgr.set_verification_agent(account_name)
+                return f"✅ Verification agent saved: {account_name}"
+            except Exception as exc:
+                return f"❌ {exc}"
+
+        verification_pref.change(
+            on_verification_pref_change,
+            inputs=[verification_pref],
+            outputs=[config_status],
+        )
+
+        def on_project_path_change(path):
+            self.security_mgr.save_preferences(path.strip())
+            return "✅ Default project path saved"
+
+        project_path_pref.input(on_project_path_change, inputs=[project_path_pref], outputs=[config_status])
 
         for card in provider_cards:
 
@@ -5923,16 +6028,16 @@ window._setupLivePatchListener();
             # Track how many tabs are currently visible (start with 1)
             visible_count = gr.State(1)
 
-            # Tab index 1 = Task 1 (since Providers is index 0)
+            # Tab index 1 = Task 1 (since Setup is index 0)
             with gr.Tabs(selected=1, elem_id="main-tabs") as main_tabs:
-                # Providers tab (first, but not default selected)
-                with gr.Tab("⚙️ Providers", id=0):
+                # Setup tab (first, but not default selected)
+                with gr.Tab("⚙️ Setup", id=0):
                     self._create_providers_ui()
 
                 # Pre-create ALL task tabs - only first visible initially
                 task_tabs = []
                 for i in range(MAX_TASKS):
-                    tab_id = i + 1  # Providers is 0, tasks start at 1
+                    tab_id = i + 1  # Setup is 0, tasks start at 1
                     is_visible = (i == 0)  # Only first tab visible initially
                     with gr.Tab(f"Task {i + 1}", id=tab_id, visible=is_visible) as task_tab:
                         self._create_session_ui(all_sessions[i].id, is_first=(i == 0))

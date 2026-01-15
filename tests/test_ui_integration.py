@@ -1,5 +1,6 @@
 """UI integration tests using Playwright to verify UI behavior with mock providers."""
 
+import json
 import time
 
 import pytest
@@ -80,9 +81,9 @@ class TestUIElements:
         task3_tab = page.get_by_role("tab", name="Task 3")
         expect(task3_tab).to_be_hidden()
 
-    def test_providers_tab_visible(self, page: Page):
-        """Providers tab should be visible."""
-        tab = page.get_by_role("tab", name="⚙️ Providers")
+    def test_setup_tab_visible(self, page: Page):
+        """Setup tab should be visible."""
+        tab = page.get_by_role("tab", name="⚙️ Setup")
         expect(tab).to_be_visible()
 
     def test_project_path_field(self, page: Page):
@@ -386,16 +387,16 @@ class TestModelReasoningDropdowns:
         # Just checking visibility is sufficient for regression prevention
 
 
-class TestProvidersTab:
-    """Test the Providers tab functionality."""
+class TestSetupTab:
+    """Test the Setup tab functionality."""
 
     def test_can_switch_to_providers_tab(self, page: Page):
-        """Should be able to switch to Providers tab."""
-        page.get_by_role("tab", name="⚙️ Providers").click()
+        """Should be able to switch to Setup tab."""
+        page.get_by_role("tab", name="⚙️ Setup").click()
         time.sleep(0.5)
 
-        # Should see provider heading
-        expect(page.get_by_role("heading", name="Providers")).to_be_visible()
+        # Should see setup heading
+        expect(page.get_by_role("heading", name="Setup")).to_be_visible()
 
     def test_provider_delete_button_fills_header(self, page: Page):
         """Delete button should fill the header height."""
@@ -421,12 +422,33 @@ class TestProvidersTab:
 
     def test_provider_usage_visible(self, page: Page):
         """Provider usage boxes should render with content."""
-        page.get_by_role("tab", name="⚙️ Providers").click()
+        page.get_by_role("tab", name="⚙️ Setup").click()
         usage = page.locator(".provider-usage").first
         expect(usage).to_be_visible(timeout=5000)
 
         text = usage.text_content() or ""
         assert text.strip(), "Usage text should not be empty"
+
+    def test_config_panel_persists_settings(self, page: Page, temp_env):
+        """Config panel should save changes immediately to config file."""
+        page.get_by_role("tab", name="⚙️ Setup").click()
+        config_toggle = page.get_by_role("button", name="Config")
+        config_toggle.click()
+
+        retention = page.get_by_label("Retention Days")
+        retention.fill("9")
+        retention.press("Enter")
+
+        coding_dropdown = page.get_by_label("Preferred Coding Agent")
+        coding_dropdown.click()
+        page.get_by_role("option", name="codex-work").click()
+
+        page.wait_for_timeout(800)
+        with open(temp_env.config_path, encoding="utf-8") as f:
+            config = json.load(f)
+
+        assert config.get("cleanup_days") == 9
+        assert config.get("role_assignments", {}).get("CODING") == "codex-work"
 
 
 class TestSubtaskTabs:
@@ -916,11 +938,11 @@ class TestScreenshots:
         assert output.exists()
         print(f"Screenshot saved: {output}")
 
-    def test_screenshot_providers_tab(self, page: Page, tmp_path):
-        """Take screenshot of Providers tab."""
-        page.get_by_role("tab", name="⚙️ Providers").click()
+    def test_screenshot_setup_tab(self, page: Page, tmp_path):
+        """Take screenshot of Setup tab."""
+        page.get_by_role("tab", name="⚙️ Setup").click()
         time.sleep(0.5)
-        output = tmp_path / "providers.png"
+        output = tmp_path / "setup.png"
         page.screenshot(path=str(output))
         assert output.exists()
         print(f"Screenshot saved: {output}")

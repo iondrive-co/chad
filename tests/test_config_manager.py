@@ -3,7 +3,7 @@
 from unittest.mock import patch
 import os
 import pytest
-from chad.config_manager import ConfigManager
+from chad.config_manager import CONFIG_BASE_KEYS, ConfigManager, validate_config_keys
 
 
 class TestConfigManager:
@@ -543,3 +543,14 @@ class TestConfigManager:
         assert accounts["work-anthropic"] == "anthropic"
         assert accounts["personal-openai"] == "openai"
         assert len(accounts) == 2  # No duplicates
+
+    def test_validate_config_keys_accepts_known_keys(self):
+        """validate_config_keys should allow all base keys."""
+        config = {key: "value" for key in CONFIG_BASE_KEYS}
+        validate_config_keys(config)  # Should not raise
+
+    def test_validate_config_keys_rejects_unknown(self):
+        """validate_config_keys should force panel updates for new keys."""
+        config = {"password_hash": "hash", "unexpected": True}
+        with pytest.raises(ValueError):
+            validate_config_keys(config)

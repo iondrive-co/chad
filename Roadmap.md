@@ -1,14 +1,3 @@
-v0.7 Touring complete
-
-Windows support
-Integrated live view with stable scrollbar
-Screenshots and hypothesis in task summaries
-Initial findings report
-Allow continued conversation after merge or cancel
-Switch from MCP usage to skills
-Pycharm launcher with dev mode allowing use of mock providers
-Added QwenCode as a provider
-
 v0.8 Paper maximiser
 
 Split ui code from core

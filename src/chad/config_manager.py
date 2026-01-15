@@ -5,12 +5,23 @@ import getpass
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import bcrypt
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+# Base keys that may appear in the persisted config.
+CONFIG_BASE_KEYS: set[str] = {
+    "password_hash",
+    "encryption_salt",
+    "accounts",
+    "role_assignments",
+    "preferences",
+    "verification_agent",
+    "cleanup_days",
+}
 
 
 class ConfigManager:
@@ -547,3 +558,21 @@ class ConfigManager:
         config = self.load_config()
         config["cleanup_days"] = days
         self.save_config(config)
+
+
+def validate_config_keys(config: dict[str, Any], *, allow: Iterable[str] | None = None) -> None:
+    """Ensure the config file only contains known keys.
+
+    Raises:
+        ValueError: If unknown keys are present.
+    """
+    if not isinstance(config, dict):
+        raise ValueError("Config must be a dict")
+    allowed_keys = set(CONFIG_BASE_KEYS)
+    if allow:
+        allowed_keys.update(allow)
+
+    unknown = set(config.keys()) - allowed_keys
+    if unknown:
+        pretty = ", ".join(sorted(unknown))
+        raise ValueError(f"Unknown config keys found: {pretty}. Update the setup config panel to handle them.")
