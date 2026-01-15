@@ -139,6 +139,8 @@ def ensure_playwright_browsers() -> None:
 
     env = os.environ.copy()
     env["PLAYWRIGHT_BROWSERS_PATH"] = os.fspath(browsers_path)
+    # Force IPv4 DNS resolution to work around IPv6 connectivity issues with Playwright CDN
+    env["NODE_OPTIONS"] = env.get("NODE_OPTIONS", "") + " --dns-result-order=ipv4first"
 
     result = subprocess.run(
         [sys.executable, "-m", "playwright", "install", "chromium"],

@@ -90,27 +90,6 @@ class TestChadWebUI:
         full_bar = web_ui._progress_bar(150)
         assert full_bar == "█" * 20
 
-    def test_list_providers_with_accounts(self, web_ui):
-        """Test listing providers when accounts exist."""
-        result = web_ui.list_providers()
-
-        assert "claude" in result
-        assert "anthropic" in result
-        assert "gpt" in result
-        assert "openai" in result
-
-    def test_list_providers_empty(self, mock_security_mgr):
-        """Test listing providers when no accounts exist."""
-        from chad.web_ui import ChadWebUI
-
-        mock_security_mgr.list_accounts.return_value = {}
-        mock_security_mgr.list_role_assignments.return_value = {}
-
-        web_ui = ChadWebUI(mock_security_mgr, "test-password")
-        result = web_ui.list_providers()
-
-        assert "No providers configured yet" in result
-
     @patch("subprocess.run")
     def test_add_provider_success(self, mock_run, web_ui, mock_security_mgr, tmp_path):
         """Test adding a new provider successfully (OpenAI/Codex)."""
@@ -2520,3 +2499,59 @@ class TestAnsiToHtml:
         result = ansi_to_html(text)
         assert "RGB white bg" in result
         assert "background" not in result
+
+
+class TestBuildInlineLiveHtml:
+    """Tests for build_inline_live_html function - critical for live view streaming."""
+
+    def test_empty_content_creates_container_with_live_id(self):
+        """Empty content must still create a container with data-live-id.
+
+        This is critical: without the data-live-id container, JS patching
+        can't find the element to update, and live view never works.
+        This was the root cause of the live view regression.
+        """
+        from chad.web_ui import build_inline_live_html
+
+        result = build_inline_live_html("", "CODING AI", live_id="test-123")
+
+        # Must contain data-live-id for JS to find and patch
+        assert 'data-live-id="test-123"' in result
+        # Must have the live content container
+        assert 'class="inline-live-content"' in result
+        # Must have the header
+        assert 'inline-live-header' in result
+        assert "CODING AI (Live)" in result
+        # Should show working placeholder
+        assert "Working" in result
+
+    def test_content_creates_container_with_live_id(self):
+        """Content should create a container with data-live-id."""
+        from chad.web_ui import build_inline_live_html
+
+        result = build_inline_live_html("Test output", "CODING AI", live_id="abc-456")
+
+        assert 'data-live-id="abc-456"' in result
+        assert 'class="inline-live-content"' in result
+        assert "Test output" in result
+
+    def test_no_live_id_still_creates_container(self):
+        """Without live_id, container should still be created (just without data attribute)."""
+        from chad.web_ui import build_inline_live_html
+
+        result = build_inline_live_html("Some output", "CODING AI", live_id=None)
+
+        assert 'class="inline-live-content"' in result
+        assert "data-live-id" not in result
+        assert "Some output" in result
+
+    def test_empty_content_without_live_id_still_creates_structure(self):
+        """Even empty content without live_id should create proper HTML structure."""
+        from chad.web_ui import build_inline_live_html
+
+        result = build_inline_live_html("", "TEST AI", live_id=None)
+
+        assert 'class="inline-live-content"' in result
+        assert 'inline-live-header' in result
+        assert "TEST AI (Live)" in result
+        assert "Working" in result

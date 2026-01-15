@@ -1,8 +1,10 @@
-When I run /usage it shows with local time, but in chad it shows in another timezone (UTC?)
+A previous commit was for "Use local time in chad providers, and allow task restart after cancel"
+Neither of those things was actually done in this commit, find out what went wrong and fix it
 
-Cannot start task after cancel
+When the coding agent is making screenshots, it needs to describe what is in the screenshot and output that as a field
+as well, and the ui needs to show that under the screenshot
 
--> After a merge is accepted or rejected by clicking on the corresponding button in the ui, only clear from the 
-Changes Ready to Merge to the bottom, but leave the chatbot panel and Continue conversation... on the screen so that follow up requests can be made
-
--> Coding AI (Live) inner panel resetting the scroll position to top when new input is added (confirmed issue exists in current code with claude provider)
+I saw the following. Firstly the verfication agent shouldn't be running tests other than lint. Secondly a timeout should still be a verification pass.
+VERIFICATION AI
+Verification failed:
+Verification timed out: Command '['/home/miles/chad/.chad-worktrees/ef54fe53/.venv/bin/python', '-m', 'pytest', '-v', '--tb=short']' timed out after 120 seconds
