@@ -46,8 +46,13 @@ When modifying functions that return tuples (e.g., `make_yield`, generator funct
    result = verify()  # Runs flake8 + all tests
    # Or: verify(lint_only=True)  # Just flake8
    ```
-3. Perform a critical self-review and note any outstanding issues
-4. All tests must pass even if you did not break them, never skip tests for any reason.
+3. **Run startup sanity check** to catch import/runtime errors not covered by tests:
+   ```bash
+   timeout 5 .venv/bin/python -c "from chad.web_ui import launch_web_ui" 2>&1 || echo "Startup check failed"
+   ```
+   This catches NameErrors, missing imports, and other issues that flake8 and tests may miss.
+4. Perform a critical self-review and note any outstanding issues
+5. All tests must pass even if you did not break them, never skip tests for any reason.
 
 ## Screenshot Fixtures
 
