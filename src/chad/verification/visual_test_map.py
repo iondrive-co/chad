@@ -142,34 +142,41 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         source_file="chad/web_ui.py",
         keywords=["accept & merge", "merge section", "discard changes", "conflict resolution", "clear task"],
     ),
-    # --- Providers Tab ---
+    # --- Setup Tab (formerly Providers) ---
     "PROVIDER_CARD": UIComponent(
-        tab="providers",
+        tab="setup",
         component="provider-card",
-        tests=["TestProvidersTab", "TestProviderTwoColumnLayout"],
+        tests=["TestSetupTab", "TestProviderTwoColumnLayout"],
         source_file="chad/provider_ui.py",
         keywords=["provider card", "account card", "provider settings"],
     ),
     "PROVIDER_MODEL_DROPDOWN": UIComponent(
-        tab="providers",
+        tab="setup",
         component="provider-card",
-        tests=["TestProvidersTab"],
+        tests=["TestSetupTab"],
         source_file="chad/provider_ui.py",
         keywords=["provider model", "default model", "account model"],
     ),
     "PROVIDER_REASONING_DROPDOWN": UIComponent(
-        tab="providers",
+        tab="setup",
         component="provider-card",
-        tests=["TestProvidersTab"],
+        tests=["TestSetupTab"],
         source_file="chad/provider_ui.py",
         keywords=["provider reasoning", "account reasoning effort"],
     ),
     "ADD_PROVIDER": UIComponent(
-        tab="providers",
+        tab="setup",
         component="add-provider",
-        tests=["TestProvidersTab"],
+        tests=["TestSetupTab"],
         source_file="chad/provider_ui.py",
         keywords=["add provider", "new provider", "add account"],
+    ),
+    "CONFIG_PANEL": UIComponent(
+        tab="setup",
+        component="config",
+        tests=["TestSetupTab"],
+        source_file="chad/web_ui.py",
+        keywords=["config", "retention days", "coding agent", "verification agent", "default project path"],
     ),
     # --- Task Tabs ---
     "TASK_TABS": UIComponent(
@@ -287,7 +294,7 @@ if __name__ == "__main__":  # pragma: no cover
 VISUAL_TEST_MAP: dict[str, list[str]] = {
     # Provider UI - card rendering, deletion, model selection, role assignment
     "chad/provider_ui.py": [
-        "TestProvidersTab",
+        "TestSetupTab",
         "TestDeleteProvider",
     ],
     # Main web UI - tabs, elements, live stream, task execution, two-column provider layout
@@ -295,7 +302,7 @@ VISUAL_TEST_MAP: dict[str, list[str]] = {
         "TestUIElements",
         "TestReadyStatus",
         "TestCodingAgentLayout",
-        "TestProvidersTab",
+        "TestSetupTab",
         "TestLiveActivityFormat",
         "TestTaskStatusHeader",
         "TestSubtaskTabs",
@@ -309,30 +316,30 @@ VISUAL_TEST_MAP: dict[str, list[str]] = {
     ],
     # Security manager - affects provider authentication display
     "chad/security.py": [
-        "TestProvidersTab",
+        "TestSetupTab",
     ],
     # Tools - verify and screenshot functions
     "chad/verification/tools.py": [
         "TestScreenshots",
-        "TestProvidersTab",
+        "TestSetupTab",
         "TestDeleteProvider",
     ],
     # Playwright test utilities - affects all visual test measurements
     "chad/verification/ui_playwright_runner.py": [
         "TestDeleteProvider",
-        "TestProvidersTab",
+        "TestSetupTab",
         "TestLiveViewFormat",
         "TestRealisticLiveContent",
         "TestScreenshots",
     ],
-    # Providers - affects provider card display and model choices
+    # Setup tab - affects provider card display and model choices
     "chad/providers.py": [
-        "TestProvidersTab",
+        "TestSetupTab",
         "TestReadyStatus",
     ],
     # Model catalog - affects model dropdown choices
     "chad/model_catalog.py": [
-        "TestProvidersTab",
+        "TestSetupTab",
     ],
 }
 

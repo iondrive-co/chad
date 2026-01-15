@@ -229,6 +229,7 @@ COMPONENT_SELECTORS = {
     "provider-summary": "#provider-summary-panel",
     "provider-card": ".provider-cards-row .column:has(.provider-card__header-row)",
     "add-provider": "#add-provider-panel",
+    "config": "#config-panel",
 }
 
 
@@ -245,10 +246,10 @@ def screenshot(
     - Capture specific UI components for focused verification
 
     Args:
-        tab: Which tab to screenshot ("run" or "providers")
+        tab: Which tab to screenshot ("run" or "setup")
         component: Optional specific component to capture. Available components:
             Run tab: "project-path", "agent-communication", "live-view"
-            Providers tab: "provider-summary", "provider-card", "add-provider"
+            Setup tab: "provider-summary", "provider-card", "add-provider", "config"
             Leave empty to capture the entire tab.
         label: Optional label like "before" or "after" for the filename
 
@@ -257,7 +258,10 @@ def screenshot(
     """
     try:
         normalized = tab.lower().strip()
-        tab_name = "providers" if normalized.startswith("p") else "run"
+        if normalized.startswith(("s", "p", "c")):
+            tab_name = "setup"
+        else:
+            tab_name = "run"
 
         selector = None
         if component:

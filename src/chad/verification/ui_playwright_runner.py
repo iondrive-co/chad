@@ -407,7 +407,7 @@ def _select_tab(page: "Page", tab: str) -> None:
     if normalized in {"run", "task", "default"}:
         labels = ["🚀 Run Task", "Task 1"]
     else:
-        labels = ["⚙️ Providers"]
+        labels = ["⚙️ Setup", "⚙️ Providers"]
 
     for label in labels:
         locator = page.get_by_role("tab", name=label)
@@ -447,7 +447,7 @@ def run_screenshot_subprocess(
     """Run screenshot_ui.py in a subprocess to avoid event loop conflicts.
 
     Args:
-        tab: Which tab to screenshot ("run" or "providers")
+        tab: Which tab to screenshot ("run" or "setup")
         headless: Whether to run browser in headless mode
         viewport: Browser viewport dimensions
         label: Optional label for the screenshot filename
@@ -521,7 +521,7 @@ def run_screenshot_subprocess(
 
 def measure_provider_delete_button(page: "Page") -> Dict[str, float]:
     """Measure the provider header row and delete button heights."""
-    _select_tab(page, "providers")
+    _select_tab(page, "setup")
     measurement = page.evaluate(
         """
 () => {
@@ -547,7 +547,7 @@ def measure_provider_delete_button(page: "Page") -> Dict[str, float]:
 
 def measure_add_provider_accordion(page: "Page") -> Dict[str, float | str]:
     """Measure spacing and typography for the Add New Provider accordion."""
-    _select_tab(page, "providers")
+    _select_tab(page, "setup")
     measurement = page.evaluate(
         """
 () => {
@@ -595,8 +595,8 @@ def measure_add_provider_accordion(page: "Page") -> Dict[str, float | str]:
 
 
 def get_provider_names(page: "Page") -> list[str]:
-    """Get a list of all visible provider names from the providers tab."""
-    _select_tab(page, "providers")
+    """Get a list of all visible provider names from the setup tab."""
+    _select_tab(page, "setup")
     names = page.evaluate(
         """
 () => {
@@ -647,7 +647,7 @@ def get_card_visibility_debug(page: "Page") -> list[dict]:
 
     Returns list of dicts with cardDisplay, columnDisplay, hasHeaderSpan, headerText for each card.
     """
-    _select_tab(page, "providers")
+    _select_tab(page, "setup")
     return page.evaluate(
         """
 () => {
@@ -721,7 +721,7 @@ def delete_provider_by_name(page: "Page", provider_name: str) -> DeleteProviderR
 
     Returns a DeleteProviderResult with details about what happened.
     """
-    _select_tab(page, "providers")
+    _select_tab(page, "setup")
 
     # Check if provider exists before deletion
     existed_before = provider_exists(page, provider_name)

@@ -120,7 +120,11 @@ def main():
         "--output", "-o", type=Path, default=DEFAULT_OUTPUT, help=f"Output path (default: {DEFAULT_OUTPUT})"
     )
     parser.add_argument(
-        "--tab", "-t", choices=["run", "providers"], default=None, help="Tab to screenshot (default: run)"
+        "--tab",
+        "-t",
+        choices=["run", "providers", "setup"],
+        default=None,
+        help="Tab to screenshot (default: run; 'setup' targets the former providers tab)",
     )
     parser.add_argument(
         "--selector",
