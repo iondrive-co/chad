@@ -579,8 +579,8 @@ class GitWorktreeManager:
             return False, None, "Worktree not found"
 
         # First commit any uncommitted changes in the worktree
-        pre_merge_msg = commit_message or "Agent changes"
-        commit_ok, commit_error = self.commit_all_changes(task_id, pre_merge_msg)
+        # Always use generic message for pre-merge commits; custom message is for merge itself
+        commit_ok, commit_error = self.commit_all_changes(task_id, "Agent changes")
         if not commit_ok:
             status_result = self._run_git("status", "--short", cwd=worktree_path, check=False)
             status = status_result.stdout.strip()
