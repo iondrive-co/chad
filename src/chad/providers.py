@@ -1652,6 +1652,180 @@ class GeminiCodeAssistProvider(AIProvider):
         return True
 
 
+class QwenCodeProvider(AIProvider):
+    """Provider for Qwen Code CLI with multi-turn support.
+
+    Uses the `qwen` command-line interface in headless mode (-p)
+    with stream-json output for real-time streaming.
+    Supports multi-turn via `--resume <session_id>`.
+
+    Qwen Code is a fork of Gemini CLI, optimized for Qwen3-Coder models.
+    Authentication via QwenChat OAuth (2000 free daily requests) or API key.
+    """
+
+    def __init__(self, config: ModelConfig):
+        super().__init__(config)
+        self.project_path: str | None = None
+        self.system_prompt: str | None = None
+        self.current_message: str | None = None
+        self.process: object | None = None
+        self.master_fd: int | None = None
+        self.session_id: str | None = None  # For multi-turn support
+
+    def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
+        ok, detail = _ensure_cli_tool("qwen", self._notify_activity)
+        if not ok:
+            return False
+
+        self.project_path = project_path
+        self.system_prompt = system_prompt
+        self.cli_path = detail
+        return True
+
+    def send_message(self, message: str) -> None:
+        # Only prepend system prompt on first message (no session_id yet)
+        if self.system_prompt and not self.session_id:
+            self.current_message = f"{self.system_prompt}\n\n---\n\n{message}"
+        else:
+            self.current_message = message
+
+    def get_response(self, timeout: float = 1800.0) -> str:  # noqa: C901
+        import json
+
+        if not self.current_message:
+            return ""
+
+        qwen_cli = getattr(self, "cli_path", None) or find_cli_executable("qwen")
+
+        # Build command - use resume if we have a session_id (multi-turn)
+        if self.session_id:
+            cmd = [
+                qwen_cli,
+                "-p",
+                self.current_message,
+                "--output-format",
+                "stream-json",
+                "--resume",
+                self.session_id,
+            ]
+        else:
+            cmd = [
+                qwen_cli,
+                "-p",
+                self.current_message,
+                "--output-format",
+                "stream-json",
+                "--yolo",  # Auto-approve all tool calls
+            ]
+            if self.config.model_name and self.config.model_name != "default":
+                cmd.extend(["-m", self.config.model_name])
+
+        try:
+            env = os.environ.copy()
+            env["TERM"] = "xterm-256color"
+
+            json_events = []
+            response_parts = []
+
+            def handle_chunk(decoded: str) -> None:
+                # Stream raw output for live display
+                self._notify_activity("stream", decoded)
+                # Parse JSON lines
+                for line in decoded.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        if not isinstance(event, dict):
+                            continue
+                        json_events.append(event)
+                        # Extract session_id from system/init event
+                        if event.get("type") in ("system", "init") and "session_id" in event:
+                            self.session_id = event["session_id"]
+                        # Collect response content from assistant messages
+                        if event.get("type") == "message" and event.get("role") == "assistant":
+                            content = event.get("content", "")
+                            if content:
+                                response_parts.append(content)
+                                self._notify_activity("text", content[:80])
+                        # Also handle assistant type directly (Gemini CLI format)
+                        if event.get("type") == "assistant":
+                            message = event.get("message", {})
+                            content_blocks = message.get("content", [])
+                            for block in content_blocks:
+                                if isinstance(block, dict) and block.get("type") == "text":
+                                    text = block.get("text", "")
+                                    if text:
+                                        response_parts.append(text)
+                                        self._notify_activity("text", text[:80])
+                    except json.JSONDecodeError:
+                        # Non-JSON line (warnings, etc.) - just notify
+                        if line and len(line) > 10:
+                            self._notify_activity("text", line[:80])
+
+            self.process, self.master_fd = _start_pty_process(cmd, cwd=self.project_path, env=env)
+
+            if self.process.stdin:
+                self.process.stdin.close()
+
+            output, timed_out, idle_stalled = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
+
+            self.current_message = None
+            self.process = None
+            self.master_fd = None
+
+            if idle_stalled:
+                return f"Error: Qwen execution stalled (no output for {int(timeout)}s)"
+            if timed_out:
+                return f"Error: Qwen execution timed out ({int(timeout / 60)} minutes)"
+
+            # Return collected response parts if any
+            if response_parts:
+                return "".join(response_parts).strip()
+
+            # Fallback to raw output
+            output = _strip_ansi_codes(output)
+            return output.strip() if output else "No response from Qwen Code"
+
+        except FileNotFoundError:
+            self.current_message = None
+            self.process = None
+            _close_master_fd(self.master_fd)
+            self.master_fd = None
+            return (
+                "Failed to run Qwen Code: command not found\n\n"
+                "Install with: npm install -g @qwen-code/qwen-code\n"
+                "Or: brew install qwen-code"
+            )
+        except (PermissionError, OSError) as exc:
+            self.current_message = None
+            self.process = None
+            _close_master_fd(self.master_fd)
+            self.master_fd = None
+            return f"Failed to run Qwen Code: {exc}"
+
+    def stop_session(self) -> None:
+        self.current_message = None
+        self.session_id = None  # Clear session_id to end multi-turn
+        _close_master_fd(self.master_fd)
+        self.master_fd = None
+        if self.process:
+            try:
+                self.process.kill()
+                self.process.wait(timeout=5)
+            except Exception:
+                pass
+            self.process = None
+
+    def is_alive(self) -> bool:
+        # Session is "alive" if we have a session_id for resuming
+        return self.session_id is not None or (self.process is not None and self.process.poll() is None)
+
+    def supports_multi_turn(self) -> bool:
+        return True
+
+
 class MistralVibeProvider(AIProvider):
     """Provider for Mistral Vibe CLI with multi-turn support.
 
@@ -2002,6 +2176,8 @@ def create_provider(config: ModelConfig) -> AIProvider:
         return OpenAICodexProvider(config)
     elif config.provider == "gemini":
         return GeminiCodeAssistProvider(config)
+    elif config.provider == "qwen":
+        return QwenCodeProvider(config)
     elif config.provider == "mistral":
         return MistralVibeProvider(config)
     elif config.provider == "mock":
