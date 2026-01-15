@@ -275,6 +275,17 @@ class GitWorktreeManager:
 
         return True
 
+    def reset_worktree(self, task_id: str, base_commit: str | None = None) -> bool:
+        """Reset a worktree to a clean state based on the provided base commit."""
+        worktree_path = self._worktree_path(task_id)
+        if not worktree_path.exists():
+            return False
+
+        target = base_commit or self.get_main_branch()
+        self._run_git("reset", "--hard", target, cwd=worktree_path, check=False)
+        self._run_git("clean", "-fd", cwd=worktree_path, check=False)
+        return True
+
     def has_changes(self, task_id: str) -> bool:
         """Check if worktree has uncommitted changes or commits ahead of main."""
         worktree_path = self._worktree_path(task_id)

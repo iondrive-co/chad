@@ -224,6 +224,35 @@ class TestGitWorktreeManager:
         assert result is True
         assert not worktree_path.exists()
 
+    def test_reset_worktree_resets_changes(self, git_repo):
+        """Test resetting a worktree back to its base commit."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-reset-1"
+
+        worktree_path, base_commit = mgr.create_worktree(task_id)
+        (worktree_path / "README.md").write_text("# Modified content\n")
+        (worktree_path / "new_file.txt").write_text("New content")
+
+        # Stage and commit a change to move branch ahead of base
+        subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Commit before reset"],
+            cwd=worktree_path,
+            check=True,
+            capture_output=True,
+        )
+
+        # Add an untracked file to ensure clean removes it
+        (worktree_path / "temp.txt").write_text("temp")
+
+        assert mgr.has_changes(task_id) is True
+
+        reset_result = mgr.reset_worktree(task_id, base_commit)
+        assert reset_result is True
+        assert mgr.has_changes(task_id) is False
+        assert (worktree_path / "temp.txt").exists() is False
+        assert (worktree_path / "README.md").read_text() == "# Test Repository\n"
+
     def test_has_changes_no_changes(self, git_repo):
         """Test has_changes returns False when no changes."""
         mgr = GitWorktreeManager(git_repo)

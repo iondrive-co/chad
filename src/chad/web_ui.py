@@ -4395,14 +4395,20 @@ class ChadWebUI:
         preserved so user can retry the task or continue the conversation.
         """
         session = self.get_session(session_id)
-        if session.worktree_path and session.project_path:
+        if session.project_path:
             git_mgr = GitWorktreeManager(Path(session.project_path))
-            git_mgr.delete_worktree(session_id)
-            session.worktree_path = None
-            session.worktree_branch = None
+            if git_mgr.worktree_exists(session_id):
+                git_mgr.reset_worktree(session_id, session.worktree_base_commit)
+                session.worktree_path = git_mgr._worktree_path(session_id)
+                session.worktree_branch = git_mgr._branch_name(session_id)
+            else:
+                worktree_path, base_commit = git_mgr.create_worktree(session_id)
+                session.worktree_path = worktree_path
+                session.worktree_branch = git_mgr._branch_name(session_id)
+                session.worktree_base_commit = base_commit
+
             session.has_worktree_changes = False
             session.merge_conflicts = None
-            session.worktree_base_commit = None
             # Preserve chat_history for follow-up conversations
 
         # Reset merge UI but keep task description and chat for follow-up
