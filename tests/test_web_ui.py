@@ -1249,7 +1249,7 @@ class TestLaunchWebUI:
 
         # When password is provided, verify_main_password should NOT be called
         mock_security.verify_main_password.assert_not_called()
-        mock_webui_class.assert_called_once_with(mock_security, "test-password")
+        mock_webui_class.assert_called_once_with(mock_security, "test-password", dev_mode=False)
         mock_app.launch.assert_called_once()
         mock_resolve_port.assert_called_once_with(7860)
         assert result == (None, 7860)
@@ -1278,7 +1278,7 @@ class TestLaunchWebUI:
         result = launch_web_ui(None)
 
         mock_security.verify_main_password.assert_called_once()
-        mock_webui_class.assert_called_once_with(mock_security, "verified-password")
+        mock_webui_class.assert_called_once_with(mock_security, "verified-password", dev_mode=False)
         mock_resolve_port.assert_called_once_with(7860)
         assert result == (None, 7860)
 
@@ -2321,14 +2321,15 @@ class TestVerificationPrompt:
         assert "coding agent output was empty" in feedback
 
     def test_run_verification_returns_rich_feedback(self, monkeypatch, tmp_path):
-        """Verification failures should include lint and test details."""
+        """Verification failures should include lint details (tests no longer run)."""
         from chad.web_ui import ChadWebUI
         import chad.web_ui as web_ui
         import chad.verification.tools as verification_tools
 
         class DummySecurityMgr:
             def list_accounts(self):
-                return {"verifier": "mock"}
+                # Use anthropic (non-mock) to trigger automated verification
+                return {"verifier": "anthropic"}
 
             def get_account_model(self, _):
                 return "default"
@@ -2336,19 +2337,14 @@ class TestVerificationPrompt:
             def get_account_reasoning(self, _):
                 return "default"
 
-        # Patch verification tool to avoid running real lint/tests
-        def fake_verify(project_root=None):
+        # Patch verification tool to avoid running real lint
+        # Note: verification now only runs lint (lint_only=True)
+        def fake_verify(project_root=None, lint_only=False):
             return {
                 "success": False,
-                "message": "Preflight failed",
+                "message": "Lint failed",
                 "phases": {
                     "lint": {"success": False, "issues": ["E123 line 5: bad import"]},
-                    "tests": {
-                        "success": False,
-                        "failed": 2,
-                        "passed": 1,
-                        "output": "FAIL: test_example.py::test_one\nAssertionError\nFAIL: test_two\nTraceback",
-                    },
                 },
             }
 
@@ -2379,7 +2375,6 @@ class TestVerificationPrompt:
         assert "Verification failed" in feedback
         assert "Flake8 errors" in feedback
         assert "E123 line 5" in feedback
-        assert "Tests failed" in feedback
 
 
 class TestAnsiToHtml:
