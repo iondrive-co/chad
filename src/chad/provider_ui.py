@@ -284,8 +284,8 @@ class ProviderUIManager:
         No programmatic API available for quota, so we estimate based on
         whether logged in. Biased low since we can't verify actual quota.
         """
-        qwen_settings = Path.home() / ".qwen" / "settings.json"
-        if not qwen_settings.exists():
+        qwen_oauth = Path.home() / ".qwen" / "oauth_creds.json"
+        if not qwen_oauth.exists():
             return 0.0
 
         return 0.3  # Logged in but no quota API, bias low
@@ -888,9 +888,9 @@ class ProviderUIManager:
         Qwen Code uses QwenChat OAuth with 2000 free daily requests.
         No programmatic API available for detailed quota.
         """
-        qwen_settings = Path.home() / ".qwen" / "settings.json"
+        qwen_oauth = Path.home() / ".qwen" / "oauth_creds.json"
 
-        if not qwen_settings.exists():
+        if not qwen_oauth.exists():
             return "❌ **Not logged in**\n\nRun `qwen` in terminal to authenticate."
 
         return (
@@ -928,8 +928,8 @@ class ProviderUIManager:
                 return False, "Not logged in"
 
             if provider_type == "qwen":
-                qwen_settings = Path.home() / ".qwen" / "settings.json"
-                if qwen_settings.exists():
+                qwen_oauth = Path.home() / ".qwen" / "oauth_creds.json"
+                if qwen_oauth.exists():
                     return True, "Logged in"
                 return False, "Not logged in"
 
@@ -1317,31 +1317,41 @@ class ProviderUIManager:
                             except Exception:
                                 pass
                         else:
-                            # On Unix, spawn gemini and poll for oauth file
+                            # On Unix, use pexpect to provide a PTY for the CLI
+                            import pexpect
+
                             env = os.environ.copy()
                             env["TERM"] = "xterm-256color"
 
-                            process = subprocess.Popen(
-                                [gemini_cli],
-                                env=env,
-                                stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                start_new_session=True,
-                            )
-
-                            start_time = time.time()
-                            timeout_secs = 120
-                            while time.time() - start_time < timeout_secs:
-                                if gemini_oauth.exists():
-                                    login_success = True
-                                    break
-                                time.sleep(2)
+                            child = pexpect.spawn(gemini_cli, timeout=120, encoding="utf-8", env=env)
 
                             try:
-                                process.terminate()
-                            except Exception:
+                                # Gemini CLI shows auth prompts on first run
+                                # Wait for and accept any prompts, then poll for oauth file
+                                try:
+                                    child.expect(["authenticate", "Google", "login", "Enter"], timeout=15)
+                                    time.sleep(1)
+                                    child.send("\r")
+                                except pexpect.TIMEOUT:
+                                    pass
+
+                                # Poll for oauth file while process runs
+                                start_time = time.time()
+                                timeout_secs = 120
+                                while time.time() - start_time < timeout_secs:
+                                    if gemini_oauth.exists():
+                                        login_success = True
+                                        break
+                                    if not child.isalive():
+                                        break
+                                    time.sleep(2)
+                            except (pexpect.TIMEOUT, pexpect.EOF):
                                 pass
+                            finally:
+                                try:
+                                    child.close()
+                                except Exception:
+                                    pass
 
                     except FileNotFoundError:
                         result = (
@@ -1372,13 +1382,13 @@ class ProviderUIManager:
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
 
             elif provider_type == "qwen":
-                # Qwen uses QwenChat OAuth (similar to Gemini)
+                # Qwen uses QwenChat OAuth (fork of Gemini CLI)
                 import time
                 import os
 
                 qwen_cli = cli_detail or "qwen"
                 is_windows = self._is_windows()
-                qwen_settings = Path.home() / ".qwen" / "settings.json"
+                qwen_oauth = Path.home() / ".qwen" / "oauth_creds.json"
 
                 # Check if already logged in
                 login_success, _ = self._check_provider_login(provider_type, account_name)
@@ -1392,11 +1402,11 @@ class ProviderUIManager:
                                 creationflags=CREATE_NEW_CONSOLE,
                             )
 
-                            # Poll for settings file
+                            # Poll for oauth file
                             start_time = time.time()
                             timeout_secs = 120
                             while time.time() - start_time < timeout_secs:
-                                if qwen_settings.exists():
+                                if qwen_oauth.exists():
                                     login_success = True
                                     break
                                 time.sleep(2)
@@ -1406,31 +1416,44 @@ class ProviderUIManager:
                             except Exception:
                                 pass
                         else:
-                            # On Unix, spawn qwen and poll for settings file
+                            # On Unix, use pexpect to interact with the CLI
+                            import pexpect
+
                             env = os.environ.copy()
                             env["TERM"] = "xterm-256color"
 
-                            process = subprocess.Popen(
-                                [qwen_cli],
-                                env=env,
-                                stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                start_new_session=True,
-                            )
-
-                            start_time = time.time()
-                            timeout_secs = 120
-                            while time.time() - start_time < timeout_secs:
-                                if qwen_settings.exists():
-                                    login_success = True
-                                    break
-                                time.sleep(2)
+                            child = pexpect.spawn(qwen_cli, timeout=120, encoding="utf-8", env=env)
 
                             try:
-                                process.terminate()
-                            except Exception:
+                                # Qwen CLI shows auth selection on first run:
+                                # "How would you like to authenticate for this project?"
+                                # 1. Qwen OAuth (selected by default)
+                                # 2. OpenAI
+                                # "(Use Enter to Set Auth)"
+
+                                # Wait for the auth selection prompt
+                                child.expect(["authenticate", "Qwen OAuth", "Use Enter"], timeout=15)
+                                time.sleep(1)
+                                child.send("\r")  # Press Enter to select Qwen OAuth
+
+                                # Poll for oauth file while waiting for user to complete browser auth
+                                start_time = time.time()
+                                timeout_secs = 120
+                                while time.time() - start_time < timeout_secs:
+                                    if qwen_oauth.exists():
+                                        login_success = True
+                                        break
+                                    if not child.isalive():
+                                        break
+                                    time.sleep(2)
+
+                            except (pexpect.TIMEOUT, pexpect.EOF):
                                 pass
+                            finally:
+                                try:
+                                    child.close()
+                                except Exception:
+                                    pass
 
                     except FileNotFoundError:
                         result = (
