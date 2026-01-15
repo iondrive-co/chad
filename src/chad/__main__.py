@@ -1,6 +1,7 @@
 """Main entry point for Chad - launches web interface."""
 
 import argparse
+import atexit
 import getpass
 import os
 import random
@@ -12,7 +13,8 @@ from datetime import datetime
 
 from pathlib import Path
 
-from .security import SecurityManager
+from .cleanup import cleanup_on_startup, cleanup_on_shutdown
+from .config_manager import ConfigManager
 from .web_ui import launch_web_ui
 from .config import ensure_project_root_env
 
@@ -106,9 +108,19 @@ def main() -> int:
     sys.stdout.flush()
 
     # Ensure all child agents inherit the active project root
-    ensure_project_root_env(Path(__file__).resolve().parents[2])
+    project_root = Path(__file__).resolve().parents[2]
+    ensure_project_root_env(project_root)
 
-    security = SecurityManager()
+    # Run startup cleanup (worktrees, logs, screenshots older than N days)
+    config_mgr = ConfigManager()
+    cleanup_days = config_mgr.get_cleanup_days()
+    cleanup_results = cleanup_on_startup(project_root, cleanup_days)
+    if cleanup_results:
+        total = sum(len(items) for items in cleanup_results.values())
+        print(f"Cleaned up {total} old files/directories (>{cleanup_days} days old)")
+
+    # Register shutdown cleanup
+    atexit.register(cleanup_on_shutdown)
 
     try:
         # Check for password from environment (for automation/screenshots)
