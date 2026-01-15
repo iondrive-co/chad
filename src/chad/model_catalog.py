@@ -53,13 +53,18 @@ class ModelCatalog:
         "gemini-2.5-flash-lite",
         "default",
     )
+    QWEN_FALLBACK: tuple[str, ...] = (
+        "qwen3-coder",
+        "qwen3-coder-plus",
+        "default",
+    )
     MISTRAL_FALLBACK: tuple[str, ...] = ("default",)
     MOCK_FALLBACK: tuple[str, ...] = ("default",)
 
     _cache: dict[str, tuple[float, list[str]]] = field(default_factory=dict, init=False)
 
     def supported_providers(self) -> set[str]:
-        return {"anthropic", "openai", "gemini", "mistral", "mock"}
+        return {"anthropic", "openai", "gemini", "qwen", "mistral", "mock"}
 
     def get_models(self, provider: str, account_name: str | None = None) -> list[str]:
         """Return discovered models for a provider, cached with TTL."""
@@ -93,6 +98,7 @@ class ModelCatalog:
             "anthropic": self.ANTHROPIC_FALLBACK,
             "openai": self.OPENAI_FALLBACK,
             "gemini": self.GEMINI_FALLBACK,
+            "qwen": self.QWEN_FALLBACK,
             "mistral": self.MISTRAL_FALLBACK,
             "mock": self.MOCK_FALLBACK,
         }.get(provider, ("default",))

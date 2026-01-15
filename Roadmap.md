@@ -7,7 +7,7 @@ Early initial summary report
 Allow continued conversation after merge
 Switch from MCP usage to skills
 Pycharm launcher with dev mode for starting a mock provider for better testing
-Add qwen code
+Add QwenCode as a provider
 
 v0.8 Paper maximiser
 
