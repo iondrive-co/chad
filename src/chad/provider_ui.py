@@ -49,19 +49,6 @@ class ProviderUIManager:
         self.installer = installer or AIToolInstaller()
         self.dev_mode = dev_mode
 
-    def list_providers(self) -> str:
-        """Summarize all configured providers."""
-        accounts = self.security_mgr.list_accounts()
-
-        if not accounts:
-            return "No providers configured yet. Add a provider with the ➕ below."
-
-        rows = []
-        for account_name, provider in accounts.items():
-            rows.append(f"- **{account_name}** ({provider})")
-
-        return "\n".join(rows)
-
     def get_provider_card_items(self) -> list[tuple[str, str]]:
         """Return provider account items for card display."""
         accounts = self.security_mgr.list_accounts()
@@ -288,11 +275,10 @@ class ProviderUIManager:
         return 0.3  # Logged in but no quota API, bias low
 
     def provider_state(self, card_slots: int, pending_delete: str | None = None) -> tuple:
-        """Build UI state for provider cards (summary + per-account controls)."""
+        """Build UI state for provider cards (per-account controls)."""
         account_items = self.get_provider_card_items()
-        list_md = self.list_providers()
 
-        outputs: list = [list_md]
+        outputs: list = []
         for idx in range(card_slots):
             if idx < len(account_items):
                 account_name, provider = account_items[idx]

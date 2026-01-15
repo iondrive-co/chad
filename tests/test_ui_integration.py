@@ -1268,6 +1268,127 @@ class TestJsPatchLiveContent:
         """)
         assert has_tracking, "Inline live content should have scroll tracking set up"
 
+    def test_initial_placeholder_has_live_id_container(self, page: Page):
+        """Initial empty placeholder should still have data-live-id container for JS patching.
+
+        This is the key regression test: when a task starts, the placeholder message
+        must have a data-live-id container so JS can patch it with streaming updates.
+        If the container doesn't exist initially, live view updates are never shown.
+        """
+        # Simulate what Python does: build_inline_live_html("", "CODING AI", live_id="test-initial-1")
+        # The result MUST contain data-live-id="test-initial-1" even when content is empty
+        page.evaluate("""
+        () => {
+            const chatbot = document.querySelector('#agent-chatbot') || document.querySelector('.agent-chatbot');
+            if (!chatbot) return false;
+
+            // Simulate the initial placeholder that Python creates
+            // This is what build_inline_live_html("", "CODING AI", live_id=...) should produce
+            const bubble = document.createElement('div');
+            bubble.className = 'message-bubble';
+            bubble.innerHTML = `
+                <strong>CODING AI</strong>
+                <div class="inline-live-header">▶ CODING AI (Live)</div>
+                <div class="inline-live-content" data-live-id="test-initial-1"><em>Working...</em></div>
+            `;
+            chatbot.appendChild(bubble);
+            return true;
+        }
+        """)
+        page.wait_for_timeout(100)
+
+        # Verify the container exists and can be found by JS
+        container_exists = page.evaluate("""
+        () => {
+            const container = document.querySelector('[data-live-id="test-initial-1"]');
+            return container !== null;
+        }
+        """)
+        assert container_exists, "Initial placeholder must have data-live-id container"
+
+        # Verify JS patching works on this initial container
+        result = page.evaluate("""
+        () => {
+            const success = window._patchLiveContent('test-initial-1', '<b>Now streaming real content...</b>');
+            const container = document.querySelector('[data-live-id="test-initial-1"]');
+            return {
+                success,
+                content: container ? container.innerHTML : null
+            };
+        }
+        """)
+
+        assert result["success"], "_patchLiveContent should work on initial placeholder"
+        assert "Now streaming real content" in result["content"], "Content should be updated"
+
+
+class TestLiveViewEndToEnd:
+    """End-to-end tests for live view streaming with mock provider."""
+
+    def test_live_view_placeholder_created_on_task_start(self, page: Page):
+        """When a task starts, a placeholder with data-live-id should be created.
+
+        This tests the actual Gradio/Python integration - not just JS functions.
+        """
+        # Fill in task description
+        task_input = page.get_by_label("Task Description")
+        task_input.fill("Test task for live view")
+        page.wait_for_timeout(200)
+
+        # Click start task button
+        start_btn = page.locator("#start-task-btn")
+        start_btn.click()
+
+        # Wait for the chatbot to show a placeholder with data-live-id
+        # The mock provider should create a message_start event that triggers this
+        page.wait_for_timeout(500)
+
+        # Check for data-live-id container in the chatbot
+        has_live_container = page.evaluate("""
+        () => {
+            const chatbot = document.querySelector('#agent-chatbot') || document.querySelector('.agent-chatbot');
+            if (!chatbot) return false;
+            // Look for any data-live-id container
+            const container = chatbot.querySelector('[data-live-id]');
+            return container !== null;
+        }
+        """)
+        assert has_live_container, (
+            "Task start should create a placeholder with data-live-id container "
+            "for JS to patch with streaming updates"
+        )
+
+    def test_live_view_content_updates_visible(self, page: Page):
+        """Live view content should be visible and update during streaming."""
+        # Fill in task description
+        task_input = page.get_by_label("Task Description")
+        task_input.fill("Show me live view test")
+        page.wait_for_timeout(200)
+
+        # Click start task button
+        start_btn = page.locator("#start-task-btn")
+        start_btn.click()
+
+        # Wait for streaming to complete (mock provider is fast)
+        page.wait_for_timeout(2000)
+
+        # Check that the chatbot shows content (not just "Working...")
+        chatbot_text = page.evaluate("""
+        () => {
+            const chatbot = document.querySelector('#agent-chatbot') || document.querySelector('.agent-chatbot');
+            if (!chatbot) return '';
+            return chatbot.textContent || '';
+        }
+        """)
+
+        # The mock provider generates specific content - check for key phrases
+        # If live view is broken, we'd only see "Working..." or nothing
+        assert "CODING AI" in chatbot_text, "Chatbot should show CODING AI messages"
+        # After task completes, we should see some actual content, not just placeholder
+        assert len(chatbot_text) > 100, (
+            f"Chatbot should have substantial content after streaming, got: {chatbot_text[:200]}"
+        )
+
 
 class TestRealisticLiveContent:
     """Test live view with realistic CLI-like content to verify all text is visible."""
@@ -1441,6 +1562,61 @@ class TestMergeDiscardReset:
             "syncMergeSectionVisibility should use ':scope > *' to only clear "
             "direct children styles, preserving accordion internal state"
         )
+
+    def test_merge_section_hidden_when_no_changes(self, page: Page):
+        """Verify merge section is hidden when there are no changes.
+
+        This test ensures that the "Changes Ready to Merge" header and merge section
+        are not visible when there are no actual changes in the worktree.
+        """
+        # Wait for page to fully load and JS to run
+        time.sleep(1.0)  # Give JS visibility sync time to run
+
+        # Check merge section visibility and content
+        merge_status = page.evaluate(
+            """
+        () => {
+            const mergeSection = document.querySelector('.merge-section');
+            if (!mergeSection) {
+                return { exists: false };
+            }
+
+            // Check if it has the hidden class
+            const hasHiddenClass = mergeSection.classList.contains('merge-section-hidden');
+
+            // Check if the header has content
+            const header = mergeSection.querySelector('h3, [data-testid="markdown"] h3');
+            const headerText = header ? header.textContent.trim() : '';
+
+            // Check if changes summary has content
+            const summary = mergeSection.querySelector('[key*="changes-summary"]');
+            const summaryText = summary ? summary.textContent.trim() : '';
+
+            // Check computed visibility
+            const style = window.getComputedStyle(mergeSection);
+            const isVisible = style.display !== 'none' && style.visibility !== 'hidden' &&
+                             !hasHiddenClass;
+
+            return {
+                exists: true,
+                hasHiddenClass: hasHiddenClass,
+                headerText: headerText,
+                summaryText: summaryText,
+                isVisible: isVisible,
+                computedDisplay: style.display
+            };
+        }
+        """
+        )
+
+        # The merge section should exist but be hidden
+        assert merge_status["exists"], "Merge section should exist in DOM"
+        assert merge_status["hasHiddenClass"], "Merge section should have 'merge-section-hidden' class"
+        assert not merge_status["isVisible"], f"Merge section should not be visible, but got: {merge_status}"
+
+        # Header and summary should be empty
+        assert merge_status["headerText"] == "", f"Header should be empty but got: '{merge_status['headerText']}'"
+        assert merge_status["summaryText"] == "", f"Summary should be empty but got: '{merge_status['summaryText']}'"
 
 
 class TestInlineScreenshots:

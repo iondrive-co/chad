@@ -269,31 +269,6 @@ body, .gradio-container, .gradio-container * {
   letter-spacing: 0.01em;
 }
 
-.provider-summary {
-  background: #1a1f2e;
-  border: 1px solid #2d3748;
-  border-radius: 14px;
-  padding: 12px 14px;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
-}
-
-.provider-summary,
-.provider-summary * {
-  color: #e2e8f0 !important;
-}
-
-.provider-summary strong {
-  color: #63b3ed !important;
-}
-
-.provider-summary code {
-  background: #2d3748 !important;
-  color: #a0aec0 !important;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 0.9em;
-}
-
 .provider-card {
   background: linear-gradient(135deg, #0c1424 0%, #0a1a32 100%);
   border: 1px solid #1f2b46;
@@ -1765,10 +1740,17 @@ def build_inline_live_html(
         live_id: Optional stable ID for JS patching. When provided, the container
                  gets a data-live-id attribute that JavaScript can use to update
                  content in-place without replacing the DOM element.
+
+    IMPORTANT: Even when content is empty, this MUST return HTML with the
+    data-live-id container so that JavaScript can patch it with streaming
+    updates. If we return plain markdown for empty content, the live view
+    will never work because there's no container to patch.
     """
     html_content = build_inline_live_inner_html(content)
+    # Use placeholder if content is empty - but ALWAYS create the HTML container
+    # with data-live-id so JS patching can update it during streaming
     if not html_content:
-        return f"**{ai_name}**\n\n*Working...*"
+        html_content = "<em>Working...</em>"
     # Format for inline display in chat bubble
     header = f'<div class="inline-live-header">▶ {ai_name} (Live)</div>'
     # Add data-live-id for JS patching if provided
@@ -1988,9 +1970,6 @@ class ChadWebUI:
 
     SUPPORTED_PROVIDERS = ProviderUIManager.SUPPORTED_PROVIDERS
     OPENAI_REASONING_LEVELS = ProviderUIManager.OPENAI_REASONING_LEVELS
-
-    def list_providers(self) -> str:
-        return self.provider_ui.list_providers()
 
     def _get_account_role(self, account_name: str) -> str | None:
         return self.provider_ui._get_account_role(account_name)
@@ -2891,16 +2870,22 @@ class ChadWebUI:
 
                             now = time_module.time()
                             if now - last_yield_time >= min_yield_interval:
-                                # Use JS patching to update content in-place
-                                # This preserves scroll position and text selection
+                                # Update chat bubble with inline live content
+                                # Also send JS patch for scroll position preservation
+                                inline_html = build_inline_live_html(display_buffer.content, current_ai, live_id=current_live_id)
                                 inner_html = build_inline_live_inner_html(display_buffer.content)
-                                if inner_html and current_live_id and render_state.should_render(inner_html):
-                                    # Send patch command via live_patch - don't update chat_history
+                                if inner_html and render_state.should_render(inline_html):
+                                    if pending_message_idx is not None:
+                                        chat_history[pending_message_idx] = {
+                                            "role": "assistant",
+                                            "content": inline_html,
+                                        }
+                                    # Also send live_patch for JS scroll preservation
                                     yield make_yield(
                                         chat_history, current_status, "",
-                                        live_patch=(current_live_id, inner_html)
+                                        live_patch=(current_live_id, inner_html) if current_live_id else None
                                     )
-                                    render_state.record(inner_html)
+                                    render_state.record(inline_html)
                                     last_yield_time = now
 
                     elif msg_type == "activity":
@@ -2912,14 +2897,20 @@ class ChadWebUI:
                                 content = display_content + f"\n\n{last_activity}"
                             else:
                                 content = last_activity
-                            # Use JS patching to update content in-place
+                            # Update chat bubble with inline live content
+                            inline_html = build_inline_live_html(content, current_ai, live_id=current_live_id)
                             inner_html = build_inline_live_inner_html(content)
-                            if inner_html and current_live_id and render_state.should_render(inner_html):
+                            if inner_html and render_state.should_render(inline_html):
+                                if pending_message_idx is not None:
+                                    chat_history[pending_message_idx] = {
+                                        "role": "assistant",
+                                        "content": inline_html,
+                                    }
                                 yield make_yield(
                                     chat_history, current_status, "",
-                                    live_patch=(current_live_id, inner_html)
+                                    live_patch=(current_live_id, inner_html) if current_live_id else None
                                 )
-                                render_state.record(inner_html)
+                                render_state.record(inline_html)
                                 last_yield_time = now
 
                 except queue.Empty:
@@ -2928,14 +2919,20 @@ class ChadWebUI:
                         display_content = display_buffer.content
                         if display_content or last_activity:
                             content = display_content if display_content else last_activity
-                            # Use JS patching to update content in-place
+                            # Update chat bubble with inline live content
+                            inline_html = build_inline_live_html(content, current_ai, live_id=current_live_id)
                             inner_html = build_inline_live_inner_html(content)
-                            if inner_html and current_live_id and render_state.should_render(inner_html):
+                            if inner_html and render_state.should_render(inline_html):
+                                if pending_message_idx is not None:
+                                    chat_history[pending_message_idx] = {
+                                        "role": "assistant",
+                                        "content": inline_html,
+                                    }
                                 yield make_yield(
                                     chat_history, current_status, "",
-                                    live_patch=(current_live_id, inner_html)
+                                    live_patch=(current_live_id, inner_html) if current_live_id else None
                                 )
-                                render_state.record(inner_html)
+                                render_state.record(inline_html)
                                 last_yield_time = now
 
                     # Periodically update session log with streaming history
@@ -3221,18 +3218,25 @@ class ChadWebUI:
                                             rev_display_buffer.append(chunk)
                                             now = time_module.time()
                                             if now - rev_last_yield >= min_yield_interval:
-                                                # Update both the separate live stream box AND the chat bubble via JS patching
+                                                # Update both the separate live stream box AND the chat bubble
                                                 rendered = build_live_stream_html(
                                                     rev_display_buffer.content, "CODING AI"
                                                 )
-                                                # Use JS patching for inline content to preserve scroll/selection
+                                                # Update chat bubble with inline live content
+                                                inline_html = build_inline_live_html(
+                                                    rev_display_buffer.content, "CODING AI", live_id=revision_live_id
+                                                )
                                                 inner_html = build_inline_live_inner_html(rev_display_buffer.content)
-                                                if inner_html and rev_render_state.should_render(inner_html):
+                                                if inner_html and rev_render_state.should_render(inline_html):
+                                                    chat_history[revision_pending_idx] = {
+                                                        "role": "assistant",
+                                                        "content": inline_html,
+                                                    }
                                                     yield make_yield(
                                                         chat_history, revision_status_msg, rendered,
                                                         live_patch=(revision_live_id, inner_html)
                                                     )
-                                                    rev_render_state.record(inner_html)
+                                                    rev_render_state.record(inline_html)
                                                     rev_last_yield = now
                                 except queue.Empty:
                                     pass
@@ -3683,14 +3687,19 @@ class ChadWebUI:
                         display_buffer.append(chunk)
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
-                            # Use JS patching to update content in-place
+                            # Update chat bubble with inline live content
+                            inline_html = build_inline_live_html(display_buffer.content, current_ai, live_id=followup_live_id)
                             inner_html = build_inline_live_inner_html(display_buffer.content)
-                            if inner_html and render_state.should_render(inner_html):
+                            if inner_html and render_state.should_render(inline_html):
+                                chat_history[pending_idx] = {
+                                    "role": "assistant",
+                                    "content": inline_html,
+                                }
                                 yield make_followup_yield(
                                     chat_history, "", working=True,
                                     live_patch=(followup_live_id, inner_html)
                                 )
-                                render_state.record(inner_html)
+                                render_state.record(inline_html)
                                 last_yield_time = now
 
                 elif msg_type == "activity":
@@ -3701,14 +3710,19 @@ class ChadWebUI:
                             content = display_content + f"\n\n{msg[1]}"
                         else:
                             content = msg[1]
-                        # Use JS patching to update content in-place
+                        # Update chat bubble with inline live content
+                        inline_html = build_inline_live_html(content, current_ai, live_id=followup_live_id)
                         inner_html = build_inline_live_inner_html(content)
-                        if inner_html and render_state.should_render(inner_html):
+                        if inner_html and render_state.should_render(inline_html):
+                            chat_history[pending_idx] = {
+                                "role": "assistant",
+                                "content": inline_html,
+                            }
                             yield make_followup_yield(
                                 chat_history, "", working=True,
                                 live_patch=(followup_live_id, inner_html)
                             )
-                            render_state.record(inner_html)
+                            render_state.record(inline_html)
                             last_yield_time = now
 
             except queue.Empty:
@@ -3716,14 +3730,19 @@ class ChadWebUI:
                 if now - last_yield_time >= 0.3:
                     display_content = display_buffer.content
                     if display_content:
-                        # Use JS patching to update content in-place
+                        # Update chat bubble with inline live content
+                        inline_html = build_inline_live_html(display_content, current_ai, live_id=followup_live_id)
                         inner_html = build_inline_live_inner_html(display_content)
-                        if inner_html and render_state.should_render(inner_html):
+                        if inner_html and render_state.should_render(inline_html):
+                            chat_history[pending_idx] = {
+                                "role": "assistant",
+                                "content": inline_html,
+                            }
                             yield make_followup_yield(
                                 chat_history, "", working=True,
                                 live_patch=(followup_live_id, inner_html)
                             )
-                            render_state.record(inner_html)
+                            render_state.record(inline_html)
                             last_yield_time = now
 
         relay_thread.join(timeout=1)
@@ -5120,11 +5139,6 @@ class ChadWebUI:
         provider_feedback = gr.Markdown("")
         gr.Markdown("### Providers", elem_classes=["provider-section-title"])
 
-        provider_list = gr.Markdown(
-            self.list_providers(),
-            elem_id="provider-summary-panel",
-            elem_classes=["provider-summary"],
-        )
         refresh_btn = gr.Button("🔄 Refresh", variant="secondary")
         pending_delete_state = gr.State(None)
 
@@ -5187,7 +5201,7 @@ class ChadWebUI:
             )
             add_btn = gr.Button("Add Provider", variant="primary", interactive=False)
 
-        provider_outputs = [provider_feedback, provider_list]
+        provider_outputs = [provider_feedback]
         for card in provider_cards:
             provider_outputs.extend(
                 [
@@ -5530,7 +5544,13 @@ window._setupLivePatchListener = function() {
         for (const mutation of mutations) {
             for (const node of mutation.addedNodes) {
                 if (node.nodeType === Node.ELEMENT_NODE) {
-                    const patchData = node.querySelector && node.querySelector('[data-live-patch]');
+                    // Check if the node itself has data-live-patch (not just descendants)
+                    let patchData = null;
+                    if (node.hasAttribute && node.hasAttribute('data-live-patch')) {
+                        patchData = node;
+                    } else if (node.querySelector) {
+                        patchData = node.querySelector('[data-live-patch]');
+                    }
                     if (patchData) {
                         try {
                             const liveId = patchData.getAttribute('data-live-patch');
@@ -5742,11 +5762,18 @@ window._setupLivePatchListener();
                     const mergeSections = collectAll('.merge-section');
                     mergeSections.forEach(section => {
                       // Check if the section has meaningful content (header with text)
-                      const header = section.querySelector('h3, [data-testid="markdown"] h3');
+                      const headerElem = section.querySelector('[data-testid="markdown"]:first-child');
+                      const header = headerElem ? headerElem.querySelector('h3') : null;
                       const hasContent = header && header.textContent.trim().length > 0;
+
                       // Also check for changes summary text
-                      const summary = section.querySelector('[key*="changes-summary"]');
-                      const hasSummary = summary && summary.textContent.trim().length > 0;
+                      const summaryElems = section.querySelectorAll('[key*="changes-summary"] [data-testid="markdown"]');
+                      let hasSummary = false;
+                      summaryElems.forEach(elem => {
+                        if (elem.textContent.trim().length > 0) {
+                          hasSummary = true;
+                        }
+                      });
 
                       if (hasContent || hasSummary) {
                         section.classList.remove('merge-section-hidden');

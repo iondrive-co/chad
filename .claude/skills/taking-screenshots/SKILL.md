@@ -25,9 +25,12 @@ allowed-tools: Bash, Read
 - `#live-stream-box` - Activity stream
 - `#provider-summary-panel` - Provider overview
 
-## Before/after workflow
+## Workflow
 
-1. Screenshot before changes
-2. Make changes
-3. Screenshot after with same options
-4. Compare visually
+1. Take a screenshot of the part of the app you will be modifying before making any changes
+2. Examine the screenshot image file and describe what it shows
+3. Check if this description matches what you expect. If not either adjust your plan, or work out if you need to write a 
+new test to capture what you expect to see, and do these until the description matches what you expect.
+4. Make changes
+5. Screenshot after with same options
+6. Compare visually
