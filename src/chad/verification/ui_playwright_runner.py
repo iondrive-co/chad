@@ -393,6 +393,9 @@ def open_playwright_page(
             time.sleep(render_delay)
             if tab:
                 _select_tab(page, tab)
+            # Ensure core run tab elements are present before yielding
+            page.wait_for_selector("#agent-chatbot", timeout=20000)
+            page.wait_for_selector(".merge-section", state="attached", timeout=20000)
             yield page
         finally:
             browser.close()

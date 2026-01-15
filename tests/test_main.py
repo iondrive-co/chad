@@ -17,6 +17,7 @@ class TestMain:
         """Test main with existing user - password handled by launch_web_ui."""
         mock_security = Mock()
         mock_security.is_first_run.return_value = False
+        mock_security.get_cleanup_days.return_value = 3
         mock_security_class.return_value = mock_security
 
         mock_launch.return_value = (None, 7860)
@@ -34,6 +35,7 @@ class TestMain:
         """Test main with first run - prompts for password."""
         mock_security = Mock()
         mock_security.is_first_run.return_value = True
+        mock_security.get_cleanup_days.return_value = 3
         mock_security_class.return_value = mock_security
 
         mock_launch.return_value = (None, 7860)
@@ -51,6 +53,7 @@ class TestMain:
         """Test main when web UI launch fails."""
         mock_security = Mock()
         mock_security.is_first_run.return_value = False
+        mock_security.get_cleanup_days.return_value = 3
         mock_security_class.return_value = mock_security
 
         mock_launch.side_effect = ValueError("Invalid password")
@@ -66,6 +69,7 @@ class TestMain:
         """Test main with keyboard interrupt."""
         mock_security = Mock()
         mock_security.is_first_run.return_value = False
+        mock_security.get_cleanup_days.return_value = 3
         mock_security_class.return_value = mock_security
 
         mock_launch.side_effect = KeyboardInterrupt()
