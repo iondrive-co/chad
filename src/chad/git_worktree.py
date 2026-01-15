@@ -326,7 +326,7 @@ class GitWorktreeManager:
         if uncommitted:
             summary_parts.append(f"**Uncommitted changes:**\n```\n{uncommitted}\n```")
 
-        return "\n\n".join(summary_parts) if summary_parts else "No changes detected"
+        return "\n\n".join(summary_parts)
 
     def get_full_diff(self, task_id: str, base_commit: str | None = None) -> str:
         """Get the full diff content for the worktree changes.
