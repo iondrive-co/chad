@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from chad.provider_ui import ProviderUIManager
-from chad.security import SecurityManager
+from chad.config_manager import ConfigManager
 
 
 class TestUsageTimezone:
@@ -18,7 +18,7 @@ class TestUsageTimezone:
         import base64
         import bcrypt
 
-        mgr = SecurityManager(tmp_path / "config.json")
+        mgr = ConfigManager(tmp_path / "config.json")
         # Initialize config with proper structure
         password_hash = mgr.hash_password("test_password")
         encryption_salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()

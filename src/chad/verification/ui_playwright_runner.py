@@ -14,7 +14,7 @@ from typing import Dict, Iterator, Optional, TYPE_CHECKING
 
 import bcrypt
 
-from chad.security import SecurityManager
+from chad.config_manager import ConfigManager
 from chad.process_registry import ProcessRegistry
 
 # Module-level registry for test servers (uses shared pidfile)
@@ -182,7 +182,7 @@ def create_temp_env(screenshot_mode: bool = True) -> TempChadEnv:
     project_dir.mkdir(parents=True, exist_ok=True)
     (project_dir / "README.md").write_text("# Test Project\n")
 
-    security_mgr = SecurityManager(config_path)
+    security_mgr = ConfigManager(config_path)
     password = ""
     password_hash = security_mgr.hash_password(password)
     encryption_salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()

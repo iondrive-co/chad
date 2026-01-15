@@ -1,17 +1,17 @@
-"""Tests for security module."""
+"""Tests for config manager module."""
 
 from unittest.mock import patch
 import os
 import pytest
-from chad.security import SecurityManager
+from chad.config_manager import ConfigManager
 
 
-class TestSecurityManager:
-    """Test cases for SecurityManager."""
+class TestConfigManager:
+    """Test cases for ConfigManager."""
 
     def test_hash_password(self):
         """Test password hashing."""
-        mgr = SecurityManager()
+        mgr = ConfigManager()
         password = "testpassword123"
         hashed = mgr.hash_password(password)
 
@@ -21,7 +21,7 @@ class TestSecurityManager:
 
     def test_verify_password_correct(self):
         """Test password verification with correct password."""
-        mgr = SecurityManager()
+        mgr = ConfigManager()
         password = "testpassword123"
         hashed = mgr.hash_password(password)
 
@@ -29,7 +29,7 @@ class TestSecurityManager:
 
     def test_verify_password_incorrect(self):
         """Test password verification with incorrect password."""
-        mgr = SecurityManager()
+        mgr = ConfigManager()
         password = "testpassword123"
         hashed = mgr.hash_password(password)
 
@@ -40,7 +40,7 @@ class TestSecurityManager:
         import base64
         import bcrypt
 
-        mgr = SecurityManager()
+        mgr = ConfigManager()
         password = "masterpassword"
         salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
         salt_bytes = base64.urlsafe_b64decode(salt.encode())
@@ -60,7 +60,7 @@ class TestSecurityManager:
         import base64
         import bcrypt
 
-        mgr = SecurityManager()
+        mgr = ConfigManager()
         password = "masterpassword"
         wrong_password = "wrongpassword"
         salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
@@ -74,14 +74,14 @@ class TestSecurityManager:
 
     def test_load_config_nonexistent_file(self, tmp_path):
         """Test loading config when file doesn't exist."""
-        mgr = SecurityManager(tmp_path / "nonexistent.conf")
+        mgr = ConfigManager(tmp_path / "nonexistent.conf")
         config = mgr.load_config()
         assert config == {}
 
     def test_save_and_load_config(self, tmp_path):
         """Test saving and loading configuration."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         test_config = {
             "password_hash": "hashed_password",
@@ -102,13 +102,13 @@ class TestSecurityManager:
 
     def test_is_first_run_no_config(self, tmp_path):
         """Test is_first_run when no config exists."""
-        mgr = SecurityManager(tmp_path / "new.conf")
+        mgr = ConfigManager(tmp_path / "new.conf")
         assert mgr.is_first_run() is True
 
     def test_is_first_run_no_password_hash(self, tmp_path):
         """Test is_first_run when config exists but no password hash."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
         mgr.save_config({"api_keys": {}})
 
         assert mgr.is_first_run() is True
@@ -116,7 +116,7 @@ class TestSecurityManager:
     def test_is_first_run_with_password_hash(self, tmp_path):
         """Test is_first_run when password hash exists."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
         mgr.save_config({"password_hash": "test_hash"})
 
         assert mgr.is_first_run() is False
@@ -125,7 +125,7 @@ class TestSecurityManager:
     def test_setup_main_password(self, mock_getpass, tmp_path):
         """Test main password setup."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         # Mock password input (password, then confirmation)
         mock_getpass.side_effect = ["testpassword123", "testpassword123"]
@@ -147,7 +147,7 @@ class TestSecurityManager:
     @patch("getpass.getpass")
     def test_setup_main_password_short_allowed(self, mock_getpass, tmp_path):
         """Test main password setup allows short passwords with warning."""
-        mgr = SecurityManager(tmp_path / "test.conf")
+        mgr = ConfigManager(tmp_path / "test.conf")
 
         # Mock: short password, then confirmation
         mock_getpass.side_effect = ["short", "short"]
@@ -158,7 +158,7 @@ class TestSecurityManager:
     @patch("getpass.getpass")
     def test_setup_main_password_empty_allowed(self, mock_getpass, tmp_path):
         """Test main password setup allows empty password with warning."""
-        mgr = SecurityManager(tmp_path / "test.conf")
+        mgr = ConfigManager(tmp_path / "test.conf")
 
         # Mock: empty password, then confirmation
         mock_getpass.side_effect = ["", ""]
@@ -169,7 +169,7 @@ class TestSecurityManager:
     @patch("getpass.getpass")
     def test_setup_main_password_mismatch(self, mock_getpass, tmp_path):
         """Test main password setup with mismatched passwords."""
-        mgr = SecurityManager(tmp_path / "test.conf")
+        mgr = ConfigManager(tmp_path / "test.conf")
 
         # Mock: password, wrong confirmation, then correct pair
         mock_getpass.side_effect = ["testpassword123", "wrongconfirm", "testpassword123", "testpassword123"]
@@ -181,7 +181,7 @@ class TestSecurityManager:
     def test_verify_main_password_success(self, mock_getpass, tmp_path):
         """Test successful main password verification."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         # Setup password first
         password = "testpassword123"
@@ -198,7 +198,7 @@ class TestSecurityManager:
     def test_verify_main_password_retry(self, mock_getpass, tmp_path):
         """Test main password verification with retry."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         password = "testpassword123"
         password_hash = mgr.hash_password(password)
@@ -214,7 +214,7 @@ class TestSecurityManager:
     def test_verify_main_password_retry_after_decline(self, mock_getpass, tmp_path):
         """Test main password verification retries after cancelling reset."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         password = "correct123"
         password_hash = mgr.hash_password(password)
@@ -230,7 +230,7 @@ class TestSecurityManager:
     def test_verify_main_password_reset_accepted(self, mock_getpass, tmp_path):
         """Test main password reset when user accepts."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         # Setup old password and accounts
         old_password = "oldpassword"
@@ -260,7 +260,7 @@ class TestSecurityManager:
     def test_verify_main_password_reset_confirmation_failed_then_retry(self, mock_getpass, tmp_path):
         """Test main password reset with mismatched confirmation, then retry and succeed."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         old_password = "correct123"
         password_hash = mgr.hash_password(old_password)
@@ -280,7 +280,7 @@ class TestSecurityManager:
     def test_store_and_get_account(self, tmp_path):
         """Test storing and retrieving named accounts."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         # Setup main password
         import base64
@@ -305,7 +305,7 @@ class TestSecurityManager:
     def test_list_accounts(self, tmp_path):
         """Test listing all accounts."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         import base64
         import bcrypt
@@ -329,7 +329,7 @@ class TestSecurityManager:
     def test_has_account(self, tmp_path):
         """Test checking if account exists."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         import base64
         import bcrypt
@@ -349,7 +349,7 @@ class TestSecurityManager:
         """Test that encrypt_value produces different output each time due to IV."""
         import bcrypt
 
-        mgr = SecurityManager(tmp_path / "test.conf")
+        mgr = ConfigManager(tmp_path / "test.conf")
         password = "testpassword"
         salt_bytes = bcrypt.gensalt()
         value = "same-test-value"
@@ -370,7 +370,7 @@ class TestSecurityManager:
         """Test encryption and decryption of empty string."""
         import bcrypt
 
-        mgr = SecurityManager(tmp_path / "test.conf")
+        mgr = ConfigManager(tmp_path / "test.conf")
         password = "testpassword"
         salt_bytes = bcrypt.gensalt()
         value = ""
@@ -383,7 +383,7 @@ class TestSecurityManager:
         """Test encryption and decryption of very long API key."""
         import bcrypt
 
-        mgr = SecurityManager(tmp_path / "test.conf")
+        mgr = ConfigManager(tmp_path / "test.conf")
         password = "testpassword"
         salt_bytes = bcrypt.gensalt()
         # Create a very long value (10KB)
@@ -397,7 +397,7 @@ class TestSecurityManager:
         """Test that decrypt_value fails gracefully with corrupted encrypted data."""
         import bcrypt
 
-        mgr = SecurityManager(tmp_path / "test.conf")
+        mgr = ConfigManager(tmp_path / "test.conf")
         password = "testpassword"
         salt_bytes = bcrypt.gensalt()
         value = "test-api-key"
@@ -412,7 +412,7 @@ class TestSecurityManager:
     def test_get_role_assignment_nonexistent_role(self, tmp_path):
         """Test get_role_assignment for role that was never assigned."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         result = mgr.get_role_assignment("NONEXISTENT_ROLE")
         assert result is None
@@ -420,7 +420,7 @@ class TestSecurityManager:
     def test_list_role_assignments_empty(self, tmp_path):
         """Test list_role_assignments when no roles are assigned."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         assignments = mgr.list_role_assignments()
         assert assignments == {}
@@ -428,7 +428,7 @@ class TestSecurityManager:
     def test_assign_role_overwrites_previous_role(self, tmp_path):
         """assign_role should overwrite an existing assignment for the role."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
         password = "testpassword"
 
         import base64
@@ -450,7 +450,7 @@ class TestSecurityManager:
     def test_assign_role_to_account_that_doesnt_exist(self, tmp_path):
         """assign_role should error when the account does not exist."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         with pytest.raises(ValueError):
             mgr.assign_role("nonexistent", "CODING")
@@ -458,7 +458,7 @@ class TestSecurityManager:
     def test_clear_role_nonexistent(self, tmp_path):
         """Clearing a missing role should be a no-op."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         mgr.clear_role("NONEXISTENT_ROLE")
         assert mgr.get_role_assignment("NONEXISTENT_ROLE") is None
@@ -466,7 +466,7 @@ class TestSecurityManager:
     def test_delete_account_cascades_to_role_assignments(self, tmp_path):
         """delete_account should remove related role assignments."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
         password = "testpassword"
 
         import base64
@@ -488,14 +488,14 @@ class TestSecurityManager:
     def test_delete_account_nonexistent(self, tmp_path):
         """Deleting a missing account should not error."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         mgr.delete_account("nonexistent")
 
     def test_save_and_load_preferences(self, tmp_path):
         """Test saving and loading user preferences."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         mgr.save_preferences("/tmp/project-path")
         loaded_prefs = mgr.load_preferences()
@@ -504,7 +504,7 @@ class TestSecurityManager:
     def test_load_preferences_nonexistent(self, tmp_path):
         """Test loading preferences when none have been saved."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         preferences = mgr.load_preferences()
         assert preferences is None
@@ -512,7 +512,7 @@ class TestSecurityManager:
     def test_multiple_accounts(self, tmp_path):
         """Test config with multiple accounts."""
         config_path = tmp_path / "test.conf"
-        mgr = SecurityManager(config_path)
+        mgr = ConfigManager(config_path)
 
         import base64
         import bcrypt
