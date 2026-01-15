@@ -3,10 +3,10 @@
 
 pytest>=7.4.0
 pytest-cov>=4.1.0
+pytest-xdist>=3.5.0
 black>=23.0.0
 flake8>=6.0.0
 mypy>=1.0.0
 
 # Visual testing
 playwright>=1.40.0
-mcp>=1.25.0
