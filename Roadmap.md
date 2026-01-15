@@ -3,11 +3,11 @@ v0.7 Touring complete
 Windows support
 Integrated live view with stable scrollbar
 Screenshots and hypothesis in task summaries
-Early initial summary report
-Allow continued conversation after merge
+Initial findings report
+Allow continued conversation after merge or cancel
 Switch from MCP usage to skills
-Pycharm launcher with dev mode for starting a mock provider for better testing
-Add QwenCode as a provider
+Pycharm launcher with dev mode allowing use of mock providers
+Added QwenCode as a provider
 
 v0.8 Paper maximiser
 

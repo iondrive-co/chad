@@ -127,7 +127,7 @@ def main() -> int:
         main_password = os.environ.get("CHAD_PASSWORD")
 
         if main_password is None:
-            if security.is_first_run():
+            if config_mgr.is_first_run():
                 sys.stdout.flush()
                 main_password = getpass.getpass("Create main password for Chad: ")
 
