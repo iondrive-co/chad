@@ -66,6 +66,8 @@ class TestVerify:
         from chad.verification.tools import verify
 
         monkeypatch.setattr("chad.verification.tools.resolve_project_root", lambda: (tmp_path, "test"))
+        # Skip playwright setup since we're testing pytest error handling
+        monkeypatch.setattr("chad.verification.tools.ensure_playwright_browsers", lambda: True)
 
         class Proc:
             def __init__(self, returncode, stdout="", stderr=""):
@@ -78,6 +80,7 @@ class TestVerify:
                 return Proc(0, "")
             if cmd[2] == "pip":
                 return Proc(0, "")
+            # pytest error
             return Proc(2, "", "ERROR: unrecognized arguments: -n")
 
         monkeypatch.setattr("chad.verification.tools.subprocess.run", fake_run)
