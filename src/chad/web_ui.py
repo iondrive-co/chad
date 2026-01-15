@@ -3479,7 +3479,8 @@ class ChadWebUI:
             coding_reasoning: Reasoning effort selected in the Run tab
 
         Yields:
-            Tuples of (chat_history, live_stream, followup_input, followup_row, send_btn)
+            Tuples of (chat_history, live_stream, followup_input, followup_row, send_btn, live_patch_trigger,
+            merge_section_group, changes_summary, merge_target_branch, diff_content, merge_section_header)
         """
         session = self.get_session(session_id)
         message_queue = queue.Queue()
@@ -3492,12 +3493,15 @@ class ChadWebUI:
         task_description = session.task_description or ""
         verification_log: list[dict[str, object]] = []
 
+        merge_no_change = (gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+
         def make_followup_yield(
             history,
             live_stream: str = "",
             show_followup: bool = True,
             working: bool = False,
             live_patch: tuple[str, str] | None = None,
+            merge_updates: tuple = merge_no_change,
         ):
             """Format output for follow-up responses."""
             # Build live patch trigger HTML if patch data provided
@@ -3515,10 +3519,11 @@ class ChadWebUI:
                 gr.update(visible=show_followup),  # Follow-up row visibility
                 gr.update(interactive=not working),  # Send button interactivity
                 patch_html,  # live_patch_trigger
+                *merge_updates,
             )
 
         if not followup_message or not followup_message.strip():
-            yield make_followup_yield(chat_history, "", show_followup=True)
+            yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
             return
 
         accounts = self.security_mgr.list_accounts()
@@ -3609,7 +3614,7 @@ class ChadWebUI:
             handoff_title = "PROVIDER HANDOFF" if provider_changed else "PREFERENCE UPDATE"
             handoff_msg = f"───────────── 🔄 {handoff_title} ─────────────\n\n" f"*Switching to {handoff_detail}*"
             chat_history.append({"role": "user", "content": handoff_msg})
-            yield make_followup_yield(chat_history, "🔄 Switching providers...", working=True)
+            yield make_followup_yield(chat_history, "🔄 Switching providers...", working=True, merge_updates=merge_no_change)
 
             new_provider = create_provider(coding_config)
             # Use worktree path if available, otherwise fall back to project path
@@ -3626,7 +3631,7 @@ class ChadWebUI:
                     }
                 )
                 session.config = None
-                yield make_followup_yield(chat_history, "", show_followup=True)
+                yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
                 return
 
             session.provider = new_provider
@@ -3647,7 +3652,7 @@ class ChadWebUI:
                 }
             )
             session.active = False
-            yield make_followup_yield(chat_history, "", show_followup=False)
+            yield make_followup_yield(chat_history, "", show_followup=False, merge_updates=merge_no_change)
             return
 
         # Add user's follow-up message to history
@@ -3667,7 +3672,7 @@ class ChadWebUI:
         })
         pending_idx = len(chat_history) - 1
 
-        yield make_followup_yield(chat_history, "⏳ Processing follow-up...", working=True)
+        yield make_followup_yield(chat_history, "⏳ Processing follow-up...", working=True, merge_updates=merge_no_change)
 
         # Set up activity callback
         def on_activity(activity_type: str, detail: str):
@@ -3730,8 +3735,11 @@ class ChadWebUI:
                                     "content": inline_html,
                                 }
                                 yield make_followup_yield(
-                                    chat_history, "", working=True,
-                                    live_patch=(followup_live_id, inner_html)
+                                    chat_history,
+                                    "",
+                                    working=True,
+                                    live_patch=(followup_live_id, inner_html),
+                                    merge_updates=merge_no_change,
                                 )
                                 render_state.record(inline_html)
                                 last_yield_time = now
@@ -3753,8 +3761,11 @@ class ChadWebUI:
                                 "content": inline_html,
                             }
                             yield make_followup_yield(
-                                chat_history, "", working=True,
-                                live_patch=(followup_live_id, inner_html)
+                                chat_history,
+                                "",
+                                working=True,
+                                live_patch=(followup_live_id, inner_html),
+                                merge_updates=merge_no_change,
                             )
                             render_state.record(inline_html)
                             last_yield_time = now
@@ -3773,8 +3784,11 @@ class ChadWebUI:
                                 "content": inline_html,
                             }
                             yield make_followup_yield(
-                                chat_history, "", working=True,
-                                live_patch=(followup_live_id, inner_html)
+                                chat_history,
+                                "",
+                                working=True,
+                                live_patch=(followup_live_id, inner_html),
+                                merge_updates=merge_no_change,
                             )
                             render_state.record(inline_html)
                             last_yield_time = now
@@ -3791,7 +3805,7 @@ class ChadWebUI:
             session.provider = None
             session.config = None
             self._update_session_log(session, chat_history, full_history)
-            yield make_followup_yield(chat_history, "", show_followup=False)
+            yield make_followup_yield(chat_history, "", show_followup=False, merge_updates=merge_no_change)
             return
 
         if not response_holder[0]:
@@ -3800,7 +3814,7 @@ class ChadWebUI:
                 "content": "**CODING AI**\n\n❌ *No response received*",
             }
             self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
-            yield make_followup_yield(chat_history, "", show_followup=True)
+            yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
             return
 
         parsed = parse_codex_output(response_holder[0])
@@ -3811,7 +3825,7 @@ class ChadWebUI:
         session.chat_history = chat_history
         self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
 
-        yield make_followup_yield(chat_history, "", show_followup=True, working=True)
+        yield make_followup_yield(chat_history, "", show_followup=True, working=True, merge_updates=merge_no_change)
 
         # Run verification on follow-up
         verification_enabled = verification_agent != self.VERIFICATION_NONE
@@ -3836,7 +3850,7 @@ class ChadWebUI:
                 verify_status = (
                     f"🔍 Running verification " f"(attempt {verification_attempt}/{max_verification_attempts})..."
                 )
-                yield make_followup_yield(chat_history, verify_status, working=True)
+                yield make_followup_yield(chat_history, verify_status, working=True, merge_updates=merge_no_change)
 
                 def verification_activity(activity_type: str, detail: str):
                     pass  # Quiet verification
@@ -3923,7 +3937,7 @@ class ChadWebUI:
                         )
                         # Show live stream placeholder during revision
                         revision_placeholder = build_live_stream_html("🔄 Revision in progress...", "CODING AI")
-                        yield make_followup_yield(chat_history, revision_placeholder, working=True)
+                        yield make_followup_yield(chat_history, revision_placeholder, working=True, merge_updates=merge_no_change)
 
                         revision_request = (
                             "The verification agent found issues with your work. "
@@ -3968,6 +3982,7 @@ class ChadWebUI:
                             chat_history,
                             "✓ Revision complete, re-verifying...",
                             working=True,
+                            merge_updates=merge_no_change,
                         )
                     else:
                         # Can't continue - add failure message
@@ -3991,7 +4006,47 @@ class ChadWebUI:
         session.chat_history = chat_history
         self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
 
-        yield make_followup_yield(chat_history, "", show_followup=True)
+        def build_merge_updates():
+            if not session.project_path:
+                return merge_no_change
+
+            try:
+                has_changes, merge_summary = self.check_worktree_changes(session_id)
+                if not has_changes:
+                    return (
+                        gr.update(visible=False),  # merge_section_group
+                        gr.update(value=""),  # changes_summary
+                        gr.update(),  # merge_target_branch
+                        gr.update(value=""),  # diff_content
+                        gr.update(value=""),  # merge_section_header
+                    )
+
+                git_mgr = GitWorktreeManager(Path(session.project_path))
+                branches = git_mgr.get_branches()
+                parsed_diff = git_mgr.get_parsed_diff(session_id, session.worktree_base_commit)
+                diff_html = self._render_diff_html(parsed_diff)
+                header_text = "### Changes Ready to Merge"
+
+                branch_choices = branches or ["main"]
+                branch_value = branch_choices[0] if branch_choices else None
+
+                return (
+                    gr.update(visible=True),  # merge_section_group
+                    gr.update(value=merge_summary),
+                    gr.update(choices=branch_choices, value=branch_value),
+                    gr.update(value=diff_html),
+                    gr.update(value=header_text),
+                )
+            except Exception:
+                return (
+                    gr.update(visible=True),
+                    gr.update(value=""),
+                    gr.update(choices=["main"], value="main"),
+                    gr.update(value=""),
+                    gr.update(value=""),
+                )
+
+        yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=build_merge_updates())
 
     def is_project_git_repo(self, project_path: str) -> bool:
         """Check if project path is a valid git repository."""
@@ -4936,6 +4991,11 @@ class ChadWebUI:
                 followup_row,
                 send_followup_btn,
                 live_patch_trigger,
+                merge_section_group,
+                changes_summary,
+                merge_target_branch,
+                diff_content,
+                merge_section_header,
             ],
         )
 
