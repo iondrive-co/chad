@@ -684,7 +684,9 @@ class ProviderUIManager:
                 if reset_at:
                     try:
                         reset_dt = datetime.fromisoformat(reset_at.replace("Z", "+00:00"))
-                        reset_str = reset_dt.strftime("%I:%M%p")
+                        # Convert to local time for display
+                        local_reset = reset_dt.astimezone()
+                        reset_str = local_reset.strftime("%I:%M%p")
                     except ValueError:
                         reset_str = reset_at
                 else:
@@ -703,7 +705,9 @@ class ProviderUIManager:
                 if reset_at:
                     try:
                         reset_dt = datetime.fromisoformat(reset_at.replace("Z", "+00:00"))
-                        reset_str = reset_dt.strftime("%b %d")
+                        # Convert to local time for display
+                        local_reset = reset_dt.astimezone()
+                        reset_str = local_reset.strftime("%b %d")
                     except ValueError:
                         reset_str = reset_at
                 else:

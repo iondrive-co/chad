@@ -26,7 +26,7 @@ Use the following sequence to complete the task:
 1. Explore the code to understand the task.
 2. Once you understand what needs to be done, you MUST output a progress update so the user can see what you found:
 ```json
-{{"type": "progress", "summary": "One line describing the issue/feature", "location": "src/file.py:123 - where changes will be made", "before_screenshot": "/path/to/before.png (optional, include if you took one)"}}
+{{"type": "progress", "summary": "One line describing the issue/feature", "location": "src/file.py:123 - where changes will be made", "before_screenshot": "/path/to/before.png (optional, include if you took one)", "before_description": "Brief description of what the screenshot shows (optional, include if you took a screenshot)"}}
 ```
 For UI tasks: take a "before" screenshot first and include the path. For non-UI tasks: omit before_screenshot.
 3. Write test(s) that should fail until the fix/feature is implemented.
@@ -61,10 +61,12 @@ PY
   "change_summary": "One sentence describing what was changed",
   "hypothesis": "Brief root cause explanation (include if investigating a bug)",
   "before_screenshot": "/path/to/before.png (include if you took a before screenshot)",
-  "after_screenshot": "/path/to/after.png (include if you took an after screenshot)"
+  "before_description": "Brief description of what the before screenshot shows",
+  "after_screenshot": "/path/to/after.png (include if you took an after screenshot)",
+  "after_description": "Brief description of what the after screenshot shows"
 }}
 ```
-Only include optional fields (hypothesis, before_screenshot, after_screenshot) when applicable.
+Only include optional fields (hypothesis, before_screenshot, before_description, after_screenshot, after_description) when applicable.
 """
 
 
@@ -165,7 +167,9 @@ class CodingSummary:
     change_summary: str
     hypothesis: str | None = None
     before_screenshot: str | None = None
+    before_description: str | None = None
     after_screenshot: str | None = None
+    after_description: str | None = None
 
 
 @dataclass
@@ -175,6 +179,7 @@ class ProgressUpdate:
     summary: str
     location: str
     before_screenshot: str | None = None
+    before_description: str | None = None
 
 
 def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
@@ -275,7 +280,9 @@ def extract_coding_summary(response: str) -> CodingSummary | None:
                     change_summary=data["change_summary"],
                     hypothesis=data.get("hypothesis"),
                     before_screenshot=data.get("before_screenshot"),
+                    before_description=data.get("before_description"),
                     after_screenshot=data.get("after_screenshot"),
+                    after_description=data.get("after_description"),
                 )
         except json.JSONDecodeError:
             pass
@@ -310,6 +317,7 @@ def extract_progress_update(response: str) -> ProgressUpdate | None:
                     summary=data.get("summary", ""),
                     location=data.get("location", ""),
                     before_screenshot=data.get("before_screenshot"),
+                    before_description=data.get("before_description"),
                 )
         except json.JSONDecodeError:
             pass
@@ -324,6 +332,7 @@ def extract_progress_update(response: str) -> ProgressUpdate | None:
                     summary=data.get("summary", ""),
                     location=data.get("location", ""),
                     before_screenshot=data.get("before_screenshot"),
+                    before_description=data.get("before_description"),
                 )
         except json.JSONDecodeError:
             pass
