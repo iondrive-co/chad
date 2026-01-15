@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch, MagicMock
 import pytest
 
 from chad.git_worktree import GitWorktreeManager
+from chad.providers import ModelConfig, MockProvider
 
 
 @pytest.fixture
@@ -361,6 +362,56 @@ class TestChadWebUI:
         # Index 10 is followup_row - should remain visible
         followup_update = outputs[10]
         assert followup_update.get("visible") is not False, "Followup row should remain visible"
+
+    def test_followup_after_discard_uses_clean_worktree(self, web_ui, git_repo, monkeypatch):
+        """Follow-up after discard should still operate in a clean worktree."""
+        session_id = "discard-followup-test"
+        git_mgr = GitWorktreeManager(git_repo)
+        worktree_path, base_commit = git_mgr.create_worktree(session_id)
+
+        session = web_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = worktree_path
+        session.worktree_branch = git_mgr._branch_name(session_id)
+        session.worktree_base_commit = base_commit
+        session.active = True
+        session.chat_history = [{"role": "user", "content": "**Task**\n\nModify BUGS.md"}]
+
+        # Speed up the mock provider
+        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
+        config = ModelConfig(provider="mock", model_name="default", account_name="claude")
+        provider = MockProvider(config)
+        provider.start_session(str(worktree_path))
+        session.provider = provider
+        session.coding_account = "claude"
+        session.config = config
+
+        # Simulate an initial coding turn to represent the first task run
+        provider.send_message("Initial coding turn")
+        provider.get_response()
+
+        # Discard before sending a follow-up
+        web_ui.discard_worktree_changes(session_id)
+
+        # Send a follow-up; this should succeed and write BUGS.md in the worktree
+        list(
+            web_ui.send_followup(
+                session_id,
+                "Add follow-up entry",
+                session.chat_history,
+                coding_agent="claude",
+                verification_agent=web_ui.VERIFICATION_NONE,
+            )
+        )
+
+        assert session.worktree_path is not None
+        bugs_file = session.worktree_path / "BUGS.md"
+        assert bugs_file.exists(), "BUGS.md should be present after follow-up"
+        content = bugs_file.read_text()
+        assert "follow-up" in content.lower(), "Follow-up marker should be added to BUGS.md"
+        assert not any(
+            "Error" in msg.get("content", "") for msg in session.chat_history if msg.get("role") == "assistant"
+        ), "Follow-up response should not include errors"
 
     def test_set_reasoning_success(self, web_ui, mock_security_mgr):
         """Test setting reasoning level for an account."""
