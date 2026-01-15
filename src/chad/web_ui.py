@@ -4015,7 +4015,9 @@ class ChadWebUI:
 
         if has_changes:
             summary = git_mgr.get_diff_summary(session_id, session.worktree_base_commit)
-            return True, summary
+            # Only show merge section if there's actually something to display
+            if summary:
+                return True, summary
         return False, ""
 
     def attempt_merge(
