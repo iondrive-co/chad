@@ -266,7 +266,7 @@ class TestChadWebUI:
         assert task_desc_update.get("value") == session.task_description, (
             "Task description value should be preserved for retry"
         )
-        assert task_desc_update.get("interactive") is True, "Task description should become editable after discard"
+        assert task_desc_update.get("interactive") is False, "Task description should remain locked after task starts"
 
         # Verify header and diff cleared after discard
         header_text = outputs[12]
