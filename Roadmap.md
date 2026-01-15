@@ -7,19 +7,20 @@ Early initial summary report
 Allow continued conversation after merge
 Switch from MCP usage to skills
 Pycharm launcher with dev mode for starting a mock provider for better testing
+Add qwen code
 
 v0.8 Paper maximiser
 
 Split ui code from core
 API allows for live stream from agent (rather than json)
 New text only ui for testing
-Simplify tests
+Simplify tests after split
 Structured log format 
 
 v0.9 Hack-propagation
 
 Full inter-provider handoff including summarize progress and resume from checkpoints
-Testing the mistral and gemini providers and add qwen code
+Improve the mistral and gemini and qwen providers data 
 Load balance based on usage, user preference, context limits hit, etc.
 
 v0.10 Slip slop slap

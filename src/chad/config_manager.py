@@ -1,4 +1,4 @@
-"""Security functions for password hashing and API key encryption."""
+"""Configuration management including password hashing, API key encryption, and app settings."""
 
 import base64
 import getpass
@@ -13,8 +13,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 
-class SecurityManager:
-    """Manages main password and API key encryption."""
+class ConfigManager:
+    """Manages application configuration including accounts, preferences, and settings."""
 
     def __init__(self, config_path: Path | None = None):
         import os
@@ -526,3 +526,24 @@ class SecurityManager:
         if account and not self.has_account(account):
             return None
         return account
+
+    def get_cleanup_days(self) -> int:
+        """Get the number of days after which to clean up old files.
+
+        Returns:
+            Number of days (default 3)
+        """
+        config = self.load_config()
+        return config.get("cleanup_days", 3)
+
+    def set_cleanup_days(self, days: int) -> None:
+        """Set the number of days after which to clean up old files.
+
+        Args:
+            days: Number of days (must be positive)
+        """
+        if days < 1:
+            raise ValueError("cleanup_days must be at least 1")
+        config = self.load_config()
+        config["cleanup_days"] = days
+        self.save_config(config)

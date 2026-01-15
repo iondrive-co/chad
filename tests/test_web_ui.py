@@ -1227,7 +1227,7 @@ class TestLaunchWebUI:
 
     @patch("chad.web_ui._resolve_port", return_value=(7860, False, False))
     @patch("chad.web_ui.ChadWebUI")
-    @patch("chad.web_ui.SecurityManager")
+    @patch("chad.web_ui.ConfigManager")
     def test_launch_with_existing_password(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """Test launching with existing user and provided password (trusted)."""
         from chad.web_ui import launch_web_ui
@@ -1256,7 +1256,7 @@ class TestLaunchWebUI:
 
     @patch("chad.web_ui._resolve_port", return_value=(7860, False, False))
     @patch("chad.web_ui.ChadWebUI")
-    @patch("chad.web_ui.SecurityManager")
+    @patch("chad.web_ui.ConfigManager")
     def test_launch_without_password_verifies(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """Test launching without password triggers verification."""
         from chad.web_ui import launch_web_ui
@@ -1284,7 +1284,7 @@ class TestLaunchWebUI:
 
     @patch("chad.web_ui._resolve_port", return_value=(7860, False, False))
     @patch("chad.web_ui.ChadWebUI")
-    @patch("chad.web_ui.SecurityManager")
+    @patch("chad.web_ui.ConfigManager")
     def test_launch_first_run_with_password(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """Test launching on first run with password provided."""
         from chad.web_ui import launch_web_ui
@@ -1312,7 +1312,7 @@ class TestLaunchWebUI:
 
     @patch("chad.web_ui._resolve_port", return_value=(43210, True, True))
     @patch("chad.web_ui.ChadWebUI")
-    @patch("chad.web_ui.SecurityManager")
+    @patch("chad.web_ui.ConfigManager")
     def test_launch_falls_back_when_port_busy(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """New launches should fall back to an ephemeral port if the default is in use."""
         from chad.web_ui import launch_web_ui

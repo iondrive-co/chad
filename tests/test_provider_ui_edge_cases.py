@@ -10,7 +10,7 @@ import pytest
 
 from chad.model_catalog import ModelCatalog
 from chad.provider_ui import ProviderUIManager
-from chad.security import SecurityManager
+from chad.config_manager import ConfigManager
 from chad.verification.ui_playwright_runner import create_temp_env
 
 
@@ -25,7 +25,7 @@ class TestProviderScreenshotMode:
             for key, value in env.env_vars.items():
                 monkeypatch.setenv(key, value)
 
-            security_mgr = SecurityManager()
+            security_mgr = ConfigManager()
             model_catalog = ModelCatalog(security_mgr)
             provider_ui = ProviderUIManager(security_mgr, env.password, model_catalog)
 
@@ -63,7 +63,7 @@ class TestClaudeUsageEdgeCases:
             monkeypatch.setenv("CHAD_CONFIG", str(env.config_path))
             monkeypatch.setenv("CHAD_TEMP_HOME", str(env.temp_dir))
 
-            security_mgr = SecurityManager()
+            security_mgr = ConfigManager()
             security_mgr.store_account("claude-1", "anthropic", api_key="dummy", password=env.password)
 
             claude_config_dir = Path(env.temp_dir) / ".chad" / "claude-configs" / "claude-1"

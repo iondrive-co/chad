@@ -17,7 +17,7 @@ from typing import Iterator
 import gradio as gr
 
 from .provider_ui import ProviderUIManager
-from .security import SecurityManager
+from .config_manager import ConfigManager
 from .session_logger import SessionLogger
 from .providers import ModelConfig, parse_codex_output, create_provider
 from .model_catalog import ModelCatalog
@@ -1966,7 +1966,7 @@ class ChadWebUI:
     VERIFICATION_NONE = "__verification_none__"
     VERIFICATION_NONE_LABEL = "None"
 
-    def __init__(self, security_mgr: SecurityManager, main_password: str, dev_mode: bool = False):
+    def __init__(self, security_mgr: ConfigManager, main_password: str, dev_mode: bool = False):
         self.security_mgr = security_mgr
         self.main_password = main_password
         self.dev_mode = dev_mode
@@ -5996,7 +5996,7 @@ def launch_web_ui(password: str = None, port: int = 7860, dev_mode: bool = False
         # Non-fatal; continue without forcing env
         pass
 
-    security_mgr = SecurityManager()
+    security_mgr = ConfigManager()
 
     # Get or verify password
     if security_mgr.is_first_run():
