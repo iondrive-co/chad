@@ -55,6 +55,13 @@ class AIToolInstaller:
                 package="@google/gemini-cli",
                 version="latest",
             ),
+            "qwen": CLIToolSpec(
+                name="Qwen Code",
+                binary="qwen",
+                installer="npm",
+                package="@qwen-code/qwen-code",
+                version="latest",
+            ),
             "vibe": CLIToolSpec(
                 name="Mistral Vibe",
                 binary="vibe",
@@ -66,12 +73,28 @@ class AIToolInstaller:
 
     def resolve_tool_path(self, binary: str) -> Path | None:
         """Return a path to the binary if it exists in tools dir or PATH."""
+        import os
+
         candidate = self.bin_dir / binary
         if candidate.exists():
             return candidate
+
+        # On Windows, npm creates .cmd wrappers
+        if os.name == "nt":
+            candidate_cmd = self.bin_dir / f"{binary}.cmd"
+            if candidate_cmd.exists():
+                return candidate_cmd
+
         npm_bin = self.tools_dir / "node_modules" / ".bin" / binary
         if npm_bin.exists():
             return npm_bin
+
+        # On Windows, check for .cmd in npm bin
+        if os.name == "nt":
+            npm_bin_cmd = self.tools_dir / "node_modules" / ".bin" / f"{binary}.cmd"
+            if npm_bin_cmd.exists():
+                return npm_bin_cmd
+
         if is_tool_installed(binary):
             from shutil import which
 
@@ -97,7 +120,12 @@ class AIToolInstaller:
 
     def _install_with_npm(self, spec: CLIToolSpec) -> tuple[bool, str]:
         if not self._check_node_npm():
-            return False, "Node.js and npm are required but were not found on PATH."
+            return False, (
+                f"Node.js and npm are required to install {spec.name}.\n\n"
+                f"Please install Node.js from https://nodejs.org/ then try again.\n\n"
+                f"Or install {spec.name} manually:\n"
+                f"```\nnpm install -g {spec.package}\n```"
+            )
 
         ensure_directory(self.tools_dir)
         ensure_directory(self.bin_dir)
@@ -112,16 +140,33 @@ class AIToolInstaller:
         code, stdout, stderr = run_command(cmd)
         if code != 0:
             err = stderr.strip() or stdout.strip() or f"npm exited with code {code}"
-            return False, f"npm install failed for {spec.name}: {err}"
+            return False, (
+                f"Failed to install {spec.name}: {err}\n\n"
+                f"You can install it manually:\n"
+                f"```\nnpm install -g {spec.package}\n```"
+            )
 
         # Ensure a stable bin path by symlinking npm's .bin into our bin dir
+        import os
+
         npm_bin = self.tools_dir / "node_modules" / ".bin" / spec.binary
         target_bin = self.bin_dir / spec.binary
+
+        # On Windows, also handle .cmd wrappers
+        if os.name == "nt":
+            npm_bin_cmd = self.tools_dir / "node_modules" / ".bin" / f"{spec.binary}.cmd"
+            target_bin_cmd = self.bin_dir / f"{spec.binary}.cmd"
+            if npm_bin_cmd.exists() and not target_bin_cmd.exists():
+                try:
+                    target_bin_cmd.symlink_to(npm_bin_cmd)
+                except (FileExistsError, OSError):
+                    pass  # Symlink failed (needs admin on Windows), will use direct path
+
         if npm_bin.exists() and not target_bin.exists():
             try:
                 target_bin.symlink_to(npm_bin)
-            except FileExistsError:
-                pass
+            except (FileExistsError, OSError):
+                pass  # Symlink failed (needs admin on Windows), will use direct path
 
         resolved = self.resolve_tool_path(spec.binary)
         if not resolved:

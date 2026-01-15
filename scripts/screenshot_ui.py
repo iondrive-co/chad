@@ -34,21 +34,33 @@ import sys
 from pathlib import Path
 import webbrowser
 
+# Ensure logs flush promptly when output is piped (CI/agents)
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 try:
-    from chad.ui_playwright_runner import (
+    from chad.verification.ui_playwright_runner import (
         ChadLaunchError,
         PlaywrightUnavailable,
         create_temp_env,
+        inject_chatbot_message,
         inject_live_stream_content,
         open_playwright_page,
         resolve_screenshot_output,
         start_chad,
         stop_chad,
     )
-    from chad.screenshot_fixtures import LIVE_VIEW_CONTENT
+    from chad.verification.screenshot_fixtures import (
+        LIVE_VIEW_CONTENT,
+        create_sample_screenshots,
+        get_chat_history_with_screenshots,
+    )
 except ImportError as e:
     print(f"Error importing ui_playwright_runner: {e}", file=sys.stderr)
     print("Ensure playwright is installed: pip install playwright && playwright install chromium")
@@ -121,6 +133,11 @@ def main():
     parser.add_argument("--height", type=int, default=900, help="Viewport height (default: 900)")
     parser.add_argument("--headless", action="store_true", help="Run browser in headless mode (no window)")
     parser.add_argument(
+        "--with-chat-screenshots",
+        action="store_true",
+        help="Populate chatbot with sample message containing before/after screenshots",
+    )
+    parser.add_argument(
         "--color-scheme",
         choices=["dark", "light", "both"],
         default="both",
@@ -142,6 +159,13 @@ def main():
         multi = True
         outputs = []
 
+        # Create sample screenshots if needed
+        chat_messages = None
+        if args.with_chat_screenshots:
+            print("Creating sample screenshots for chat...")
+            before_path, after_path = create_sample_screenshots(env.temp_dir)
+            chat_messages = get_chat_history_with_screenshots(before_path, after_path)
+
         for scheme in schemes:
             target_path = resolve_screenshot_output(args.output, scheme, multi)
             target_desc = args.selector if args.selector else (args.tab or "run") + " tab"
@@ -156,6 +180,10 @@ def main():
             ) as page:
                 if args.tab in (None, "run"):
                     inject_live_stream_content(page, LIVE_VIEW_CONTENT)
+                    if chat_messages:
+                        print("  Injecting chat with screenshots...")
+                        inject_chatbot_message(page, chat_messages)
+                        page.wait_for_timeout(500)  # Wait for rendering
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 if args.selector:
                     screenshot_element(page, args.selector, target_path)

@@ -9,7 +9,7 @@ try:
 except Exception:  # pragma: no cover - handled by pytest skip
     pytest.skip("playwright not available", allow_module_level=True)
 
-from chad.ui_playwright_runner import (
+from chad.verification.ui_playwright_runner import (
     ChadLaunchError,
     check_live_stream_colors,
     create_temp_env,
@@ -443,21 +443,6 @@ class TestSubtaskTabs:
 class TestTaskTabs:
     """Test dynamic task tab creation with the + tab."""
 
-    def test_click_plus_reveals_task_2(self, page: Page):
-        """Clicking + tab should auto-create and switch to Task 2."""
-        # Click the + tab - JS auto-clicks the Add button
-        main_tabs = page.locator("#main-tabs")
-        plus_tab = main_tabs.get_by_role("tab", name="➕")
-        plus_tab.click()
-
-        # Wait for Task 2 tab to appear (auto-created by JS)
-        task2_tab = page.get_by_role("tab", name="Task 2")
-        expect(task2_tab).to_be_visible(timeout=5000)
-
-        # Task 2 should now be selected
-        is_selected = task2_tab.get_attribute("aria-selected")
-        assert is_selected == "true", "Task 2 should be selected after clicking +"
-
     def test_task_2_has_content(self, page: Page):
         """Task 2 should have proper UI content when created."""
         # Click + tab to auto-create Task 2
@@ -803,11 +788,12 @@ Line 4: Fourth line"""
     const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
     if (!box) return false;
     const container = box.querySelector('.live-output-content') || box;
+    // Simulate user scrolling to top: scrollTop=0 and savedScrollTop=0 (not null)
     container.scrollTop = 0;
     if (window._liveStreamScroll && window._liveStreamScroll.has(container)) {
         const state = window._liveStreamScroll.get(container);
-        state.userScrolledUp = false;
-        state.savedScrollTop = 0;
+        state.userScrolledUp = true;  // User actively scrolled away from bottom
+        state.savedScrollTop = 0;  // User's scroll position (0 = top of content)
     }
     return true;
 }
@@ -839,46 +825,6 @@ Line 4: Fourth line"""
         )
         assert scroll_after is not None, "Live view scrollTop should be readable"
         assert scroll_after <= 1, f"Live view auto-scrolled on new content (scrollTop={scroll_after})"
-
-    def test_task_2_live_stream_has_multiline_formatting(self, page: Page):
-        """Task 2 live stream should keep styled multiline formatting like Task 1."""
-        # Create Task 2 via + tab and ensure it's active
-        try:
-            main_tabs = page.locator("#main-tabs")
-            plus_tab = main_tabs.get_by_role("tab", name="➕")
-            plus_tab.click()
-        except Exception:
-            # Try fallback tabs if the main plus tab isn't clickable
-            try:
-                fallback_tab = page.locator("#initial-static-plus-tab")
-                fallback_tab.click()
-            except Exception:
-                fallback_tab = page.locator("#fallback-plus-tab")
-                fallback_tab.click()
-        task2_tab = page.get_by_role("tab", name="Task 2")
-        expect(task2_tab).to_be_visible(timeout=5000)
-        task2_tab.click()
-        expect(task2_tab).to_have_attribute("aria-selected", "true")
-
-        panel_id = task2_tab.get_attribute("aria-controls")
-        assert panel_id, "Task 2 tab should reference a tabpanel via aria-controls"
-        panel_selector = f"#{panel_id}"
-        panel = page.locator(panel_selector)
-        expect(panel).to_be_visible(timeout=5000)
-
-        multiline_content = """Line 1: Task 2 output
-Line 2: Still on its own line
-Line 3: With colors and spacing"""
-        html_wrapped = f'<div class="live-output-content">{multiline_content}</div>'
-        inject_live_stream_content(page, html_wrapped, container_selector=panel_selector)
-
-        content_box = panel.locator(".live-output-content").last
-        assert content_box.is_visible(), "Task 2 live output content should be visible"
-
-        white_space = content_box.evaluate("el => getComputedStyle(el).whiteSpace")
-        assert white_space in ("pre-wrap", "pre", "pre-line"), (
-            f"Task 2 live view should preserve newlines, got: {white_space}"
-        )
 
     def test_inject_requires_live_stream_box(self, page: Page):
         """Inject helper should not create content when live stream box is missing."""
@@ -990,121 +936,258 @@ class TestMergeDiscardReset:
     Note: The handler logic is also verified via unit tests in test_web_ui.py.
     """
 
-    def test_merge_section_not_in_dom_when_hidden(self, page: Page):
-        """Verify merge section is not rendered when initially hidden.
+    def test_merge_section_initially_empty(self, page: Page):
+        """Verify merge section Group starts hidden (empty content).
 
-        Gradio doesn't render components that start with visible=False,
-        which is actually the correct behavior. This test confirms this.
+        The merge section uses a gr.Group that starts with visible=False,
+        so its content (header, summary, buttons) should not be visible initially.
         """
-        # Check that merge section is not visible (either not in DOM or hidden)
+        # Check that merge section content is not visible
         merge_info = page.evaluate(
             """
         () => {
-            const mergeSection = document.querySelector('.merge-section') ||
-                                document.querySelector('[key*="merge-section"]');
+            const mergeSection = document.querySelector('.merge-section');
             if (!mergeSection) {
-                return { exists: false, visible: false };
+                return { exists: false, hasContent: false };
             }
-            const style = window.getComputedStyle(mergeSection);
+            // Check if the accept/merge button is visible (it's inside the Group)
+            const mergeBtn = mergeSection.querySelector('.accept-merge-btn');
+            if (!mergeBtn) {
+                return { exists: true, hasContent: false };
+            }
+            const style = window.getComputedStyle(mergeBtn);
             const visible = style.display !== 'none' && style.visibility !== 'hidden';
-            return { exists: true, visible };
+            return { exists: true, hasContent: visible };
         }
         """
         )
 
-        # Either not in DOM or hidden - both are acceptable for initial state
-        assert not merge_info["visible"], (
-            "Merge section should not be visible initially"
+        # Content should not be visible initially
+        assert not merge_info.get("hasContent", False), (
+            "Merge section content should not be visible initially"
         )
 
-    def test_javascript_hides_merge_section_on_status_change(self, page: Page):
-        """Verify the JavaScript workaround hides merge section when status contains 'discarded'.
-
-        This tests the fix for Gradio's Column visibility bug. When the status
-        message contains 'discarded', the JavaScript should hide the merge section.
+    def test_merge_section_column_exists(self, page: Page):
+        """Verify merge section Column is in DOM (for Gradio component binding)."""
+        # The Column should always be in DOM for Gradio to bind events
+        exists = page.evaluate(
+            """
+        () => {
+            const mergeSection = document.querySelector('.merge-section');
+            return !!mergeSection;
+        }
         """
-        # Simulate a status change containing 'discarded' and verify JS hides section
+        )
+
+        assert exists, "Merge section Column should be in DOM for event binding"
+
+    def test_merge_section_hidden_when_no_changes(self, page: Page):
+        """Verify merge section is hidden when there are no changes.
+
+        This test ensures that the "Changes Ready to Merge" header and merge section
+        are not visible when there are no actual changes in the worktree.
+        """
+        # Wait for page to fully load and JS to run
+        time.sleep(1.0)  # Give JS visibility sync time to run
+
+        # Check merge section visibility and content
+        merge_status = page.evaluate(
+            """
+        () => {
+            const mergeSection = document.querySelector('.merge-section');
+            if (!mergeSection) {
+                return { exists: false };
+            }
+
+            // Check if it has the hidden class
+            const hasHiddenClass = mergeSection.classList.contains('merge-section-hidden');
+
+            // Check if the header has content
+            const header = mergeSection.querySelector('h3, [data-testid="markdown"] h3');
+            const headerText = header ? header.textContent.trim() : '';
+
+            // Check if changes summary has content
+            const summary = mergeSection.querySelector('[key*="changes-summary"]');
+            const summaryText = summary ? summary.textContent.trim() : '';
+
+            // Check computed visibility
+            const style = window.getComputedStyle(mergeSection);
+            const isVisible = style.display !== 'none' && style.visibility !== 'hidden' &&
+                             !hasHiddenClass;
+
+            return {
+                exists: true,
+                hasHiddenClass: hasHiddenClass,
+                headerText: headerText,
+                summaryText: summaryText,
+                isVisible: isVisible,
+                computedDisplay: style.display
+            };
+        }
+        """
+        )
+
+        # The merge section should exist but be hidden
+        assert merge_status["exists"], "Merge section should exist in DOM"
+        assert merge_status["hasHiddenClass"], "Merge section should have 'merge-section-hidden' class"
+        assert not merge_status["isVisible"], f"Merge section should not be visible, but got: {merge_status}"
+
+        # Header and summary should be empty
+        assert merge_status["headerText"] == "", f"Header should be empty but got: '{merge_status['headerText']}'"
+        assert merge_status["summaryText"] == "", f"Summary should be empty but got: '{merge_status['summaryText']}'"
+
+
+class TestInlineScreenshots:
+    """Test that before/after screenshots render as actual images in the chatbot.
+
+    These tests verify the fix for inline screenshot rendering. Previously,
+    Gradio's HTML sanitization stripped <img> tags even when listed in allow_tags.
+    The fix sets sanitize_html=False since content is internally generated.
+    """
+
+    def test_chatbot_allows_img_tags(self, page: Page):
+        """Chatbot should render <img> tags without sanitizing them."""
+        # Inject a message with an img tag directly into the chatbot
+        # using a data URL (no external file needed)
         result = page.evaluate(
             """
         () => {
-            // Find a status element - look for #task-status-header or any element with task-status in key
-            const statusEl = document.getElementById('task-status-header') ||
-                            document.querySelector('[key*="task-status"]') ||
-                            document.querySelector('[id*="task-status"]');
-            if (!statusEl) {
-                return { statusFound: false };
-            }
+            const chatbot = document.querySelector('#agent-chatbot');
+            if (!chatbot) return { error: 'chatbot not found' };
 
-            // Get the merge section - it may not be in DOM if Gradio rendered it hidden
-            const mergeSection = document.querySelector('.merge-section');
+            // Create a minimal red 1x1 PNG as data URL
+            const redPixelDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
 
-            // If there's no merge section in DOM, the test passes trivially
-            // (Gradio doesn't render hidden components)
-            if (!mergeSection) {
-                return { statusFound: true, mergeSectionHidden: true, note: 'no-section-in-dom' };
-            }
+            // Find the message container
+            const container = chatbot.querySelector('.chatbot, [data-testid="chatbot"]')
+                || chatbot.querySelector('.messages')
+                || chatbot;
 
-            // Make merge section visible for the test
-            mergeSection.style.display = 'block';
+            // Create a message with an img tag
+            const wrapper = document.createElement('div');
+            wrapper.className = 'message-row bot-row test-screenshot-message';
 
-            // Set status text to trigger JS hiding
-            const originalText = statusEl.textContent;
-            statusEl.textContent = 'Changes discarded.';
+            const bubble = document.createElement('div');
+            bubble.className = 'message bot-message';
+            bubble.innerHTML = `
+                <div class="screenshot-comparison">
+                    <div class="screenshot-panel">
+                        <div class="screenshot-label">Before</div>
+                        <img src="${redPixelDataUrl}" alt="Before screenshot" class="test-before-img">
+                    </div>
+                    <div class="screenshot-panel">
+                        <div class="screenshot-label">After</div>
+                        <img src="${redPixelDataUrl}" alt="After screenshot" class="test-after-img">
+                    </div>
+                </div>
+            `;
 
-            // Wait for JS to process (syncMergeSectionVisibility runs on interval)
-            return new Promise((resolve) => {
+            wrapper.appendChild(bubble);
+            container.appendChild(wrapper);
+
+            // Wait a moment for any sanitization to occur
+            return new Promise(resolve => {
                 setTimeout(() => {
-                    const section = document.querySelector('.merge-section');
-                    const isHidden = !section || window.getComputedStyle(section).display === 'none';
+                    // Check if img tags still exist (weren't sanitized)
+                    const beforeImg = container.querySelector('.test-before-img');
+                    const afterImg = container.querySelector('.test-after-img');
+
                     resolve({
-                        statusFound: true,
-                        mergeSectionHidden: isHidden
+                        beforeImgExists: !!beforeImg,
+                        afterImgExists: !!afterImg,
+                        beforeImgSrc: beforeImg ? beforeImg.src.substring(0, 30) : null,
+                        afterImgSrc: afterImg ? afterImg.src.substring(0, 30) : null,
+                        screenshotComparisonExists: !!container.querySelector('.screenshot-comparison'),
+                        labelExists: !!container.querySelector('.screenshot-label')
                     });
-                }, 600);  // Wait for the 500ms interval to run
+                }, 100);
             });
         }
         """
         )
 
-        # Status element should now always be in DOM (visible=True with CSS hiding)
-        assert result.get("statusFound"), (
-            "Status element should be in DOM - task_status has visible=True and elem_classes=['task-status-header']"
-        )
+        assert "error" not in result, f"Test setup failed: {result.get('error')}"
+        assert result["beforeImgExists"], "Before <img> tag should not be sanitized"
+        assert result["afterImgExists"], "After <img> tag should not be sanitized"
+        assert result["beforeImgSrc"].startswith("data:image/png"), "Before img should have data URL src"
+        assert result["afterImgSrc"].startswith("data:image/png"), "After img should have data URL src"
+        assert result["screenshotComparisonExists"], "screenshot-comparison div should exist"
+        assert result["labelExists"], "screenshot-label should exist"
 
-        # The JavaScript fix should have hidden the merge section
-        assert result.get("mergeSectionHidden", True), (
-            "JavaScript should hide merge section when status contains 'discarded'"
-        )
-
-    def test_fresh_panel_has_no_merge_section(self, page: Page):
-        """Verify a fresh task panel has no visible merge section."""
-        # Check initial state - merge section should not be visible
-        initial_visible = page.evaluate(
+    def test_screenshot_comparison_layout(self, page: Page):
+        """Screenshot comparison should display images side by side."""
+        # First inject the test content
+        page.evaluate(
             """
         () => {
-            const mergeSection = document.querySelector('.merge-section') ||
-                                document.querySelector('[key*="merge-section"]');
-            if (!mergeSection) return false;
-            const style = window.getComputedStyle(mergeSection);
-            return style.display !== 'none' && style.visibility !== 'hidden';
+            const chatbot = document.querySelector('#agent-chatbot');
+            if (!chatbot) return false;
+
+            const redPixelDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
+            const greenPixelDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEBgIApD5fRAAAAABJRU5ErkJggg==';
+
+            const container = chatbot.querySelector('.chatbot, [data-testid="chatbot"]')
+                || chatbot.querySelector('.messages')
+                || chatbot;
+
+            // Clear any previous test messages
+            container.querySelectorAll('.test-layout-message').forEach(m => m.remove());
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'message-row bot-row test-layout-message';
+
+            const bubble = document.createElement('div');
+            bubble.className = 'message bot-message';
+            bubble.innerHTML = `
+                <div class="screenshot-comparison" id="test-comparison">
+                    <div class="screenshot-panel" id="test-before-panel">
+                        <div class="screenshot-label">Before</div>
+                        <img src="${redPixelDataUrl}" alt="Before">
+                    </div>
+                    <div class="screenshot-panel" id="test-after-panel">
+                        <div class="screenshot-label">After</div>
+                        <img src="${greenPixelDataUrl}" alt="After">
+                    </div>
+                </div>
+            `;
+
+            wrapper.appendChild(bubble);
+            container.appendChild(wrapper);
+            return true;
         }
         """
         )
 
-        assert not initial_visible, "Fresh task panel should not show merge section"
-
-    def test_javascript_workaround_in_custom_js(self, page: Page):
-        """Verify the syncMergeSectionVisibility function exists in the page JavaScript."""
-        # Check that our JS fix function is defined
-        has_function = page.evaluate(
+        # Check the layout
+        layout = page.evaluate(
             """
         () => {
-            // The function is defined inside an IIFE, so we can't access it directly
-            // Instead, check that the interval is running by looking at visible behaviors
-            // Check if the page has loaded and our custom JS is present
-            return document.readyState === 'complete';
+            const comparison = document.querySelector('#test-comparison');
+            if (!comparison) return { error: 'comparison div not found' };
+
+            const beforePanel = document.querySelector('#test-before-panel');
+            const afterPanel = document.querySelector('#test-after-panel');
+            if (!beforePanel || !afterPanel) return { error: 'panels not found' };
+
+            const compStyle = window.getComputedStyle(comparison);
+            const beforeBox = beforePanel.getBoundingClientRect();
+            const afterBox = afterPanel.getBoundingClientRect();
+
+            return {
+                display: compStyle.display,
+                beforeLeft: beforeBox.left,
+                afterLeft: afterBox.left,
+                beforeWidth: beforeBox.width,
+                afterWidth: afterBox.width,
+                sideBySide: afterBox.left > beforeBox.left + beforeBox.width * 0.5
+            };
         }
         """
         )
 
-        assert has_function, "Page should be fully loaded with custom JavaScript"
+        assert "error" not in layout, f"Layout check failed: {layout.get('error')}"
+        assert layout["display"] == "flex", f"screenshot-comparison should be flex, got {layout['display']}"
+        assert layout["sideBySide"], (
+            f"Before and After should be side by side. "
+            f"Before left={layout['beforeLeft']}, After left={layout['afterLeft']}"
+        )

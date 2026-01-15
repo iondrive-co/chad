@@ -3,6 +3,9 @@
 Edit these prompts to customize agent behavior.
 """
 
+from dataclasses import dataclass
+
+
 # =============================================================================
 # CODING AGENT SYSTEM PROMPT
 # =============================================================================
@@ -13,20 +16,57 @@ Edit these prompts to customize agent behavior.
 CODING_AGENT_PROMPT = """\
 {project_docs}
 
-Firstly, write a test which should fail until the following task has been successfully completed. For any UI-affecting
-work, see if the project has a means to take a "before" screenshot, if so do that and review the screenshot to confirm
-you understand the issue/current state.
+You need to complete the following task:
 ---
 # Task
 
 {task}
 ---
-Once you have completed your changes for the task, take an after screenshot if that is supported to confirm that the
-user's request is fixed/done. Run any tests and lint available in the project and fix all issues even if you didn't
-cause them. When you are done, end your response with a JSON summary block like this:
+Use the following sequence to complete the task:
+1. Explore the code to understand the task.
+2. Once you understand what needs to be done, you MUST output a progress update so the user can see what you found:
 ```json
-{{"change_summary": "One sentence describing what was changed"}}
+{{"type": "progress", "summary": "One line describing the issue/feature", "location": "src/file.py:123 - where changes will be made", "before_screenshot": "/path/to/before.png (optional, include if you took one)", "before_description": "Brief description of what the screenshot shows (optional, include if you took a screenshot)"}}
 ```
+For UI tasks: take a "before" screenshot first and include the path. For non-UI tasks: omit before_screenshot.
+3. Write test(s) that should fail until the fix/feature is implemented.
+4. Make the changes, adjusting tests as needed. If no changes are required, skip to step 9.
+5. Once you have completed your changes for the task, take an after screenshot (if that is supported) to confirm
+that the user's request is fixed/done.
+6. You MUST run verification before completing your task. Use the built-in verify() function for efficiency:
+- Recommended approach: python -c \"from chad.verification.tools import verify; result = verify(); print('✓ Passed' if result['success'] else f'✗ Failed at {{result.get(\"failed_phase\", \"unknown\")}}'); exit(0 if result['success'] else 1)\"
+- For visual-only tests when needed: python -c \"from chad.verification.tools import verify; result = verify(visual_only=True); print('✓ Passed' if result['success'] else f'✗ Failed at {{result.get(\"failed_phase\", \"unknown\")}}'); exit(0 if result['success'] else 1)\"
+
+If verify() is unavailable, use manual commands with intelligent Python detection:
+- Detect Python: Use ./.venv/bin/python if exists, otherwise ./.venv/Scripts/python.exe (Windows), ./venv/bin/python, ./venv/Scripts/python.exe (Windows), or fallback to python3
+- Run linting: {{detected_python}} -m flake8 src/chad
+- Run core tests (visuals excluded by marker): {{detected_python}} -m pytest tests/ -v --tb=short -n auto \\
+                                               -m \"not visual\"
+- Run only the visual tests mapped to the UI you touched (see src/chad/verification/visual_test_map.py):
+    VTESTS=$({{detected_python}} - <<'PY'
+import subprocess
+from chad.verification.visual_test_map import tests_for_paths
+changed = subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines()
+print(" or ".join(tests_for_paths(changed)))
+PY
+)
+    if [ -n "$VTESTS" ]; then {{detected_python}} -m pytest tests/test_ui_integration.py \\
+                                                       tests/test_ui_playwright_runner.py -v --tb=short \\
+                                                       -m \"visual\" -k "$VTESTS"; fi
+  If you add or change UI components, update visual_test_map.py so future runs pick the right visual tests.
+7. Fix ALL failures and retest if required.
+8. End your response with a JSON summary block like this:
+```json
+{{
+  "change_summary": "One sentence describing what was changed",
+  "hypothesis": "Brief root cause explanation (include if investigating a bug)",
+  "before_screenshot": "/path/to/before.png (include if you took a before screenshot)",
+  "before_description": "Brief description of what the before screenshot shows",
+  "after_screenshot": "/path/to/after.png (include if you took an after screenshot)",
+  "after_description": "Brief description of what the after screenshot shows"
+}}
+```
+Only include optional fields (hypothesis, before_screenshot, before_description, after_screenshot, after_description) when applicable.
 """
 
 
@@ -49,7 +89,7 @@ Here is the coding agents output for that task:
 ---
 
 Please verify the work by:
-1. Checking that what was actually modified on disk (use Read/Glob tools) matches the coding agents output
+1. Checking that what was actually modified on disk matches the coding agents output
 2. Checking that the coding agents output addresses everything the user asked for
 3. Reviewing the changes for correctness and completeness
 
@@ -120,6 +160,28 @@ class VerificationParseError(Exception):
     pass
 
 
+@dataclass
+class CodingSummary:
+    """Structured summary extracted from coding agent response."""
+
+    change_summary: str
+    hypothesis: str | None = None
+    before_screenshot: str | None = None
+    before_description: str | None = None
+    after_screenshot: str | None = None
+    after_description: str | None = None
+
+
+@dataclass
+class ProgressUpdate:
+    """Intermediate progress update from coding agent."""
+
+    summary: str
+    location: str
+    before_screenshot: str | None = None
+    before_description: str | None = None
+
+
 def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
     """Parse the JSON response from the verification agent.
 
@@ -135,15 +197,46 @@ def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
     import json
     import re
 
+    # Strip thinking/reasoning prefixes that some models add before JSON
+    # e.g., "*Thinking: **Ensuring valid JSON output***\n\n{..."
+    cleaned = re.sub(r"^\s*\*+[Tt]hinking:.*?\*+\s*", "", response, flags=re.DOTALL)
+
     # Extract JSON from the response (may be wrapped in ```json ... ```)
-    json_match = re.search(r"```json\s*(\{.*?\})\s*```", response, re.DOTALL)
+    json_match = re.search(r"```json\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
     if json_match:
         json_str = json_match.group(1)
     else:
-        # Try to find raw JSON object
-        json_match = re.search(r'\{[^{}]*"passed"[^{}]*\}', response, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(0)
+        # Try to find JSON object by matching balanced braces
+        # Find the first { and extract a valid JSON object from there
+        brace_start = cleaned.find("{")
+        if brace_start != -1:
+            depth = 0
+            in_string = False
+            escape_next = False
+            json_end = -1
+            for i, char in enumerate(cleaned[brace_start:], brace_start):
+                if escape_next:
+                    escape_next = False
+                    continue
+                if char == "\\" and in_string:
+                    escape_next = True
+                    continue
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        json_end = i + 1
+                        break
+            if json_end != -1:
+                json_str = cleaned[brace_start:json_end]
+            else:
+                raise VerificationParseError(f"No valid JSON found in response: {response[:200]}")
         else:
             raise VerificationParseError(f"No JSON found in response: {response[:200]}")
 
@@ -165,14 +258,14 @@ def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
     return passed, summary, issues
 
 
-def extract_coding_summary(response: str) -> str | None:
-    """Extract the change_summary from a coding agent response.
+def extract_coding_summary(response: str) -> CodingSummary | None:
+    """Extract the structured summary from a coding agent response.
 
     Args:
         response: Raw response from the coding agent
 
     Returns:
-        The change_summary string if found, None otherwise
+        CodingSummary with change_summary and optional hypothesis/screenshot paths, or None
     """
     import json
     import re
@@ -183,13 +276,93 @@ def extract_coding_summary(response: str) -> str | None:
         try:
             data = json.loads(json_match.group(1))
             if "change_summary" in data:
-                return data["change_summary"]
+                return CodingSummary(
+                    change_summary=data["change_summary"],
+                    hypothesis=data.get("hypothesis"),
+                    before_screenshot=data.get("before_screenshot"),
+                    before_description=data.get("before_description"),
+                    after_screenshot=data.get("after_screenshot"),
+                    after_description=data.get("after_description"),
+                )
         except json.JSONDecodeError:
             pass
 
-    # Try to find raw JSON with change_summary
+    # Try to find raw JSON with change_summary (fallback - only gets change_summary)
     json_match = re.search(r'\{\s*"change_summary"\s*:\s*"([^"]+)"\s*\}', response)
     if json_match:
-        return json_match.group(1)
+        return CodingSummary(change_summary=json_match.group(1))
 
     return None
+
+
+def extract_progress_update(response: str) -> ProgressUpdate | None:
+    """Extract a progress update from coding agent streaming output.
+
+    Args:
+        response: Raw response chunk from the coding agent
+
+    Returns:
+        ProgressUpdate if found, None otherwise
+    """
+    import json
+    import re
+
+    # Look for JSON block with type: "progress"
+    json_match = re.search(r'```json\s*(\{[^`]*"type"\s*:\s*"progress"[^`]*\})\s*```', response, re.DOTALL)
+    if json_match:
+        try:
+            data = json.loads(json_match.group(1))
+            if data.get("type") == "progress":
+                return ProgressUpdate(
+                    summary=data.get("summary", ""),
+                    location=data.get("location", ""),
+                    before_screenshot=data.get("before_screenshot"),
+                    before_description=data.get("before_description"),
+                )
+        except json.JSONDecodeError:
+            pass
+
+    # Try to find raw JSON with type: progress (fallback)
+    raw_match = re.search(r'\{\s*"type"\s*:\s*"progress"[^}]+\}', response)
+    if raw_match:
+        try:
+            data = json.loads(raw_match.group(0))
+            if data.get("type") == "progress":
+                return ProgressUpdate(
+                    summary=data.get("summary", ""),
+                    location=data.get("location", ""),
+                    before_screenshot=data.get("before_screenshot"),
+                    before_description=data.get("before_description"),
+                )
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+def check_verification_mentioned(response: str) -> bool:
+    """Check if the coding agent mentioned running verification.
+
+    Args:
+        response: Raw response from the coding agent
+
+    Returns:
+        True if verification was mentioned, False otherwise
+    """
+    import re
+
+    verification_patterns = [
+        r"flake8",
+        r"pytest",
+        r"verification.*passed",
+        r"all tests pass",
+        r"linting.*pass",
+        r"\d+ passed",
+    ]
+
+    response_lower = response.lower()
+    for pattern in verification_patterns:
+        if re.search(pattern, response_lower):
+            return True
+
+    return False

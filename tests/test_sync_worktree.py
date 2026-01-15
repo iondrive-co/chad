@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 def test_sync_paths_copies_files_without_rsync(monkeypatch, tmp_path):
-    import chad.sync_worktree as sync_worktree
+    import chad.verification.sync_worktree as sync_worktree
 
     source = tmp_path / "src"
     dest = tmp_path / "dest"
@@ -22,7 +22,7 @@ def test_sync_paths_copies_files_without_rsync(monkeypatch, tmp_path):
 
 
 def test_sync_paths_delete_removes_extra(monkeypatch, tmp_path):
-    import chad.sync_worktree as sync_worktree
+    import chad.verification.sync_worktree as sync_worktree
 
     source = tmp_path / "src2"
     dest = tmp_path / "dest2"

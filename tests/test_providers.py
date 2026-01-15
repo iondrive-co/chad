@@ -1,8 +1,11 @@
 """Tests for AI providers."""
 
 import json
+import os
 import platform
 import sys
+import textwrap
+import time
 from unittest.mock import Mock, patch
 
 import pytest
@@ -47,8 +50,8 @@ class TestCreateProvider:
             create_provider(config)
 
 
-def test_codex_start_session_ensures_mcp_config(monkeypatch, tmp_path):
-    """Codex start_session should install CLI and write per-home MCP config."""
+def test_codex_start_session_ensures_cli_installed(monkeypatch, tmp_path):
+    """Codex start_session should install CLI if missing."""
     import chad.providers as providers
 
     calls: list = []
@@ -59,23 +62,14 @@ def test_codex_start_session_ensures_mcp_config(monkeypatch, tmp_path):
             return True, "/bin/codex"
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setattr(providers, "CLI_INSTALLER", DummyInstaller())
-
-    def fake_config(home=None, project_root=None):
-        calls.append(("config", home))
-        return {"changed": True, "path": str(tmp_path / "cfg")}
-
-    monkeypatch.setattr(providers, "ensure_global_mcp_config", fake_config)
 
     cfg = providers.ModelConfig(provider="openai", model_name="default", account_name="acc")
     provider = providers.OpenAICodexProvider(cfg)
 
     assert provider.start_session(str(tmp_path)) is True
     assert ("cli", "codex") in calls
-    config_calls = [c for c in calls if c[0] == "config"]
-    assert config_calls, "ensure_global_mcp_config should be invoked"
-    home_used = config_calls[0][1]
-    assert str(home_used).startswith(str(tmp_path / ".chad" / "codex-homes" / "acc"))
 
 
 class TestParseCodexOutput:
@@ -853,6 +847,7 @@ class TestOpenAICodexProvider:
         provider.send_message("Hello")
         assert provider.current_message == "Hello"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
     @patch("chad.providers.select.select")
     @patch("chad.providers.os.read")
     @patch("chad.providers.os.close")
@@ -886,6 +881,7 @@ class TestOpenAICodexProvider:
         mock_stdin.write.assert_called_once_with(b"What is 2+2?")
         mock_stdin.close.assert_called_once()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
     @patch("chad.providers.select.select")
     @patch("chad.providers.os.read")
     @patch("chad.providers.os.close")
@@ -907,7 +903,8 @@ class TestOpenAICodexProvider:
         mock_select.return_value = ([], [], [])
 
         # Simulate timeout by having time advance past the limit
-        mock_time.side_effect = [0, 0, 2000, 2000]
+        # Provide enough values for all time.time() calls in the code path
+        mock_time.side_effect = [0, 0, 0, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000]
 
         config = ModelConfig(provider="openai", model_name="gpt-4")
         provider = OpenAICodexProvider(config)
@@ -919,6 +916,7 @@ class TestOpenAICodexProvider:
         assert provider.current_message is None
         mock_process.kill.assert_called_once()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
     @patch("chad.providers.os.close")
     @patch("chad.providers.pty.openpty")
     @patch("subprocess.Popen")
@@ -945,7 +943,7 @@ class TestOpenAICodexProvider:
 
     @patch("chad.providers._stream_pty_output", return_value=("", False, False))
     @patch("chad.providers._start_pty_process")
-    def test_get_response_exec_includes_network_access(self, mock_start, mock_stream):
+    def test_get_response_exec_uses_bypass_flag(self, mock_start, mock_stream):
         mock_process = Mock()
         mock_process.stdin = Mock()
         mock_start.return_value = (mock_process, 11)
@@ -959,12 +957,13 @@ class TestOpenAICodexProvider:
         provider.get_response(timeout=1.0)
 
         cmd = mock_start.call_args.args[0]
-        assert "-c" in cmd
-        assert 'network_access="enabled"' in cmd
+        # In exec mode, we use bypass flag because approval_policy=on-request
+        # doesn't work in non-interactive mode
+        assert "--dangerously-bypass-approvals-and-sandbox" in cmd
 
     @patch("chad.providers._stream_pty_output", return_value=("", False, False))
     @patch("chad.providers._start_pty_process")
-    def test_get_response_resume_includes_network_access(self, mock_start, mock_stream):
+    def test_get_response_resume_uses_bypass_flag(self, mock_start, mock_stream):
         mock_process = Mock()
         mock_process.stdin = Mock()
         mock_start.return_value = (mock_process, 11)
@@ -979,8 +978,10 @@ class TestOpenAICodexProvider:
         provider.get_response(timeout=1.0)
 
         cmd = mock_start.call_args.args[0]
-        assert "-c" in cmd
-        assert 'network_access="enabled"' in cmd
+        # Resume also needs bypass flag for non-interactive mode
+        assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+        assert "resume" in cmd
+        assert "thread-123" in cmd
 
     def test_reconnect_error_then_success(self):
         events = [
@@ -988,7 +989,7 @@ class TestOpenAICodexProvider:
             {"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}},
         ]
 
-        def fake_stream(_p, _fd, on_chunk, _t, idle_timeout=None):
+        def fake_stream(_p, _fd, on_chunk, _t, idle_timeout=None, idle_timeout_callback=None):
             for event in events:
                 on_chunk(json.dumps(event) + "\n")
             return "", False, False
@@ -1011,7 +1012,7 @@ class TestOpenAICodexProvider:
     def test_reconnect_error_without_recovery(self):
         events = [{"type": "error", "message": "Reconnecting... 5/5"}]
 
-        def fake_stream(_p, _fd, on_chunk, _t, idle_timeout=None):
+        def fake_stream(_p, _fd, on_chunk, _t, idle_timeout=None, idle_timeout_callback=None):
             for event in events:
                 on_chunk(json.dumps(event) + "\n")
             return "", False, False
@@ -1032,6 +1033,26 @@ class TestOpenAICodexProvider:
             with pytest.raises(RuntimeError, match="reconnect"):
                 provider.get_response(timeout=1.0)
 
+    def test_get_env_sets_windows_home_variables(self, monkeypatch):
+        """Test that _get_env sets all Windows home-related environment variables."""
+        from chad.utils import platform_path
+
+        monkeypatch.setattr("os.name", "nt")
+        config = ModelConfig(provider="openai", model_name="gpt-4", account_name="test-account")
+        provider = OpenAICodexProvider(config)
+
+        env = provider._get_env()
+        isolated_home = provider._get_isolated_home()
+        home_path = platform_path(isolated_home)
+
+        # Check all Windows-specific environment variables are set
+        assert env["HOME"] == isolated_home
+        assert env["USERPROFILE"] == isolated_home
+        assert env["HOMEDRIVE"] == (home_path.drive or "C:")
+        assert env["HOMEPATH"] == str(home_path.relative_to(home_path.anchor))
+        assert env["APPDATA"] == str(home_path / "AppData" / "Roaming")
+        assert env["LOCALAPPDATA"] == str(home_path / "AppData" / "Local")
+
 
 class TestImportOnWindows:
     """Ensure providers import cleanly when termios/pty is unavailable (Windows)."""
@@ -1047,7 +1068,8 @@ class TestImportOnWindows:
 
     @patch("chad.providers._stream_pty_output", return_value=("", False, True))
     @patch("chad.providers._start_pty_process")
-    def test_get_response_idle_stall(self, mock_start, mock_stream):
+    def test_get_response_idle_stall_no_thread_id(self, mock_start, mock_stream):
+        """Stall without thread_id should fail immediately (no recovery possible)."""
         mock_process = Mock()
         mock_process.stdin = Mock()
         mock_start.return_value = (mock_process, 11)
@@ -1057,9 +1079,145 @@ class TestImportOnWindows:
         provider.project_path = "/tmp/test_project"
         provider.current_message = "Hello"
         provider.cli_path = "/bin/codex"
+        provider.thread_id = None  # No thread_id means no recovery possible
 
         with pytest.raises(RuntimeError, match="stalled"):
             provider.get_response(timeout=1.0)
+
+    @patch("chad.providers._start_pty_process")
+    def test_get_response_stall_recovery_success(self, mock_start):
+        """Stall with thread_id should attempt recovery and succeed on retry."""
+        mock_process = Mock()
+        mock_process.stdin = Mock()
+        mock_start.return_value = (mock_process, 11)
+
+        # First call stalls, second call succeeds
+        stall_count = [0]
+
+        def fake_stream(_p, _fd, on_chunk, _t, idle_timeout=None, idle_timeout_callback=None):
+            stall_count[0] += 1
+            if stall_count[0] == 1:
+                # First call: stall
+                return "", False, True
+            else:
+                # Second call: success with response
+                on_chunk(json.dumps({
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Recovered!"}
+                }) + "\n")
+                return "", False, False
+
+        with patch("chad.providers._stream_pty_output", side_effect=fake_stream):
+            config = ModelConfig(provider="openai", model_name="gpt-4")
+            provider = OpenAICodexProvider(config)
+            provider.project_path = "/tmp/test_project"
+            provider.current_message = "Hello"
+            provider.cli_path = "/bin/codex"
+            provider.thread_id = "thread-123"  # Has thread_id so recovery is possible
+
+            result = provider.get_response(timeout=1.0)
+            assert "Recovered!" in result
+            assert stall_count[0] == 2  # First stall, then recovery
+
+    @patch("chad.providers._stream_pty_output", return_value=("", False, True))
+    @patch("chad.providers._start_pty_process")
+    def test_get_response_stall_recovery_exhausted(self, mock_start, mock_stream):
+        """Stall with thread_id should fail after single recovery attempt."""
+        mock_process = Mock()
+        mock_process.stdin = Mock()
+        mock_start.return_value = (mock_process, 11)
+
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+        provider.project_path = "/tmp/test_project"
+        provider.current_message = "Hello"
+        provider.cli_path = "/bin/codex"
+        provider.thread_id = "thread-123"  # Has thread_id
+
+        # Should fail after single recovery attempt (initial + 1 recovery = 2 calls)
+        with pytest.raises(RuntimeError, match="stalled"):
+            provider.get_response(timeout=1.0)
+
+        # Verify exactly 2 attempts were made (initial + single recovery)
+        assert mock_stream.call_count == 2
+
+    @patch("chad.providers._start_pty_process")
+    def test_exploration_loop_detection(self, mock_start):
+        """Exploration loop should be detected when too many exploration commands without implementation."""
+        import json
+
+        mock_process = Mock()
+        mock_process.stdin = Mock()
+        mock_start.return_value = (mock_process, 11)
+
+        call_count = [0]
+
+        def fake_stream(process, master_fd, on_chunk, timeout, **kwargs):
+            call_count[0] += 1
+            # Simulate many exploration commands (>40 which is the default limit)
+            for i in range(45):
+                on_chunk(json.dumps({
+                    "type": "item.completed",
+                    "item": {"type": "command_execution", "command": f"rg -n 'pattern{i}' src/"}
+                }) + "\n")
+            # Simulate the idle callback being called and returning True due to exploration limit
+            return "", False, True
+
+        with patch("chad.providers._stream_pty_output", side_effect=fake_stream):
+            config = ModelConfig(provider="openai", model_name="gpt-4")
+            provider = OpenAICodexProvider(config)
+            provider.project_path = "/tmp/test_project"
+            provider.current_message = "Hello"
+            provider.cli_path = "/bin/codex"
+            provider.thread_id = None  # No thread_id so no recovery
+
+            with pytest.raises(RuntimeError, match="exploration loop"):
+                provider.get_response(timeout=1.0)
+
+    @patch("chad.providers._start_pty_process")
+    def test_exploration_loop_recovery_attempt(self, mock_start):
+        """Exploration loop should attempt recovery by prompting agent to implement."""
+        import json
+
+        mock_process = Mock()
+        mock_process.stdin = Mock()
+        mock_start.return_value = (mock_process, 11)
+
+        call_count = [0]
+
+        def fake_stream(process, master_fd, on_chunk, timeout, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First call: simulate exploration loop
+                for i in range(45):
+                    on_chunk(json.dumps({
+                        "type": "item.completed",
+                        "item": {"type": "command_execution", "command": f"rg -n 'pattern{i}' src/"}
+                    }) + "\n")
+                return "", False, True
+            else:
+                # Second call (recovery): simulate successful implementation
+                on_chunk(json.dumps({
+                    "type": "item.completed",
+                    "item": {"type": "command_execution", "command": "edit src/file.py"}
+                }) + "\n")
+                on_chunk(json.dumps({
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Fixed the bug!"}
+                }) + "\n")
+                return "", False, False
+
+        with patch("chad.providers._stream_pty_output", side_effect=fake_stream):
+            config = ModelConfig(provider="openai", model_name="gpt-4")
+            provider = OpenAICodexProvider(config)
+            provider.project_path = "/tmp/test_project"
+            provider.current_message = "Hello"
+            provider.cli_path = "/bin/codex"
+            provider.thread_id = "thread-123"  # Has thread_id so recovery is possible
+
+            result = provider.get_response(timeout=1.0)
+            assert "Fixed the bug!" in result
+            assert call_count[0] == 2  # Initial + recovery
 
 
 def test_stream_output_without_pty(monkeypatch):
@@ -1076,6 +1234,136 @@ def test_stream_output_without_pty(monkeypatch):
     assert "hello from pipe" in output
     assert timed_out is False
     assert idle_stalled is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
+def test_stream_pty_kills_process_group_on_idle():
+    import chad.providers as providers
+
+    if not providers._HAS_PTY:
+        pytest.skip("PTY not available")
+
+    script = textwrap.dedent(
+        """
+        import subprocess, sys, time
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        print(child.pid, flush=True)
+        time.sleep(10)
+        """
+    )
+
+    process, master_fd = providers._start_pty_process([sys.executable, "-c", script])
+    output, timed_out, idle_stalled = providers._stream_pty_output(
+        process, master_fd, None, timeout=3.0, idle_timeout=0.5
+    )
+
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    assert lines, "No output captured from child process"
+    child_pid = int(lines[0])
+
+    assert idle_stalled is True
+    assert timed_out is False
+    assert process.poll() is not None
+
+    def pid_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, OSError):
+            return False
+        return True
+
+    deadline = time.time() + 2
+    while pid_alive(child_pid) and time.time() < deadline:
+        time.sleep(0.05)
+
+    assert pid_alive(child_pid) is False, "Child process survived stall termination"
+
+
+def test_pipe_idle_callback_does_not_reset_clock(monkeypatch):
+    """Stall detection should respect cumulative silence even when callback defers it."""
+    import chad.providers as providers
+
+    class DummyStdout:
+        def readline(self):
+            time.sleep(0.001)
+            return b""
+
+    class DummyProcess:
+        def __init__(self):
+            self.stdout = DummyStdout()
+            self.killed = False
+            self.pid = None
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            return 0
+
+    proc = DummyProcess()
+
+    start = time.time()
+    output, timed_out, idle_stalled = providers._stream_pipe_output(
+        proc,
+        None,
+        timeout=0.2,
+        idle_timeout=0.01,
+        idle_timeout_callback=lambda elapsed: elapsed >= 0.03,
+    )
+
+    assert idle_stalled is True
+    assert timed_out is False
+    assert proc.killed is True
+    assert time.time() - start < 1.0
+    assert output == ""
+
+
+def test_stream_pipe_output_buffers_partial_lines(monkeypatch):
+    """Test that _stream_pipe_output properly buffers partial lines for JSON parsing.
+
+    This is a regression test for the Windows pipe buffering issue where JSON
+    lines could be split across multiple read() calls, causing parse failures.
+    """
+    import chad.providers as providers
+
+    monkeypatch.setattr(providers, "_HAS_PTY", False)
+    monkeypatch.setattr(providers, "pty", None)
+
+    # Create a subprocess that outputs multiple JSON lines
+    # The print statements should be buffered properly
+    code = '''
+import sys
+print('{"type": "event1", "data": "first"}'  , flush=True)
+print('{"type": "event2", "data": "second"}' , flush=True)
+print('{"type": "event3", "data": "third"}'  , flush=True)
+'''
+    process, master_fd = providers._start_pty_process(
+        [sys.executable, "-c", code]
+    )
+
+    received_chunks = []
+
+    def on_chunk(chunk):
+        received_chunks.append(chunk)
+
+    output, timed_out, idle_stalled = providers._stream_pty_output(
+        process, master_fd, on_chunk, timeout=5.0
+    )
+
+    assert timed_out is False
+    assert idle_stalled is False
+
+    # Each line should be parseable as JSON
+    import json
+    for chunk in received_chunks:
+        for line in chunk.strip().split("\n"):
+            if line.strip():
+                parsed = json.loads(line)
+                assert "type" in parsed
+                assert "data" in parsed
 
 
 class TestCodexJsonEventParsing:
@@ -1251,6 +1539,7 @@ class TestCodexLiveViewFormatting:
 class TestOpenAICodexProviderIntegration:
     """Integration tests for OpenAICodexProvider using mocked subprocess."""
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="select.select doesn't work with pipes on Windows")
     def test_codex_execution_flow(self):
         """Test the end-to-end flow with mocked codex CLI."""
         import tempfile
@@ -1308,15 +1597,18 @@ class TestOpenAICodexProviderIntegration:
 class TestMistralVibeProvider:
     """Test cases for MistralVibeProvider."""
 
-    def test_start_session_success(self):
+    @patch("chad.providers._ensure_cli_tool", return_value=(True, "/bin/vibe"))
+    def test_start_session_success(self, mock_ensure):
         config = ModelConfig(provider="mistral", model_name="default")
         provider = MistralVibeProvider(config)
 
         result = provider.start_session("/tmp/test_project")
         assert result is True
         assert provider.project_path == "/tmp/test_project"
+        mock_ensure.assert_called_once_with("vibe", provider._notify_activity)
 
-    def test_start_session_with_system_prompt(self):
+    @patch("chad.providers._ensure_cli_tool", return_value=(True, "/bin/vibe"))
+    def test_start_session_with_system_prompt(self, mock_ensure):
         config = ModelConfig(provider="mistral", model_name="default")
         provider = MistralVibeProvider(config)
 
@@ -1346,6 +1638,7 @@ class TestGeminiCodeAssistProvider:
         assert "system" in provider.current_message
         assert "hello" in provider.current_message
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
     @patch("chad.providers.select.select")
     @patch("chad.providers.os.read")
     @patch("chad.providers.os.close")
@@ -1372,6 +1665,7 @@ class TestGeminiCodeAssistProvider:
         mock_popen.assert_called_once()
         assert provider.current_message is None
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
     @patch("chad.providers.select.select")
     @patch("chad.providers.os.read")
     @patch("chad.providers.os.close")
@@ -1398,6 +1692,7 @@ class TestGeminiCodeAssistProvider:
         assert "timed out" in response
         assert provider.current_message is None
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
     @patch("chad.providers.os.close")
     @patch("chad.providers.pty.openpty")
     @patch("subprocess.Popen")
@@ -1414,3 +1709,264 @@ class TestGeminiCodeAssistProvider:
     def test_get_response_no_message(self):
         provider = GeminiCodeAssistProvider(ModelConfig(provider="gemini", model_name="default"))
         assert provider.get_response(timeout=1) == ""
+
+
+class TestWindowsCodexStallHandling:
+    """Tests for Windows-specific Codex stall detection and process termination.
+
+    These tests verify that when Codex stops producing output (stalls), the system
+    correctly detects the idle timeout and terminates the process tree.
+    """
+
+    def test_idle_stall_detected_on_silent_process(self, monkeypatch):
+        """Test that a process producing no output triggers idle stall detection."""
+        import chad.providers as providers
+
+        monkeypatch.setattr(providers, "_HAS_PTY", False)
+        monkeypatch.setattr(providers, "pty", None)
+
+        # Create a subprocess that sleeps without producing output
+        # Use a very short idle timeout to keep test fast
+        code = "import time; time.sleep(10)"
+        process, master_fd = providers._start_pty_process(
+            [sys.executable, "-c", code]
+        )
+
+        # Use a short idle timeout (0.5s) to detect stall quickly
+        output, timed_out, idle_stalled = providers._stream_pipe_output(
+            process, None, timeout=10.0, idle_timeout=0.5
+        )
+
+        assert idle_stalled is True
+        assert timed_out is False
+        # Process should be terminated
+        assert process.poll() is not None
+
+    def test_process_killed_after_idle_stall(self, monkeypatch):
+        """Test that the process is properly killed when idle stall is detected."""
+        import chad.providers as providers
+
+        monkeypatch.setattr(providers, "_HAS_PTY", False)
+        monkeypatch.setattr(providers, "pty", None)
+
+        # Create a subprocess that hangs indefinitely
+        code = "import time; time.sleep(3600)"
+        process, master_fd = providers._start_pty_process(
+            [sys.executable, "-c", code]
+        )
+
+        # Verify process is running
+        assert process.poll() is None
+
+        # Stream with short idle timeout
+        output, timed_out, idle_stalled = providers._stream_pipe_output(
+            process, None, timeout=10.0, idle_timeout=0.3
+        )
+
+        # Process should be terminated after idle stall
+        assert idle_stalled is True
+        # Give a moment for process cleanup
+        import time
+        time.sleep(0.2)
+        assert process.poll() is not None
+
+    def test_stdin_flush_before_close(self, monkeypatch):
+        """Test that stdin is flushed before being closed."""
+        import chad.providers as providers
+        from unittest.mock import Mock
+
+        # Mock the _start_pty_process to return a mock process
+        mock_stdin = Mock()
+        mock_process = Mock()
+        mock_process.stdin = mock_stdin
+        mock_process.poll.return_value = 0  # Process completed immediately
+
+        monkeypatch.setattr(
+            providers, "_start_pty_process",
+            lambda cmd, cwd=None, env=None: (mock_process, None)
+        )
+        monkeypatch.setattr(providers, "_HAS_PTY", False)
+
+        # Mock _stream_pty_output to return immediately
+        monkeypatch.setattr(
+            providers, "_stream_pty_output",
+            lambda proc, fd, on_chunk, timeout, idle_timeout=None: ("", False, False)
+        )
+
+        # Mock CLI installation
+        monkeypatch.setattr(
+            providers, "_ensure_cli_tool",
+            lambda name, notify: (True, "/bin/codex")
+        )
+
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+        provider.project_path = "/tmp/test"
+        provider.current_message = "test message"
+        provider.cli_path = "/bin/codex"
+
+        # This will fail because we're mocking, but we want to verify the stdin calls
+        try:
+            provider.get_response(timeout=1.0)
+        except Exception:
+            pass
+
+        # Verify flush was called before close
+        calls = mock_stdin.method_calls
+        flush_index = None
+        close_index = None
+        for i, c in enumerate(calls):
+            if c[0] == 'flush':
+                flush_index = i
+            if c[0] == 'close':
+                close_index = i
+
+        # Both should be called, flush before close
+        assert flush_index is not None, "stdin.flush() was not called"
+        assert close_index is not None, "stdin.close() was not called"
+        assert flush_index < close_index, "flush() must be called before close()"
+
+    def test_output_received_before_stall(self, monkeypatch):
+        """Test that output produced before a stall is captured."""
+        import chad.providers as providers
+
+        monkeypatch.setattr(providers, "_HAS_PTY", False)
+        monkeypatch.setattr(providers, "pty", None)
+
+        # Create a subprocess that outputs something then sleeps
+        # Add a small delay after output to ensure it's flushed to the pipe
+        code = textwrap.dedent(
+            """
+            import sys
+            import time
+            print("output before stall", flush=True)
+            sys.stdout.flush()
+            time.sleep(0.2)  # Give time for output to be read
+            time.sleep(10)   # Then stall
+            """
+        )
+        process, master_fd = providers._start_pty_process(
+            [sys.executable, "-c", code]
+        )
+
+        received = []
+
+        def on_chunk(chunk):
+            received.append(chunk)
+
+        # Use longer idle timeout to ensure we capture the output first
+        output, timed_out, idle_stalled = providers._stream_pipe_output(
+            process, on_chunk, timeout=10.0, idle_timeout=1.0
+        )
+
+        assert idle_stalled is True
+        # Should have captured the output before the stall
+        all_output = output + "".join(received)
+        assert "output before stall" in all_output, f"Output not found. Got: {all_output!r}"
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific test")
+    def test_windows_startupinfo_configured(self, monkeypatch):
+        """Test that Windows subprocess uses proper STARTUPINFO flags."""
+        import chad.providers as providers
+        import subprocess
+
+        monkeypatch.setattr(providers, "_HAS_PTY", False)
+        monkeypatch.setattr(providers, "pty", None)
+
+        # Capture the Popen call to verify startupinfo
+        original_popen = subprocess.Popen
+        popen_kwargs = {}
+
+        def mock_popen(*args, **kwargs):
+            popen_kwargs.update(kwargs)
+            # Return a simple process for the test
+            return original_popen([sys.executable, "-c", "pass"], **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+
+        process, master_fd = providers._start_pty_process(
+            [sys.executable, "-c", "pass"]
+        )
+        process.wait()
+
+        # Verify startupinfo was set on Windows
+        assert "startupinfo" in popen_kwargs
+        assert popen_kwargs["startupinfo"] is not None
+        assert popen_kwargs["startupinfo"].dwFlags & subprocess.STARTF_USESTDHANDLES
+
+
+class TestWindowsEncodingHandling:
+    """Tests for Windows UTF-8 encoding handling in subprocess calls.
+
+    On Windows, subprocess with text=True defaults to cp1252 encoding which
+    can't handle all UTF-8 characters. These tests verify encoding is properly
+    specified to prevent UnicodeDecodeError.
+    """
+
+    def test_claude_provider_uses_utf8_encoding(self, monkeypatch):
+        """Test that ClaudeCodeProvider subprocess uses UTF-8 encoding."""
+        import subprocess
+        import chad.providers as providers
+
+        # Capture the Popen kwargs
+        captured_kwargs = {}
+
+        def mock_popen(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            raise FileNotFoundError("mock - CLI not found")
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        monkeypatch.setattr(providers, "_ensure_cli_tool", lambda n, cb: (True, "/fake/claude"))
+
+        config = ModelConfig(provider="anthropic", model_name="claude-sonnet-4")
+        provider = ClaudeCodeProvider(config)
+
+        # This will fail because we raise FileNotFoundError, but we can check kwargs
+        result = provider.start_session("/tmp/test")
+
+        assert result is False  # Failed because mock raised error
+        assert captured_kwargs.get("text") is True
+        assert captured_kwargs.get("encoding") == "utf-8"
+        assert captured_kwargs.get("errors") == "replace"
+
+    def test_utf8_characters_handled_in_pipe_output(self, monkeypatch):
+        """Test that UTF-8 characters (like emojis) are handled without errors."""
+        import chad.providers as providers
+        import os
+
+        monkeypatch.setattr(providers, "_HAS_PTY", False)
+        monkeypatch.setattr(providers, "pty", None)
+
+        # Create a subprocess that outputs UTF-8 characters including ones
+        # that would fail with cp1252 (like em-dash \u2014 which is byte 0x97 in cp1252
+        # or smart quotes which contain bytes that don't map)
+        code = '''
+import sys
+# Output various UTF-8 characters that would fail with cp1252
+print("Hello \\u2014 World")  # em-dash
+print("Quotes: \\u201c and \\u201d")  # smart quotes
+print("Emoji: \\U0001F600")  # grinning face emoji
+print("Done", flush=True)
+'''
+        # Set PYTHONIOENCODING so the subprocess outputs UTF-8
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        process, master_fd = providers._start_pty_process(
+            [sys.executable, "-c", code], env=env
+        )
+
+        received = []
+
+        def on_chunk(chunk):
+            received.append(chunk)
+
+        output, timed_out, idle_stalled = providers._stream_pipe_output(
+            process, on_chunk, timeout=10.0, idle_timeout=2.0
+        )
+
+        # Should complete without errors and capture output
+        all_output = output + "".join(received)
+        assert "Done" in all_output
+        # The special characters should be present (or replaced if errors='replace')
+        assert "Hello" in all_output
+        assert "Quotes" in all_output

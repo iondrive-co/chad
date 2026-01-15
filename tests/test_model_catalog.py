@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 from pathlib import Path
 
 from chad.model_catalog import ModelCatalog
@@ -34,6 +35,8 @@ def _write_codex_config(home: Path, model: str, migrations: dict[str, str] | Non
 
 def test_openai_models_keep_codex_variants_for_chatgpt(monkeypatch, tmp_path):
     monkeypatch.setenv("CHAD_TEMP_HOME", str(tmp_path))
+    if os.name == "nt":
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     home = tmp_path / ".chad" / "codex-homes" / "codex-home"
     _write_auth(home / ".codex" / "auth.json", "plus")
     _write_codex_session(home, "gpt-5.1-codex-max")
@@ -50,6 +53,8 @@ def test_openai_models_keep_codex_variants_for_chatgpt(monkeypatch, tmp_path):
 
 def test_openai_models_strip_literal_codex_for_team(monkeypatch, tmp_path):
     monkeypatch.setenv("CHAD_TEMP_HOME", str(tmp_path))
+    if os.name == "nt":
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     home = tmp_path / ".chad" / "codex-homes" / "codex-work"
     _write_auth(home / ".codex" / "auth.json", "team")
     _write_codex_session(home, "gpt-5.1-codex-max")
@@ -66,11 +71,31 @@ def test_openai_models_strip_literal_codex_for_team(monkeypatch, tmp_path):
 
 def test_openai_models_use_isolated_codex_home(monkeypatch, tmp_path):
     monkeypatch.setenv("CHAD_TEMP_HOME", str(tmp_path))
+    if os.name == "nt":
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     home = tmp_path / ".chad" / "codex-homes" / "codex-home"
     _write_auth(home / ".codex" / "auth.json", "plus")
     _write_codex_session(home, "o3-mini")
 
     catalog = ModelCatalog(home_dir=tmp_path)
+    models = catalog.get_models("openai", "codex-home")
+
+    assert "o3-mini" in models
+
+
+def test_openai_models_sync_windows_real_home(monkeypatch, tmp_path):
+    isolated_home = tmp_path / "isolated"
+    real_home = tmp_path / "real-home"
+
+    monkeypatch.setenv("CHAD_TEMP_HOME", str(isolated_home))
+    monkeypatch.setattr(os, "name", "nt", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: real_home))
+
+    session = real_home / ".codex" / "sessions" / "2025" / "01" / "01" / "session.jsonl"
+    session.parent.mkdir(parents=True, exist_ok=True)
+    session.write_text(json.dumps({"model": "o3-mini"}))
+
+    catalog = ModelCatalog(home_dir=isolated_home)
     models = catalog.get_models("openai", "codex-home")
 
     assert "o3-mini" in models

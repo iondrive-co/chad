@@ -11,6 +11,7 @@ from chad.git_worktree import (
     DiffLine,
     DiffHunk,
     FileDiff,
+    find_main_venv,
 )
 
 
@@ -88,6 +89,120 @@ class TestGitWorktreeManager:
         assert (worktree_path / "README.md").exists()
         assert len(base_commit) == 40  # SHA-1 hash length
 
+    def test_create_worktree_symlinks_venv(self, git_repo):
+        """Test that worktree creation symlinks the main project's venv."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-venv-symlink"
+
+        # Create a venv in the main project
+        main_venv = git_repo / "venv"
+        main_venv.mkdir()
+        (main_venv / "bin").mkdir()
+        (main_venv / "bin" / "python").write_text("#!/bin/bash\necho test")
+
+        worktree_path, _ = mgr.create_worktree(task_id)
+        worktree_venv = worktree_path / "venv"
+
+        assert worktree_venv.is_symlink()
+        assert worktree_venv.resolve() == main_venv.resolve()
+        assert (worktree_venv / "bin" / "python").exists()
+
+    def test_create_worktree_symlinks_dotvenv(self, git_repo):
+        """Test that worktree creation symlinks .venv when that's what exists."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-dotvenv-symlink"
+
+        # Create a .venv in the main project
+        main_venv = git_repo / ".venv"
+        main_venv.mkdir()
+        (main_venv / "bin").mkdir()
+        (main_venv / "bin" / "python").write_text("#!/bin/bash\necho test")
+
+        worktree_path, _ = mgr.create_worktree(task_id)
+        worktree_venv = worktree_path / ".venv"
+
+        assert worktree_venv.is_symlink()
+        assert worktree_venv.resolve() == main_venv.resolve()
+        assert (worktree_venv / "bin" / "python").exists()
+
+    def test_create_worktree_prefers_dotvenv_over_venv(self, git_repo):
+        """Test that .venv is preferred when both .venv and venv exist."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-venv-preference"
+
+        # Create both .venv and venv
+        dotvenv = git_repo / ".venv"
+        dotvenv.mkdir()
+        (dotvenv / "bin").mkdir()
+        (dotvenv / "bin" / "python").write_text("dotvenv")
+
+        venv = git_repo / "venv"
+        venv.mkdir()
+        (venv / "bin").mkdir()
+        (venv / "bin" / "python").write_text("venv")
+
+        worktree_path, _ = mgr.create_worktree(task_id)
+
+        # Should use .venv, not venv
+        assert (worktree_path / ".venv").is_symlink()
+        assert not (worktree_path / "venv").exists()
+        assert (worktree_path / ".venv" / "bin" / "python").read_text() == "dotvenv"
+
+    def test_create_worktree_cleans_stale_pth_entries(self, git_repo):
+        """Test that creating a worktree cleans up stale .pth entries from old worktrees."""
+        from chad.git_worktree import cleanup_stale_pth_entries
+
+        # Create a venv with site-packages
+        main_venv = git_repo / "venv"
+        site_packages = main_venv / "lib" / "python3.12" / "site-packages"
+        site_packages.mkdir(parents=True)
+
+        # Create worktree base directory
+        worktree_base = git_repo / ".chad-worktrees"
+        worktree_base.mkdir(exist_ok=True)
+
+        # Create a .pth file with stale entries (worktrees that don't exist)
+        pth_file = site_packages / "test.pth"
+        stale_worktree = f"{worktree_base}/deadbeef/src"
+        valid_path = "/some/other/path"
+        pth_file.write_text(f"{stale_worktree}\n{valid_path}\n")
+
+        # Run cleanup
+        removed = cleanup_stale_pth_entries(main_venv, worktree_base)
+
+        assert removed == 1
+        content = pth_file.read_text()
+        assert stale_worktree not in content
+        assert valid_path in content
+
+    def test_cleanup_removes_conflicting_worktree_entries(self, git_repo):
+        """Test that cleanup removes entries from other worktrees when current_worktree_id is specified."""
+        from chad.git_worktree import cleanup_stale_pth_entries
+
+        # Create a venv with site-packages
+        main_venv = git_repo / "venv"
+        site_packages = main_venv / "lib" / "python3.12" / "site-packages"
+        site_packages.mkdir(parents=True)
+
+        # Create worktree base directory with an existing worktree
+        worktree_base = git_repo / ".chad-worktrees"
+        worktree_base.mkdir(exist_ok=True)
+        (worktree_base / "aaaaaaaa").mkdir()  # Existing worktree
+
+        # Create a .pth file with entry from existing but conflicting worktree
+        pth_file = site_packages / "test.pth"
+        conflicting = f'import sys; sys.path.insert(0, "{worktree_base}/aaaaaaaa/src")'
+        valid_path = "/some/other/path"
+        pth_file.write_text(f"{conflicting}\n{valid_path}\n")
+
+        # Run cleanup with current_worktree_id - should remove the conflicting entry
+        removed = cleanup_stale_pth_entries(main_venv, worktree_base, current_worktree_id="bbbbbbbb")
+
+        assert removed == 1
+        content = pth_file.read_text()
+        assert "aaaaaaaa" not in content
+        assert valid_path in content
+
     def test_worktree_exists(self, git_repo):
         """Test checking if worktree exists."""
         mgr = GitWorktreeManager(git_repo)
@@ -108,6 +223,35 @@ class TestGitWorktreeManager:
         result = mgr.delete_worktree(task_id)
         assert result is True
         assert not worktree_path.exists()
+
+    def test_reset_worktree_resets_changes(self, git_repo):
+        """Test resetting a worktree back to its base commit."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-reset-1"
+
+        worktree_path, base_commit = mgr.create_worktree(task_id)
+        (worktree_path / "README.md").write_text("# Modified content\n")
+        (worktree_path / "new_file.txt").write_text("New content")
+
+        # Stage and commit a change to move branch ahead of base
+        subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Commit before reset"],
+            cwd=worktree_path,
+            check=True,
+            capture_output=True,
+        )
+
+        # Add an untracked file to ensure clean removes it
+        (worktree_path / "temp.txt").write_text("temp")
+
+        assert mgr.has_changes(task_id) is True
+
+        reset_result = mgr.reset_worktree(task_id, base_commit)
+        assert reset_result is True
+        assert mgr.has_changes(task_id) is False
+        assert (worktree_path / "temp.txt").exists() is False
+        assert (worktree_path / "README.md").read_text() == "# Test Repository\n"
 
     def test_has_changes_no_changes(self, git_repo):
         """Test has_changes returns False when no changes."""
@@ -272,6 +416,77 @@ class TestGitWorktreeManager:
 
         # Abort the merge to clean up
         mgr.abort_merge()
+
+    def test_merge_stashes_uncommitted_main_changes(self, git_repo):
+        """Test that merge stashes uncommitted changes in main repo before merging."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-stash-merge"
+
+        # Create worktree and add a new file
+        worktree_path, _ = mgr.create_worktree(task_id)
+        (worktree_path / "new_feature.txt").write_text("Feature content\n")
+        subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Add feature"],
+            cwd=worktree_path,
+            check=True,
+            capture_output=True,
+        )
+
+        # Create uncommitted changes in the main repo (different file)
+        (git_repo / "local_work.txt").write_text("Local uncommitted work\n")
+
+        # Merge should succeed despite uncommitted changes (they get stashed)
+        success, conflicts, error = mgr.merge_to_main(task_id)
+        assert success is True
+        assert conflicts is None
+        assert error is None
+
+        # Verify merged content exists
+        assert (git_repo / "new_feature.txt").exists()
+        assert (git_repo / "new_feature.txt").read_text() == "Feature content\n"
+
+        # Verify uncommitted changes are preserved (stash was popped)
+        assert (git_repo / "local_work.txt").exists()
+        assert (git_repo / "local_work.txt").read_text() == "Local uncommitted work\n"
+
+    def test_merge_stashes_conflicting_uncommitted_changes(self, git_repo):
+        """Test merge when main has uncommitted changes to the same file being merged.
+
+        When the stash is popped after merge and conflicts with merged changes,
+        git creates conflict markers. The user's uncommitted changes are preserved
+        in the 'Stashed changes' section of the conflict.
+        """
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-stash-conflict"
+
+        # Create worktree and modify README
+        worktree_path, _ = mgr.create_worktree(task_id)
+        (worktree_path / "README.md").write_text("# Worktree changes\n")
+        subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Modify README"],
+            cwd=worktree_path,
+            check=True,
+            capture_output=True,
+        )
+
+        # Create uncommitted changes to README in main (same file)
+        (git_repo / "README.md").write_text("# Uncommitted local changes\n")
+
+        # Merge should stash the uncommitted changes and succeed
+        success, conflicts, error = mgr.merge_to_main(task_id)
+        assert success is True
+        assert conflicts is None
+        assert error is None
+
+        # When stash pops with conflicts, the user's changes are preserved
+        # in conflict markers - this is expected git behavior
+        content = (git_repo / "README.md").read_text()
+        # The merged content is in "Updated upstream" section
+        assert "# Worktree changes" in content
+        # The user's uncommitted changes are preserved in "Stashed changes" section
+        assert "# Uncommitted local changes" in content
 
     def test_resolve_all_conflicts_ours(self, git_repo):
         """Test resolving all conflicts with ours (original)."""
@@ -636,3 +851,63 @@ class TestDiffDataClasses:
         assert file_diff.is_new is True
         assert file_diff.is_deleted is False
         assert file_diff.is_binary is False
+
+
+class TestFindMainVenv:
+    """Test cases for find_main_venv function."""
+
+    def test_finds_dotvenv(self, tmp_path):
+        """Test finding .venv directory."""
+        dotvenv = tmp_path / ".venv"
+        dotvenv.mkdir()
+        (dotvenv / "bin").mkdir()
+
+        result = find_main_venv(tmp_path)
+        assert result == dotvenv
+
+    def test_finds_venv(self, tmp_path):
+        """Test finding venv directory when .venv doesn't exist."""
+        venv = tmp_path / "venv"
+        venv.mkdir()
+        (venv / "bin").mkdir()
+
+        result = find_main_venv(tmp_path)
+        assert result == venv
+
+    def test_prefers_dotvenv_over_venv(self, tmp_path):
+        """Test that .venv is preferred when both exist."""
+        dotvenv = tmp_path / ".venv"
+        dotvenv.mkdir()
+
+        venv = tmp_path / "venv"
+        venv.mkdir()
+
+        result = find_main_venv(tmp_path)
+        assert result == dotvenv
+
+    def test_returns_none_when_no_venv(self, tmp_path):
+        """Test that None is returned when no venv exists."""
+        result = find_main_venv(tmp_path)
+        assert result is None
+
+    def test_ignores_symlinks(self, tmp_path):
+        """Test that symlinks are ignored to prevent circular references."""
+        # Create a real .venv
+        real_venv = tmp_path / ".venv"
+        real_venv.mkdir()
+
+        # Create a circular venv symlink (pointing to itself)
+        venv_link = tmp_path / "venv"
+        venv_link.symlink_to(venv_link)  # This creates a broken circular symlink
+
+        result = find_main_venv(tmp_path)
+        assert result == real_venv  # Should ignore the symlink
+
+    def test_ignores_symlink_when_only_symlink_exists(self, tmp_path):
+        """Test that None is returned when only a symlink exists."""
+        # Create a venv symlink pointing to nonexistent target
+        venv_link = tmp_path / "venv"
+        venv_link.symlink_to("/nonexistent/path")
+
+        result = find_main_venv(tmp_path)
+        assert result is None

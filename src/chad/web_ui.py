@@ -1,5 +1,6 @@
 """Gradio web interface for Chad."""
 
+import base64
 import os
 import json
 import re
@@ -8,6 +9,7 @@ import threading
 import queue
 import uuid
 import html
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
@@ -15,18 +17,22 @@ from typing import Iterator
 import gradio as gr
 
 from .provider_ui import ProviderUIManager
-from .security import SecurityManager
+from .config_manager import ConfigManager
 from .session_logger import SessionLogger
 from .providers import ModelConfig, parse_codex_output, create_provider
 from .model_catalog import ModelCatalog
 from .prompts import (
     build_coding_prompt,
     extract_coding_summary,
+    extract_progress_update,
+    check_verification_mentioned,
     get_verification_prompt,
     parse_verification_response,
+    ProgressUpdate,
     VerificationParseError,
 )
 from .git_worktree import GitWorktreeManager, MergeConflict, FileDiff
+from .verification.ui_playwright_runner import cleanup_all_test_servers
 
 
 @dataclass
@@ -52,6 +58,22 @@ class Session:
     merge_conflicts: list[MergeConflict] | None = None
 
 
+def _history_entry(agent: str, content: str) -> tuple[str, str, str]:
+    """Create a streaming history entry with a timestamp."""
+    return (agent, content, datetime.now(timezone.utc).isoformat())
+
+
+def _history_contents(history: list[tuple]) -> list[str]:
+    """Extract textual content from streaming history entries."""
+    contents: list[str] = []
+    for entry in history or []:
+        if isinstance(entry, tuple) and len(entry) >= 2:
+            contents.append(entry[1])
+        elif isinstance(entry, dict) and "content" in entry:
+            contents.append(str(entry["content"]))
+    return contents
+
+
 @dataclass
 class VerificationDropdownState:
     """Resolved state for verification model/reasoning dropdowns."""
@@ -65,7 +87,7 @@ class VerificationDropdownState:
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\][^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")
 
-DEFAULT_CODING_TIMEOUT = 1800.0
+DEFAULT_CODING_TIMEOUT = 900.0
 DEFAULT_VERIFICATION_TIMEOUT = 600.0
 MAX_VERIFICATION_PROMPT_CHARS = 6000
 
@@ -247,31 +269,6 @@ body, .gradio-container, .gradio-container * {
   letter-spacing: 0.01em;
 }
 
-.provider-summary {
-  background: #1a1f2e;
-  border: 1px solid #2d3748;
-  border-radius: 14px;
-  padding: 12px 14px;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
-}
-
-.provider-summary,
-.provider-summary * {
-  color: #e2e8f0 !important;
-}
-
-.provider-summary strong {
-  color: #63b3ed !important;
-}
-
-.provider-summary code {
-  background: #2d3748 !important;
-  color: #a0aec0 !important;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 0.9em;
-}
-
 .provider-card {
   background: linear-gradient(135deg, #0c1424 0%, #0a1a32 100%);
   border: 1px solid #1f2b46;
@@ -366,15 +363,24 @@ body, .gradio-container, .gradio-container * {
   display: none !important;
 }
 
-/* Hide merge/conflict sections completely when merged/discarded */
+/* Hide merge/conflict sections when hidden class is present */
 .merge-section-hidden,
 .conflict-section-hidden {
   display: none !important;
   visibility: hidden !important;
-  height: 0 !important;
-  overflow: hidden !important;
-  margin: 0 !important;
+}
+
+/* Visually hidden but still in DOM for JS access */
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
   padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
 }
 
 /* Hide task status when empty (keeps element in DOM for JS detection) */
@@ -470,9 +476,10 @@ body, .gradio-container, .gradio-container * {
   }
 }
 
-#live-output-box {
-  max-height: 220px;
-  overflow-y: auto;
+
+/* Hide live stream box but keep in DOM - removed by inject_live_stream_content */
+.live-stream-hidden {
+  display: none !important;
 }
 
 #live-stream-box,
@@ -503,9 +510,10 @@ body, .gradio-container, .gradio-container * {
   border-radius: 0 0 8px 8px !important;
   padding: 12px !important;
   margin: 0 !important;
-  max-height: 400px;
-  overflow-y: auto;
-  overflow-anchor: none;
+  max-height: 400px !important;
+  min-height: 100px !important;
+  overflow-y: auto !important;
+  overflow-anchor: none !important;
   white-space: pre-wrap;
   word-wrap: break-word;
   font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
@@ -751,6 +759,120 @@ body, .gradio-container, .gradio-container * {
   background: rgba(97, 175, 239, 1);
 }
 
+/* Inline live content in chat bubbles */
+.agent-chatbot .inline-live-header {
+  background: #2a2a3e;
+  color: #a8d4ff;
+  padding: 4px 10px;
+  border-radius: 6px 6px 0 0;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  margin: 8px 0 0 0;
+}
+.agent-chatbot .inline-live-content {
+  background: #1e1e2e !important;
+  color: #e2e8f0 !important;
+  border: 1px solid #555 !important;
+  border-top: none !important;
+  border-radius: 0 0 6px 6px !important;
+  padding: 10px !important;
+  margin: 0 !important;
+  max-height: 350px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+}
+/* Diff highlighting in inline live content */
+.agent-chatbot .inline-live-content .diff-add {
+  color: #98c379 !important;
+  background: rgba(152, 195, 121, 0.1) !important;
+}
+.agent-chatbot .inline-live-content .diff-remove {
+  color: #e06c75 !important;
+  background: rgba(224, 108, 117, 0.1) !important;
+}
+.agent-chatbot .inline-live-content .diff-header {
+  color: #61afef !important;
+  font-weight: bold;
+}
+/* Syntax highlighting in inline live content */
+.agent-chatbot .inline-live-content .keyword { color: #c678dd !important; }
+.agent-chatbot .inline-live-content .string { color: #98c379 !important; }
+.agent-chatbot .inline-live-content .comment { color: #5c6370 !important; font-style: italic; }
+.agent-chatbot .inline-live-content .function { color: #61afef !important; }
+.agent-chatbot .inline-live-content .number { color: #d19a66 !important; }
+
+/* Screenshot comparison in chat bubbles */
+.agent-chatbot .screenshot-comparison {
+  display: flex;
+  gap: 12px;
+  margin: 12px 0;
+  flex-wrap: wrap;
+}
+.agent-chatbot .screenshot-panel {
+  flex: 1 1 45%;
+  min-width: 200px;
+  max-width: 100%;
+}
+.agent-chatbot .screenshot-single {
+  margin: 12px 0;
+  max-width: 100%;
+}
+.agent-chatbot .screenshot-label {
+  background: #2a2a3e;
+  color: #a8d4ff;
+  padding: 4px 10px;
+  border-radius: 6px 6px 0 0;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+}
+.agent-chatbot .screenshot-comparison img,
+.agent-chatbot .screenshot-single img {
+  width: 100%;
+  height: auto;
+  border: 1px solid #555;
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  display: block;
+}
+
+/* Full-width screenshot for progress updates and single after screenshots */
+.agent-chatbot .screenshot-full-width {
+  margin: 12px 0;
+  width: 100%;
+}
+.agent-chatbot .screenshot-full-width img {
+  width: 100%;
+  max-height: 600px;
+  object-fit: contain;
+  border: 1px solid #555;
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  display: block;
+}
+.agent-chatbot .screenshot-description {
+  background: #1e1e2e;
+  color: #cdd6f4;
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 1.4;
+  border: 1px solid #555;
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+}
+/* When description follows image, remove image's bottom radius */
+.agent-chatbot img + .screenshot-description {
+  margin-top: 0;
+}
+.agent-chatbot img:has(+ .screenshot-description) {
+  border-radius: 0;
+}
+
 /* Role status row: keep status and session log button on one line, aligned with button row below */
 #role-status-row {
   display: flex;
@@ -790,17 +912,17 @@ body, .gradio-container, .gradio-container * {
 }
 
 /* Agent communication chatbot - full-width speech bubbles */
-#agent-chatbot .message-row,
-#agent-chatbot .message {
+.agent-chatbot .message-row,
+.agent-chatbot .message {
   width: 100% !important;
   max-width: 100% !important;
   align-self: stretch !important;
 }
 
-#agent-chatbot .bubble-wrap,
-#agent-chatbot .bubble,
-#agent-chatbot .message-content,
-#agent-chatbot .message .prose {
+.agent-chatbot .bubble-wrap,
+.agent-chatbot .bubble,
+.agent-chatbot .message-content,
+.agent-chatbot .message .prose {
   width: 100% !important;
   max-width: 100% !important;
 }
@@ -1184,326 +1306,9 @@ body, .gradio-container, .gradio-container * {
 SCREENSHOT_MODE_JS = "true" if os.environ.get("CHAD_SCREENSHOT_MODE") == "1" else "false"
 SCREENSHOT_LIVE_VIEW_HTML = "null"
 if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
-    from .screenshot_fixtures import LIVE_VIEW_CONTENT
+    from .verification.screenshot_fixtures import LIVE_VIEW_CONTENT
 
     SCREENSHOT_LIVE_VIEW_HTML = json.dumps(LIVE_VIEW_CONTENT)
-CUSTOM_JS = (
-    """
-function() {
-    const screenshotMode = """
-    + SCREENSHOT_MODE_JS
-    + """;
-    const screenshotLiveViewHtml = """
-    + SCREENSHOT_LIVE_VIEW_HTML
-    + """;
-    // Fix for Gradio not properly updating column visibility after initial render
-    function fixProviderCardVisibility() {
-        const columns = document.querySelectorAll('.column');
-        columns.forEach(col => {
-            const headerRow = col.querySelector('.provider-card__header-row');
-            const headerText = col.querySelector(
-                '.provider-card__header-text, .provider-card__header-text-secondary'
-            );
-
-            if (headerRow) {
-                // This is a provider card column
-                if (headerText && headerText.textContent.trim().length > 0) {
-                    // Has content - show it
-                    col.style.display = '';
-                    col.style.visibility = '';
-                } else {
-                    // Empty card - hide it to prevent gap
-                    col.style.display = 'none';
-                }
-            }
-        });
-    }
-    function normalizeProviderHeaderClasses() {
-        if (!screenshotMode) return;
-        const headers = document.querySelectorAll('.provider-card__header-text');
-        headers.forEach((header, idx) => {
-            if (idx === 0) return;
-            header.classList.remove('provider-card__header-text');
-            header.classList.add('provider-card__header-text-secondary');
-        });
-    }
-    function getLiveStreamBoxes() {
-        return Array.from(document.querySelectorAll('#live-stream-box, .live-stream-box'));
-    }
-    function ensureLiveStreamVisible() {
-        if (!screenshotMode) return;
-        const liveBoxes = getLiveStreamBoxes();
-        if (!liveBoxes.length) return;
-        liveBoxes.forEach((liveBox) => {
-            liveBox.classList.remove('hide-container');
-            liveBox.style.display = 'block';
-            liveBox.style.visibility = 'visible';
-            liveBox.removeAttribute('hidden');
-            if (screenshotLiveViewHtml && !liveBox.querySelector('.live-output-content')) {
-                liveBox.innerHTML = screenshotLiveViewHtml;
-            }
-        });
-    }
-    function ensureTabAriaLinks() {
-        const tabHost = document.getElementById('main-tabs')?.parentElement || document;
-        const tablist = tabHost.querySelector('[role=\"tablist\"]');
-        const tabs = tablist ? Array.from(tablist.querySelectorAll('[role=\"tab\"]')) : [];
-        const panels = Array.from(tabHost.querySelectorAll('[role=\"tabpanel\"]'));
-        if (!tabs.length || !panels.length) return;
-        tabs.forEach((tab, idx) => {
-            const panel = panels[idx];
-            if (!panel) return;
-            const panelId = panel.id && panel.id.trim() ? panel.id : `tabpanel-${idx}`;
-            const tabId = tab.id && tab.id.trim() ? tab.id : `tab-${idx}`;
-            panel.id = panelId;
-            tab.id = tabId;
-            tab.setAttribute('aria-controls', panelId);
-            panel.setAttribute('aria-labelledby', tabId);
-            if (!panel.getAttribute('role')) {
-                panel.setAttribute('role', 'tabpanel');
-            }
-        });
-    }
-    function ensureTabListVisible() {
-        const tablist = document.querySelector('[role=\"tablist\"]');
-        if (!tablist) return;
-        tablist.style.display = 'flex';
-        tablist.style.visibility = 'visible';
-        tablist.removeAttribute('hidden');
-    }
-    setInterval(() => {
-        normalizeProviderHeaderClasses();
-        fixProviderCardVisibility();
-        ensureLiveStreamVisible();
-        ensureTabAriaLinks();
-        ensureTabListVisible();
-    }, 500);
-    const visObserver = new MutationObserver(() => {
-        fixProviderCardVisibility();
-        ensureTabAriaLinks();
-        ensureTabListVisible();
-    });
-    visObserver.observe(document.body, { childList: true, subtree: true, attributes: true });
-    setTimeout(ensureLiveStreamVisible, 100);
-    setTimeout(ensureTabAriaLinks, 100);
-
-    // Live stream scroll preservation
-    window._liveStreamScroll = window._liveStreamScroll || new WeakMap();
-    const scrollStates = window._liveStreamScroll;
-
-    function getScrollState(container) {
-        if (!container) return null;
-        if (!scrollStates.has(container)) {
-            scrollStates.set(container, {
-                userScrolledUp: false,
-                savedScrollTop: 0,
-                lastUserScrollTime: 0,
-                ignoreNextScroll: false
-            });
-        }
-        return scrollStates.get(container);
-    }
-
-    function getScrollContainer(liveBox) {
-        if (!liveBox) return null;
-        return liveBox.querySelector('.live-output-content') ||
-               liveBox.querySelector('[data-testid="markdown"]') ||
-               liveBox;
-    }
-
-    function handleUserScroll(e) {
-        const container = e.target;
-        const state = getScrollState(container);
-        if (!container || !state || state.ignoreNextScroll) {
-            if (state) state.ignoreNextScroll = false;
-            return;
-        }
-        const now = Date.now();
-        if (now - state.lastUserScrollTime < 50) return;
-        state.lastUserScrollTime = now;
-
-        const scrollBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-        const isAtBottom = scrollBottom < 50;
-
-        // User is NOT at bottom = they scrolled away from auto-scroll position
-        state.userScrolledUp = !isAtBottom;
-        state.savedScrollTop = container.scrollTop;
-    }
-
-    function restoreScrollPosition(container) {
-        const state = getScrollState(container);
-        if (!container || !state) return;
-        state.ignoreNextScroll = true;
-        requestAnimationFrame(() => {
-            const targetScrollTop =
-                state.savedScrollTop > 0 ? state.savedScrollTop : container.scrollTop;
-            container.scrollTop = targetScrollTop;
-            setTimeout(() => { state.ignoreNextScroll = false; }, 100);
-        });
-    }
-
-    function attachScrollListener(container) {
-        if (!container || container._liveScrollAttached) return;
-        container._liveScrollAttached = true;
-        container.addEventListener('scroll', handleUserScroll, { passive: true });
-    }
-
-    function initScrollTracking() {
-        const liveBoxes = getLiveStreamBoxes();
-        if (!liveBoxes.length) {
-            setTimeout(initScrollTracking, 200);
-            return;
-        }
-
-        liveBoxes.forEach((liveBox) => {
-            let lastContainer = null;
-            const syncContainer = () => {
-                const container = getScrollContainer(liveBox);
-                if (!container) return;
-                if (container !== lastContainer) {
-                    attachScrollListener(container);
-                    lastContainer = container;
-                }
-                restoreScrollPosition(container);
-            };
-
-            const observer = new MutationObserver(syncContainer);
-            observer.observe(liveBox, {
-                childList: true,
-                subtree: true,
-                characterData: true
-            });
-
-            syncContainer();
-        });
-    }
-
-    setTimeout(initScrollTracking, 100);
-
-    // Auto-click "Add New Task" button when + tab is clicked
-    function setupPlusTabAutoClick() {
-        const tabButtons = document.querySelectorAll('button[role="tab"]');
-        tabButtons.forEach(tab => {
-            if (tab.textContent.trim() === '➕' && !tab._plusClickSetup) {
-                tab._plusClickSetup = true;
-                tab.addEventListener('click', () => {
-                    // Small delay to let tab panel become visible
-                    setTimeout(() => {
-                        const addBtn = document.getElementById('add-new-task-btn');
-                        if (addBtn) {
-                            addBtn.click();
-                        }
-                    }, 50);
-                });
-            }
-        });
-    }
-    function ensurePlusTabExists() {
-        const existing = Array.from(document.querySelectorAll('[role=\"tab\"]')).find(
-            (tab) => tab.textContent && tab.textContent.trim() === '➕'
-        );
-        if (existing) return;
-        const addBtn = document.getElementById('add-new-task-btn');
-        if (!addBtn) return;
-        let fallback = document.getElementById('fallback-plus-tab');
-        if (!fallback) {
-            fallback = document.createElement('button');
-            fallback.id = 'fallback-plus-tab';
-            fallback.setAttribute('role', 'tab');
-            fallback.setAttribute('aria-label', '➕');
-            fallback.textContent = '➕';
-            fallback.style.position = 'fixed';
-            fallback.style.top = '12px';
-            fallback.style.right = '12px';
-            fallback.style.zIndex = '9999';
-            fallback.style.padding = '6px 10px';
-            fallback.style.fontSize = '16px';
-            fallback.style.cursor = 'pointer';
-            document.body.appendChild(fallback);
-        }
-        fallback.onclick = () => addBtn.click();
-    }
-
-    // Run setup periodically to catch dynamically added tabs
-    setInterval(setupPlusTabAutoClick, 500);
-    setTimeout(setupPlusTabAutoClick, 100);
-    setInterval(ensurePlusTabExists, 500);
-    setTimeout(ensurePlusTabExists, 100);
-
-    // Fix for Gradio Column visibility not updating after merge/discard
-    // Since gr.update(visible=False) doesn't work for Columns in Gradio 6.x,
-    // we use a hidden state element to control visibility reliably via JavaScript
-    function syncMergeSectionVisibility() {
-        // Find all merge sections in all task panels
-        const mergeSections = document.querySelectorAll('.merge-section');
-        mergeSections.forEach(mergeSection => {
-            // Primary method: Check the visibility state element (more reliable)
-            const stateInput =
-                mergeSection.querySelector('.merge-visibility-state input, .merge-visibility-state textarea');
-            let shouldHide = false;
-
-            if (stateInput) {
-                // Use the explicit visibility state from Python
-                shouldHide = stateInput.value === 'hidden' || stateInput.value === '';
-            } else {
-                // Fallback: Check status text (for backward compatibility)
-                const taskPanel = mergeSection.closest('.tabitem, [role="tabpanel"]');
-                if (taskPanel) {
-                    const statusEl = taskPanel.querySelector('.task-status-header') ||
-                                    taskPanel.querySelector('[id*="task-status"]') ||
-                                    taskPanel.querySelector('[class*="task-status"]');
-                    const statusText = statusEl ? (statusEl.textContent || '') : '';
-                    shouldHide = statusText.includes('merged') || statusText.includes('discarded');
-                }
-            }
-
-            if (shouldHide) {
-                // Hide the section completely
-                mergeSection.classList.add('merge-section-hidden');
-                mergeSection.style.cssText = 'display: none !important; visibility: hidden !important;';
-                mergeSection.querySelectorAll('.accordion, [class*="accordion"]').forEach(acc => {
-                    acc.style.cssText = 'display: none !important;';
-                });
-            } else if (stateInput && stateInput.value === 'visible') {
-                // Explicitly show the section
-                mergeSection.classList.remove('merge-section-hidden');
-                mergeSection.style.cssText = '';
-                mergeSection.querySelectorAll('.accordion, [class*="accordion"]').forEach(acc => {
-                    acc.style.cssText = '';
-                });
-            }
-        });
-
-        // Also handle conflict sections (still using status text for these)
-        const conflictSections = document.querySelectorAll('.conflict-section');
-        conflictSections.forEach(conflictSection => {
-            const taskPanel = conflictSection.closest('.tabitem, [role="tabpanel"]');
-            if (!taskPanel) return;
-
-            const statusEl = taskPanel.querySelector('.task-status-header') ||
-                            taskPanel.querySelector('[id*="task-status"]') ||
-                            taskPanel.querySelector('[class*="task-status"]');
-            const statusText = statusEl ? (statusEl.textContent || '') : '';
-            const shouldHide = statusText.includes('merged') || statusText.includes('discarded');
-
-            if (shouldHide) {
-                conflictSection.classList.add('conflict-section-hidden');
-                conflictSection.style.cssText = 'display: none !important; visibility: hidden !important;';
-            } else if (conflictSection.classList.contains('conflict-section-hidden')) {
-                conflictSection.classList.remove('conflict-section-hidden');
-                conflictSection.style.cssText = '';
-            }
-        });
-    }
-
-    // Run frequently and on DOM changes for responsive UI
-    setInterval(syncMergeSectionVisibility, 100);
-    const mergeSectionObserver = new MutationObserver(syncMergeSectionVisibility);
-    mergeSectionObserver.observe(document.body,
-        { childList: true, subtree: true, characterData: true, attributes: true });
-}
-"""
-)
 
 
 def _brighten_color(r: int, g: int, b: int, min_brightness: int = 140) -> tuple[int, int, int]:
@@ -1592,16 +1397,6 @@ def ansi_to_html(text: str) -> str:
         "96": (86, 182, 194),
         "97": (255, 255, 255),
     }
-    bg_colors = {
-        "40": "#1e1e2e",
-        "41": "#e06c75",
-        "42": "#98c379",
-        "43": "#e5c07b",
-        "44": "#61afef",
-        "45": "#c678dd",
-        "46": "#56b6c2",
-        "47": "#abb2bf",
-    }
 
     # CSI sequence ending characters (covers most terminal sequences)
     CSI_ENDINGS = "ABCDEFGHJKLMPSTXZcfghlmnpqrstuz"
@@ -1678,9 +1473,7 @@ def ansi_to_html(text: str) -> str:
                                     r, g, b = _brighten_color(*basic_colors[code])
                                     result.append(f'<span style="color:rgb({r},{g},{b})">')
                                     current_styles.append("color")
-                                elif code in bg_colors:
-                                    result.append(f'<span style="background-color:{bg_colors[code]}">')
-                                    current_styles.append("bg")
+                                # Skip basic background colors (40-47) - they clash with our dark theme
                                 idx += 1
                         # Skip the entire CSI sequence (including non-SGR ones)
                         i = j + 1
@@ -1934,6 +1727,80 @@ def build_live_stream_html(content: str, ai_name: str = "CODING AI") -> str:
     return f"{header}\n{body}"
 
 
+def build_inline_live_inner_html(content: str) -> str:
+    """Build just the inner HTML content for a live stream container.
+
+    This is used for JS patching - updating innerHTML without replacing
+    the container element itself, preserving scroll position and selection.
+    """
+    cleaned = normalize_live_stream_spacing(content)
+    if not cleaned.strip():
+        return ""
+    html_content = ansi_to_html(cleaned)
+    html_content = html.unescape(html_content)
+    html_content = highlight_diffs(html_content)
+    html_content = highlight_code_syntax(html_content)
+    return html_content
+
+
+def build_inline_live_html(
+    content: str, ai_name: str = "CODING AI", live_id: str | None = None
+) -> str:
+    """Render live stream as inline HTML for embedding in chat bubbles.
+
+    This formats the streaming content to display directly in the Chatbot
+    component instead of a separate live stream panel.
+
+    Args:
+        content: The streaming content to display
+        ai_name: Name of the AI to show in header
+        live_id: Optional stable ID for JS patching. When provided, the container
+                 gets a data-live-id attribute that JavaScript can use to update
+                 content in-place without replacing the DOM element.
+
+    IMPORTANT: Even when content is empty, this MUST return HTML with the
+    data-live-id container so that JavaScript can patch it with streaming
+    updates. If we return plain markdown for empty content, the live view
+    will never work because there's no container to patch.
+    """
+    html_content = build_inline_live_inner_html(content)
+    # Use placeholder if content is empty - but ALWAYS create the HTML container
+    # with data-live-id so JS patching can update it during streaming
+    if not html_content:
+        html_content = "<em>Working...</em>"
+    # Format for inline display in chat bubble
+    header = f'<div class="inline-live-header">▶ {ai_name} (Live)</div>'
+    # Add data-live-id for JS patching if provided
+    live_id_attr = f' data-live-id="{live_id}"' if live_id else ""
+    body = f'<div class="inline-live-content"{live_id_attr}>{html_content}</div>'
+    return f"**{ai_name}**\n\n{header}\n{body}"
+
+
+def image_to_data_url(path: str | None) -> str | None:
+    """Convert an image file to a base64 data URL for inline display.
+
+    Args:
+        path: Path to the image file, or None
+
+    Returns:
+        Data URL string or None if file doesn't exist or can't be read
+    """
+    if not path:
+        return None
+    try:
+        p = Path(path)
+        if not p.exists():
+            return None
+        suffix = p.suffix.lower()
+        mime_types = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif"}
+        mime = mime_types.get(suffix, "image/png")
+        data = p.read_bytes()
+        b64 = base64.b64encode(data).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        return None
+
+
 def summarize_content(content: str, max_length: int = 200) -> str:
     """Create a meaningful summary of content for collapsed view.
 
@@ -1997,21 +1864,80 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
         content: The message content
         collapsible: Whether to make long messages collapsible with a summary
     """
-    # All AI messages are assistant role
-    role = "assistant"
-
-    # For long content, make it collapsible with a summary
     if collapsible and len(content) > 300:
-        # First try to extract structured summary from JSON block
-        summary = extract_coding_summary(content)
-        if not summary:
-            # Fall back to heuristic-based extraction
-            summary = summarize_content(content)
-        formatted = f"**{speaker}**\n\n{summary}\n\n<details><summary>Show full output</summary>\n\n{content}\n\n</details>"  # noqa: E501
+        coding_summary = extract_coding_summary(content)
+        if coding_summary:
+            summary_text = coding_summary.change_summary
+            extra_parts = []
+            if coding_summary.hypothesis:
+                extra_parts.append(f"**Hypothesis:** {coding_summary.hypothesis}")
+            before_url = image_to_data_url(coding_summary.before_screenshot) if coding_summary.before_screenshot else None
+            after_url = image_to_data_url(coding_summary.after_screenshot) if coding_summary.after_screenshot else None
+            before_desc = coding_summary.before_description
+            after_desc = coding_summary.after_description
+            if before_url or after_url:
+                # Use side-by-side comparison when both exist, full-width for single screenshot
+                if before_url and after_url:
+                    screenshot_html = '<div class="screenshot-comparison">'
+                    before_desc_html = f'<div class="screenshot-description">{before_desc}</div>' if before_desc else ''
+                    after_desc_html = f'<div class="screenshot-description">{after_desc}</div>' if after_desc else ''
+                    screenshot_html += (
+                        f'<div class="screenshot-panel"><div class="screenshot-label">Before</div>'
+                        f'<img src="{before_url}" alt="Before screenshot">{before_desc_html}</div>'
+                    )
+                    screenshot_html += (
+                        f'<div class="screenshot-panel"><div class="screenshot-label">After</div>'
+                        f'<img src="{after_url}" alt="After screenshot">{after_desc_html}</div>'
+                    )
+                    screenshot_html += '</div>'
+                elif after_url:
+                    # Single after screenshot - use full width
+                    after_desc_html = f'<div class="screenshot-description">{after_desc}</div>' if after_desc else ''
+                    screenshot_html = (
+                        f'<div class="screenshot-full-width"><div class="screenshot-label">After</div>'
+                        f'<img src="{after_url}" alt="After screenshot">{after_desc_html}</div>'
+                    )
+                else:
+                    # Single before screenshot - use full width
+                    before_desc_html = f'<div class="screenshot-description">{before_desc}</div>' if before_desc else ''
+                    screenshot_html = (
+                        f'<div class="screenshot-full-width"><div class="screenshot-label">Before</div>'
+                        f'<img src="{before_url}" alt="Before screenshot">{before_desc_html}</div>'
+                    )
+                extra_parts.append(screenshot_html)
+            if extra_parts:
+                summary_text = f"{summary_text}\n\n" + "\n\n".join(extra_parts)
+        else:
+            summary_text = summarize_content(content)
+        formatted = (
+            f"**{speaker}**\n\n{summary_text}\n\n"
+            f"<details><summary>Show full output</summary>\n\n{content}\n\n</details>"
+        )
     else:
         formatted = f"**{speaker}**\n\n{content}"
 
-    return {"role": role, "content": formatted}
+    return {"role": "assistant", "content": formatted}
+
+
+def make_progress_message(progress: ProgressUpdate) -> dict:
+    """Create a chat message for an intermediate progress update.
+
+    Shows the before screenshot full-width with a summary and location.
+    """
+    screenshot_url = image_to_data_url(progress.before_screenshot)
+    parts = ["**CODING AI** *(Progress)*"]
+    if progress.summary:
+        parts.append(f"\n\n{progress.summary}")
+    if progress.location:
+        parts.append(f"\n\n**Location:** `{progress.location}`")
+    if screenshot_url:
+        desc_html = f'<div class="screenshot-description">{progress.before_description}</div>' if progress.before_description else ''
+        parts.append(
+            f'\n\n<div class="screenshot-full-width">'
+            f'<div class="screenshot-label">Before</div>'
+            f'<img src="{screenshot_url}" alt="Before screenshot">{desc_html}</div>'
+        )
+    return {"role": "assistant", "content": "".join(parts)}
 
 
 def _truncate_verification_output(text: str, limit: int = MAX_VERIFICATION_PROMPT_CHARS) -> str:
@@ -2040,14 +1966,19 @@ class ChadWebUI:
     VERIFICATION_NONE = "__verification_none__"
     VERIFICATION_NONE_LABEL = "None"
 
-    def __init__(self, security_mgr: SecurityManager, main_password: str):
+    def __init__(self, security_mgr: ConfigManager, main_password: str, dev_mode: bool = False):
         self.security_mgr = security_mgr
         self.main_password = main_password
+        self.dev_mode = dev_mode
         self.sessions: dict[str, Session] = {}
         self.provider_card_count = 10
         self.model_catalog = ModelCatalog(security_mgr)
-        self.provider_ui = ProviderUIManager(security_mgr, main_password, self.model_catalog)
+        self.provider_ui = ProviderUIManager(security_mgr, main_password, self.model_catalog, dev_mode=dev_mode)
         self.session_logger = SessionLogger()
+        # Store dropdown references for cross-tab updates
+        self._session_dropdowns: dict[str, dict] = {}
+        # Store provider card delete events for chaining dropdown updates
+        self._provider_delete_events: list = []
 
     def get_session(self, session_id: str) -> Session:
         """Get or create a session by ID."""
@@ -2063,9 +1994,6 @@ class ChadWebUI:
 
     SUPPORTED_PROVIDERS = ProviderUIManager.SUPPORTED_PROVIDERS
     OPENAI_REASONING_LEVELS = ProviderUIManager.OPENAI_REASONING_LEVELS
-
-    def list_providers(self) -> str:
-        return self.provider_ui.list_providers()
 
     def _get_account_role(self, account_name: str) -> str | None:
         return self.provider_ui._get_account_role(account_name)
@@ -2120,6 +2048,10 @@ class ChadWebUI:
     def _get_mistral_usage(self) -> str:
         return self.provider_ui._get_mistral_usage()
 
+    def get_provider_choices(self) -> list[str]:
+        """Get ordered list of provider type choices for dropdowns."""
+        return self.provider_ui.get_provider_choices()
+
     def _read_project_docs(self, project_path: Path) -> str | None:
         """Read project documentation if present.
 
@@ -2157,6 +2089,9 @@ class ChadWebUI:
         verification_reasoning: str | None = None,
     ) -> tuple[bool | None, str]:
         """Run the verification agent to review the coding agent's work.
+
+        First runs MCP verification (flake8 + tests), then if that passes,
+        runs the LLM verification agent.
 
         Args:
             project_path: Path to the project directory
@@ -2196,7 +2131,72 @@ class ChadWebUI:
             return None, ("Verification aborted: coding agent output was empty. "
                           "Rerun after capturing the coding response.")
 
-        change_summary = extract_coding_summary(coding_output)
+        def _run_automated_verification() -> tuple[bool, str | None]:
+            try:
+                from .verification.tools import verify as run_verify
+                if on_activity:
+                    on_activity("system", "Running verification (flake8)...")
+
+                verify_result = run_verify(project_root=project_path, lint_only=True)
+
+                # Treat timeout as a pass (coding agent ran their own tests)
+                error_msg = verify_result.get("error") or ""
+                if "timed out" in error_msg.lower():
+                    if on_activity:
+                        on_activity("system", "Verification timed out, treating as pass")
+                    return True, None
+
+                if not verify_result.get("success", False):
+                    issues: list[str] = []
+                    failure_message = verify_result.get("message") or verify_result.get("error")
+                    if failure_message:
+                        issues.append(failure_message)
+
+                    phases = verify_result.get("phases", {})
+
+                    lint_phase = phases.get("lint", {})
+                    if not lint_phase.get("success", True):
+                        lint_issues = lint_phase.get("issues") or []
+                        if lint_issues:
+                            joined = "\n".join(f"- {issue}" for issue in lint_issues[:5])
+                            issues.append(f"Flake8 errors:\n{joined}")
+                        else:
+                            issues.append(f"Flake8 failed with {lint_phase.get('issue_count', 0)} errors")
+
+                    pip_phase = phases.get("pip_check", {})
+                    if not pip_phase.get("success", True):
+                        pip_issues = pip_phase.get("issues") or []
+                        if pip_issues:
+                            joined = "\n".join(f"- {issue}" for issue in pip_issues[:5])
+                            issues.append(f"Dependency issues:\n{joined}")
+                        else:
+                            issues.append("Package dependency issues found")
+
+                    test_phase = phases.get("tests", {})
+                    if not test_phase.get("success", True):
+                        failed_count = test_phase.get("failed", 0)
+                        passed_count = test_phase.get("passed", 0)
+                        output_lines = (test_phase.get("output") or "").strip().splitlines()
+                        snippet = "\n".join(output_lines[-5:]) if output_lines else ""
+                        summary = f"Tests failed ({failed_count} failed, {passed_count} passed)"
+                        if snippet:
+                            summary += f":\n{snippet}"
+                        issues.append(summary)
+
+                    if not issues:
+                        issues.append("Verification failed")
+
+                    feedback = "Verification failed:\n" + "\n\n".join(issues)
+                    return False, feedback
+            except Exception as e:
+                # If verification fails to run, log but continue with LLM verification
+                if on_activity:
+                    on_activity("system", f"Warning: Verification could not run: {str(e)}")
+
+            return True, None
+
+        coding_summary = extract_coding_summary(coding_output)
+        change_summary = coding_summary.change_summary if coding_summary else None
         trimmed_output = _truncate_verification_output(coding_output)
         verification_prompt = get_verification_prompt(trimmed_output, task_description, change_summary)
 
@@ -2225,12 +2225,17 @@ class ChadWebUI:
                     verifier.stop_session()
 
                     if passed:
+                        # Skip automated verification for mock provider (testing mode)
+                        if verification_provider != "mock" and not check_verification_mentioned(coding_output):
+                            verified, feedback = _run_automated_verification()
+                            if not verified:
+                                return False, feedback or "Verification failed"
                         return True, summary
-                    else:
-                        feedback = summary
-                        if issues:
-                            feedback += "\n\nIssues:\n" + "\n".join(f"- {issue}" for issue in issues)
-                        return False, feedback
+
+                    feedback = summary
+                    if issues:
+                        feedback += "\n\nIssues:\n" + "\n".join(f"- {issue}" for issue in issues)
+                    return False, feedback
 
                 except VerificationParseError as e:
                     last_error = str(e)
@@ -2334,10 +2339,17 @@ class ChadWebUI:
         """Cancel the running task for a specific session."""
         session = self.get_session(session_id)
         session.cancel_requested = True
+        session.active = False  # Mark session as inactive to allow restart
         if session.provider:
             session.provider.stop_session()
             session.provider = None
         session.config = None
+
+        # Clean up any spawned test server processes (e.g., from visual tests)
+        try:
+            cleanup_all_test_servers()
+        except Exception:
+            pass  # Best effort cleanup
 
         # Clean up worktree if it exists
         if session.worktree_path and session.project_path:
@@ -2502,8 +2514,16 @@ class ChadWebUI:
             merge_summary: str = "",
             branch_choices: list[str] | None = None,
             diff_full: str = "",
+            live_patch: tuple[str, str] | None = None,
         ):
-            """Format output tuple for Gradio with current UI state."""
+            """Format output tuple for Gradio with current UI state.
+
+            Args:
+                live_patch: Optional (live_id, inner_html) tuple for JS patching.
+                           When provided, JavaScript will patch the container with
+                           data-live-id=live_id using the inner_html content,
+                           preserving scroll position and text selection.
+            """
             display_stream = live_stream
             is_error = "❌" in status
             display_role_status = self.format_role_status()
@@ -2522,9 +2542,16 @@ class ChadWebUI:
                 branch_update = gr.update(choices=branch_choices, value=branch_choices[0])
             else:
                 branch_update = gr.update()
-            # Determine visibility state for merge section (controls via JS workaround)
-            visibility_state = "visible" if show_merge else "hidden"
             header_text = "### Changes Ready to Merge" if show_merge else ""
+            # Build live patch trigger HTML if patch data provided
+            if live_patch:
+                live_id, inner_html = live_patch
+                # Escape HTML for safe embedding in data attribute
+                import html as html_module
+                escaped_html = html_module.escape(inner_html)
+                patch_html = f'<div data-live-patch="{live_id}" style="display:none">{escaped_html}</div>'
+            else:
+                patch_html = ""
             return (
                 display_history,
                 display_stream,
@@ -2539,12 +2566,12 @@ class ChadWebUI:
                 gr.update(value=""),  # Clear followup input
                 gr.update(visible=show_followup),  # Show/hide followup row
                 gr.update(interactive=show_followup),  # Enable/disable send button
-                gr.update(visible=show_merge),  # Show/hide merge section (Gradio - may not work)
+                gr.update(visible=show_merge),  # Show/hide merge section group
                 gr.update(value=merge_summary),  # Merge changes summary
                 branch_update,  # Branch dropdown choices
                 gr.update(value=diff_full),  # Full diff content
-                visibility_state,  # merge_visibility_state - controls via JS
                 header_text,  # merge_section_header - dynamic header
+                patch_html,  # live_patch_trigger - JS reads this to patch content
             )
 
         try:
@@ -2652,7 +2679,9 @@ class ChadWebUI:
             status_prefix += "• Mode: Direct (coding AI only)\n\n"
 
             chat_history.append({"role": "user", "content": f"**Task**\n\n{task_description}"})
-            self.session_logger.update_log(session.log_path, chat_history)
+            self.session_logger.update_log(
+                session.log_path, chat_history, last_event=self._last_event_info(session)
+            )
 
             initial_status = f"{status_prefix}⏳ Initializing session..."
             yield make_yield(chat_history, initial_status, summary=initial_status, interactive=False)
@@ -2753,12 +2782,18 @@ class ChadWebUI:
 
             last_activity = ""
             streaming_buffer = ""
-            full_history = []  # Infinite history - list of (ai_name, content) tuples
+            full_history = []  # Infinite history - list of (ai_name, content, timestamp) tuples
             display_buffer = LiveStreamDisplayBuffer()
             last_yield_time = 0.0
+            last_log_update_time = time_module.time()
+            log_update_interval = 10.0  # Update session log every 10 seconds
             min_yield_interval = 0.05
             pending_message_idx = None
             render_state = LiveStreamRenderState()
+            progress_emitted = False  # Track if we've shown a progress update bubble
+            # Live ID for JS patching - unique per pending message
+            live_id_counter = 0
+            current_live_id: str | None = None
 
             while not relay_complete.is_set() and not session.cancel_requested:
                 try:
@@ -2777,9 +2812,14 @@ class ChadWebUI:
 
                     elif msg_type == "message_start":
                         speaker = msg[1]
+                        # Create unique live_id for JS patching
+                        current_live_id = f"{session_id}-{live_id_counter}"
+                        live_id_counter += 1
+                        # Create placeholder with stable live container structure
+                        # The container has data-live-id for JS to patch in-place
                         placeholder = {
                             "role": "assistant",
-                            "content": f"**{speaker}**\n\n⏳ *Working...*",
+                            "content": build_inline_live_html("", speaker, live_id=current_live_id),
                         }
                         chat_history.append(placeholder)
                         pending_message_idx = len(chat_history) - 1
@@ -2801,7 +2841,9 @@ class ChadWebUI:
                         last_activity = ""
                         current_live_stream = ""
                         render_state.reset()
-                        self.session_logger.update_log(session.log_path, chat_history)
+                        self.session_logger.update_log(
+                            session.log_path, chat_history, last_event=self._last_event_info(session)
+                        )
                         yield make_yield(chat_history, current_status, current_live_stream)
                         last_yield_time = time_module.time()
 
@@ -2822,23 +2864,60 @@ class ChadWebUI:
                     elif msg_type == "ai_switch":
                         current_ai = msg[1]
                         streaming_buffer = ""
-                        full_history.append((current_ai, "Processing request\n"))
+                        full_history.append(_history_entry(current_ai, "Processing request\n"))
                         display_buffer.append("Processing request\n")
 
                     elif msg_type == "stream":
                         chunk = msg[1]
                         if chunk.strip():
                             streaming_buffer += chunk
-                            full_history.append((current_ai, chunk))
+                            full_history.append(_history_entry(current_ai, chunk))
                             display_buffer.append(chunk)
+
+                            # Check for progress update in streaming buffer
+                            if not progress_emitted:
+                                progress = extract_progress_update(streaming_buffer)
+                                if progress:
+                                    progress_emitted = True
+                                    # Insert progress bubble before the current working bubble
+                                    progress_msg = make_progress_message(progress)
+                                    if pending_message_idx is not None:
+                                        chat_history.insert(pending_message_idx, progress_msg)
+                                        pending_message_idx += 1
+                                        # Create new live_id for the continuation placeholder
+                                        current_live_id = f"{session_id}-{live_id_counter}"
+                                        live_id_counter += 1
+                                        # Reset the live view placeholder with new live container
+                                        chat_history[pending_message_idx] = {
+                                            "role": "assistant",
+                                            "content": build_inline_live_html("", current_ai, live_id=current_live_id),
+                                        }
+                                        # Reset display buffer so live view starts fresh after progress
+                                        display_buffer = LiveStreamDisplayBuffer()
+                                        render_state.reset()
+                                    else:
+                                        chat_history.append(progress_msg)
+                                    yield make_yield(chat_history, current_status, "")
+                                    last_yield_time = time_module.time()
+
                             now = time_module.time()
                             if now - last_yield_time >= min_yield_interval:
-                                display_content = display_buffer.content
-                                rendered_stream = build_live_stream_html(display_content, current_ai)
-                                if render_state.should_render(rendered_stream):
-                                    current_live_stream = rendered_stream
-                                    yield make_yield(chat_history, current_status, current_live_stream)
-                                    render_state.record(rendered_stream)
+                                # Update chat bubble with inline live content
+                                # Also send JS patch for scroll position preservation
+                                inline_html = build_inline_live_html(display_buffer.content, current_ai, live_id=current_live_id)
+                                inner_html = build_inline_live_inner_html(display_buffer.content)
+                                if inner_html and render_state.should_render(inline_html):
+                                    if pending_message_idx is not None:
+                                        chat_history[pending_message_idx] = {
+                                            "role": "assistant",
+                                            "content": inline_html,
+                                        }
+                                    # Also send live_patch for JS scroll preservation
+                                    yield make_yield(
+                                        chat_history, current_status, "",
+                                        live_patch=(current_live_id, inner_html) if current_live_id else None
+                                    )
+                                    render_state.record(inline_html)
                                     last_yield_time = now
 
                     elif msg_type == "activity":
@@ -2848,30 +2927,50 @@ class ChadWebUI:
                             display_content = display_buffer.content
                             if display_content:
                                 content = display_content + f"\n\n{last_activity}"
-                                rendered_stream = build_live_stream_html(content, current_ai)
                             else:
-                                rendered_stream = f"**Live:** {last_activity}"
-                            if render_state.should_render(rendered_stream):
-                                current_live_stream = rendered_stream
-                                yield make_yield(chat_history, current_status, current_live_stream)
-                                render_state.record(rendered_stream)
+                                content = last_activity
+                            # Update chat bubble with inline live content
+                            inline_html = build_inline_live_html(content, current_ai, live_id=current_live_id)
+                            inner_html = build_inline_live_inner_html(content)
+                            if inner_html and render_state.should_render(inline_html):
+                                if pending_message_idx is not None:
+                                    chat_history[pending_message_idx] = {
+                                        "role": "assistant",
+                                        "content": inline_html,
+                                    }
+                                yield make_yield(
+                                    chat_history, current_status, "",
+                                    live_patch=(current_live_id, inner_html) if current_live_id else None
+                                )
+                                render_state.record(inline_html)
                                 last_yield_time = now
 
                 except queue.Empty:
                     now = time_module.time()
                     if now - last_yield_time >= 0.3:
                         display_content = display_buffer.content
-                        if display_content:
-                            rendered_stream = build_live_stream_html(display_content, current_ai)
-                        elif last_activity:
-                            rendered_stream = f"**Live:** {last_activity}"
-                        else:
-                            rendered_stream = ""
-                        if render_state.should_render(rendered_stream):
-                            current_live_stream = rendered_stream
-                            yield make_yield(chat_history, current_status, current_live_stream)
-                            render_state.record(rendered_stream)
-                            last_yield_time = now
+                        if display_content or last_activity:
+                            content = display_content if display_content else last_activity
+                            # Update chat bubble with inline live content
+                            inline_html = build_inline_live_html(content, current_ai, live_id=current_live_id)
+                            inner_html = build_inline_live_inner_html(content)
+                            if inner_html and render_state.should_render(inline_html):
+                                if pending_message_idx is not None:
+                                    chat_history[pending_message_idx] = {
+                                        "role": "assistant",
+                                        "content": inline_html,
+                                    }
+                                yield make_yield(
+                                    chat_history, current_status, "",
+                                    live_patch=(current_live_id, inner_html) if current_live_id else None
+                                )
+                                render_state.record(inline_html)
+                                last_yield_time = now
+
+                    # Periodically update session log with streaming history
+                    if full_history and now - last_log_update_time >= log_update_interval:
+                        self._update_session_log(session, chat_history, full_history)
+                        last_log_update_time = now
 
             if session.cancel_requested:
                 for idx in range(len(chat_history) - 1, -1, -1):
@@ -2888,7 +2987,7 @@ class ChadWebUI:
                     "🛑 Task cancelled",
                     "",
                     summary="🛑 Task cancelled",
-                    show_followup=False,
+                    show_followup=True,  # Always show follow-up after task starts
                 )
             else:
                 while True:
@@ -2901,7 +3000,9 @@ class ChadWebUI:
                                 chat_history[pending_message_idx] = make_chat_message(speaker, content)
                             else:
                                 chat_history.append(make_chat_message(speaker, content))
-                            self.session_logger.update_log(session.log_path, chat_history)
+                            self.session_logger.update_log(
+                                session.log_path, chat_history, last_event=self._last_event_info(session)
+                            )
                             yield make_yield(chat_history, current_status, "")
                     except queue.Empty:
                         break
@@ -2914,6 +3015,7 @@ class ChadWebUI:
             verification_enabled = verification_agent != self.VERIFICATION_NONE
             verification_account_for_run = actual_verification_account if verification_enabled else None
             verification_log: list[dict[str, object]] = []
+            verified: bool | None = None  # Track verification result
 
             if session.cancel_requested:
                 final_status = "🛑 Task cancelled by user"
@@ -2941,10 +3043,13 @@ class ChadWebUI:
                             break
 
                 if not last_coding_output and full_history:
-                    last_coding_output = "".join(chunk for _, chunk in full_history[-50:]).strip()
+                    last_coding_output = "".join(_history_contents(full_history[-50:])).strip()
 
                 if not last_coding_output:
                     last_coding_output = completion_reason[0] or ""
+
+                # No longer need to warn about verification not being mentioned
+                # since we now run it automatically during verification phase
 
                 # Run verification loop
                 max_verification_attempts = 3
@@ -2964,7 +3069,9 @@ class ChadWebUI:
                             "content": f"───────────── 🔍 VERIFICATION (Attempt {verification_attempt}) ─────────────",
                         }
                     )
-                    self.session_logger.update_log(session.log_path, chat_history)
+                    self.session_logger.update_log(
+                        session.log_path, chat_history, last_event=self._last_event_info(session)
+                    )
 
                     # Show verification status
                     verify_status = (
@@ -2973,22 +3080,47 @@ class ChadWebUI:
                     )
                     yield make_yield(chat_history, verify_status, "")
 
-                    # Run verification
+                    # Run verification in a thread so we can stream output to live view
                     def verification_activity(activity_type: str, detail: str):
                         content = detail if activity_type == "stream" else f"[{activity_type}] {detail}\n"
                         message_queue.put(("stream", content))
 
-                    # Run verification in worktree so it can see the changes
                     verification_path = str(session.worktree_path or path_obj)
-                    verified, verification_feedback = self._run_verification(
-                        verification_path,
-                        last_coding_output,
-                        task_description,
-                        verification_account_for_run,
-                        on_activity=verification_activity,
-                        verification_model=resolved_verification_model,
-                        verification_reasoning=resolved_verification_reasoning,
-                    )
+                    verification_result: list = [None, None]  # [verified, feedback]
+                    verification_complete = threading.Event()
+
+                    def run_verification_thread():
+                        try:
+                            v, f = self._run_verification(
+                                verification_path,
+                                last_coding_output,
+                                task_description,
+                                verification_account_for_run,
+                                on_activity=verification_activity,
+                                verification_model=resolved_verification_model,
+                                verification_reasoning=resolved_verification_reasoning,
+                            )
+                            verification_result[0] = v
+                            verification_result[1] = f
+                        except Exception as exc:
+                            verification_result[0] = None
+                            verification_result[1] = f"Verification error: {exc}"
+                        finally:
+                            verification_complete.set()
+
+                    verification_thread = threading.Thread(target=run_verification_thread, daemon=True)
+                    verification_thread.start()
+
+                    # Poll message queue while verification runs
+                    # Note: verification streaming is silent (no inline display) since it's usually fast
+                    while not verification_complete.is_set() and not session.cancel_requested:
+                        try:
+                            message_queue.get(timeout=0.05)  # Drain queue
+                        except queue.Empty:
+                            pass
+
+                    verification_thread.join(timeout=1.0)
+                    verified, verification_feedback = verification_result[0], verification_result[1]
                     status_label = "error" if verified is None else ("passed" if verified else "failed")
                     verification_log.append(
                         {
@@ -3015,7 +3147,10 @@ class ChadWebUI:
                             }
                         )
                         self.session_logger.update_log(
-                            session.log_path, chat_history, verification_attempts=verification_log
+                            session.log_path,
+                            chat_history,
+                            verification_attempts=verification_log,
+                            last_event=self._last_event_info(session),
                         )
                         break
                     elif verified:
@@ -3027,12 +3162,18 @@ class ChadWebUI:
                             }
                         )
                         self.session_logger.update_log(
-                            session.log_path, chat_history, verification_attempts=verification_log
+                            session.log_path,
+                            chat_history,
+                            verification_attempts=verification_log,
+                            last_event=self._last_event_info(session),
                         )
                     else:
                         chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
                         self.session_logger.update_log(
-                            session.log_path, chat_history, verification_attempts=verification_log
+                            session.log_path,
+                            chat_history,
+                            verification_attempts=verification_log,
+                            last_event=self._last_event_info(session),
                         )
 
                         # If not verified and session is still active, send feedback to coding agent
@@ -3047,7 +3188,9 @@ class ChadWebUI:
                                 "*Sending verification feedback to coding agent...*"
                             )
                             chat_history.append({"role": "user", "content": revision_content})
-                            self.session_logger.update_log(session.log_path, chat_history)
+                            self.session_logger.update_log(
+                                session.log_path, chat_history, last_event=self._last_event_info(session)
+                            )
                             revision_status = f"{status_prefix}🔄 Sending revision request to coding agent..."
                             yield make_yield(chat_history, revision_status, "")
 
@@ -3059,35 +3202,94 @@ class ChadWebUI:
                                 "Please fix these issues and confirm when done."
                             )
 
-                            # Add placeholder for coding agent response
+                            # Add placeholder for coding agent response with live container
+                            revision_live_id = f"{session_id}-rev-{live_id_counter}"
+                            live_id_counter += 1
                             chat_history.append(
                                 {
                                     "role": "assistant",
-                                    "content": "**CODING AI**\n\n⏳ *Working on revisions...*",
+                                    "content": build_inline_live_html("", "CODING AI", live_id=revision_live_id),
                                 }
                             )
                             revision_pending_idx = len(chat_history) - 1
-                            self.session_logger.update_log(session.log_path, chat_history)
-                            yield make_yield(
-                                chat_history,
-                                f"{status_prefix}⏳ Coding agent working on revisions...",
-                                "",
+                            self.session_logger.update_log(
+                                session.log_path, chat_history, last_event=self._last_event_info(session)
                             )
+                            revision_status_msg = f"{status_prefix}⏳ Coding agent working on revisions..."
+                            # Show live stream placeholder during revision setup
+                            revision_placeholder = build_live_stream_html("⏳ Preparing revision...", "CODING AI")
+                            yield make_yield(chat_history, revision_status_msg, revision_placeholder)
 
-                            # Send the revision request
-                            try:
-                                coding_provider_instance.send_message(revision_request)
-                                revision_response = coding_provider_instance.get_response(timeout=coding_timeout)
-                            except Exception as exc:
+                            # Run revision in a thread so we can stream output to live view
+                            revision_result: list = [None, None]  # [response, error]
+                            revision_complete = threading.Event()
+
+                            def run_revision_thread():
+                                try:
+                                    coding_provider_instance.send_message(revision_request)
+                                    resp = coding_provider_instance.get_response(timeout=coding_timeout)
+                                    revision_result[0] = resp
+                                except Exception as exc:
+                                    revision_result[1] = exc
+                                finally:
+                                    revision_complete.set()
+
+                            revision_thread = threading.Thread(target=run_revision_thread, daemon=True)
+                            revision_thread.start()
+
+                            # Poll message queue while revision runs (live stream updates)
+                            rev_display_buffer = LiveStreamDisplayBuffer()
+                            rev_render_state = LiveStreamRenderState()
+                            rev_last_yield = 0.0
+                            while not revision_complete.is_set() and not session.cancel_requested:
+                                try:
+                                    msg = message_queue.get(timeout=0.05)
+                                    if msg[0] == "stream":
+                                        chunk = msg[1]
+                                        if chunk.strip():
+                                            rev_display_buffer.append(chunk)
+                                            now = time_module.time()
+                                            if now - rev_last_yield >= min_yield_interval:
+                                                # Update both the separate live stream box AND the chat bubble
+                                                rendered = build_live_stream_html(
+                                                    rev_display_buffer.content, "CODING AI"
+                                                )
+                                                # Update chat bubble with inline live content
+                                                inline_html = build_inline_live_html(
+                                                    rev_display_buffer.content, "CODING AI", live_id=revision_live_id
+                                                )
+                                                inner_html = build_inline_live_inner_html(rev_display_buffer.content)
+                                                if inner_html and rev_render_state.should_render(inline_html):
+                                                    chat_history[revision_pending_idx] = {
+                                                        "role": "assistant",
+                                                        "content": inline_html,
+                                                    }
+                                                    yield make_yield(
+                                                        chat_history, revision_status_msg, rendered,
+                                                        live_patch=(revision_live_id, inner_html)
+                                                    )
+                                                    rev_render_state.record(inline_html)
+                                                    rev_last_yield = now
+                                except queue.Empty:
+                                    pass
+
+                            revision_thread.join(timeout=1.0)
+                            revision_response = revision_result[0]
+                            revision_error = revision_result[1]
+
+                            if revision_error:
                                 chat_history[revision_pending_idx] = {
                                     "role": "assistant",
-                                    "content": f"**CODING AI**\n\n❌ *Error: {exc}*",
+                                    "content": f"**CODING AI**\n\n❌ *Error: {revision_error}*",
                                 }
                                 session.active = False
                                 session.provider = None
                                 session.config = None
                                 self.session_logger.update_log(
-                                    session.log_path, chat_history, verification_attempts=verification_log
+                                    session.log_path,
+                                    chat_history,
+                                    verification_attempts=verification_log,
+                                    last_event=self._last_event_info(session),
                                 )
                                 break
 
@@ -3096,7 +3298,10 @@ class ChadWebUI:
                                 chat_history[revision_pending_idx] = make_chat_message("CODING AI", parsed_revision)
                                 last_coding_output = parsed_revision
                                 self.session_logger.update_log(
-                                    session.log_path, chat_history, verification_attempts=verification_log
+                                    session.log_path,
+                                    chat_history,
+                                    verification_attempts=verification_log,
+                                    last_event=self._last_event_info(session),
                                 )
                             else:
                                 chat_history[revision_pending_idx] = {
@@ -3104,7 +3309,10 @@ class ChadWebUI:
                                     "content": "**CODING AI**\n\n❌ *No response to revision request*",
                                 }
                                 self.session_logger.update_log(
-                                    session.log_path, chat_history, verification_attempts=verification_log
+                                    session.log_path,
+                                    chat_history,
+                                    verification_attempts=verification_log,
+                                    last_event=self._last_event_info(session),
                                 )
                                 break
 
@@ -3118,7 +3326,10 @@ class ChadWebUI:
                             break
 
                     self.session_logger.update_log(
-                        session.log_path, chat_history, verification_attempts=verification_log
+                        session.log_path,
+                        chat_history,
+                        verification_attempts=verification_log,
+                        last_event=self._last_event_info(session),
                     )
 
                 if verified is True:
@@ -3127,12 +3338,12 @@ class ChadWebUI:
                     chat_history.append({"role": "user", "content": completion_msg})
                 elif verified is None:
                     # Verification errored - already added error message above
-                    final_status = "❌ Task completed but verification errored"
+                    final_status = "❌ Task failed - verification error"
                 else:
                     final_status = (
-                        f"⚠️ Task completed but verification failed " f"after {verification_attempt} attempt(s)"
+                        f"❌ Task failed - verification failed " f"after {verification_attempt} attempt(s)"
                     )
-                    completion_msg = "───────────── ⚠️ TASK COMPLETED (UNVERIFIED) ─────────────"
+                    completion_msg = "───────────── ❌ TASK FAILED (VERIFICATION) ─────────────"
                     if verification_feedback:
                         if len(verification_feedback) > 200:
                             completion_msg += f"\n\n*{verification_feedback[:200]}...*"
@@ -3150,22 +3361,36 @@ class ChadWebUI:
                     failure_msg += f"\n\n*{completion_reason[0]}*"
                 chat_history.append({"role": "user", "content": failure_msg})
 
-            streaming_transcript = "".join(chunk for _, chunk in full_history) if full_history else ""
             if final_status:
-                marker = f"[FINAL STATUS] {final_status}"
-                streaming_transcript = (
-                    f"{streaming_transcript.rstrip()}\n\n{marker}" if streaming_transcript else marker
-                )
+                full_history.append(_history_entry("SYSTEM", f"\n\n[FINAL STATUS] {final_status}"))
+
+            # Determine final session status based on both task completion and verification
+            overall_success = False
+            if session.cancel_requested:
+                session_status = "cancelled"
+            elif not task_success[0]:
+                session_status = "failed"
+            elif not verification_enabled:
+                session_status = "completed"
+                overall_success = True
+            elif verified is True:
+                session_status = "completed"
+                overall_success = True
+            else:
+                # Task succeeded but verification failed or errored
+                session_status = "failed"
+                overall_success = False
 
             self.session_logger.update_log(
                 session.log_path,
                 chat_history,
-                streaming_transcript=streaming_transcript,
-                success=task_success[0],
+                streaming_history=full_history if full_history else None,
+                success=overall_success,
                 completion_reason=completion_reason[0],
-                status="completed" if task_success[0] else "failed",
+                status=session_status,
                 verification_attempts=verification_log,
                 final_status=final_status,
+                last_event=self._last_event_info(session),
             )
             if session.log_path:
                 final_status += f"\n\n*Session log: {session.log_path}*"
@@ -3175,15 +3400,18 @@ class ChadWebUI:
             session.chat_history = chat_history
             session.coding_account = coding_account
 
-            # Show follow-up input if session can continue (Claude with successful task)
-            can_continue = session.active and task_success[0]
-            if can_continue:
+            # Always show follow-up input after task starts, regardless of outcome
+            can_continue = True  # Always allow follow-up messages
+            if session.active and overall_success:
                 final_status += "\n\n*Session active - you can send follow-up messages*"
-                final_summary = f"{status_prefix}{final_status}"
+            else:
+                final_status += "\n\n*You can send follow-up messages*"
+            final_summary = f"{status_prefix}{final_status}"
 
             # Check for worktree changes to show merge section
+            # Show merge section whenever there are changes, regardless of task success
             has_changes, merge_summary_text = self.check_worktree_changes(session_id)
-            show_merge = has_changes and task_success[0]
+            show_merge = has_changes
 
             # Get available branches and rendered diff for merge target
             branches = []
@@ -3202,7 +3430,7 @@ class ChadWebUI:
                 final_summary,
                 "",
                 summary=final_summary,
-                interactive=True,
+                interactive=False,  # Task description locked after work begins
                 show_followup=can_continue,
                 show_merge=show_merge,
                 merge_summary=merge_summary_text if show_merge else "",
@@ -3221,8 +3449,8 @@ class ChadWebUI:
                 chat_history,
                 error_msg,
                 summary=error_msg,
-                interactive=True,
-                show_followup=False,
+                interactive=False,  # Task description locked after work begins
+                show_followup=True,  # Always show follow-up after task starts
                 show_merge=False,
                 merge_summary="",
             )
@@ -3251,7 +3479,8 @@ class ChadWebUI:
             coding_reasoning: Reasoning effort selected in the Run tab
 
         Yields:
-            Tuples of (chat_history, live_stream, followup_input, followup_row, send_btn)
+            Tuples of (chat_history, live_stream, followup_input, followup_row, send_btn, live_patch_trigger,
+            merge_section_group, changes_summary, merge_target_branch, diff_content, merge_section_header)
         """
         session = self.get_session(session_id)
         message_queue = queue.Queue()
@@ -3264,23 +3493,37 @@ class ChadWebUI:
         task_description = session.task_description or ""
         verification_log: list[dict[str, object]] = []
 
+        merge_no_change = (gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+
         def make_followup_yield(
             history,
             live_stream: str = "",
             show_followup: bool = True,
             working: bool = False,
+            live_patch: tuple[str, str] | None = None,
+            merge_updates: tuple = merge_no_change,
         ):
             """Format output for follow-up responses."""
+            # Build live patch trigger HTML if patch data provided
+            if live_patch:
+                live_id, inner_html = live_patch
+                import html as html_module
+                escaped_html = html_module.escape(inner_html)
+                patch_html = f'<div data-live-patch="{live_id}" style="display:none">{escaped_html}</div>'
+            else:
+                patch_html = ""
             return (
                 history,
                 live_stream,
                 gr.update(value="" if not working else followup_message),  # Clear input when not working
                 gr.update(visible=show_followup),  # Follow-up row visibility
                 gr.update(interactive=not working),  # Send button interactivity
+                patch_html,  # live_patch_trigger
+                *merge_updates,
             )
 
         if not followup_message or not followup_message.strip():
-            yield make_followup_yield(chat_history, "", show_followup=True)
+            yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
             return
 
         accounts = self.security_mgr.list_accounts()
@@ -3371,7 +3614,7 @@ class ChadWebUI:
             handoff_title = "PROVIDER HANDOFF" if provider_changed else "PREFERENCE UPDATE"
             handoff_msg = f"───────────── 🔄 {handoff_title} ─────────────\n\n" f"*Switching to {handoff_detail}*"
             chat_history.append({"role": "user", "content": handoff_msg})
-            yield make_followup_yield(chat_history, "🔄 Switching providers...", working=True)
+            yield make_followup_yield(chat_history, "🔄 Switching providers...", working=True, merge_updates=merge_no_change)
 
             new_provider = create_provider(coding_config)
             # Use worktree path if available, otherwise fall back to project path
@@ -3388,7 +3631,7 @@ class ChadWebUI:
                     }
                 )
                 session.config = None
-                yield make_followup_yield(chat_history, "", show_followup=False)
+                yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
                 return
 
             session.provider = new_provider
@@ -3409,7 +3652,7 @@ class ChadWebUI:
                 }
             )
             session.active = False
-            yield make_followup_yield(chat_history, "", show_followup=False)
+            yield make_followup_yield(chat_history, "", show_followup=False, merge_updates=merge_no_change)
             return
 
         # Add user's follow-up message to history
@@ -3421,11 +3664,15 @@ class ChadWebUI:
             user_content = f"**Follow-up**\n\n{followup_message}"
         chat_history.append({"role": "user", "content": user_content})
 
-        # Add placeholder for AI response
-        chat_history.append({"role": "assistant", "content": "**CODING AI**\n\n⏳ *Working...*"})
+        # Add placeholder for AI response with live container for JS patching
+        followup_live_id = f"{session_id}-followup-{len(chat_history)}"
+        chat_history.append({
+            "role": "assistant",
+            "content": build_inline_live_html("", "CODING AI", live_id=followup_live_id)
+        })
         pending_idx = len(chat_history) - 1
 
-        yield make_followup_yield(chat_history, "⏳ Processing follow-up...", working=True)
+        yield make_followup_yield(chat_history, "⏳ Processing follow-up...", working=True, merge_updates=merge_no_change)
 
         # Set up activity callback
         def on_activity(activity_type: str, detail: str):
@@ -3460,7 +3707,8 @@ class ChadWebUI:
         # Stream updates while waiting
         import time as time_module
 
-        full_history = []
+        full_history = []  # List of (ai_name, content, timestamp) tuples
+        current_ai = "CODING AI"
         display_buffer = LiveStreamDisplayBuffer()
         last_yield_time = 0.0
         min_yield_interval = 0.05
@@ -3474,15 +3722,26 @@ class ChadWebUI:
                 if msg_type == "stream":
                     chunk = msg[1]
                     if chunk.strip():
-                        full_history.append(chunk)
+                        full_history.append(_history_entry(current_ai, chunk))
                         display_buffer.append(chunk)
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
-                            display_content = display_buffer.content
-                            live_stream = build_live_stream_html(display_content)
-                            if render_state.should_render(live_stream):
-                                yield make_followup_yield(chat_history, live_stream, working=True)
-                                render_state.record(live_stream)
+                            # Update chat bubble with inline live content
+                            inline_html = build_inline_live_html(display_buffer.content, current_ai, live_id=followup_live_id)
+                            inner_html = build_inline_live_inner_html(display_buffer.content)
+                            if inner_html and render_state.should_render(inline_html):
+                                chat_history[pending_idx] = {
+                                    "role": "assistant",
+                                    "content": inline_html,
+                                }
+                                yield make_followup_yield(
+                                    chat_history,
+                                    "",
+                                    working=True,
+                                    live_patch=(followup_live_id, inner_html),
+                                    merge_updates=merge_no_change,
+                                )
+                                render_state.record(inline_html)
                                 last_yield_time = now
 
                 elif msg_type == "activity":
@@ -3491,12 +3750,24 @@ class ChadWebUI:
                         display_content = display_buffer.content
                         if display_content:
                             content = display_content + f"\n\n{msg[1]}"
-                            live_stream = build_live_stream_html(content)
                         else:
-                            live_stream = f"**Live:** {msg[1]}"
-                        if render_state.should_render(live_stream):
-                            yield make_followup_yield(chat_history, live_stream, working=True)
-                            render_state.record(live_stream)
+                            content = msg[1]
+                        # Update chat bubble with inline live content
+                        inline_html = build_inline_live_html(content, current_ai, live_id=followup_live_id)
+                        inner_html = build_inline_live_inner_html(content)
+                        if inner_html and render_state.should_render(inline_html):
+                            chat_history[pending_idx] = {
+                                "role": "assistant",
+                                "content": inline_html,
+                            }
+                            yield make_followup_yield(
+                                chat_history,
+                                "",
+                                working=True,
+                                live_patch=(followup_live_id, inner_html),
+                                merge_updates=merge_no_change,
+                            )
+                            render_state.record(inline_html)
                             last_yield_time = now
 
             except queue.Empty:
@@ -3504,13 +3775,23 @@ class ChadWebUI:
                 if now - last_yield_time >= 0.3:
                     display_content = display_buffer.content
                     if display_content:
-                        live_stream = build_live_stream_html(display_content)
-                    else:
-                        live_stream = ""
-                    if render_state.should_render(live_stream):
-                        yield make_followup_yield(chat_history, live_stream, working=True)
-                        render_state.record(live_stream)
-                        last_yield_time = now
+                        # Update chat bubble with inline live content
+                        inline_html = build_inline_live_html(display_content, current_ai, live_id=followup_live_id)
+                        inner_html = build_inline_live_inner_html(display_content)
+                        if inner_html and render_state.should_render(inline_html):
+                            chat_history[pending_idx] = {
+                                "role": "assistant",
+                                "content": inline_html,
+                            }
+                            yield make_followup_yield(
+                                chat_history,
+                                "",
+                                working=True,
+                                live_patch=(followup_live_id, inner_html),
+                                merge_updates=merge_no_change,
+                            )
+                            render_state.record(inline_html)
+                            last_yield_time = now
 
         relay_thread.join(timeout=1)
 
@@ -3524,7 +3805,7 @@ class ChadWebUI:
             session.provider = None
             session.config = None
             self._update_session_log(session, chat_history, full_history)
-            yield make_followup_yield(chat_history, "", show_followup=False)
+            yield make_followup_yield(chat_history, "", show_followup=False, merge_updates=merge_no_change)
             return
 
         if not response_holder[0]:
@@ -3533,7 +3814,7 @@ class ChadWebUI:
                 "content": "**CODING AI**\n\n❌ *No response received*",
             }
             self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
-            yield make_followup_yield(chat_history, "", show_followup=True)
+            yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
             return
 
         parsed = parse_codex_output(response_holder[0])
@@ -3544,7 +3825,7 @@ class ChadWebUI:
         session.chat_history = chat_history
         self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
 
-        yield make_followup_yield(chat_history, "", show_followup=True, working=True)
+        yield make_followup_yield(chat_history, "", show_followup=True, working=True, merge_updates=merge_no_change)
 
         # Run verification on follow-up
         verification_enabled = verification_agent != self.VERIFICATION_NONE
@@ -3569,7 +3850,7 @@ class ChadWebUI:
                 verify_status = (
                     f"🔍 Running verification " f"(attempt {verification_attempt}/{max_verification_attempts})..."
                 )
-                yield make_followup_yield(chat_history, verify_status, working=True)
+                yield make_followup_yield(chat_history, verify_status, working=True, merge_updates=merge_no_change)
 
                 def verification_activity(activity_type: str, detail: str):
                     pass  # Quiet verification
@@ -3654,7 +3935,9 @@ class ChadWebUI:
                         self._update_session_log(
                             session, chat_history, full_history, verification_attempts=verification_log
                         )
-                        yield make_followup_yield(chat_history, "🔄 Revision in progress...", working=True)
+                        # Show live stream placeholder during revision
+                        revision_placeholder = build_live_stream_html("🔄 Revision in progress...", "CODING AI")
+                        yield make_followup_yield(chat_history, revision_placeholder, working=True, merge_updates=merge_no_change)
 
                         revision_request = (
                             "The verification agent found issues with your work. "
@@ -3699,6 +3982,7 @@ class ChadWebUI:
                             chat_history,
                             "✓ Revision complete, re-verifying...",
                             working=True,
+                            merge_updates=merge_no_change,
                         )
                     else:
                         # Can't continue - add failure message
@@ -3722,7 +4006,47 @@ class ChadWebUI:
         session.chat_history = chat_history
         self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
 
-        yield make_followup_yield(chat_history, "", show_followup=True)
+        def build_merge_updates():
+            if not session.project_path:
+                return merge_no_change
+
+            try:
+                has_changes, merge_summary = self.check_worktree_changes(session_id)
+                if not has_changes:
+                    return (
+                        gr.update(visible=False),  # merge_section_group
+                        gr.update(value=""),  # changes_summary
+                        gr.update(),  # merge_target_branch
+                        gr.update(value=""),  # diff_content
+                        gr.update(value=""),  # merge_section_header
+                    )
+
+                git_mgr = GitWorktreeManager(Path(session.project_path))
+                branches = git_mgr.get_branches()
+                parsed_diff = git_mgr.get_parsed_diff(session_id, session.worktree_base_commit)
+                diff_html = self._render_diff_html(parsed_diff)
+                header_text = "### Changes Ready to Merge"
+
+                branch_choices = branches or ["main"]
+                branch_value = branch_choices[0] if branch_choices else None
+
+                return (
+                    gr.update(visible=True),  # merge_section_group
+                    gr.update(value=merge_summary),
+                    gr.update(choices=branch_choices, value=branch_value),
+                    gr.update(value=diff_html),
+                    gr.update(value=header_text),
+                )
+            except Exception:
+                return (
+                    gr.update(visible=True),
+                    gr.update(value=""),
+                    gr.update(choices=["main"], value="main"),
+                    gr.update(value=""),
+                    gr.update(value=""),
+                )
+
+        yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=build_merge_updates())
 
     def is_project_git_repo(self, project_path: str) -> bool:
         """Check if project path is a valid git repository."""
@@ -3746,7 +4070,9 @@ class ChadWebUI:
 
         if has_changes:
             summary = git_mgr.get_diff_summary(session_id, session.worktree_base_commit)
-            return True, summary
+            # Only show merge section if there's actually something to display
+            if summary:
+                return True, summary
         return False, ""
 
     def attempt_merge(
@@ -3757,10 +4083,10 @@ class ChadWebUI:
     ) -> tuple:
         """Attempt to merge worktree changes to a target branch.
 
-        Returns 15 values for merge_outputs:
-        [merge_section, changes_summary, conflict_section, conflict_info, conflicts_html,
+        Returns 14 values for merge_outputs:
+        [merge_section_group, changes_summary, conflict_section, conflict_info, conflicts_html,
          task_status, chatbot, start_btn, cancel_btn, live_stream, followup_row, task_description,
-         merge_visibility_state, merge_section_header, diff_content]
+         merge_section_header, diff_content]
         """
         session = self.get_session(session_id)
         no_change = gr.update()
@@ -3769,7 +4095,7 @@ class ChadWebUI:
                 gr.update(visible=False), no_change, gr.update(visible=False),
                 no_change, no_change, gr.update(value="❌ No worktree to merge.", visible=True),
                 no_change, no_change, no_change, no_change, no_change, no_change,
-                "hidden", "", "",  # merge_visibility_state, merge_section_header, diff_content
+                "", "",  # merge_section_header, diff_content
             )
 
         try:
@@ -3787,25 +4113,23 @@ class ChadWebUI:
                 session.has_worktree_changes = False
                 session.worktree_base_commit = None
                 session.task_description = ""
-                session.chat_history = []
-                # Full reset - return tab to initial state
-                # Use direct values where possible to match working make_yield pattern
+                # Preserve chat_history for follow-up conversations
+                # Reset merge section but keep chatbot and followup visible
                 return (
-                    gr.update(visible=False),                    # merge_section
-                    "",                                          # changes_summary - direct value
+                    gr.update(visible=False),                    # merge_section_group
+                    "",                                          # changes_summary
                     gr.update(visible=False),                    # conflict_section
-                    "",                                          # conflict_info - direct value
-                    "",                                          # conflicts_html - direct value
+                    "",                                          # conflict_info
+                    "",                                          # conflicts_html
                     gr.update(value=f"✓ Changes merged to {target_name}.", visible=True),
-                    [],                                          # chatbot - direct empty list
-                    gr.update(interactive=True),                 # start_btn - enable
-                    gr.update(interactive=False),                # cancel_btn - disable
-                    "",                                          # live_stream - direct value
-                    gr.update(visible=False),                    # followup_row - hide
-                    "",                                          # task_description - direct value
-                    "hidden",                                    # merge_visibility_state - hide via JS
-                    "",                                          # merge_section_header - clear
-                    "",                                          # diff_content - clear diff view
+                    no_change,                                   # chatbot - preserve for follow-up
+                    gr.update(interactive=False),                # start_btn - never re-enable after task starts
+                    gr.update(interactive=False),                # cancel_btn
+                    "",                                          # live_stream
+                    no_change,                                   # followup_row - preserve for follow-up
+                    "",                                          # task_description
+                    "",                                          # merge_section_header
+                    "",                                          # diff_content
                 )
             elif conflicts:
                 session.merge_conflicts = conflicts
@@ -3813,33 +4137,33 @@ class ChadWebUI:
                 file_count = len(conflicts or [])
                 conflict_msg = f"**{file_count} file(s)** with **{conflict_count} conflict(s)** need resolution."
                 return (
-                    gr.update(visible=False),                    # merge_section
+                    gr.update(visible=False),                    # merge_section_group
                     no_change,                                   # changes_summary
                     gr.update(visible=True),                     # conflict_section
                     gr.update(value=conflict_msg),               # conflict_info
                     gr.update(value=self._render_conflicts_html(conflicts or [])),
                     no_change,                                   # task_status
                     no_change, no_change, no_change, no_change, no_change, no_change,
-                    "hidden", "", "",                       # merge_visibility_state, merge_section_header, diff_content
+                    "", "",                                      # merge_section_header, diff_content
                 )
             else:
                 error_detail = error_msg or "Merge failed. Check git status and commit hooks."
                 return (
-                    gr.update(visible=True),                     # merge_section remains visible
+                    gr.update(visible=True),                     # merge_section_group remains visible
                     no_change,                                   # changes_summary unchanged
                     gr.update(visible=False),                    # conflict_section hidden
                     gr.update(value=""),                         # conflict_info cleared
                     gr.update(value=""),                         # conflicts_html cleared
                     gr.update(value=f"❌ {error_detail}", visible=True),
                     no_change, no_change, no_change, no_change, no_change, no_change,
-                    "visible", no_change, no_change,        # merge_visibility_state, merge_section_header, diff_content
+                    no_change, no_change,                        # merge_section_header, diff_content
                 )
         except Exception as e:
             return (
                 no_change, no_change, no_change, no_change, no_change,
                 gr.update(value=f"❌ Merge error: {e}", visible=True),
                 no_change, no_change, no_change, no_change, no_change, no_change,
-                no_change, no_change, no_change,            # merge_visibility_state, merge_section_header, diff_content
+                no_change, no_change,                            # merge_section_header, diff_content
             )
 
     def _render_conflicts_html(self, conflicts: list[MergeConflict]) -> str:
@@ -4026,7 +4350,7 @@ class ChadWebUI:
     def resolve_all_conflicts(self, session_id: str, use_incoming: bool) -> tuple:
         """Resolve all conflicts by choosing all original or all incoming.
 
-        Returns 15 values for merge_outputs.
+        Returns 14 values for merge_outputs.
         """
         session = self.get_session(session_id)
         no_change = gr.update()
@@ -4035,7 +4359,7 @@ class ChadWebUI:
                 no_change, no_change, gr.update(visible=False),
                 no_change, no_change, gr.update(value="❌ No project path set.", visible=True),
                 no_change, no_change, no_change, no_change, no_change, no_change,
-                no_change, no_change, no_change,  # merge_visibility_state, merge_section_header, diff_content
+                no_change, no_change,  # merge_section_header, diff_content
             )
 
         try:
@@ -4051,45 +4375,43 @@ class ChadWebUI:
                 session.has_worktree_changes = False
                 session.worktree_base_commit = None
                 session.task_description = ""
-                session.chat_history = []
-                # Full reset - return tab to initial state
-                # Use direct values where possible to match working make_yield pattern
+                # Preserve chat_history for follow-up conversations
+                # Reset merge section but keep chatbot and followup visible
                 return (
-                    gr.update(visible=False),                    # merge_section
-                    "",                                          # changes_summary - direct value
+                    gr.update(visible=False),                    # merge_section_group
+                    "",                                          # changes_summary
                     gr.update(visible=False),                    # conflict_section
-                    "",                                          # conflict_info - direct value
-                    "",                                          # conflicts_html - direct value
+                    "",                                          # conflict_info
+                    "",                                          # conflicts_html
                     gr.update(value="✓ All conflicts resolved. Merge complete.", visible=True),
-                    [],                                          # chatbot - direct empty list
-                    gr.update(interactive=True),                 # start_btn - enable
-                    gr.update(interactive=False),                # cancel_btn - disable
-                    "",                                          # live_stream - direct value
-                    gr.update(visible=False),                    # followup_row - hide
-                    "",                                          # task_description - direct value
-                    "hidden",                                    # merge_visibility_state - hide via JS
-                    "",                                          # merge_section_header - clear
-                    "",                                          # diff_content - clear diff view
+                    no_change,                                   # chatbot - preserve for follow-up
+                    gr.update(interactive=False),                # start_btn - never re-enable after task starts
+                    gr.update(interactive=False),                # cancel_btn
+                    "",                                          # live_stream
+                    no_change,                                   # followup_row - preserve for follow-up
+                    "",                                          # task_description
+                    "",                                          # merge_section_header
+                    "",                                          # diff_content
                 )
             else:
                 return (
                     no_change, no_change, no_change, no_change, no_change,
                     gr.update(value="❌ Failed to complete merge. Check git status.", visible=True),
                     no_change, no_change, no_change, no_change, no_change, no_change,
-                    no_change, no_change, no_change,  # merge_visibility_state, merge_section_header, diff_content
+                    no_change, no_change,  # merge_section_header, diff_content
                 )
         except Exception as e:
             return (
                 no_change, no_change, no_change, no_change, no_change,
                 gr.update(value=f"❌ Error resolving conflicts: {e}", visible=True),
                 no_change, no_change, no_change, no_change, no_change, no_change,
-                no_change, no_change, no_change,  # merge_visibility_state, merge_section_header, diff_content
+                no_change, no_change,  # merge_section_header, diff_content
             )
 
     def abort_merge_action(self, session_id: str) -> tuple:
         """Abort an in-progress merge, return to merge section.
 
-        Returns 15 values for merge_outputs.
+        Returns 14 values for merge_outputs.
         """
         session = self.get_session(session_id)
         no_change = gr.update()
@@ -4098,7 +4420,7 @@ class ChadWebUI:
                 no_change, no_change, gr.update(visible=False),
                 no_change, no_change, no_change,
                 no_change, no_change, no_change, no_change, no_change, no_change,
-                no_change, no_change, no_change,  # merge_visibility_state, merge_section_header, diff_content
+                no_change, no_change,  # merge_section_header, diff_content
             )
 
         git_mgr = GitWorktreeManager(Path(session.project_path))
@@ -4107,58 +4429,59 @@ class ChadWebUI:
 
         # Check if worktree still has changes - show merge section if so
         has_changes, summary = self.check_worktree_changes(session_id)
-        visibility_state = "visible" if has_changes else "hidden"
         header_text = "### Changes Ready to Merge" if has_changes else ""
 
         return (
-            gr.update(visible=has_changes),              # merge_section
+            gr.update(visible=has_changes),              # merge_section_group
             gr.update(value=summary if has_changes else ""),  # changes_summary
             gr.update(visible=False),                    # conflict_section
             no_change,                                   # conflict_info
             no_change,                                   # conflicts_html
             gr.update(value="⚠️ Merge aborted. Changes remain in worktree.", visible=True),
             no_change, no_change, no_change, no_change, no_change, no_change,  # no tab reset on abort
-            visibility_state,                            # merge_visibility_state
             header_text,                                 # merge_section_header
-            no_change,                                   # diff_content - keep as is
+            no_change,                                   # diff_content
         )
 
     def discard_worktree_changes(self, session_id: str) -> tuple:
         """Discard worktree and all changes, reset merge UI but keep task description.
 
-        Returns 15 values for merge_outputs. Task description is preserved so user
-        can retry the task with the same description.
+        Returns 14 values for merge_outputs. Task description and chat history are
+        preserved so user can retry the task or continue the conversation.
         """
         session = self.get_session(session_id)
-        no_change = gr.update()
-        if session.worktree_path and session.project_path:
+        if session.project_path:
             git_mgr = GitWorktreeManager(Path(session.project_path))
-            git_mgr.delete_worktree(session_id)
-            session.worktree_path = None
-            session.worktree_branch = None
+            if git_mgr.worktree_exists(session_id):
+                git_mgr.reset_worktree(session_id, session.worktree_base_commit)
+                session.worktree_path = git_mgr._worktree_path(session_id)
+                session.worktree_branch = git_mgr._branch_name(session_id)
+            else:
+                worktree_path, base_commit = git_mgr.create_worktree(session_id)
+                session.worktree_path = worktree_path
+                session.worktree_branch = git_mgr._branch_name(session_id)
+                session.worktree_base_commit = base_commit
+
             session.has_worktree_changes = False
             session.merge_conflicts = None
-            session.worktree_base_commit = None
-            session.chat_history = []
+            # Preserve chat_history for follow-up conversations
 
-        # Reset merge UI but keep task description for retry
-        # Use direct values where possible to match working make_yield pattern
+        # Reset merge UI but keep task description and chat for follow-up
         return (
-            gr.update(visible=False),                    # merge_section
-            "",                                          # changes_summary - direct value
+            gr.update(visible=False),                    # merge_section_group
+            "",                                          # changes_summary
             gr.update(visible=False),                    # conflict_section
-            "",                                          # conflict_info - direct value
-            "",                                          # conflicts_html - direct value
+            "",                                          # conflict_info
+            "",                                          # conflicts_html
             gr.update(value="🗑️ Changes discarded.", visible=True),  # task_status
-            [],                                          # chatbot - direct empty list
-            gr.update(interactive=True),                 # start_btn - enable
-            gr.update(interactive=False),                # cancel_btn - disable
-            "",                                          # live_stream - direct value
-            gr.update(visible=False),                    # followup_row - hide
-            no_change,                                   # task_description - keep for retry
-            "hidden",                                    # merge_visibility_state - hide via JS
-            "",                                          # merge_section_header - clear
-            "",                                          # diff_content - clear diff view
+            gr.update(),                                 # chatbot - preserve for follow-up
+            gr.update(interactive=False),                # start_btn - never re-enable after task starts
+            gr.update(interactive=False),                # cancel_btn
+            "",                                          # live_stream
+            gr.update(),                                 # followup_row - preserve for follow-up
+            gr.update(value=session.task_description or "", interactive=False),  # task_description - locked after task starts
+            "",                                          # merge_section_header
+            "",                                          # diff_content
         )
 
     def _build_handoff_context(self, chat_history: list) -> str:
@@ -4192,11 +4515,17 @@ class ChadWebUI:
 
         return "\n".join(context_parts)
 
+    def _last_event_info(self, session: Session) -> dict | None:
+        """Return the last event snapshot from the provider if available."""
+        provider = getattr(session, "provider", None)
+        info = getattr(provider, "last_event_info", None) if provider else None
+        return info if info else None
+
     def _update_session_log(
         self,
         session: Session,
         chat_history: list,
-        streaming_history: list = None,
+        streaming_history: list[tuple[str, str] | tuple[str, str, str]] | None = None,
         verification_attempts: list | None = None,
     ):
         """Update the session log with current state.
@@ -4204,16 +4533,16 @@ class ChadWebUI:
         Args:
             session: The session to update
             chat_history: Current chat history
-            streaming_history: Optional streaming transcript chunks
+            streaming_history: Optional streaming history as (ai_name, content, timestamp) tuples
         """
         if session.log_path:
-            streaming_transcript = "".join(streaming_history) if streaming_history else None
             self.session_logger.update_log(
                 session.log_path,
                 chat_history,
-                streaming_transcript=streaming_transcript,
+                streaming_history=streaming_history,
                 status="continued",
                 verification_attempts=verification_attempts,
+                last_event=self._last_event_info(session),
             )
 
     def _create_session_ui(self, session_id: str, is_first: bool = False):
@@ -4225,8 +4554,6 @@ class ChadWebUI:
         """
         session = self.get_session(session_id)
         default_path = os.environ.get("CHAD_PROJECT_PATH", str(Path.cwd()))
-        screenshot_mode = os.environ.get("CHAD_SCREENSHOT_MODE") == "1"
-        initial_live_stream = "Live output will appear here." if screenshot_mode and is_first else ""
 
         accounts_map = self.security_mgr.list_accounts()
         account_choices = list(accounts_map.keys())
@@ -4429,11 +4756,28 @@ class ChadWebUI:
                 height=400,
                 key=f"chatbot-{session_id}",
                 elem_id="agent-chatbot" if is_first else None,
+                elem_classes=["agent-chatbot"],  # CSS targets this class
+                sanitize_html=False,  # Required for inline screenshots - content is internally generated
+                type="messages",  # Use OpenAI-style dicts with 'role' and 'content' keys
             )
 
-        # Live activity stream - below agent communication
-        with gr.Column(elem_id="live-stream-box" if is_first else None, elem_classes=["live-stream-box"]):
-            live_stream = gr.Markdown(initial_live_stream, visible=True)
+        # Live stream kept in DOM (visible=True) but hidden via CSS for visual tests
+        live_stream = gr.Markdown(
+            "",
+            visible=True,
+            elem_id="live-stream-box" if is_first else None,
+            elem_classes=["live-stream-hidden", "live-stream-box"],
+        )
+
+        # Hidden HTML element for JS live content patching
+        # When this element's content changes, JS reads the data-live-patch attribute
+        # and patches the corresponding container's innerHTML in-place
+        live_patch_trigger = gr.HTML(
+            "",
+            visible=False,
+            key=f"live-patch-{session_id}",
+            elem_classes=["live-patch-trigger"],
+        )
 
         with gr.Row(visible=False, key=f"followup-row-{session_id}") as followup_row:
             followup_input = gr.TextArea(
@@ -4452,18 +4796,11 @@ class ChadWebUI:
             )
 
         # Merge section - shown when worktree has changes
-        # Note: visibility controlled via merge_visibility_state due to Gradio 6 Column visibility bug
-        with gr.Column(visible=False, key=f"merge-section-{session_id}",
-                       elem_classes=["merge-section"]) as merge_section:
-            # Hidden state element controls visibility - JS watches this value
-            # "visible" = show section, "hidden" = hide section
-            merge_visibility_state = gr.Textbox(
-                value="hidden",
-                visible=False,
-                elem_classes=["merge-visibility-state"],
-                key=f"merge-visibility-{session_id}",
-            )
-            merge_section_header = gr.Markdown("### Changes Ready to Merge")
+        # Use visible=True so element is rendered to DOM, hide via CSS initially
+        # Gradio 6 doesn't render components with visible=False
+        with gr.Column(visible=True, render=True, key=f"merge-section-{session_id}",
+                       elem_classes=["merge-section", "merge-section-hidden"]) as merge_section_group:
+            merge_section_header = gr.Markdown("")  # Populated when changes exist
             changes_summary = gr.Markdown(
                 "",
                 key=f"changes-summary-{session_id}",
@@ -4624,12 +4961,12 @@ class ChadWebUI:
                 followup_input,
                 followup_row,
                 send_followup_btn,
-                merge_section,
+                merge_section_group,
                 changes_summary,
                 merge_target_branch,
                 diff_content,
-                merge_visibility_state,  # Controls visibility via JS
-                merge_section_header,    # Dynamic header text
+                merge_section_header,
+                live_patch_trigger,
             ],
         )
 
@@ -4653,6 +4990,12 @@ class ChadWebUI:
                 followup_input,
                 followup_row,
                 send_followup_btn,
+                live_patch_trigger,
+                merge_section_group,
+                changes_summary,
+                merge_target_branch,
+                diff_content,
+                merge_section_header,
             ],
         )
 
@@ -4673,9 +5016,8 @@ class ChadWebUI:
             return self.abort_merge_action(session_id)
 
         # Full reset outputs - includes components needed to reset tab to initial state
-        # Note: merge_visibility_state at index 12 controls visibility via JS (Gradio 6 Column bug workaround)
         merge_outputs = [
-            merge_section,          # 0: Hide merge section (Gradio visibility - may not work)
+            merge_section_group,    # 0: Hide merge section group
             changes_summary,        # 1: Clear summary
             conflict_section,       # 2: Hide conflict section
             conflict_info,          # 3: Clear conflict info
@@ -4687,9 +5029,8 @@ class ChadWebUI:
             live_stream,            # 9: Clear live stream
             followup_row,           # 10: Hide followup row
             task_description,       # 11: Clear task description
-            merge_visibility_state,  # 12: Set to "hidden" to hide section via JS
-            merge_section_header,    # 13: Clear header when hiding
-            diff_content,            # 14: Clear diff view inside accordion
+            merge_section_header,   # 12: Clear header when hiding
+            diff_content,           # 13: Clear diff view inside accordion
         ]
 
         accept_merge_btn.click(
@@ -4886,6 +5227,12 @@ class ChadWebUI:
             outputs=[verification_model, verification_reasoning],
         )
 
+        # Store dropdown references for cross-tab updates when providers change
+        self._session_dropdowns[session_id] = {
+            "coding_agent": coding_agent,
+            "verification_agent": verification_agent,
+        }
+
     def _create_providers_ui(self):
         """Create the Providers tab UI within @gr.render."""
         account_items = self.provider_ui.get_provider_card_items()
@@ -4894,11 +5241,6 @@ class ChadWebUI:
         provider_feedback = gr.Markdown("")
         gr.Markdown("### Providers", elem_classes=["provider-section-title"])
 
-        provider_list = gr.Markdown(
-            self.list_providers(),
-            elem_id="provider-summary-panel",
-            elem_classes=["provider-summary"],
-        )
         refresh_btn = gr.Button("🔄 Refresh", variant="secondary")
         pending_delete_state = gr.State(None)
 
@@ -4955,13 +5297,13 @@ class ChadWebUI:
             gr.Markdown("Click to add another provider. Close the accordion to retract without adding.")
             new_provider_name = gr.Textbox(label="Provider Name", placeholder="e.g., work-claude")
             new_provider_type = gr.Dropdown(
-                choices=["anthropic", "openai", "gemini", "mistral"],
+                choices=self.get_provider_choices(),
                 label="Provider Type",
                 value="anthropic",
             )
             add_btn = gr.Button("Add Provider", variant="primary", interactive=False)
 
-        provider_outputs = [provider_feedback, provider_list]
+        provider_outputs = [provider_feedback]
         for card in provider_cards:
             provider_outputs.extend(
                 [
@@ -5023,11 +5365,12 @@ class ChadWebUI:
                 return handler
 
             delete_outputs = [pending_delete_state] + provider_outputs
-            card["delete_btn"].click(
+            delete_event = card["delete_btn"].click(
                 fn=make_delete_handler(),
                 inputs=[pending_delete_state, card["account_state"]],
                 outputs=delete_outputs,
             )
+            self._provider_delete_events.append(delete_event)
 
     def create_interface(self) -> gr.Blocks:
         """Create the Gradio interface."""
@@ -5035,7 +5378,71 @@ class ChadWebUI:
         initial_session = self.create_session("Task 1")
         initial_session.log_path = self.session_logger.precreate_log()
 
-        with gr.Blocks(title="Chad") as interface:
+        with gr.Blocks(title="Chad", js="""
+        () => {
+            const getRoot = () => {
+                const app = document.querySelector('gradio-app');
+                return (app && app.shadowRoot) ? app.shadowRoot : document;
+            };
+            const isPlus = (el) => {
+                const label = (el.textContent || el.getAttribute('aria-label') || '').trim();
+                return label === '➕';
+            };
+            const hideButton = (btn) => {
+                btn.style.visibility = 'hidden';
+                btn.style.opacity = '0';
+            };
+            const clickAddTask = () => {
+                const root = getRoot();
+                let attempts = 0;
+                const tryClick = () => {
+                    const btn = root.querySelector('#add-new-task-btn');
+                    if (btn) {
+                        hideButton(btn);
+                        btn.click();
+                        return true;
+                    }
+                    attempts += 1;
+                    if (attempts <= 15) setTimeout(tryClick, 80);
+                    return false;
+                };
+                return tryClick();
+            };
+            const isPlusSelected = () => {
+                const root = getRoot();
+                return Array.from(root.querySelectorAll('[role="tab"]')).some(
+                    (tab) => isPlus(tab) && tab.getAttribute('aria-selected') === 'true'
+                );
+            };
+            const wirePlusButtons = () => {
+                const root = getRoot();
+                const candidates = [
+                    ...root.querySelectorAll('[role="tab"]'),
+                    ...document.querySelectorAll('#initial-static-plus-tab, #fallback-plus-tab, #static-plus-tab')
+                ];
+                candidates.forEach((tab) => {
+                    if (!tab || tab._plusClickSetup || !isPlus(tab)) return;
+                    tab._plusClickSetup = true;
+                    tab.addEventListener('click', () => setTimeout(clickAddTask, 60));
+                });
+                if (isPlusSelected()) setTimeout(clickAddTask, 60);
+                const addBtn = root.querySelector('#add-new-task-btn');
+                if (addBtn) hideButton(addBtn);
+            };
+
+            const observer = new MutationObserver(() => {
+                if (isPlusSelected()) clickAddTask();
+            });
+            observer.observe(document, { childList: true, subtree: true });
+            const rootObserverTarget = getRoot();
+            if (rootObserverTarget && rootObserverTarget !== document) {
+                observer.observe(rootObserverTarget, { childList: true, subtree: true });
+            }
+
+            setInterval(wirePlusButtons, 400);
+            setTimeout(wirePlusButtons, 80);
+        }
+        """) as interface:
             # Inject custom CSS
             gr.HTML(f"<style>{PROVIDER_PANEL_CSS}</style>")
 
@@ -5090,6 +5497,192 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
   setInterval(wirePlus, 400);
   setTimeout(wirePlus, 80);
 })();
+
+// Live view scroll tracking to prevent auto-scroll when user has scrolled up
+window._liveStreamScroll = window._liveStreamScroll || new WeakMap();
+
+function initializeLiveStreamScrollTracking() {
+    const getRoot = () => {
+        const app = document.querySelector('gradio-app');
+        return (app && app.shadowRoot) ? app.shadowRoot : document;
+    };
+
+    function setupScrollTracking(container) {
+        if (window._liveStreamScroll.has(container)) {
+            return; // Already setup
+        }
+
+        // Initialize state for this container
+        const state = {
+            userScrolledUp: false,      // True when user actively scrolled away from bottom
+            savedScrollTop: null,       // User's scroll position (null = auto-scroll, number = restore position)
+            ignoreNextScroll: false,    // Prevent feedback loops when setting scrollTop programmatically
+            lastScrollHeight: container.scrollHeight
+        };
+
+        window._liveStreamScroll.set(container, state);
+
+        // Track user scroll behavior
+        container.addEventListener('scroll', () => {
+            if (state.ignoreNextScroll) return;
+
+            const isAtBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 1;
+
+            if (isAtBottom) {
+                // User scrolled back to bottom - resume auto-scrolling
+                state.userScrolledUp = false;
+                state.savedScrollTop = null;
+            } else {
+                // User scrolled up from bottom - preserve their position
+                state.userScrolledUp = true;
+                state.savedScrollTop = container.scrollTop;
+            }
+        });
+
+        // Watch for content changes using MutationObserver
+        const observer = new MutationObserver(() => {
+            if (container.scrollHeight !== state.lastScrollHeight) {
+                state.lastScrollHeight = container.scrollHeight;
+                restoreScrollPosition(container, state);
+            }
+        });
+
+        observer.observe(container, {
+            childList: true,
+            subtree: true,
+            characterData: true
+        });
+    }
+
+    function restoreScrollPosition(container, state) {
+        if (!container || !state) return;
+        state.ignoreNextScroll = true;
+
+        requestAnimationFrame(() => {
+            // If user has scrolled away from bottom, maintain their position
+            if (state.userScrolledUp && state.savedScrollTop !== null) {
+                container.scrollTop = state.savedScrollTop;
+            }
+            // Otherwise, if user is at bottom or hasn't scrolled, scroll to bottom for new content
+            else if (!state.userScrolledUp) {
+                container.scrollTop = container.scrollHeight;
+            }
+
+            setTimeout(() => { state.ignoreNextScroll = false; }, 100);
+        });
+    }
+
+    function findAndSetupContainers() {
+        const root = getRoot();
+        const containers = [
+            ...root.querySelectorAll('#live-stream-box .live-output-content'),
+            ...root.querySelectorAll('.live-stream-box .live-output-content'),
+            // Also track inline live content in chat bubbles
+            ...root.querySelectorAll('.inline-live-content'),
+            ...root.querySelectorAll('[data-live-id]')
+        ];
+
+        containers.forEach(container => {
+            if (container) {
+                setupScrollTracking(container);
+            }
+        });
+    }
+
+    // Setup scroll tracking for existing and future containers
+    setInterval(findAndSetupContainers, 500);
+    setTimeout(findAndSetupContainers, 100);
+}
+
+initializeLiveStreamScrollTracking();
+
+// Live content patching - update innerHTML without replacing container element
+// This preserves scroll position and text selection during streaming updates
+window._patchLiveContent = function(liveId, innerHtml) {
+    const getRoot = () => {
+        const app = document.querySelector('gradio-app');
+        return (app && app.shadowRoot) ? app.shadowRoot : document;
+    };
+
+    const root = getRoot();
+    const container = root.querySelector(`[data-live-id="${liveId}"]`);
+    if (!container) return false;
+
+    // Get scroll state before update
+    const scrollTop = container.scrollTop;
+    const scrollHeight = container.scrollHeight;
+    const clientHeight = container.clientHeight;
+    const wasAtBottom = scrollTop + clientHeight >= scrollHeight - 5;
+
+    // Check if user has scrolled up (use our tracking state if available)
+    let userScrolledUp = false;
+    if (window._liveStreamScroll && window._liveStreamScroll.has(container)) {
+        const state = window._liveStreamScroll.get(container);
+        userScrolledUp = state.userScrolledUp;
+    } else {
+        userScrolledUp = !wasAtBottom;
+    }
+
+    // Patch content in place
+    container.innerHTML = innerHtml;
+
+    // Restore scroll position
+    requestAnimationFrame(() => {
+        if (userScrolledUp) {
+            // User scrolled up - maintain their position
+            container.scrollTop = scrollTop;
+        } else {
+            // User was at bottom - scroll to new bottom
+            container.scrollTop = container.scrollHeight;
+        }
+    });
+
+    return true;
+};
+
+// Listen for live content patch events from Python
+window._setupLivePatchListener = function() {
+    const observer = new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+            for (const node of mutation.addedNodes) {
+                if (node.nodeType === Node.ELEMENT_NODE) {
+                    // Check if the node itself has data-live-patch (not just descendants)
+                    let patchData = null;
+                    if (node.hasAttribute && node.hasAttribute('data-live-patch')) {
+                        patchData = node;
+                    } else if (node.querySelector) {
+                        patchData = node.querySelector('[data-live-patch]');
+                    }
+                    if (patchData) {
+                        try {
+                            const liveId = patchData.getAttribute('data-live-patch');
+                            const content = patchData.textContent;
+                            if (liveId && content) {
+                                window._patchLiveContent(liveId, content);
+                            }
+                        } catch (e) {
+                            console.error('Live patch error:', e);
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    const startObserver = () => {
+        const getRoot = () => {
+            const app = document.querySelector('gradio-app');
+            return (app && app.shadowRoot) ? app.shadowRoot : document;
+        };
+        const root = getRoot();
+        observer.observe(root.body || root, { childList: true, subtree: true });
+    };
+
+    // Start after a short delay to ensure DOM is ready
+    setTimeout(startObserver, 200);
+};
+
+window._setupLivePatchListener();
 </script>
 """
             )
@@ -5110,19 +5703,104 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                     btn.style.visibility = 'hidden';
                     btn.style.opacity = '0';
                   };
+                  const collectAll = (selector) => {
+                    const seen = new Set();
+                    const results = [];
+                    const walk = (node) => {
+                      if (!node) return;
+                      node.querySelectorAll(selector).forEach((el) => {
+                        if (seen.has(el)) return;
+                        seen.add(el);
+                        results.push(el);
+                      });
+                      node.querySelectorAll('*').forEach((el) => {
+                        if (el.shadowRoot) walk(el.shadowRoot);
+                      });
+                    };
+                    walk(document);
+                    return results;
+                  };
+                  const ensureDiscardEditable = () => {
+                    // Find status elements more broadly
+                    const statuses = collectAll('.task-status-header, [id*=\"task-status\"], [class*=\"task-status\"], [class*=\"status\"]');
+                    // Also check for any element containing "discarded" text
+                    const allElements = collectAll('*');
+                    const allWithDiscarded = allElements.filter(el => {
+                      const text = (el.textContent || '').toLowerCase();
+                      return text.includes('discarded') || text.includes('🗑️');
+                    });
+
+                    const hasDiscarded = statuses.some((el) => {
+                      const text = (el.textContent || '').toLowerCase().replace(/[^a-z]/g, '');
+                      return text.includes('discarded');
+                    }) || allWithDiscarded.length > 0;
+
+                    if (!hasDiscarded) return;
+
+                    // Find task description textareas more specifically
+                    const textareas = collectAll('textarea');
+                    textareas.forEach((ta) => {
+                      // Check multiple ways to identify task description textarea
+                      const container = ta.closest('.gradio-container, .task-entry-bubble, [class*="textbox"], [class*="textarea"]');
+                      const labelEl = container ? container.querySelector('label, span.label') : null;
+                      const labelText = labelEl ? (labelEl.textContent || '').toLowerCase() : '';
+                      const ariaLabel = (ta.getAttribute('aria-label') || '').toLowerCase();
+                      const placeholder = (ta.getAttribute('placeholder') || '').toLowerCase();
+                      const key = ta.getAttribute('key') || '';
+
+                      // Match task description by multiple criteria
+                      const isTaskDesc = labelText.includes('task description') ||
+                                       ariaLabel.includes('task description') ||
+                                       placeholder.includes('describe what you want done') ||
+                                       key.includes('task-desc');
+
+                      if (!isTaskDesc) return;
+
+                      // Enable the textarea
+                      ta.removeAttribute('disabled');
+                      ta.removeAttribute('aria-disabled');
+                      ta.disabled = false;
+                      ta.readOnly = false;
+
+                      // Also enable any parent fieldset
+                      const fieldset = ta.closest('fieldset');
+                      if (fieldset) {
+                        fieldset.removeAttribute('disabled');
+                        fieldset.removeAttribute('aria-disabled');
+                        fieldset.disabled = false;
+                      }
+
+                      // Make sure any Gradio wrapper is also enabled
+                      const gradioWrapper = ta.closest('.gr-textbox, .gradio-textbox');
+                      if (gradioWrapper) {
+                        gradioWrapper.classList.remove('disabled');
+                        gradioWrapper.removeAttribute('disabled');
+                      }
+                    });
+                  };
                   const fixAriaLinks = () => {
                     const root = getRoot();
-                    const tabs = Array.from(root.querySelectorAll('[role=\"tab\"][data-tab-id]'));
-                    const panels = Array.from(root.querySelectorAll('.tabitem'));
+                    const tabs = collectAll('[role=\"tab\"]');
+                    const panels = collectAll('.tabitem, [role=\"tabpanel\"]');
                     const textOf = (el) => (el.textContent || '').trim();
                     const addPanel = panels.find((p) => textOf(p).includes('Add New Task'));
                     const taskPanels = panels.filter((p) => textOf(p).includes('Task Description'));
+                    const panelByData = new Map();
+                    panels.forEach((panel) => {
+                      const dataId = panel.getAttribute('data-tab-id');
+                      if (dataId) panelByData.set(dataId, panel);
+                    });
                     let taskIdx = 0;
+                    const usedPanelIds = new Set();
+                    const usedTabIds = new Set();
 
                     tabs.forEach((tab, idx) => {
                       const label = textOf(tab);
+                      const tabData = tab.getAttribute('data-tab-id');
                       let panel = null;
-                      if (isPlus(tab) && addPanel) {
+                      if (tabData && panelByData.has(tabData)) {
+                        panel = panelByData.get(tabData);
+                      } else if (isPlus(tab) && addPanel) {
                         panel = addPanel;
                       } else if (label.startsWith('Task') && taskPanels.length) {
                         panel = taskPanels[Math.min(taskIdx, taskPanels.length - 1)];
@@ -5131,12 +5809,21 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                         panel = panels.length ? panels[idx % panels.length] : null;
                       }
                       if (!panel) return;
-                      const dataId = tab.getAttribute('data-tab-id') || idx;
-                      const panelId = panel.id && panel.id.trim() ? panel.id : `tabpanel-${dataId}`;
-                      const tabId = tab.id && tab.id.trim() ? tab.id : `tab-${dataId}`;
+                      const panelIndex = panels.indexOf(panel);
+                      const dataId = tab.getAttribute('data-tab-id') || panelIndex || idx;
+                      let panelId = panel.id && panel.id.trim() ? panel.id : `tabpanel-${dataId}`;
+                      if (usedPanelIds.has(panelId)) {
+                        panelId = `tabpanel-${dataId}-${idx}`;
+                      }
+                      let tabId = tab.id && tab.id.trim() ? tab.id : `tab-${dataId}`;
+                      if (usedTabIds.has(tabId)) {
+                        tabId = `tab-${dataId}-${idx}`;
+                      }
                       panel.id = panelId;
                       panel.setAttribute('role', 'tabpanel');
                       tab.id = tabId;
+                      usedPanelIds.add(panelId);
+                      usedTabIds.add(tabId);
                       tab.setAttribute('aria-controls', panelId);
                       panel.setAttribute('aria-labelledby', tabId);
                     });
@@ -5172,12 +5859,53 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                     const btn = root.querySelector('#add-new-task-btn');
                     if (btn) hideButton(btn);
                   };
+                  const syncMergeSectionVisibility = () => {
+                    // Find all merge sections and show/hide based on content
+                    const mergeSections = collectAll('.merge-section');
+                    mergeSections.forEach(section => {
+                      // Check if the section has meaningful content (header with text)
+                      const headerElem = section.querySelector('[data-testid="markdown"]:first-child');
+                      const header = headerElem ? headerElem.querySelector('h3') : null;
+                      const hasContent = header && header.textContent.trim().length > 0;
+
+                      // Also check for changes summary text
+                      const summaryElems = section.querySelectorAll('[key*="changes-summary"] [data-testid="markdown"]');
+                      let hasSummary = false;
+                      summaryElems.forEach(elem => {
+                        if (elem.textContent.trim().length > 0) {
+                          hasSummary = true;
+                        }
+                      });
+
+                      if (hasContent || hasSummary) {
+                        section.classList.remove('merge-section-hidden');
+                        section.style.cssText = '';
+                        // Show direct children only - skip accordion internals to preserve open/close state
+                        section.querySelectorAll(':scope > *').forEach(child => {
+                          child.style.display = '';
+                          child.style.visibility = '';
+                        });
+                      } else {
+                        section.classList.add('merge-section-hidden');
+                      }
+                    });
+                  };
                   const tickAll = () => {
                     wirePlus();
                     fixAriaLinks();
+                    ensureDiscardEditable();
+                    syncMergeSectionVisibility();
                   };
                   setInterval(tickAll, 400);
                   setTimeout(tickAll, 80);
+                  setInterval(syncMergeSectionVisibility, 200);
+                  document.addEventListener('click', (event) => {
+                    const tab = event.target && event.target.closest
+                      ? event.target.closest('[role=\"tab\"]')
+                      : null;
+                    if (!tab) return;
+                    setTimeout(fixAriaLinks, 0);
+                  }, true);
                 }
                 """,
             )
@@ -5245,29 +5973,100 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                 outputs=[main_tabs, visible_count] + task_tabs,
             )
 
+            # Refresh dropdowns when switching to any task tab (after adding providers)
+            def on_tab_select(evt: gr.SelectData):
+                """Refresh agent dropdowns when switching to a task tab."""
+                # Only refresh for task tabs (id >= 1, not providers tab id=0)
+                if evt.index == 0:
+                    return [gr.update() for _ in range(len(self._session_dropdowns) * 2)]
+
+                # Get current account choices
+                accounts = self.security_mgr.list_accounts()
+                account_choices = list(accounts.keys())
+                none_label = (
+                    "None (disable verification)"
+                    if self.VERIFICATION_NONE_LABEL in account_choices
+                    else self.VERIFICATION_NONE_LABEL
+                )
+                verification_choices = [
+                    (self.SAME_AS_CODING, self.SAME_AS_CODING),
+                    (none_label, self.VERIFICATION_NONE),
+                    *[(account, account) for account in account_choices],
+                ]
+
+                # Update all session dropdowns
+                updates = []
+                for session_id in self._session_dropdowns:
+                    updates.append(gr.update(choices=account_choices))  # coding_agent
+                    updates.append(gr.update(choices=verification_choices))  # verification_agent
+                return updates
+
+            # Collect all dropdown outputs for the select handler
+            all_dropdown_outputs = []
+            for session_id in sorted(self._session_dropdowns.keys()):
+                dropdowns = self._session_dropdowns[session_id]
+                all_dropdown_outputs.append(dropdowns["coding_agent"])
+                all_dropdown_outputs.append(dropdowns["verification_agent"])
+
+            if all_dropdown_outputs:
+                main_tabs.select(on_tab_select, outputs=all_dropdown_outputs)
+
+            # Chain dropdown refresh to provider delete events
+            # This ensures dropdowns update when providers are deleted
+            def refresh_dropdowns_after_delete():
+                """Refresh all session dropdowns after a provider is deleted."""
+                accounts = self.security_mgr.list_accounts()
+                account_choices = list(accounts.keys())
+                none_label = (
+                    "None (disable verification)"
+                    if self.VERIFICATION_NONE_LABEL in account_choices
+                    else self.VERIFICATION_NONE_LABEL
+                )
+                verification_choices = [
+                    (self.SAME_AS_CODING, self.SAME_AS_CODING),
+                    (none_label, self.VERIFICATION_NONE),
+                    *[(account, account) for account in account_choices],
+                ]
+
+                updates = []
+                for session_id in self._session_dropdowns:
+                    # Update choices; reset value to first valid choice if current is invalid
+                    first_choice = account_choices[0] if account_choices else None
+                    updates.append(gr.update(choices=account_choices, value=first_choice))
+                    updates.append(gr.update(choices=verification_choices))
+                return updates
+
+            if all_dropdown_outputs and self._provider_delete_events:
+                for delete_event in self._provider_delete_events:
+                    delete_event.then(
+                        fn=refresh_dropdowns_after_delete,
+                        outputs=all_dropdown_outputs,
+                    )
+
             return interface
 
 
-def launch_web_ui(password: str = None, port: int = 7860) -> tuple[None, int]:
+def launch_web_ui(password: str = None, port: int = 7860, dev_mode: bool = False) -> tuple[None, int]:
     """Launch the Chad web interface.
 
     Args:
         password: Main password. If not provided, will prompt via CLI
         port: Port to run on. Use 0 for ephemeral port.
+        dev_mode: If True, enable development features like mock provider
 
     Returns:
         Tuple of (None, actual_port) where actual_port is the port used
     """
     # Ensure downstream agents inherit a consistent project root
     try:
-        from .mcp_config import ensure_project_root_env
+        from .config import ensure_project_root_env
 
         ensure_project_root_env()
     except Exception:
         # Non-fatal; continue without forcing env
         pass
 
-    security_mgr = SecurityManager()
+    security_mgr = ConfigManager()
 
     # Get or verify password
     if security_mgr.is_first_run():
@@ -5296,7 +6095,7 @@ def launch_web_ui(password: str = None, port: int = 7860) -> tuple[None, int]:
             main_password = security_mgr.verify_main_password()
 
     # Create and launch UI
-    ui = ChadWebUI(security_mgr, main_password)
+    ui = ChadWebUI(security_mgr, main_password, dev_mode=dev_mode)
     app = ui.create_interface()
 
     requested_port = port
@@ -5322,71 +6121,6 @@ def launch_web_ui(password: str = None, port: int = 7860) -> tuple[None, int]:
         share=False,
         inbrowser=open_browser,  # Don't open browser for screenshot mode
         quiet=False,
-        js="""
-        function() {
-            const getRoot = () => {
-                const app = document.querySelector('gradio-app');
-                return (app && app.shadowRoot) ? app.shadowRoot : document;
-            };
-            const isPlus = (el) => {
-                const label = (el.textContent || el.getAttribute('aria-label') || '').trim();
-                return label === '➕';
-            };
-            const hideButton = (btn) => {
-                btn.style.visibility = 'hidden';
-                btn.style.opacity = '0';
-            };
-            const clickAddTask = () => {
-                const root = getRoot();
-                let attempts = 0;
-                const tryClick = () => {
-                    const btn = root.querySelector('#add-new-task-btn');
-                    if (btn) {
-                        hideButton(btn);
-                        btn.click();
-                        return true;
-                    }
-                    attempts += 1;
-                    if (attempts <= 15) setTimeout(tryClick, 80);
-                    return false;
-                };
-                return tryClick();
-            };
-            const isPlusSelected = () => {
-                const root = getRoot();
-                return Array.from(root.querySelectorAll('[role=\"tab\"]')).some(
-                    (tab) => isPlus(tab) && tab.getAttribute('aria-selected') === 'true'
-                );
-            };
-            const wirePlusButtons = () => {
-                const root = getRoot();
-                const candidates = [
-                    ...root.querySelectorAll('[role=\"tab\"]'),
-                    ...document.querySelectorAll('#initial-static-plus-tab, #fallback-plus-tab, #static-plus-tab')
-                ];
-                candidates.forEach((tab) => {
-                    if (!tab || tab._plusClickSetup || !isPlus(tab)) return;
-                    tab._plusClickSetup = true;
-                    tab.addEventListener('click', () => setTimeout(clickAddTask, 60));
-                });
-                if (isPlusSelected()) setTimeout(clickAddTask, 60);
-                const addBtn = root.querySelector('#add-new-task-btn');
-                if (addBtn) hideButton(addBtn);
-            };
-
-            const observer = new MutationObserver(() => {
-                if (isPlusSelected()) clickAddTask();
-            });
-            observer.observe(document, { childList: true, subtree: true });
-            const rootObserverTarget = getRoot();
-            if (rootObserverTarget && rootObserverTarget !== document) {
-                observer.observe(rootObserverTarget, { childList: true, subtree: true });
-            }
-
-            setInterval(wirePlusButtons, 400);
-            setTimeout(wirePlusButtons, 80);
-        }
-        """,
     )
 
     return None, port

@@ -4,21 +4,36 @@ import base64
 import json
 import math
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 
 import gradio as gr
 
+from chad.utils import platform_path, safe_home
 from .model_catalog import ModelCatalog
 from .installer import AIToolInstaller
-from .mcp_config import ensure_global_mcp_config
 
 
 class ProviderUIManager:
     """Provider management and display helpers for the web UI."""
 
-    SUPPORTED_PROVIDERS = {"anthropic", "openai", "gemini", "mistral"}
+    _ALL_PROVIDERS = {"anthropic", "openai", "gemini", "qwen", "mistral", "mock"}
+    SUPPORTED_PROVIDERS = {"anthropic", "openai", "gemini", "qwen", "mistral", "mock"}  # For backwards compat
     OPENAI_REASONING_LEVELS = ["default", "low", "medium", "high", "xhigh"]
+
+    def get_supported_providers(self) -> set[str]:
+        """Get the set of supported providers based on dev mode."""
+        if self.dev_mode:
+            return self._ALL_PROVIDERS
+        return self._ALL_PROVIDERS - {"mock"}
+
+    def get_provider_choices(self) -> list[str]:
+        """Get ordered list of provider type choices for dropdowns."""
+        # Fixed order for consistent UI
+        order = ["anthropic", "openai", "gemini", "qwen", "mistral", "mock"]
+        supported = self.get_supported_providers()
+        return [p for p in order if p in supported]
 
     def __init__(
         self,
@@ -26,24 +41,13 @@ class ProviderUIManager:
         main_password: str,
         model_catalog: ModelCatalog | None = None,
         installer: AIToolInstaller | None = None,
+        dev_mode: bool = False,
     ):
         self.security_mgr = security_mgr
         self.main_password = main_password
         self.model_catalog = model_catalog or ModelCatalog(security_mgr)
         self.installer = installer or AIToolInstaller()
-
-    def list_providers(self) -> str:
-        """Summarize all configured providers."""
-        accounts = self.security_mgr.list_accounts()
-
-        if not accounts:
-            return "No providers configured yet. Add a provider with the ➕ below."
-
-        rows = []
-        for account_name, provider in accounts.items():
-            rows.append(f"- **{account_name}** ({provider})")
-
-        return "\n".join(rows)
+        self.dev_mode = dev_mode
 
     def get_provider_card_items(self) -> list[tuple[str, str]]:
         """Return provider account items for card display."""
@@ -53,10 +57,7 @@ class ProviderUIManager:
         # In screenshot mode, ensure deterministic ordering for tests
         if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
             # Use the same order as defined in MOCK_ACCOUNTS for consistency
-            try:
-                from .screenshot_fixtures import MOCK_ACCOUNTS
-            except ImportError:
-                from chad.screenshot_fixtures import MOCK_ACCOUNTS
+            from .verification.screenshot_fixtures import MOCK_ACCOUNTS
             screenshot_order = []
             other_accounts = []
 
@@ -98,7 +99,7 @@ class ProviderUIManager:
         """Get usage text for a single provider."""
         # Check for screenshot mode - return synthetic data
         if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
-            from .screenshot_fixtures import get_mock_usage
+            from .verification.screenshot_fixtures import get_mock_usage
 
             return get_mock_usage(account_name)
 
@@ -114,6 +115,8 @@ class ProviderUIManager:
             status_text = self._get_claude_usage(account_name)
         elif provider == "gemini":
             status_text = self._get_gemini_usage()
+        elif provider == "qwen":
+            status_text = self._get_qwen_usage()
         elif provider == "mistral":
             status_text = self._get_mistral_usage()
         else:
@@ -157,6 +160,8 @@ class ProviderUIManager:
             return self._get_codex_remaining_usage(account_name)
         if provider == "gemini":
             return self._get_gemini_remaining_usage()
+        if provider == "qwen":
+            return self._get_qwen_remaining_usage()
         if provider == "mistral":
             return self._get_mistral_remaining_usage()
 
@@ -172,7 +177,7 @@ class ProviderUIManager:
             return 0.0
 
         try:
-            with open(creds_file) as f:
+            with open(creds_file, encoding="utf-8") as f:
                 creds = json.load(f)
 
             oauth_data = creds.get("claudeAiOauth", {})
@@ -204,6 +209,7 @@ class ProviderUIManager:
 
     def _get_codex_remaining_usage(self, account_name: str) -> float:
         """Get Codex remaining usage from session files (0.0-1.0)."""
+        self._sync_codex_home(account_name)
         codex_home = self._get_codex_home(account_name)
         auth_file = codex_home / ".codex" / "auth.json"
         if not auth_file.exists():
@@ -217,7 +223,7 @@ class ProviderUIManager:
         for root, _, files in os.walk(sessions_dir):
             for filename in files:
                 if filename.endswith(".jsonl"):
-                    path = Path(root) / filename
+                    path = platform_path(root) / filename
                     session_files.append((path.stat().st_mtime, path))
 
         if not session_files:
@@ -228,7 +234,7 @@ class ProviderUIManager:
 
         try:
             rate_limits = None
-            with open(latest_session) as f:
+            with open(latest_session, encoding="utf-8") as f:
                 for line in f:
                     if "rate_limits" in line:
                         data = json.loads(line.strip())
@@ -272,12 +278,23 @@ class ProviderUIManager:
 
         return 0.3  # Logged in but no quota API, bias low
 
-    def provider_state(self, card_slots: int, pending_delete: str | None = None) -> tuple:
-        """Build UI state for provider cards (summary + per-account controls)."""
-        account_items = self.get_provider_card_items()
-        list_md = self.list_providers()
+    def _get_qwen_remaining_usage(self) -> float:
+        """Estimate Qwen remaining usage (0.0-1.0).
 
-        outputs: list = [list_md]
+        No programmatic API available for quota, so we estimate based on
+        whether logged in. Biased low since we can't verify actual quota.
+        """
+        qwen_oauth = Path.home() / ".qwen" / "oauth_creds.json"
+        if not qwen_oauth.exists():
+            return 0.0
+
+        return 0.3  # Logged in but no quota API, bias low
+
+    def provider_state(self, card_slots: int, pending_delete: str | None = None) -> tuple:
+        """Build UI state for provider cards (per-account controls)."""
+        account_items = self.get_provider_card_items()
+
+        outputs: list = []
         for idx in range(card_slots):
             if idx < len(account_items):
                 account_name, provider = account_items[idx]
@@ -326,9 +343,47 @@ class ProviderUIManager:
         """Get the isolated HOME directory for a Codex account."""
         # Use temp home in screenshot mode
         temp_home = os.environ.get("CHAD_TEMP_HOME")
-        if temp_home:
-            return Path(temp_home) / ".chad" / "codex-homes" / account_name
-        return Path.home() / ".chad" / "codex-homes" / account_name
+        base_home = safe_home() if temp_home else safe_home(ignore_temp_home=True)
+        return platform_path(base_home / ".chad" / "codex-homes" / account_name)
+
+    def _sync_codex_home(self, account_name: str) -> None:
+        """Sync real-home Codex data into the isolated home.
+
+        IMPORTANT: This only syncs files that DON'T already exist in the isolated home.
+        Once an account has its own auth.json, it should never be overwritten by the
+        real home's auth - that would cause multiple accounts to share credentials.
+        """
+        isolated_home = platform_path(self._get_codex_home(account_name) / ".codex")
+        real_home = platform_path(safe_home(ignore_temp_home=True) / ".codex")
+        if not real_home.exists():
+            return
+
+        isolated_home.mkdir(parents=True, exist_ok=True)
+
+        def sync_file_if_missing(src: Path, dest: Path) -> None:
+            """Only copy if destination doesn't exist - never overwrite existing auth."""
+            try:
+                if not dest.exists():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dest)
+            except OSError:
+                return
+
+        def sync_tree_if_missing(src_dir: Path, dest_dir: Path) -> None:
+            """Sync tree but never overwrite existing files."""
+            for root, _, files in os.walk(src_dir):
+                for filename in files:
+                    src_path = platform_path(root) / filename
+                    rel_path = src_path.relative_to(src_dir)
+                    dest_path = dest_dir / rel_path
+                    sync_file_if_missing(src_path, dest_path)
+
+        # Only sync auth.json if the isolated home doesn't have one yet
+        # This prevents overwriting account-specific credentials
+        sync_file_if_missing(real_home / "auth.json", isolated_home / "auth.json")
+        sync_file_if_missing(real_home / "config.toml", isolated_home / "config.toml")
+        if (real_home / "sessions").exists():
+            sync_tree_if_missing(real_home / "sessions", isolated_home / "sessions")
 
     def _get_claude_config_dir(self, account_name: str) -> Path:
         """Get the isolated CLAUDE_CONFIG_DIR for a Claude account.
@@ -336,21 +391,24 @@ class ProviderUIManager:
         Each Claude account gets its own config directory to support
         multiple Claude accounts with separate authentication.
         """
-        # Use temp home in screenshot mode
-        temp_home = os.environ.get("CHAD_TEMP_HOME")
-        if temp_home:
-            return Path(temp_home) / ".chad" / "claude-configs" / account_name
-        return Path.home() / ".chad" / "claude-configs" / account_name
+        base_home = safe_home()
+        return platform_path(base_home / ".chad" / "claude-configs" / account_name)
+
+    @staticmethod
+    def _is_windows() -> bool:
+        """Return True when running on Windows."""
+        return os.name == "nt"
 
     def _get_codex_usage(self, account_name: str) -> str:
         """Get usage info from Codex by parsing JWT token and session files."""
+        self._sync_codex_home(account_name)
         codex_home = self._get_codex_home(account_name)
         auth_file = codex_home / ".codex" / "auth.json"
         if not auth_file.exists():
             return "❌ **Not logged in**\n\nClick 'Login' to authenticate this account."
 
         try:
-            with open(auth_file) as f:
+            with open(auth_file, encoding="utf-8") as f:
                 auth_data = json.load(f)
 
             tokens = auth_data.get("tokens", {})
@@ -400,6 +458,7 @@ class ProviderUIManager:
 
     def _get_codex_session_usage(self, account_name: str) -> str | None:  # noqa: C901
         """Extract usage data from the most recent Codex session file."""
+        self._sync_codex_home(account_name)
         codex_home = self._get_codex_home(account_name)
         sessions_dir = codex_home / ".codex" / "sessions"
         if not sessions_dir.exists():
@@ -409,7 +468,7 @@ class ProviderUIManager:
         for root, _, files in os.walk(sessions_dir):
             for filename in files:
                 if filename.endswith(".jsonl"):
-                    path = Path(root) / filename
+                    path = platform_path(root) / filename
                     session_files.append((path.stat().st_mtime, path))
 
         if not session_files:
@@ -421,16 +480,43 @@ class ProviderUIManager:
         rate_limits = None
         timestamp = None
         try:
-            with open(latest_session) as f:
+            with open(latest_session, encoding="utf-8") as f:
                 for line in f:
-                    if "rate_limits" in line:
+                    if "rate_limits" not in line:
+                        continue
+                    try:
                         data = json.loads(line.strip())
-                        if data.get("type") == "event_msg":
-                            payload = data.get("payload", {})
-                            if payload.get("type") == "token_count":
-                                rate_limits = payload.get("rate_limits")
-                                timestamp = data.get("timestamp")
-        except (json.JSONDecodeError, OSError):
+                    except json.JSONDecodeError:
+                        continue
+
+                    # Try various locations where rate_limits might be
+                    # 1. Old format: event_msg with token_count payload
+                    if data.get("type") == "event_msg":
+                        payload = data.get("payload", {})
+                        if payload.get("type") == "token_count":
+                            rate_limits = payload.get("rate_limits")
+                            timestamp = data.get("timestamp")
+                            continue
+
+                    # 2. New format: rate_limits at top level
+                    if "rate_limits" in data and isinstance(data.get("rate_limits"), dict):
+                        rate_limits = data.get("rate_limits")
+                        timestamp = data.get("timestamp")
+                        continue
+
+                    # 3. New format: rate_limits in item
+                    item = data.get("item", {})
+                    if isinstance(item, dict) and "rate_limits" in item:
+                        rate_limits = item.get("rate_limits")
+                        timestamp = data.get("timestamp")
+                        continue
+
+                    # 4. turn.ended event format
+                    if data.get("type") in ("turn.ended", "thread.ended"):
+                        if "rate_limits" in data:
+                            rate_limits = data.get("rate_limits")
+                            timestamp = data.get("timestamp")
+        except OSError:
             return None
 
         if not rate_limits:
@@ -474,7 +560,9 @@ class ProviderUIManager:
         if timestamp:
             try:
                 update_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                result += f"*Last updated: {update_dt.strftime('%Y-%m-%d %H:%M UTC')}*\n"
+                # Convert to local time for display
+                local_dt = update_dt.astimezone()
+                result += f"*Last updated: {local_dt.strftime('%Y-%m-%d %H:%M')}*\n"
             except ValueError:
                 pass
 
@@ -494,7 +582,7 @@ class ProviderUIManager:
             return False
 
         try:
-            with open(creds_file) as f:
+            with open(creds_file, encoding="utf-8") as f:
                 creds = json.load(f)
 
             oauth_data = creds.get("claudeAiOauth", {})
@@ -533,7 +621,7 @@ class ProviderUIManager:
 
             creds["claudeAiOauth"] = oauth_data
 
-            with open(creds_file, "w") as f:
+            with open(creds_file, "w", encoding="utf-8") as f:
                 json.dump(creds, f)
 
             return True
@@ -551,7 +639,7 @@ class ProviderUIManager:
             return "❌ **Not logged in**\n\n" "Click **Login** below to authenticate this account."
 
         try:
-            with open(creds_file) as f:
+            with open(creds_file, encoding="utf-8") as f:
                 creds = json.load(f)
 
             oauth_data = creds.get("claudeAiOauth", {})
@@ -576,7 +664,7 @@ class ProviderUIManager:
             if response.status_code == 401:
                 if self._refresh_claude_token(account_name):
                     # Re-read credentials and retry
-                    with open(creds_file) as f:
+                    with open(creds_file, encoding="utf-8") as f:
                         creds = json.load(f)
                     oauth_data = creds.get("claudeAiOauth", {})
                     access_token = oauth_data.get("accessToken", "")
@@ -612,7 +700,9 @@ class ProviderUIManager:
                 if reset_at:
                     try:
                         reset_dt = datetime.fromisoformat(reset_at.replace("Z", "+00:00"))
-                        reset_str = reset_dt.strftime("%I:%M%p")
+                        # Convert to local time for display
+                        local_reset = reset_dt.astimezone()
+                        reset_str = local_reset.strftime("%I:%M%p")
                     except ValueError:
                         reset_str = reset_at
                 else:
@@ -631,7 +721,9 @@ class ProviderUIManager:
                 if reset_at:
                     try:
                         reset_dt = datetime.fromisoformat(reset_at.replace("Z", "+00:00"))
-                        reset_str = reset_dt.strftime("%b %d")
+                        # Convert to local time for display
+                        local_reset = reset_dt.astimezone()
+                        reset_str = local_reset.strftime("%b %d")
                     except ValueError:
                         reset_str = reset_at
                 else:
@@ -693,7 +785,7 @@ class ProviderUIManager:
 
         for session_file in session_files:
             try:
-                with open(session_file) as f:
+                with open(session_file, encoding="utf-8") as f:
                     session_data = json.load(f)
 
                 messages = session_data.get("messages", [])
@@ -762,7 +854,7 @@ class ProviderUIManager:
 
         for session_file in session_files:
             try:
-                with open(session_file) as f:
+                with open(session_file, encoding="utf-8") as f:
                     data = json.load(f)
 
                 metadata = data.get("metadata", {})
@@ -789,6 +881,24 @@ class ProviderUIManager:
         result += f"**Estimated cost:** ${total_cost:.4f}\n"
 
         return result
+
+    def _get_qwen_usage(self) -> str:
+        """Get usage info from Qwen Code.
+
+        Qwen Code uses QwenChat OAuth with 2000 free daily requests.
+        No programmatic API available for detailed quota.
+        """
+        qwen_oauth = Path.home() / ".qwen" / "oauth_creds.json"
+
+        if not qwen_oauth.exists():
+            return "❌ **Not logged in**\n\nRun `qwen` in terminal to authenticate."
+
+        return (
+            "✅ **Logged in**\n\n"
+            "**Qwen3-Coder** (QwenChat OAuth)\n\n"
+            "Free tier: 2,000 requests/day\n\n"
+            "*Detailed usage stats not available via API*"
+        )
 
     def get_account_choices(self) -> list[str]:
         """Get list of account names for dropdowns."""
@@ -817,30 +927,38 @@ class ProviderUIManager:
                     return True, "Logged in"
                 return False, "Not logged in"
 
+            if provider_type == "qwen":
+                qwen_oauth = Path.home() / ".qwen" / "oauth_creds.json"
+                if qwen_oauth.exists():
+                    return True, "Logged in"
+                return False, "Not logged in"
+
             if provider_type == "mistral":
                 vibe_config = Path.home() / ".vibe" / "config.toml"
                 if vibe_config.exists():
                     return True, "Logged in"
                 return False, "Not logged in"
 
+            if provider_type == "mock":
+                return True, "Mock provider (no login required)"
+
             return False, "Unknown provider type"
 
         except Exception as exc:
             return False, f"Error: {str(exc)}"
 
-    def _setup_codex_account(self, account_name: str) -> str:
+    def _setup_codex_account(self, account_name: str) -> Path:
         """Setup isolated home directory for a Codex account."""
         codex_home = self._get_codex_home(account_name)
         codex_dir = codex_home / ".codex"
         codex_dir.mkdir(parents=True, exist_ok=True)
-        ensure_global_mcp_config(home=codex_home)
-        return str(codex_home)
+        return codex_home
 
-    def _setup_claude_account(self, account_name: str) -> str:
+    def _setup_claude_account(self, account_name: str) -> Path:
         """Setup isolated config directory for a Claude account."""
         config_dir = self._get_claude_config_dir(account_name)
         config_dir.mkdir(parents=True, exist_ok=True)
-        return str(config_dir)
+        return config_dir
 
     def _ensure_provider_cli(self, provider_type: str) -> tuple[bool, str]:
         """Ensure the provider's CLI is present; install if missing."""
@@ -848,6 +966,7 @@ class ProviderUIManager:
             "openai": "codex",
             "anthropic": "claude",
             "gemini": "gemini",
+            "qwen": "qwen",
             "mistral": "vibe",
         }
         tool_key = tool_map.get(provider_type)
@@ -864,7 +983,7 @@ class ProviderUIManager:
         accordion_state = gr.update(open=True)
 
         try:
-            if provider_type not in self.SUPPORTED_PROVIDERS:
+            if provider_type not in self.get_supported_providers():
                 base_response = self.provider_action_response(f"❌ Unsupported provider '{provider_type}'", card_slots)
                 return (*base_response, name_field_value, add_btn_state, accordion_state)
 
@@ -884,22 +1003,115 @@ class ProviderUIManager:
 
             if provider_type == "openai":
                 import os
+                import shutil as shutil_mod
+                import time
 
-                codex_home = self._setup_codex_account(account_name)
+                codex_home = Path(self._setup_codex_account(account_name))
                 codex_cli = cli_detail or "codex"
+                is_windows = self._is_windows()
 
                 env = os.environ.copy()
-                env["HOME"] = codex_home
+                env["HOME"] = str(codex_home)
+                if is_windows:
+                    env["USERPROFILE"] = str(codex_home)
 
-                login_result = subprocess.run(
-                    [codex_cli, "login"],
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
+                isolated_auth_file = codex_home / ".codex" / "auth.json"
+                real_home = Path.home()
+                real_auth_file = real_home / ".codex" / "auth.json"
 
-                if login_result.returncode == 0:
+                # Track the mtime of real auth file before login to detect changes
+                real_auth_mtime_before = None
+                if is_windows and real_auth_file.exists():
+                    try:
+                        real_auth_mtime_before = real_auth_file.stat().st_mtime
+                    except OSError:
+                        pass
+
+                login_success = False
+
+                try:
+                    if is_windows:
+                        # On Windows, open Codex in a new console with custom HOME
+                        CREATE_NEW_CONSOLE = 0x00000010
+                        process = subprocess.Popen(
+                            [codex_cli, "login"],
+                            env=env,
+                            creationflags=CREATE_NEW_CONSOLE,
+                        )
+
+                        # Poll for auth file - check both isolated and real home
+                        # (in case Codex doesn't respect our custom HOME)
+                        start_time = time.time()
+                        timeout_secs = 120
+                        while time.time() - start_time < timeout_secs:
+                            # First check isolated location (preferred)
+                            if isolated_auth_file.exists():
+                                try:
+                                    with open(isolated_auth_file, encoding="utf-8") as f:
+                                        auth_data = json.load(f)
+                                    tokens = auth_data.get("tokens", {})
+                                    if tokens.get("access_token"):
+                                        login_success = True
+                                        break
+                                except (json.JSONDecodeError, KeyError, OSError):
+                                    pass
+
+                            # Fallback: check if real home auth file was updated
+                            if real_auth_file.exists():
+                                try:
+                                    current_mtime = real_auth_file.stat().st_mtime
+                                    # Only use if file is new or was modified after we started
+                                    if real_auth_mtime_before is None or current_mtime > real_auth_mtime_before:
+                                        with open(real_auth_file, encoding="utf-8") as f:
+                                            auth_data = json.load(f)
+                                        tokens = auth_data.get("tokens", {})
+                                        if tokens.get("access_token"):
+                                            # Copy to isolated directory
+                                            isolated_auth_file.parent.mkdir(parents=True, exist_ok=True)
+                                            shutil_mod.copy2(real_auth_file, isolated_auth_file)
+                                            login_success = True
+                                            break
+                                except (json.JSONDecodeError, KeyError, OSError):
+                                    pass
+
+                            time.sleep(2)
+
+                        # Clean up process if still running
+                        try:
+                            process.terminate()
+                        except Exception:
+                            pass
+                    else:
+                        # On Unix, use subprocess.run directly
+                        login_result = subprocess.run(
+                            [codex_cli, "login"],
+                            env=env,
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            timeout=120,
+                        )
+                        login_success = login_result.returncode == 0
+
+                except FileNotFoundError:
+                    # CLI not found - provide helpful message
+                    import shutil
+                    codex_home_path = self._get_codex_home(account_name)
+                    if codex_home_path.exists():
+                        shutil.rmtree(codex_home_path, ignore_errors=True)
+                    result = (
+                        "❌ Codex CLI not found.\n\n"
+                        "Please install Codex first:\n"
+                        "```\nnpm install -g @openai/codex\n```"
+                    )
+                    base_response = self.provider_action_response(result, card_slots)
+                    return (*base_response, name_field_value, add_btn_state, accordion_state)
+
+                except Exception:
+                    pass  # Fall through to login_success check
+
+                if login_success:
                     self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
                     result = f"✅ Provider '{account_name}' added and logged in!"
                     name_field_value = ""
@@ -912,8 +1124,14 @@ class ProviderUIManager:
                     if codex_home_path.exists():
                         shutil.rmtree(codex_home_path, ignore_errors=True)
 
-                    error = login_result.stderr.strip() if login_result.stderr else "Login was cancelled or failed"
-                    result = f"❌ Login failed for '{account_name}': {error}"
+                    if is_windows:
+                        result = (
+                            f"❌ Login timed out for '{account_name}'.\n\n"
+                            "A Codex CLI window should have opened. If you didn't complete the login in time, "
+                            "please try again and complete the browser authentication within 2 minutes."
+                        )
+                    else:
+                        result = f"❌ Login failed for '{account_name}'. Please try again."
                     base_response = self.provider_action_response(result, card_slots)
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
 
@@ -931,31 +1149,26 @@ class ProviderUIManager:
                     import time
                     import os
 
-                    creds_file = Path(config_dir) / ".credentials.json"
+                    creds_file = config_dir / ".credentials.json"
+                    is_windows = self._is_windows()
 
                     try:
-                        import pexpect
+                        if is_windows:
+                            # On Windows, open Claude in a new console window for user interaction
+                            # and poll for credentials in the background
+                            import subprocess
 
-                        # Set up environment for Claude
-                        env = os.environ.copy()
-                        env["CLAUDE_CONFIG_DIR"] = str(config_dir)
-                        env["TERM"] = "xterm-256color"
+                            # Set up environment
+                            env = os.environ.copy()
+                            env["CLAUDE_CONFIG_DIR"] = str(config_dir)
 
-                        child = pexpect.spawn(claude_cli, timeout=120, encoding="utf-8", env=env)
-
-                        try:
-                            # Step 1: Theme selection
-                            child.expect("Choose the text style", timeout=20)
-                            time.sleep(1)
-                            child.send("\r")
-
-                            # Step 2: Login method selection
-                            child.expect("Select login method", timeout=15)
-                            time.sleep(1)
-                            child.send("\r")
-
-                            # Step 3: Wait for browser to open
-                            child.expect(["Opening browser", "browser"], timeout=15)
+                            # Start Claude in a new console window (CREATE_NEW_CONSOLE = 0x10)
+                            CREATE_NEW_CONSOLE = 0x00000010
+                            process = subprocess.Popen(
+                                [claude_cli],
+                                env=env,
+                                creationflags=CREATE_NEW_CONSOLE,
+                            )
 
                             # Poll for credentials file to appear (OAuth callback)
                             start_time = time.time()
@@ -963,7 +1176,7 @@ class ProviderUIManager:
                             while time.time() - start_time < timeout_secs:
                                 if creds_file.exists():
                                     try:
-                                        with open(creds_file) as f:
+                                        with open(creds_file, encoding="utf-8") as f:
                                             creds_data = json.load(f)
                                         oauth = creds_data.get("claudeAiOauth", {})
                                         if oauth.get("accessToken"):
@@ -973,50 +1186,74 @@ class ProviderUIManager:
                                         pass
                                 time.sleep(2)
 
-                        except pexpect.TIMEOUT:
-                            pass  # Will fall through to login_success check
-                        except pexpect.EOF:
-                            pass  # Process ended unexpectedly
-                        finally:
+                            # Clean up process if still running
                             try:
-                                child.close()
+                                process.terminate()
                             except Exception:
                                 pass
 
-                    except ImportError:
-                        # pexpect not available, fall back to script wrapper
-                        login_process = subprocess.Popen(
-                            ["script", "-q", "-c", f'CLAUDE_CONFIG_DIR="{config_dir}" "{claude_cli}"', "/dev/null"],
-                            stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            env={**os.environ, "CLAUDE_CONFIG_DIR": str(config_dir)},
-                            start_new_session=True,
-                        )
+                        else:
+                            # On Unix, use pexpect for automated login
+                            import pexpect
 
-                        start_time = time.time()
-                        timeout_secs = 120
-                        while time.time() - start_time < timeout_secs:
-                            if creds_file.exists():
+                            env = os.environ.copy()
+                            env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+                            env["TERM"] = "xterm-256color"
+
+                            child = pexpect.spawn(claude_cli, timeout=120, encoding="utf-8", env=env)
+
+                            try:
+                                # Step 1: Theme selection
+                                child.expect("Choose the text style", timeout=20)
+                                time.sleep(1)
+                                child.send("\r")
+
+                                # Step 2: Login method selection
+                                child.expect("Select login method", timeout=15)
+                                time.sleep(1)
+                                child.send("\r")
+
+                                # Step 3: Wait for browser to open
+                                child.expect(["Opening browser", "browser"], timeout=15)
+
+                                # Poll for credentials file to appear (OAuth callback)
+                                start_time = time.time()
+                                timeout_secs = 120
+                                while time.time() - start_time < timeout_secs:
+                                    if creds_file.exists():
+                                        try:
+                                            with open(creds_file, encoding="utf-8") as f:
+                                                creds_data = json.load(f)
+                                            oauth = creds_data.get("claudeAiOauth", {})
+                                            if oauth.get("accessToken"):
+                                                login_success = True
+                                                break
+                                        except (json.JSONDecodeError, KeyError, OSError):
+                                            pass
+                                    time.sleep(2)
+
+                            except pexpect.TIMEOUT:
+                                pass  # Will fall through to login_success check
+                            except pexpect.EOF:
+                                pass  # Process ended unexpectedly
+                            finally:
                                 try:
-                                    with open(creds_file) as f:
-                                        creds_data = json.load(f)
-                                    oauth = creds_data.get("claudeAiOauth", {})
-                                    if oauth.get("accessToken"):
-                                        login_success = True
-                                        break
-                                except (json.JSONDecodeError, KeyError, OSError):
+                                    child.close()
+                                except Exception:
                                     pass
-                            time.sleep(2)
 
-                        try:
-                            login_process.terminate()
-                            login_process.wait(timeout=5)
-                        except Exception:
-                            try:
-                                login_process.kill()
-                            except Exception:
-                                pass
+                    except FileNotFoundError:
+                        # CLI not found - provide helpful message
+                        import shutil
+                        if config_dir.exists():
+                            shutil.rmtree(config_dir, ignore_errors=True)
+                        result = (
+                            "❌ Claude CLI not found.\n\n"
+                            "Please install Claude Code first:\n"
+                            "```\nnpm install -g @anthropic-ai/claude-code\n```"
+                        )
+                        base_response = self.provider_action_response(result, card_slots)
+                        return (*base_response, name_field_value, add_btn_state, accordion_state)
 
                     except Exception:
                         pass  # Any error, fall through to login_success check
@@ -1031,15 +1268,231 @@ class ProviderUIManager:
                     # Login failed/timed out - clean up
                     import shutil
 
-                    config_path = Path(config_dir)
-                    if config_path.exists():
-                        shutil.rmtree(config_path, ignore_errors=True)
+                    if config_dir.exists():
+                        shutil.rmtree(config_dir, ignore_errors=True)
 
-                    result = f"❌ Login timed out for '{account_name}'. Please try again."
+                    if is_windows:
+                        result = (
+                            f"❌ Login timed out for '{account_name}'.\n\n"
+                            "A Claude CLI window should have opened. If you didn't complete the login in time, "
+                            "please try again and complete the browser authentication within 2 minutes."
+                        )
+                    else:
+                        result = f"❌ Login timed out for '{account_name}'. Please try again."
+                    base_response = self.provider_action_response(result, card_slots)
+                    return (*base_response, name_field_value, add_btn_state, accordion_state)
+
+            elif provider_type == "gemini":
+                # Gemini uses browser OAuth
+                import time
+                import os
+
+                gemini_cli = cli_detail or "gemini"
+                is_windows = self._is_windows()
+                gemini_oauth = Path.home() / ".gemini" / "oauth_creds.json"
+
+                # Check if already logged in
+                login_success, _ = self._check_provider_login(provider_type, account_name)
+
+                if not login_success:
+                    try:
+                        if is_windows:
+                            CREATE_NEW_CONSOLE = 0x00000010
+                            process = subprocess.Popen(
+                                [gemini_cli],
+                                creationflags=CREATE_NEW_CONSOLE,
+                            )
+
+                            # Poll for credentials file
+                            start_time = time.time()
+                            timeout_secs = 120
+                            while time.time() - start_time < timeout_secs:
+                                if gemini_oauth.exists():
+                                    login_success = True
+                                    break
+                                time.sleep(2)
+
+                            try:
+                                process.terminate()
+                            except Exception:
+                                pass
+                        else:
+                            # On Unix, use pexpect to provide a PTY for the CLI
+                            import pexpect
+
+                            env = os.environ.copy()
+                            env["TERM"] = "xterm-256color"
+
+                            # Set terminal dimensions for proper rendering
+                            child = pexpect.spawn(
+                                gemini_cli, timeout=120, encoding="utf-8", env=env, dimensions=(50, 120)
+                            )
+
+                            try:
+                                # Gemini CLI shows auth prompts on first run
+                                # Wait for it to render, then send Enter to proceed
+                                time.sleep(2)
+                                child.send("\r")
+                                time.sleep(2)
+                                child.send("\r")
+
+                                # Poll for oauth file while process runs
+                                start_time = time.time()
+                                timeout_secs = 120
+                                while time.time() - start_time < timeout_secs:
+                                    if gemini_oauth.exists():
+                                        login_success = True
+                                        break
+                                    if not child.isalive():
+                                        break
+                                    time.sleep(2)
+                            except (pexpect.TIMEOUT, pexpect.EOF):
+                                pass
+                            finally:
+                                try:
+                                    child.close()
+                                except Exception:
+                                    pass
+
+                    except FileNotFoundError:
+                        result = (
+                            "❌ Gemini CLI not found.\n\n"
+                            "Please install Gemini CLI first:\n"
+                            "```\nnpm install -g @google/gemini-cli\n```"
+                        )
+                        base_response = self.provider_action_response(result, card_slots)
+                        return (*base_response, name_field_value, add_btn_state, accordion_state)
+                    except Exception:
+                        pass
+
+                if login_success:
+                    self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
+                    result = f"✅ Provider '{account_name}' added and logged in!"
+                    name_field_value = ""
+                    add_btn_state = gr.update(interactive=False)
+                    accordion_state = gr.update(open=False)
+                else:
+                    if is_windows:
+                        result = (
+                            f"❌ Login timed out for '{account_name}'.\n\n"
+                            "A Gemini CLI window should have opened. Please try again."
+                        )
+                    else:
+                        result = f"❌ Login timed out for '{account_name}'. Please try again."
+                    base_response = self.provider_action_response(result, card_slots)
+                    return (*base_response, name_field_value, add_btn_state, accordion_state)
+
+            elif provider_type == "qwen":
+                # Qwen uses QwenChat OAuth (fork of Gemini CLI)
+                import time
+                import os
+
+                qwen_cli = cli_detail or "qwen"
+                is_windows = self._is_windows()
+                qwen_oauth = Path.home() / ".qwen" / "oauth_creds.json"
+
+                # Check if already logged in
+                login_success, _ = self._check_provider_login(provider_type, account_name)
+
+                if not login_success:
+                    try:
+                        if is_windows:
+                            CREATE_NEW_CONSOLE = 0x00000010
+                            process = subprocess.Popen(
+                                [qwen_cli],
+                                creationflags=CREATE_NEW_CONSOLE,
+                            )
+
+                            # Poll for oauth file
+                            start_time = time.time()
+                            timeout_secs = 120
+                            while time.time() - start_time < timeout_secs:
+                                if qwen_oauth.exists():
+                                    login_success = True
+                                    break
+                                time.sleep(2)
+
+                            try:
+                                process.terminate()
+                            except Exception:
+                                pass
+                        else:
+                            # On Unix, use pexpect for qwen OAuth flow
+                            # Qwen uses device authorization - let CLI handle browser opening
+                            import pexpect
+
+                            env = os.environ.copy()
+                            env["TERM"] = "xterm-256color"
+
+                            child = pexpect.spawn(
+                                qwen_cli, timeout=180, encoding="utf-8", env=env, dimensions=(50, 120)
+                            )
+
+                            try:
+                                # Qwen CLI shows auth prompts on first run
+                                # Wait briefly for render, then send Enter to proceed
+                                time.sleep(0.5)
+                                child.send("\r")
+                                time.sleep(0.5)
+                                child.send("\r")
+
+                                # Poll for oauth file while process runs
+                                # CLI handles browser opening and device polling internally
+                                # Drain output to prevent buffer blocking (device auth produces
+                                # continuous output like QR codes and countdown timers)
+                                start_time = time.time()
+                                timeout_secs = 120
+                                while time.time() - start_time < timeout_secs:
+                                    if qwen_oauth.exists():
+                                        login_success = True
+                                        break
+                                    if not child.isalive():
+                                        break
+                                    # Drain any pending output to prevent blocking
+                                    try:
+                                        child.read_nonblocking(size=10000, timeout=0.1)
+                                    except (pexpect.TIMEOUT, pexpect.EOF):
+                                        pass
+                                    time.sleep(0.5)
+
+                            except (pexpect.TIMEOUT, pexpect.EOF):
+                                pass
+                            finally:
+                                try:
+                                    child.close()
+                                except Exception:
+                                    pass
+
+                    except FileNotFoundError:
+                        result = (
+                            "❌ Qwen Code CLI not found.\n\n"
+                            "Please install Qwen Code first:\n"
+                            "```\nnpm install -g @qwen-code/qwen-code\n```"
+                        )
+                        base_response = self.provider_action_response(result, card_slots)
+                        return (*base_response, name_field_value, add_btn_state, accordion_state)
+                    except Exception:
+                        pass
+
+                if login_success:
+                    self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
+                    result = f"✅ Provider '{account_name}' added and logged in!"
+                    name_field_value = ""
+                    add_btn_state = gr.update(interactive=False)
+                    accordion_state = gr.update(open=False)
+                else:
+                    if is_windows:
+                        result = (
+                            f"❌ Login timed out for '{account_name}'.\n\n"
+                            "A Qwen Code CLI window should have opened. Please try again."
+                        )
+                    else:
+                        result = f"❌ Login timed out for '{account_name}'. Please try again."
                     base_response = self.provider_action_response(result, card_slots)
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
 
             else:
+                # Generic flow for mistral and other providers
                 self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
                 result = f"✓ Provider '{account_name}' ({provider_type}) added."
 
@@ -1050,11 +1503,11 @@ class ProviderUIManager:
                 else:
                     result += f" ⚠️ {login_msg}"
                     auth_info = {
-                        "gemini": ("gemini", "Opens browser to authenticate with your Google account"),
                         "mistral": ("vibe --setup", "Set up your Mistral API key"),
                     }
                     auth_cmd, auth_desc = auth_info.get(provider_type, ("unknown", ""))
-                    result += f" — manual login: run `{auth_cmd}` ({auth_desc})"
+                    if auth_cmd != "unknown":
+                        result += f" — manual login: run `{auth_cmd}` ({auth_desc})"
 
                 name_field_value = ""
                 add_btn_state = gr.update(interactive=False)

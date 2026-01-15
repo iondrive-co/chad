@@ -9,7 +9,7 @@ def test_provider_cards_wrapped_in_row():
     web_ui_path = Path(__file__).parent.parent / "src/chad/web_ui.py"
 
     # Read the web_ui.py file
-    content = web_ui_path.read_text()
+    content = web_ui_path.read_text(encoding="utf-8")
 
     # Check that provider cards are created within a Row
     # Look for the pattern where provider cards are created
@@ -39,7 +39,7 @@ def test_provider_cards_wrapped_in_row():
 def test_css_has_reduced_padding():
     """Test that CSS has reduced padding values."""
     web_ui_path = Path(__file__).parent.parent / "src/chad/web_ui.py"
-    content = web_ui_path.read_text()
+    content = web_ui_path.read_text(encoding="utf-8")
 
     # Check provider-usage padding
     usage_idx = content.find(".provider-usage {")
@@ -79,7 +79,7 @@ def test_css_has_reduced_padding():
 def test_css_grid_or_flexbox_layout():
     """Test that CSS includes grid or flexbox properties for two-column layout."""
     web_ui_path = Path(__file__).parent.parent / "src/chad/web_ui.py"
-    content = web_ui_path.read_text()
+    content = web_ui_path.read_text(encoding="utf-8")
 
     # Check for CSS that enables multi-column layout
     # This could be grid-template-columns, flex properties, or column-count
