@@ -1418,10 +1418,8 @@ class ProviderUIManager:
                                 pass
                         else:
                             # On Unix, use pexpect for qwen OAuth flow
-                            # Qwen uses device authorization - CLI polls server after user approves
+                            # Qwen uses device authorization - let CLI handle browser opening
                             import pexpect
-                            import re
-                            import webbrowser
 
                             env = os.environ.copy()
                             env["TERM"] = "xterm-256color"
@@ -1430,36 +1428,18 @@ class ProviderUIManager:
                                 qwen_cli, timeout=180, encoding="utf-8", env=env, dimensions=(50, 120)
                             )
 
-                            browser_opened = False
                             try:
-                                # Wait for auth menu to appear (fast, use expect)
-                                child.expect(["Qwen OAuth", "authenticate", "Enter"], timeout=10)
-                                child.send("\r")  # Select Qwen OAuth
+                                # Qwen CLI shows auth prompts on first run
+                                # Wait briefly for render, then send Enter to proceed
+                                time.sleep(0.5)
+                                child.send("\r")
+                                time.sleep(0.5)
+                                child.send("\r")
 
-                                # Wait for auth URL to appear in output
-                                child.expect(
-                                    [r"https://chat\.qwen\.ai/auth", "Waiting for.*authentication"],
-                                    timeout=10,
-                                )
-
-                                # Read buffer to get full URL
-                                time.sleep(1)
-                                output = child.before + child.after if child.after else child.before
-                                try:
-                                    output += child.read_nonblocking(size=10000, timeout=1)
-                                except Exception:
-                                    pass
-
-                                # Extract and open auth URL (only once)
-                                auth_urls = re.findall(
-                                    r"https://chat\.qwen\.ai/auth\w*\?[^\s\x1b\]]+", output
-                                )
-                                if auth_urls and not browser_opened:
-                                    auth_url = re.sub(r"[\x1b\[\]0-9;m]*$", "", auth_urls[0])
-                                    webbrowser.open(auth_url)
-                                    browser_opened = True
-
-                                # Poll for oauth file - CLI is polling server in background
+                                # Poll for oauth file while process runs
+                                # CLI handles browser opening and device polling internally
+                                # Drain output to prevent buffer blocking (device auth produces
+                                # continuous output like QR codes and countdown timers)
                                 start_time = time.time()
                                 timeout_secs = 120
                                 while time.time() - start_time < timeout_secs:
@@ -1468,7 +1448,12 @@ class ProviderUIManager:
                                         break
                                     if not child.isalive():
                                         break
-                                    time.sleep(2)
+                                    # Drain any pending output to prevent blocking
+                                    try:
+                                        child.read_nonblocking(size=10000, timeout=0.1)
+                                    except (pexpect.TIMEOUT, pexpect.EOF):
+                                        pass
+                                    time.sleep(0.5)
 
                             except (pexpect.TIMEOUT, pexpect.EOF):
                                 pass
