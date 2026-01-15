@@ -55,6 +55,13 @@ class AIToolInstaller:
                 package="@google/gemini-cli",
                 version="latest",
             ),
+            "qwen": CLIToolSpec(
+                name="Qwen Code",
+                binary="qwen",
+                installer="npm",
+                package="@qwen-code/qwen-code",
+                version="latest",
+            ),
             "vibe": CLIToolSpec(
                 name="Mistral Vibe",
                 binary="vibe",
