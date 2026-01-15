@@ -2987,7 +2987,7 @@ class ChadWebUI:
                     "🛑 Task cancelled",
                     "",
                     summary="🛑 Task cancelled",
-                    show_followup=False,
+                    show_followup=True,  # Always show follow-up after task starts
                 )
             else:
                 while True:
@@ -3400,11 +3400,13 @@ class ChadWebUI:
             session.chat_history = chat_history
             session.coding_account = coding_account
 
-            # Show follow-up input if session can continue (Claude with successful task and verification)
-            can_continue = session.active and overall_success
-            if can_continue:
+            # Always show follow-up input after task starts, regardless of outcome
+            can_continue = True  # Always allow follow-up messages
+            if session.active and overall_success:
                 final_status += "\n\n*Session active - you can send follow-up messages*"
-                final_summary = f"{status_prefix}{final_status}"
+            else:
+                final_status += "\n\n*You can send follow-up messages*"
+            final_summary = f"{status_prefix}{final_status}"
 
             # Check for worktree changes to show merge section
             # Show merge section whenever there are changes, regardless of task success
@@ -3448,7 +3450,7 @@ class ChadWebUI:
                 error_msg,
                 summary=error_msg,
                 interactive=False,  # Task description locked after work begins
-                show_followup=False,
+                show_followup=True,  # Always show follow-up after task starts
                 show_merge=False,
                 merge_summary="",
             )
@@ -3624,7 +3626,7 @@ class ChadWebUI:
                     }
                 )
                 session.config = None
-                yield make_followup_yield(chat_history, "", show_followup=False)
+                yield make_followup_yield(chat_history, "", show_followup=True)
                 return
 
             session.provider = new_provider
@@ -4064,7 +4066,7 @@ class ChadWebUI:
                     "",                                          # conflicts_html
                     gr.update(value=f"✓ Changes merged to {target_name}.", visible=True),
                     no_change,                                   # chatbot - preserve for follow-up
-                    gr.update(interactive=True),                 # start_btn
+                    gr.update(interactive=False),                # start_btn - never re-enable after task starts
                     gr.update(interactive=False),                # cancel_btn
                     "",                                          # live_stream
                     no_change,                                   # followup_row - preserve for follow-up
@@ -4326,7 +4328,7 @@ class ChadWebUI:
                     "",                                          # conflicts_html
                     gr.update(value="✓ All conflicts resolved. Merge complete.", visible=True),
                     no_change,                                   # chatbot - preserve for follow-up
-                    gr.update(interactive=True),                 # start_btn
+                    gr.update(interactive=False),                # start_btn - never re-enable after task starts
                     gr.update(interactive=False),                # cancel_btn
                     "",                                          # live_stream
                     no_change,                                   # followup_row - preserve for follow-up
@@ -4410,11 +4412,11 @@ class ChadWebUI:
             "",                                          # conflicts_html
             gr.update(value="🗑️ Changes discarded.", visible=True),  # task_status
             gr.update(),                                 # chatbot - preserve for follow-up
-            gr.update(interactive=True),                 # start_btn
+            gr.update(interactive=False),                # start_btn - never re-enable after task starts
             gr.update(interactive=False),                # cancel_btn
             "",                                          # live_stream
             gr.update(),                                 # followup_row - preserve for follow-up
-            gr.update(value=session.task_description or "", interactive=True),  # task_description
+            gr.update(value=session.task_description or "", interactive=False),  # task_description - locked after task starts
             "",                                          # merge_section_header
             "",                                          # diff_content
         )

@@ -84,9 +84,9 @@ class MergeUIState:
         return cls(
             merge_visible=False,
             status_message=status,
-            start_enabled=True,
+            start_enabled=False,  # Never re-enable Start button after task starts
             cancel_enabled=False,
-            followup_visible=False,
+            followup_visible=True,  # Always show follow-up after task starts
             chatbot_history=[],
             task_description="",
         )
@@ -97,9 +97,9 @@ class MergeUIState:
         return cls(
             merge_visible=False,
             status_message="Changes discarded",
-            start_enabled=True,
+            start_enabled=False,  # Never re-enable Start button after task starts
             cancel_enabled=False,
-            followup_visible=False,
+            followup_visible=True,  # Always show follow-up after task starts
             chatbot_history=[],
             task_description=task_description,
         )
@@ -118,7 +118,7 @@ class MergeUIState:
             conflict_info=conflict_info,
             conflicts_html=conflicts_html,
             status_message=status_message,
-            start_enabled=False,
+            start_enabled=False,  # Never re-enable Start button after task starts
             cancel_enabled=False,
             merge_header="### Conflicts to Resolve",
         )
@@ -136,7 +136,7 @@ class MergeUIState:
             changes_summary=changes_summary,
             diff_content=diff_content,
             merge_header=merge_header,
-            start_enabled=False,
+            start_enabled=False,  # Never re-enable Start button after task starts
             cancel_enabled=False,
         )
 
