@@ -18,8 +18,8 @@ from .installer import AIToolInstaller
 class ProviderUIManager:
     """Provider management and display helpers for the web UI."""
 
-    _ALL_PROVIDERS = {"anthropic", "openai", "gemini", "mistral", "mock"}
-    SUPPORTED_PROVIDERS = {"anthropic", "openai", "gemini", "mistral", "mock"}  # For backwards compat
+    _ALL_PROVIDERS = {"anthropic", "openai", "gemini", "qwen", "mistral", "mock"}
+    SUPPORTED_PROVIDERS = {"anthropic", "openai", "gemini", "qwen", "mistral", "mock"}  # For backwards compat
     OPENAI_REASONING_LEVELS = ["default", "low", "medium", "high", "xhigh"]
 
     def get_supported_providers(self) -> set[str]:
@@ -31,7 +31,7 @@ class ProviderUIManager:
     def get_provider_choices(self) -> list[str]:
         """Get ordered list of provider type choices for dropdowns."""
         # Fixed order for consistent UI
-        order = ["anthropic", "openai", "gemini", "mistral", "mock"]
+        order = ["anthropic", "openai", "gemini", "qwen", "mistral", "mock"]
         supported = self.get_supported_providers()
         return [p for p in order if p in supported]
 
@@ -115,6 +115,8 @@ class ProviderUIManager:
             status_text = self._get_claude_usage(account_name)
         elif provider == "gemini":
             status_text = self._get_gemini_usage()
+        elif provider == "qwen":
+            status_text = self._get_qwen_usage()
         elif provider == "mistral":
             status_text = self._get_mistral_usage()
         else:
@@ -158,6 +160,8 @@ class ProviderUIManager:
             return self._get_codex_remaining_usage(account_name)
         if provider == "gemini":
             return self._get_gemini_remaining_usage()
+        if provider == "qwen":
+            return self._get_qwen_remaining_usage()
         if provider == "mistral":
             return self._get_mistral_remaining_usage()
 
@@ -270,6 +274,18 @@ class ProviderUIManager:
         """
         vibe_config = Path.home() / ".vibe" / "config.toml"
         if not vibe_config.exists():
+            return 0.0
+
+        return 0.3  # Logged in but no quota API, bias low
+
+    def _get_qwen_remaining_usage(self) -> float:
+        """Estimate Qwen remaining usage (0.0-1.0).
+
+        No programmatic API available for quota, so we estimate based on
+        whether logged in. Biased low since we can't verify actual quota.
+        """
+        qwen_settings = Path.home() / ".qwen" / "settings.json"
+        if not qwen_settings.exists():
             return 0.0
 
         return 0.3  # Logged in but no quota API, bias low
@@ -866,6 +882,24 @@ class ProviderUIManager:
 
         return result
 
+    def _get_qwen_usage(self) -> str:
+        """Get usage info from Qwen Code.
+
+        Qwen Code uses QwenChat OAuth with 2000 free daily requests.
+        No programmatic API available for detailed quota.
+        """
+        qwen_settings = Path.home() / ".qwen" / "settings.json"
+
+        if not qwen_settings.exists():
+            return "❌ **Not logged in**\n\nRun `qwen` in terminal to authenticate."
+
+        return (
+            "✅ **Logged in**\n\n"
+            "**Qwen3-Coder** (QwenChat OAuth)\n\n"
+            "Free tier: 2,000 requests/day\n\n"
+            "*Detailed usage stats not available via API*"
+        )
+
     def get_account_choices(self) -> list[str]:
         """Get list of account names for dropdowns."""
         return list(self.security_mgr.list_accounts().keys())
@@ -890,6 +924,12 @@ class ProviderUIManager:
             if provider_type == "gemini":
                 gemini_oauth = Path.home() / ".gemini" / "oauth_creds.json"
                 if gemini_oauth.exists():
+                    return True, "Logged in"
+                return False, "Not logged in"
+
+            if provider_type == "qwen":
+                qwen_settings = Path.home() / ".qwen" / "settings.json"
+                if qwen_settings.exists():
                     return True, "Logged in"
                 return False, "Not logged in"
 
@@ -926,6 +966,7 @@ class ProviderUIManager:
             "openai": "codex",
             "anthropic": "claude",
             "gemini": "gemini",
+            "qwen": "qwen",
             "mistral": "vibe",
         }
         tool_key = tool_map.get(provider_type)
@@ -1241,7 +1282,186 @@ class ProviderUIManager:
                     base_response = self.provider_action_response(result, card_slots)
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
 
+            elif provider_type == "gemini":
+                # Gemini uses browser OAuth
+                import time
+                import os
+
+                gemini_cli = cli_detail or "gemini"
+                is_windows = self._is_windows()
+                gemini_oauth = Path.home() / ".gemini" / "oauth_creds.json"
+
+                # Check if already logged in
+                login_success, _ = self._check_provider_login(provider_type, account_name)
+
+                if not login_success:
+                    try:
+                        if is_windows:
+                            CREATE_NEW_CONSOLE = 0x00000010
+                            process = subprocess.Popen(
+                                [gemini_cli],
+                                creationflags=CREATE_NEW_CONSOLE,
+                            )
+
+                            # Poll for credentials file
+                            start_time = time.time()
+                            timeout_secs = 120
+                            while time.time() - start_time < timeout_secs:
+                                if gemini_oauth.exists():
+                                    login_success = True
+                                    break
+                                time.sleep(2)
+
+                            try:
+                                process.terminate()
+                            except Exception:
+                                pass
+                        else:
+                            # On Unix, spawn gemini and poll for oauth file
+                            env = os.environ.copy()
+                            env["TERM"] = "xterm-256color"
+
+                            process = subprocess.Popen(
+                                [gemini_cli],
+                                env=env,
+                                stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                start_new_session=True,
+                            )
+
+                            start_time = time.time()
+                            timeout_secs = 120
+                            while time.time() - start_time < timeout_secs:
+                                if gemini_oauth.exists():
+                                    login_success = True
+                                    break
+                                time.sleep(2)
+
+                            try:
+                                process.terminate()
+                            except Exception:
+                                pass
+
+                    except FileNotFoundError:
+                        result = (
+                            "❌ Gemini CLI not found.\n\n"
+                            "Please install Gemini CLI first:\n"
+                            "```\nnpm install -g @google/gemini-cli\n```"
+                        )
+                        base_response = self.provider_action_response(result, card_slots)
+                        return (*base_response, name_field_value, add_btn_state, accordion_state)
+                    except Exception:
+                        pass
+
+                if login_success:
+                    self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
+                    result = f"✅ Provider '{account_name}' added and logged in!"
+                    name_field_value = ""
+                    add_btn_state = gr.update(interactive=False)
+                    accordion_state = gr.update(open=False)
+                else:
+                    if is_windows:
+                        result = (
+                            f"❌ Login timed out for '{account_name}'.\n\n"
+                            "A Gemini CLI window should have opened. Please try again."
+                        )
+                    else:
+                        result = f"❌ Login timed out for '{account_name}'. Please try again."
+                    base_response = self.provider_action_response(result, card_slots)
+                    return (*base_response, name_field_value, add_btn_state, accordion_state)
+
+            elif provider_type == "qwen":
+                # Qwen uses QwenChat OAuth (similar to Gemini)
+                import time
+                import os
+
+                qwen_cli = cli_detail or "qwen"
+                is_windows = self._is_windows()
+                qwen_settings = Path.home() / ".qwen" / "settings.json"
+
+                # Check if already logged in
+                login_success, _ = self._check_provider_login(provider_type, account_name)
+
+                if not login_success:
+                    try:
+                        if is_windows:
+                            CREATE_NEW_CONSOLE = 0x00000010
+                            process = subprocess.Popen(
+                                [qwen_cli],
+                                creationflags=CREATE_NEW_CONSOLE,
+                            )
+
+                            # Poll for settings file
+                            start_time = time.time()
+                            timeout_secs = 120
+                            while time.time() - start_time < timeout_secs:
+                                if qwen_settings.exists():
+                                    login_success = True
+                                    break
+                                time.sleep(2)
+
+                            try:
+                                process.terminate()
+                            except Exception:
+                                pass
+                        else:
+                            # On Unix, spawn qwen and poll for settings file
+                            env = os.environ.copy()
+                            env["TERM"] = "xterm-256color"
+
+                            process = subprocess.Popen(
+                                [qwen_cli],
+                                env=env,
+                                stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                start_new_session=True,
+                            )
+
+                            start_time = time.time()
+                            timeout_secs = 120
+                            while time.time() - start_time < timeout_secs:
+                                if qwen_settings.exists():
+                                    login_success = True
+                                    break
+                                time.sleep(2)
+
+                            try:
+                                process.terminate()
+                            except Exception:
+                                pass
+
+                    except FileNotFoundError:
+                        result = (
+                            "❌ Qwen Code CLI not found.\n\n"
+                            "Please install Qwen Code first:\n"
+                            "```\nnpm install -g @qwen-code/qwen-code\n```"
+                        )
+                        base_response = self.provider_action_response(result, card_slots)
+                        return (*base_response, name_field_value, add_btn_state, accordion_state)
+                    except Exception:
+                        pass
+
+                if login_success:
+                    self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
+                    result = f"✅ Provider '{account_name}' added and logged in!"
+                    name_field_value = ""
+                    add_btn_state = gr.update(interactive=False)
+                    accordion_state = gr.update(open=False)
+                else:
+                    if is_windows:
+                        result = (
+                            f"❌ Login timed out for '{account_name}'.\n\n"
+                            "A Qwen Code CLI window should have opened. Please try again."
+                        )
+                    else:
+                        result = f"❌ Login timed out for '{account_name}'. Please try again."
+                    base_response = self.provider_action_response(result, card_slots)
+                    return (*base_response, name_field_value, add_btn_state, accordion_state)
+
             else:
+                # Generic flow for mistral and other providers
                 self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
                 result = f"✓ Provider '{account_name}' ({provider_type}) added."
 
@@ -1252,11 +1472,11 @@ class ProviderUIManager:
                 else:
                     result += f" ⚠️ {login_msg}"
                     auth_info = {
-                        "gemini": ("gemini", "Opens browser to authenticate with your Google account"),
                         "mistral": ("vibe --setup", "Set up your Mistral API key"),
                     }
                     auth_cmd, auth_desc = auth_info.get(provider_type, ("unknown", ""))
-                    result += f" — manual login: run `{auth_cmd}` ({auth_desc})"
+                    if auth_cmd != "unknown":
+                        result += f" — manual login: run `{auth_cmd}` ({auth_desc})"
 
                 name_field_value = ""
                 add_btn_state = gr.update(interactive=False)
