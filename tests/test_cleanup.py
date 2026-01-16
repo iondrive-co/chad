@@ -73,7 +73,7 @@ class TestCleanupOldWorktrees:
         new_worktree = worktree_base / "def67890"
         new_worktree.mkdir()
 
-        with patch("chad.git_worktree.GitWorktreeManager") as mock_manager_cls:
+        with patch("chad.util.git_worktree.GitWorktreeManager") as mock_manager_cls:
             mock_manager = MagicMock()
             mock_manager.delete_worktree.return_value = True
             mock_manager_cls.return_value = mock_manager

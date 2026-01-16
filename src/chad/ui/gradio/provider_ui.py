@@ -7,12 +7,16 @@ import os
 import shutil
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import gradio as gr
 
 from chad.util.utils import platform_path, safe_home
 from chad.util.model_catalog import ModelCatalog
 from chad.util.installer import AIToolInstaller
+
+if TYPE_CHECKING:
+    from chad.ui.client import APIClient
 
 
 class ProviderUIManager:
@@ -37,22 +41,20 @@ class ProviderUIManager:
 
     def __init__(
         self,
-        security_mgr,
-        main_password: str,
+        api_client: "APIClient",
         model_catalog: ModelCatalog | None = None,
         installer: AIToolInstaller | None = None,
         dev_mode: bool = False,
     ):
-        self.security_mgr = security_mgr
-        self.main_password = main_password
-        self.model_catalog = model_catalog or ModelCatalog(security_mgr)
+        self.api_client = api_client
+        self.model_catalog = model_catalog or ModelCatalog(api_client)
         self.installer = installer or AIToolInstaller()
         self.dev_mode = dev_mode
 
     def get_provider_card_items(self) -> list[tuple[str, str]]:
         """Return provider account items for card display."""
-        accounts = self.security_mgr.list_accounts()
-        account_items = list(accounts.items())
+        accounts = self.api_client.list_accounts()
+        account_items = [(acc.name, acc.provider) for acc in accounts]
 
         # In screenshot mode, ensure deterministic ordering for tests
         if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
@@ -91,9 +93,11 @@ class ProviderUIManager:
 
     def _get_account_role(self, account_name: str) -> str | None:
         """Return the role assigned to the account, if any."""
-        role_assignments = self.security_mgr.list_role_assignments()
-        roles = [role for role, acct in role_assignments.items() if acct == account_name and role == "CODING"]
-        return roles[0] if roles else None
+        try:
+            account = self.api_client.get_account(account_name)
+            return account.role
+        except Exception:
+            return None
 
     def get_provider_usage(self, account_name: str) -> str:
         """Get usage text for a single provider."""
@@ -103,8 +107,11 @@ class ProviderUIManager:
 
             return get_mock_usage(account_name)
 
-        accounts = self.security_mgr.list_accounts()
-        provider = accounts.get(account_name)
+        try:
+            account = self.api_client.get_account(account_name)
+            provider = account.provider
+        except Exception:
+            provider = None
 
         if not provider:
             return "Select a provider to see usage details."
@@ -148,8 +155,11 @@ class ProviderUIManager:
 
         Used to sort providers by availability - highest remaining usage first.
         """
-        accounts = self.security_mgr.list_accounts()
-        provider = accounts.get(account_name)
+        try:
+            account = self.api_client.get_account(account_name)
+            provider = account.provider
+        except Exception:
+            provider = None
 
         if not provider:
             return 0.0
@@ -902,7 +912,8 @@ class ProviderUIManager:
 
     def get_account_choices(self) -> list[str]:
         """Get list of account names for dropdowns."""
-        return list(self.security_mgr.list_accounts().keys())
+        accounts = self.api_client.list_accounts()
+        return [acc.name for acc in accounts]
 
     def _check_provider_login(self, provider_type: str, account_name: str) -> tuple[bool, str]:  # noqa: C901
         """Check if a provider is logged in."""
@@ -992,12 +1003,13 @@ class ProviderUIManager:
                 base_response = self.provider_action_response(f"❌ {cli_detail}", card_slots)
                 return (*base_response, name_field_value, add_btn_state, accordion_state)
 
-            existing_accounts = self.security_mgr.list_accounts()
+            existing_accounts = self.api_client.list_accounts()
+            existing_names = {acc.name for acc in existing_accounts}
             base_name = provider_type
             counter = 1
             account_name = provider_name if provider_name else base_name
 
-            while account_name in existing_accounts:
+            while account_name in existing_names:
                 account_name = f"{base_name}-{counter}"
                 counter += 1
 
@@ -1112,7 +1124,7 @@ class ProviderUIManager:
                     pass  # Fall through to login_success check
 
                 if login_success:
-                    self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
+                    self.api_client.create_account(account_name, provider_type)
                     result = f"✅ Provider '{account_name}' added and logged in!"
                     name_field_value = ""
                     add_btn_state = gr.update(interactive=False)
@@ -1259,7 +1271,7 @@ class ProviderUIManager:
                         pass  # Any error, fall through to login_success check
 
                 if login_success:
-                    self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
+                    self.api_client.create_account(account_name, provider_type)
                     result = f"✅ Provider '{account_name}' added and logged in!"
                     name_field_value = ""
                     add_btn_state = gr.update(interactive=False)
@@ -1366,7 +1378,7 @@ class ProviderUIManager:
                         pass
 
                 if login_success:
-                    self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
+                    self.api_client.create_account(account_name, provider_type)
                     result = f"✅ Provider '{account_name}' added and logged in!"
                     name_field_value = ""
                     add_btn_state = gr.update(interactive=False)
@@ -1475,7 +1487,7 @@ class ProviderUIManager:
                         pass
 
                 if login_success:
-                    self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
+                    self.api_client.create_account(account_name, provider_type)
                     result = f"✅ Provider '{account_name}' added and logged in!"
                     name_field_value = ""
                     add_btn_state = gr.update(interactive=False)
@@ -1493,7 +1505,7 @@ class ProviderUIManager:
 
             else:
                 # Generic flow for mistral and other providers
-                self.security_mgr.store_account(account_name, provider_type, "", self.main_password)
+                self.api_client.create_account(account_name, provider_type)
                 result = f"✓ Provider '{account_name}' ({provider_type}) added."
 
                 login_success, login_msg = self._check_provider_login(provider_type, account_name)
@@ -1531,28 +1543,32 @@ class ProviderUIManager:
 
     def _unassign_account_roles(self, account_name: str) -> None:
         """Remove all role assignments for an account."""
-        role_assignments = self.security_mgr.list_role_assignments()
-        for role, acct in list(role_assignments.items()):
-            if acct == account_name and role == "CODING":
-                self.security_mgr.clear_role(role)
+        try:
+            account = self.api_client.get_account(account_name)
+            if account.role:
+                self.api_client.set_account_role(account_name, "")
+        except Exception:
+            pass
 
     def get_role_config_status(self) -> tuple[bool, str]:
         """Check if roles are properly configured for running tasks."""
-        role_assignments = self.security_mgr.list_role_assignments()
-        coding_account = role_assignments.get("CODING")
-
-        accounts = self.security_mgr.list_accounts()
+        accounts = self.api_client.list_accounts()
         if not accounts:
             return False, "⚠️ Add a provider to start tasks."
 
-        if not coding_account or coding_account not in accounts:
+        # Find coding account
+        coding_account = None
+        for acc in accounts:
+            if acc.role == "CODING":
+                coding_account = acc
+                break
+
+        if not coding_account:
             return False, "⚠️ Please select a Coding Agent in the Run Task tab."
 
-        coding_provider = accounts.get(coding_account, "unknown")
-        coding_model = self.security_mgr.get_account_model(coding_account)
-        coding_model_str = coding_model if coding_model != "default" else ""
+        coding_model_str = coding_account.model if coding_account.model else ""
 
-        coding_info = f"{coding_account} ({coding_provider}"
+        coding_info = f"{coding_account.name} ({coding_account.provider}"
         if coding_model_str:
             coding_info += f", {coding_model_str}"
         coding_info += ")"
@@ -1572,8 +1588,9 @@ class ProviderUIManager:
             if not role or not str(role).strip():
                 return self.provider_action_response("❌ Please select a role", card_slots)
 
-            accounts = self.security_mgr.list_accounts()
-            if account_name not in accounts:
+            accounts = self.api_client.list_accounts()
+            account_names = {acc.name for acc in accounts}
+            if account_name not in account_names:
                 return self.provider_action_response(f"❌ Provider '{account_name}' not found", card_slots)
 
             if role == "(none)":
@@ -1584,7 +1601,7 @@ class ProviderUIManager:
                 return self.provider_action_response("❌ Only the CODING role is supported", card_slots)
 
             self._unassign_account_roles(account_name)
-            self.security_mgr.assign_role(account_name, "CODING")
+            self.api_client.set_account_role(account_name, "CODING")
             return self.provider_action_response(f"✓ Assigned CODING role to {account_name}", card_slots)
         except Exception as exc:
             return self.provider_action_response(f"❌ Error assigning role: {str(exc)}", card_slots)
@@ -1598,11 +1615,12 @@ class ProviderUIManager:
             if not model:
                 return self.provider_action_response("❌ Please select a model", card_slots)
 
-            accounts = self.security_mgr.list_accounts()
-            if account_name not in accounts:
+            accounts = self.api_client.list_accounts()
+            account_names = {acc.name for acc in accounts}
+            if account_name not in account_names:
                 return self.provider_action_response(f"❌ Provider '{account_name}' not found", card_slots)
 
-            self.security_mgr.set_account_model(account_name, model)
+            self.api_client.set_account_model(account_name, model)
             return self.provider_action_response(f"✓ Set model to `{model}` for {account_name}", card_slots)
         except Exception as exc:
             return self.provider_action_response(f"❌ Error setting model: {str(exc)}", card_slots)
@@ -1616,11 +1634,12 @@ class ProviderUIManager:
             if not reasoning:
                 return self.provider_action_response("❌ Please select a reasoning level", card_slots)
 
-            accounts = self.security_mgr.list_accounts()
-            if account_name not in accounts:
+            accounts = self.api_client.list_accounts()
+            account_names = {acc.name for acc in accounts}
+            if account_name not in account_names:
                 return self.provider_action_response(f"❌ Provider '{account_name}' not found", card_slots)
 
-            self.security_mgr.set_account_reasoning(account_name, reasoning)
+            self.api_client.set_account_reasoning(account_name, reasoning)
             return self.provider_action_response(f"✓ Set reasoning to `{reasoning}` for {account_name}", card_slots)
         except Exception as exc:
             return self.provider_action_response(f"❌ Error setting reasoning: {str(exc)}", card_slots)
@@ -1632,8 +1651,12 @@ class ProviderUIManager:
         if not account_name:
             return ["default"]
 
-        accounts = self.security_mgr.list_accounts()
-        provider = accounts.get(account_name, "")
+        try:
+            account = self.api_client.get_account(account_name)
+            provider = account.provider
+        except Exception:
+            provider = ""
+
         catalog = model_catalog_override or self.model_catalog
         return catalog.get_models(provider, account_name)
 
@@ -1642,12 +1665,11 @@ class ProviderUIManager:
         if provider == "openai":
             stored = "default"
             if account_name:
-                getter = getattr(self.security_mgr, "get_account_reasoning", None)
-                if getter:
-                    try:
-                        stored = getter(account_name) or "default"
-                    except Exception:
-                        stored = "default"
+                try:
+                    account = self.api_client.get_account(account_name)
+                    stored = account.reasoning or "default"
+                except Exception:
+                    stored = "default"
             stored = stored if isinstance(stored, str) else "default"
             choices = set(self.OPENAI_REASONING_LEVELS)
             if stored:
@@ -1670,8 +1692,11 @@ class ProviderUIManager:
             if not confirmed:
                 return self.provider_action_response("Deletion cancelled.", card_slots)
 
-            accounts = self.security_mgr.list_accounts()
-            provider = accounts.get(account_name)
+            try:
+                account = self.api_client.get_account(account_name)
+                provider = account.provider
+            except Exception:
+                provider = None
 
             if provider == "openai":
                 codex_home = self._get_codex_home(account_name)
@@ -1682,7 +1707,7 @@ class ProviderUIManager:
                 if claude_config.exists():
                     shutil.rmtree(claude_config, ignore_errors=True)
 
-            self.security_mgr.delete_account(account_name)
+            self.api_client.delete_account(account_name)
             return self.provider_action_response(f"✓ Provider '{account_name}' deleted", card_slots)
         except Exception as exc:
             return self.provider_action_response(f"❌ Error deleting provider: {str(exc)}", card_slots)

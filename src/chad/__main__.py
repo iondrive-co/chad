@@ -120,10 +120,12 @@ def run_unified(
     api_port: int,
     dev_mode: bool,
     ui_mode: str = "gradio",
+    server_url: str | None = None,
 ) -> None:
-    """Run both server and UI in one process.
+    """Run UI, optionally with a local API server.
 
-    The API server runs in a background thread while the UI runs in the main thread.
+    If server_url is provided, connects to that server. Otherwise starts a local
+    API server in a background thread.
 
     Args:
         main_password: Main password for config encryption
@@ -131,34 +133,38 @@ def run_unified(
         api_port: Port for API server (0 for ephemeral)
         dev_mode: Enable development mode
         ui_mode: UI mode - "gradio" or "cli"
+        server_url: External server URL to connect to (skips local server)
     """
-    import uvicorn
-    from chad.server.main import create_app
+    if server_url:
+        # Connect to existing server
+        api_base_url = server_url
+        print(f"Connecting to API server at {api_base_url}")
+    else:
+        # Start local API server
+        import uvicorn
+        from chad.server.main import create_app
 
-    # Use ephemeral port if 0
-    if api_port == 0:
-        api_port = find_free_port()
+        if api_port == 0:
+            api_port = find_free_port()
 
-    # Start API server in background thread
-    app = create_app()
-    server_config = uvicorn.Config(app, host="127.0.0.1", port=api_port, log_level="warning")
-    server = uvicorn.Server(server_config)
+        app = create_app()
+        server_config = uvicorn.Config(app, host="127.0.0.1", port=api_port, log_level="warning")
+        server = uvicorn.Server(server_config)
 
-    server_thread = threading.Thread(target=server.run, daemon=True)
-    server_thread.start()
+        server_thread = threading.Thread(target=server.run, daemon=True)
+        server_thread.start()
 
-    # Give server a moment to start
-    time.sleep(0.5)
-    print(f"API server running on http://127.0.0.1:{api_port}")
+        time.sleep(0.5)
+        api_base_url = f"http://127.0.0.1:{api_port}"
+        print(f"API server running on {api_base_url}")
 
     # Run UI in main thread (blocking)
     if ui_mode == "cli":
         from chad.ui.cli import launch_cli_ui
-        api_base_url = f"http://127.0.0.1:{api_port}"
         launch_cli_ui(api_base_url=api_base_url, password=main_password)
     else:
         from chad.ui.gradio.web_ui import launch_web_ui
-        launch_web_ui(main_password, port=ui_port, dev_mode=dev_mode)
+        launch_web_ui(api_base_url=api_base_url, port=ui_port, dev_mode=dev_mode)
 
 
 def main() -> int:
@@ -173,9 +179,9 @@ def main() -> int:
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["unified", "server", "ui"],
+        choices=["unified", "server"],
         default="unified",
-        help="Run mode: unified (default, both server+UI), server (API only), ui (Gradio only)",
+        help="Run mode: unified (default, UI + local server), server (API only)",
     )
     parser.add_argument(
         "--port", type=int, default=0, help="Port for UI (default: 0 = ephemeral)"
@@ -187,7 +193,8 @@ def main() -> int:
         "--api-host", type=str, default="0.0.0.0", help="Host for API server (default: 0.0.0.0)"
     )
     parser.add_argument(
-        "--server-url", type=str, default=None, help="Server URL for UI mode (default: http://localhost:8000)"
+        "--server-url", type=str, default=None,
+        help="Connect to existing API server instead of starting a local one"
     )
     parser.add_argument(
         "--dev", action="store_true", help="Enable development mode (enables mock provider)"
@@ -238,27 +245,15 @@ def main() -> int:
         # Determine UI mode from args or config
         ui_mode = args.ui if args.ui else config_mgr.get_ui_mode()
 
-        if args.mode == "unified":
-            # Run both server and UI
-            run_unified(
-                main_password,
-                ui_port=args.port,
-                api_port=args.api_port,
-                dev_mode=args.dev,
-                ui_mode=ui_mode,
-            )
-        else:
-            # UI-only mode (connects to external server)
-            if args.server_url:
-                os.environ["CHAD_SERVER_URL"] = args.server_url
-
-            if ui_mode == "cli":
-                from chad.ui.cli import launch_cli_ui
-                server_url = args.server_url or "http://localhost:8000"
-                launch_cli_ui(api_base_url=server_url, password=main_password)
-            else:
-                from chad.ui.gradio.web_ui import launch_web_ui
-                launch_web_ui(main_password, port=args.port, dev_mode=args.dev)
+        # Run UI with optional local server (--server-url skips local server)
+        run_unified(
+            main_password,
+            ui_port=args.port,
+            api_port=args.api_port,
+            dev_mode=args.dev,
+            ui_mode=ui_mode,
+            server_url=args.server_url,
+        )
 
         return 0
     except ValueError as e:

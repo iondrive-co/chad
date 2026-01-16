@@ -76,6 +76,23 @@ class MergeResult:
     conflicts: list[dict[str, Any]] | None
 
 
+@dataclass
+class Preferences:
+    """User preferences from API."""
+
+    last_project_path: str | None
+    dark_mode: bool
+    ui_mode: str
+
+
+@dataclass
+class CleanupSettings:
+    """Cleanup settings from API."""
+
+    retention_days: int
+    auto_cleanup: bool
+
+
 class APIClient:
     """Client for Chad server REST API."""
 
@@ -176,6 +193,23 @@ class APIClient:
         resp.raise_for_status()
         data = resp.json()
         return [self._parse_account(a) for a in data.get("accounts", [])]
+
+    def create_account(self, name: str, provider: str) -> Account:
+        """Register an account after OAuth authentication.
+
+        Args:
+            name: Account name
+            provider: Provider type (anthropic, openai, etc.)
+
+        Returns:
+            The created Account
+        """
+        resp = self._client.post(
+            self._url("/accounts"),
+            json={"name": name, "provider": provider},
+        )
+        resp.raise_for_status()
+        return self._parse_account(resp.json())
 
     def get_account(self, name: str) -> Account:
         """Get an account by name."""
@@ -387,49 +421,70 @@ class APIClient:
         resp.raise_for_status()
         return resp.json()
 
-    def get_cleanup_settings(self) -> dict[str, Any]:
+    def get_cleanup_settings(self) -> CleanupSettings:
         """Get cleanup settings."""
         resp = self._client.get(self._url("/config/cleanup"))
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        return CleanupSettings(
+            retention_days=data.get("cleanup_days", 7),
+            auto_cleanup=data.get("auto_cleanup", True),
+        )
 
-    def update_cleanup_settings(
+    def set_cleanup_settings(
         self,
-        cleanup_days: int | None = None,
+        retention_days: int | None = None,
         auto_cleanup: bool | None = None,
-    ) -> dict[str, Any]:
+    ) -> CleanupSettings:
         """Update cleanup settings."""
         data = {}
-        if cleanup_days is not None:
-            data["cleanup_days"] = cleanup_days
+        if retention_days is not None:
+            data["cleanup_days"] = retention_days
         if auto_cleanup is not None:
             data["auto_cleanup"] = auto_cleanup
 
         resp = self._client.put(self._url("/config/cleanup"), json=data)
         resp.raise_for_status()
-        return resp.json()
+        result = resp.json()
+        return CleanupSettings(
+            retention_days=result.get("cleanup_days", 7),
+            auto_cleanup=result.get("auto_cleanup", True),
+        )
 
-    def get_preferences(self) -> dict[str, Any]:
+    def get_preferences(self) -> "Preferences":
         """Get user preferences."""
         resp = self._client.get(self._url("/config/preferences"))
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        return Preferences(
+            last_project_path=data.get("last_project_path"),
+            dark_mode=data.get("dark_mode", True),
+            ui_mode=data.get("ui_mode", "gradio"),
+        )
 
-    def update_preferences(
+    def set_preferences(
         self,
         last_project_path: str | None = None,
         dark_mode: bool | None = None,
-    ) -> dict[str, Any]:
+        ui_mode: str | None = None,
+    ) -> "Preferences":
         """Update user preferences."""
         data = {}
         if last_project_path is not None:
             data["last_project_path"] = last_project_path
         if dark_mode is not None:
             data["dark_mode"] = dark_mode
+        if ui_mode is not None:
+            data["ui_mode"] = ui_mode
 
         resp = self._client.put(self._url("/config/preferences"), json=data)
         resp.raise_for_status()
-        return resp.json()
+        result = resp.json()
+        return Preferences(
+            last_project_path=result.get("last_project_path"),
+            dark_mode=result.get("dark_mode", True),
+            ui_mode=result.get("ui_mode", "gradio"),
+        )
 
     # Providers
     def list_providers(self) -> list[dict[str, Any]]:
@@ -437,3 +492,26 @@ class APIClient:
         resp = self._client.get(self._url("/providers"))
         resp.raise_for_status()
         return resp.json().get("providers", [])
+
+    # Verification Agent
+    def get_verification_agent(self) -> str | None:
+        """Get the account configured as verification agent."""
+        resp = self._client.get(self._url("/config/verification-agent"))
+        resp.raise_for_status()
+        return resp.json().get("account_name")
+
+    def set_verification_agent(self, account_name: str | None) -> str | None:
+        """Set or clear the verification agent account.
+
+        Args:
+            account_name: Account name to set, or None to clear
+
+        Returns:
+            The account name that was set (or None if cleared)
+        """
+        resp = self._client.put(
+            self._url("/config/verification-agent"),
+            json={"account_name": account_name},
+        )
+        resp.raise_for_status()
+        return resp.json().get("account_name")
