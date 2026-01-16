@@ -28,7 +28,7 @@ def cleanup_old_worktrees(project_path: Path, days: int) -> list[str]:
     Returns:
         List of cleaned up task IDs
     """
-    from chad.git_worktree import GitWorktreeManager
+    from chad.util.git_worktree import GitWorktreeManager
 
     worktree_base = project_path / ".chad-worktrees"
     if not worktree_base.exists():

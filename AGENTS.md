@@ -7,7 +7,7 @@ flawlessly working features.
 
 ## Before making changes
 
-**For UI work, first search `src/chad/verification/visual_test_map.py` for keywords from your task** (e.g., "reasoning effort",
+**For UI work, first search `src/chad/ui/gradio/verification/visual_test_map.py` for keywords from your task** (e.g., "reasoning effort",
 "verification agent"). The `UI_COMPONENT_MAP` tells you which screenshot component to use and which tests cover it.
 
 Then write a test which should fail until the issue is fixed or feature is implemented. Take a before screenshot to
@@ -28,7 +28,7 @@ smallest causal change and add a regression test that fails before the fix and p
 
 ## During changes
 
-For UI changes add any new display functionality to `verification/visual_test_map.py`.
+For UI changes add any new display functionality to `src/chad/ui/gradio/verification/visual_test_map.py`.
 
 ### Test Index Awareness
 
@@ -42,13 +42,13 @@ When modifying functions that return tuples (e.g., `make_yield`, generator funct
 1. Take an after screenshot if the issue has a visual component
 2. Run verification using the `verify()` function which handles Python detection automatically:
    ```python
-   from chad.verification.tools import verify
+   from chad.ui.gradio.verification.tools import verify
    result = verify()  # Runs flake8 + all tests
    # Or: verify(lint_only=True)  # Just flake8
    ```
 3. **Run startup sanity check** to catch import/runtime errors not covered by tests:
    ```bash
-   timeout 5 .venv/bin/python -c "from chad.web_ui import launch_web_ui" 2>&1 || echo "Startup check failed"
+   timeout 5 .venv/bin/python -c "from chad.ui.gradio import launch_web_ui" 2>&1 || echo "Startup check failed"
    ```
    This catches NameErrors, missing imports, and other issues that flake8 and tests may miss.
 4. Perform a critical self-review and note any outstanding issues
@@ -56,7 +56,7 @@ When modifying functions that return tuples (e.g., `make_yield`, generator funct
 
 ## Screenshot Fixtures
 
-Screenshots use synthetic data for realistic UI captures. See `src/chad/screenshot_fixtures.py` for fixture definitions.
+Screenshots use synthetic data for realistic UI captures. See `src/chad/ui/gradio/verification/screenshot_fixtures.py` for fixture definitions.
 
 ## Providers
 
@@ -78,17 +78,30 @@ The readme file is `README.md` (all caps), not `Readme.md`.
 
 ```
 src/chad/
-├── __main__.py       # Entry point
-├── prompts.py        # Coding and verification agent prompts
-├── providers.py      # AI provider implementations
-├── web_ui.py         # Gradio web interface
-└── model_catalog.py  # Model discovery per provider
+├── __init__.py           # Package init
+├── __main__.py           # Entry point
+├── util/                 # Domain logic and utilities
+│   ├── providers.py      # AI provider implementations
+│   ├── config_manager.py # Configuration management
+│   ├── git_worktree.py   # Git worktree management
+│   ├── model_catalog.py  # Model discovery per provider
+│   └── prompts.py        # Coding and verification prompts
+├── server/               # FastAPI backend
+│   ├── main.py           # Server entry point
+│   ├── api/routes/       # REST + WebSocket endpoints
+│   └── services/         # Business logic services
+└── ui/
+    ├── gradio/           # Gradio web interface
+    │   ├── web_ui.py     # Main UI implementation
+    │   └── verification/ # Visual testing tools
+    ├── client/           # API + WebSocket clients
+    └── cli/              # CLI interface (placeholder)
 
-.claude/skills/       # Claude Code skills (auto-activated)
+.claude/skills/           # Claude Code skills (auto-activated)
 ├── verifying/
 └── taking-screenshots/
 
-.codex/skills/        # OpenAI Codex skills (auto-activated)
+.codex/skills/            # OpenAI Codex skills (auto-activated)
 ├── verifying/
 └── taking-screenshots/
 ```
@@ -101,7 +114,7 @@ Config stored in `~/.chad.conf` with encrypted provider tokens.
 
 The project uses `.venv` (not `venv`). Worktrees automatically symlink to the main project's `.venv` so agents don't need to reinstall dependencies.
 
-**For running lint/tests**: Always use `verify()` from `chad.verification.tools` instead of hardcoded paths like `./.venv/bin/python`. The verify() function automatically detects the correct Python interpreter.
+**For running lint/tests**: Always use `verify()` from `chad.ui.gradio.verification.tools` instead of hardcoded paths like `./.venv/bin/python`. The verify() function automatically detects the correct Python interpreter.
 
 To create a fresh virtual environment (rarely needed):
 

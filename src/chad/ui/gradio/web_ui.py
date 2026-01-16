@@ -17,11 +17,11 @@ from typing import Iterator
 import gradio as gr
 
 from .provider_ui import ProviderUIManager
-from .config_manager import ConfigManager, validate_config_keys
-from .session_logger import SessionLogger
-from .providers import ModelConfig, parse_codex_output, create_provider
-from .model_catalog import ModelCatalog
-from .prompts import (
+from chad.util.config_manager import ConfigManager, validate_config_keys
+from chad.util.session_logger import SessionLogger
+from chad.util.providers import ModelConfig, parse_codex_output, create_provider
+from chad.util.model_catalog import ModelCatalog
+from chad.util.prompts import (
     build_coding_prompt,
     extract_coding_summary,
     extract_progress_update,
@@ -31,7 +31,7 @@ from .prompts import (
     ProgressUpdate,
     VerificationParseError,
 )
-from .git_worktree import GitWorktreeManager, MergeConflict, FileDiff
+from chad.util.git_worktree import GitWorktreeManager, MergeConflict, FileDiff
 from .verification.ui_playwright_runner import cleanup_all_test_servers
 
 
@@ -6164,7 +6164,7 @@ def launch_web_ui(password: str = None, port: int = 7860, dev_mode: bool = False
     """
     # Ensure downstream agents inherit a consistent project root
     try:
-        from .config import ensure_project_root_env
+        from chad.util.config import ensure_project_root_env
 
         ensure_project_root_env()
     except Exception:

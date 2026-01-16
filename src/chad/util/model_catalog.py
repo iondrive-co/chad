@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from chad.utils import platform_path, safe_home
+from chad.util.utils import platform_path, safe_home
 
 try:  # Python 3.11+
     import tomllib  # type: ignore

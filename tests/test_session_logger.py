@@ -4,7 +4,7 @@ import os
 import json
 from pathlib import Path
 
-from chad.session_logger import SessionLogger
+from chad.util.session_logger import SessionLogger
 
 
 def test_session_logger_respects_env_dir(tmp_path, monkeypatch):

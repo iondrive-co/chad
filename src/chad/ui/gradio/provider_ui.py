@@ -10,9 +10,9 @@ from pathlib import Path
 
 import gradio as gr
 
-from chad.utils import platform_path, safe_home
-from .model_catalog import ModelCatalog
-from .installer import AIToolInstaller
+from chad.util.utils import platform_path, safe_home
+from chad.util.model_catalog import ModelCatalog
+from chad.util.installer import AIToolInstaller
 
 
 class ProviderUIManager:

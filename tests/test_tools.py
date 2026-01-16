@@ -11,7 +11,7 @@ class TestVerify:
 
     def test_verify_lint_only_success(self):
         """verify(lint_only=True) should run only flake8."""
-        from chad.verification.tools import verify
+        from chad.ui.gradio.verification.tools import verify
 
         with patch("chad.verification.tools.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
@@ -25,7 +25,7 @@ class TestVerify:
 
     def test_verify_lint_failure(self):
         """verify should report lint failures."""
-        from chad.verification.tools import verify
+        from chad.ui.gradio.verification.tools import verify
 
         with patch("chad.verification.tools.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 1
@@ -39,7 +39,7 @@ class TestVerify:
 
     def test_verify_prefers_project_venv(self, tmp_path, monkeypatch):
         """verify should use project venv python when available."""
-        from chad.verification.tools import verify
+        from chad.ui.gradio.verification.tools import verify
 
         venv_dir = tmp_path / "venv" / ("Scripts" if os.name == "nt" else "bin")
         venv_dir.mkdir(parents=True, exist_ok=True)
@@ -63,7 +63,7 @@ class TestVerify:
 
     def test_verify_reports_pytest_stderr_on_error(self, monkeypatch, tmp_path):
         """verify should surface stderr when pytest fails before running tests."""
-        from chad.verification.tools import verify
+        from chad.ui.gradio.verification.tools import verify
 
         monkeypatch.setattr("chad.verification.tools.resolve_project_root", lambda: (tmp_path, "test"))
         # Skip playwright setup since we're testing pytest error handling
@@ -98,7 +98,7 @@ class TestScreenshot:
 
     def test_screenshot_unknown_component(self):
         """screenshot with unknown component should fail."""
-        from chad.verification.tools import screenshot
+        from chad.ui.gradio.verification.tools import screenshot
 
         result = screenshot(tab="run", component="nonexistent")
 
@@ -107,7 +107,7 @@ class TestScreenshot:
 
     def test_screenshot_component_selector_mapping(self):
         """Verify component selectors are correctly mapped."""
-        from chad.verification.tools import COMPONENT_SELECTORS
+        from chad.ui.gradio.verification.tools import COMPONENT_SELECTORS
 
         assert "project-path" in COMPONENT_SELECTORS
         assert "live-view" in COMPONENT_SELECTORS
@@ -132,7 +132,7 @@ class TestSkillsEfficiency:
             assert "./.venv/bin/python" in skill_content, "Current skill hardcodes venv path"
 
             # After improvement, the skill should either:
-            # 1. Recommend using verify() function from chad.verification.tools
+            # 1. Recommend using verify() function from chad.ui.gradio.verification.tools
             # 2. Include fallback logic for when .venv doesn't exist
             # This test will pass when the skill is improved
 
@@ -142,7 +142,7 @@ class TestParseVerificationResponse:
 
     def test_parse_with_thinking_prefix(self):
         """Should handle responses with *Thinking:* prefix before JSON."""
-        from chad.prompts import parse_verification_response
+        from chad.util.prompts import parse_verification_response
 
         response = ('*Thinking: **Ensuring valid JSON output***\n\n'
                     '{"passed":false,"summary":"Found issues","issues":["Error 1"]}')
@@ -155,7 +155,7 @@ class TestParseVerificationResponse:
 
     def test_parse_nested_json(self):
         """Should handle JSON with nested objects."""
-        from chad.prompts import parse_verification_response
+        from chad.util.prompts import parse_verification_response
 
         response = ('{"passed":true,"summary":"All good","issues":[],'
                     '"details":{"lint":{"status":"ok"}}}')
@@ -168,7 +168,7 @@ class TestParseVerificationResponse:
 
     def test_parse_markdown_code_block(self):
         """Should extract JSON from markdown code blocks."""
-        from chad.prompts import parse_verification_response
+        from chad.util.prompts import parse_verification_response
 
         response = '```json\n{"passed":true,"summary":"OK"}\n```'
 
@@ -179,7 +179,7 @@ class TestParseVerificationResponse:
 
     def test_parse_plain_json(self):
         """Should handle plain JSON without any wrapper."""
-        from chad.prompts import parse_verification_response
+        from chad.util.prompts import parse_verification_response
 
         response = '{"passed":false,"summary":"Test failure"}'
 
@@ -190,14 +190,14 @@ class TestParseVerificationResponse:
 
     def test_parse_invalid_json_raises(self):
         """Should raise VerificationParseError for invalid JSON."""
-        from chad.prompts import parse_verification_response, VerificationParseError
+        from chad.util.prompts import parse_verification_response, VerificationParseError
 
         with pytest.raises(VerificationParseError):
             parse_verification_response("not json at all")
 
     def test_parse_missing_passed_field_raises(self):
         """Should raise VerificationParseError if 'passed' field is missing."""
-        from chad.prompts import parse_verification_response, VerificationParseError
+        from chad.util.prompts import parse_verification_response, VerificationParseError
 
         with pytest.raises(VerificationParseError):
             parse_verification_response('{"summary":"No passed field"}')

@@ -5,8 +5,8 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from chad.provider_ui import ProviderUIManager
-from chad.config_manager import ConfigManager
+from chad.ui.gradio.provider_ui import ProviderUIManager
+from chad.util.config_manager import ConfigManager
 
 
 class TestUsageTimezone:

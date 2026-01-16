@@ -1,4 +1,4 @@
-from chad.verification.visual_test_map import (
+from chad.ui.gradio.verification.visual_test_map import (
     UI_COMPONENT_MAP,
     tests_for_keywords,
     tests_for_paths,
@@ -24,7 +24,7 @@ def test_main_injects_worktree_src(monkeypatch, capsys):
     """_main should put current worktree src at the front of sys.path."""
     import sys
     from importlib import reload
-    from chad.verification import visual_test_map
+    from chad.ui.gradio.verification import visual_test_map
 
     visual_test_map = reload(visual_test_map)
 

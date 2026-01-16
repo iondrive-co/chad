@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def test_build_pytest_command():
-    from chad.verification.quick_verify import build_pytest_command
+    from chad.ui.gradio.verification.quick_verify import build_pytest_command
 
     root = Path("/tmp/project")
     cmd = build_pytest_command(root, workers="3", keyword="mcp", tests=["tests/test_one.py"])

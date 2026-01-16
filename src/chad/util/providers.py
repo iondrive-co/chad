@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from chad.utils import platform_path, safe_home
+from chad.util.utils import platform_path, safe_home
 from .installer import AIToolInstaller
 from .installer import DEFAULT_TOOLS_DIR
 

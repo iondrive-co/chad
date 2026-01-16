@@ -1,4 +1,4 @@
-"""Main entry point for Chad - launches web interface."""
+"""Main entry point for Chad - launches web interface or server."""
 
 import argparse
 import atexit
@@ -10,13 +10,17 @@ import sys
 import threading
 import time
 from datetime import datetime
+from typing import Literal
 
 from pathlib import Path
 
-from .cleanup import cleanup_on_startup, cleanup_on_shutdown
-from .config_manager import ConfigManager
-from .web_ui import launch_web_ui
-from .config import ensure_project_root_env
+from .util.cleanup import cleanup_on_startup, cleanup_on_shutdown
+from .util.config_manager import ConfigManager
+from .ui.gradio.web_ui import launch_web_ui
+from .util.config import ensure_project_root_env
+
+# Supported run modes
+RunMode = Literal["unified", "server", "ui"]
 
 
 def _start_parent_watchdog() -> None:
@@ -86,6 +90,66 @@ SCS = [
 ]
 
 
+def find_free_port() -> int:
+    """Find a free port by binding to port 0."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def run_server(host: str = "0.0.0.0", port: int = 0) -> None:
+    """Run the Chad API server.
+
+    Args:
+        host: Host to bind to
+        port: Port to run on (0 for ephemeral)
+    """
+    import uvicorn
+    from chad.server.main import create_app
+
+    if port == 0:
+        port = find_free_port()
+
+    app = create_app()
+    print(f"Starting Chad API server on {host}:{port}")
+    uvicorn.run(app, host=host, port=port)
+
+
+def run_unified(main_password: str | None, ui_port: int, api_port: int, dev_mode: bool) -> None:
+    """Run both server and UI in one process.
+
+    The API server runs in a background thread while the UI runs in the main thread.
+
+    Args:
+        main_password: Main password for config encryption
+        ui_port: Port for Gradio UI (0 for ephemeral)
+        api_port: Port for API server (0 for ephemeral)
+        dev_mode: Enable development mode
+    """
+    import uvicorn
+    from chad.server.main import create_app
+
+    # Use ephemeral port if 0
+    if api_port == 0:
+        api_port = find_free_port()
+
+    # Start API server in background thread
+    app = create_app()
+    server_config = uvicorn.Config(app, host="127.0.0.1", port=api_port, log_level="warning")
+    server = uvicorn.Server(server_config)
+
+    server_thread = threading.Thread(target=server.run, daemon=True)
+    server_thread.start()
+
+    # Give server a moment to start
+    time.sleep(0.5)
+    print(f"API server running on http://127.0.0.1:{api_port}")
+
+    # Run UI in main thread (blocking) - Gradio handles ephemeral ports itself
+    launch_web_ui(main_password, port=ui_port, dev_mode=dev_mode)
+
+
 def main() -> int:
     """Main entry point for Chad web interface."""
     # Start watchdog if spawned by a parent process (e.g., tests)
@@ -96,7 +160,23 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="Chad: YOLO AI")
     parser.add_argument(
-        "--port", type=int, default=7860, help="Port to run on (default: 7860, use 0 for ephemeral; falls back if busy)"
+        "--mode",
+        type=str,
+        choices=["unified", "server", "ui"],
+        default="unified",
+        help="Run mode: unified (default, both server+UI), server (API only), ui (Gradio only)",
+    )
+    parser.add_argument(
+        "--port", type=int, default=0, help="Port for UI (default: 0 = ephemeral)"
+    )
+    parser.add_argument(
+        "--api-port", type=int, default=0, help="Port for API server (default: 0 = ephemeral)"
+    )
+    parser.add_argument(
+        "--api-host", type=str, default="0.0.0.0", help="Host for API server (default: 0.0.0.0)"
+    )
+    parser.add_argument(
+        "--server-url", type=str, default=None, help="Server URL for UI mode (default: http://localhost:8000)"
     )
     parser.add_argument(
         "--dev", action="store_true", help="Enable development mode (enables mock provider)"
@@ -123,7 +203,12 @@ def main() -> int:
     atexit.register(cleanup_on_shutdown)
 
     try:
-        # Check for password from environment (for automation/screenshots)
+        # Server-only mode - no password needed
+        if args.mode == "server":
+            run_server(host=args.api_host, port=args.api_port)
+            return 0
+
+        # UI modes need password
         main_password = os.environ.get("CHAD_PASSWORD")
 
         if main_password is None:
@@ -131,7 +216,15 @@ def main() -> int:
                 sys.stdout.flush()
                 main_password = getpass.getpass("Create main password for Chad: ")
 
-        launch_web_ui(main_password, port=args.port, dev_mode=args.dev)
+        if args.mode == "unified":
+            # Run both server and UI
+            run_unified(main_password, ui_port=args.port, api_port=args.api_port, dev_mode=args.dev)
+        else:
+            # UI-only mode (connects to external server)
+            if args.server_url:
+                os.environ["CHAD_SERVER_URL"] = args.server_url
+            launch_web_ui(main_password, port=args.port, dev_mode=args.dev)
+
         return 0
     except ValueError as e:
         print(f"\n❌ Error: {e}")

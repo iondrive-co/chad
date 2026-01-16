@@ -34,8 +34,8 @@ For UI tasks: take a "before" screenshot first and include the path. For non-UI 
 5. Once you have completed your changes for the task, take an after screenshot (if that is supported) to confirm
 that the user's request is fixed/done.
 6. You MUST run verification before completing your task. Use the built-in verify() function for efficiency:
-- Recommended approach: python -c \"from chad.verification.tools import verify; result = verify(); print('✓ Passed' if result['success'] else f'✗ Failed at {{result.get(\"failed_phase\", \"unknown\")}}'); exit(0 if result['success'] else 1)\"
-- For visual-only tests when needed: python -c \"from chad.verification.tools import verify; result = verify(visual_only=True); print('✓ Passed' if result['success'] else f'✗ Failed at {{result.get(\"failed_phase\", \"unknown\")}}'); exit(0 if result['success'] else 1)\"
+- Recommended approach: python -c \"from chad.ui.gradio.verification.tools import verify; result = verify(); print('✓ Passed' if result['success'] else f'✗ Failed at {{result.get(\"failed_phase\", \"unknown\")}}'); exit(0 if result['success'] else 1)\"
+- For visual-only tests when needed: python -c \"from chad.ui.gradio.verification.tools import verify; result = verify(visual_only=True); print('✓ Passed' if result['success'] else f'✗ Failed at {{result.get(\"failed_phase\", \"unknown\")}}'); exit(0 if result['success'] else 1)\"
 
 If verify() is unavailable, use manual commands with intelligent Python detection:
 - Detect Python: Use ./.venv/bin/python if exists, otherwise ./.venv/Scripts/python.exe (Windows), ./venv/bin/python, ./venv/Scripts/python.exe (Windows), or fallback to python3
@@ -45,7 +45,7 @@ If verify() is unavailable, use manual commands with intelligent Python detectio
 - Run only the visual tests mapped to the UI you touched (see src/chad/verification/visual_test_map.py):
     VTESTS=$({{detected_python}} - <<'PY'
 import subprocess
-from chad.verification.visual_test_map import tests_for_paths
+from chad.ui.gradio.verification.visual_test_map import tests_for_paths
 changed = subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines()
 print(" or ".join(tests_for_paths(changed)))
 PY
