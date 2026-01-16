@@ -75,6 +75,86 @@ Screenshots use synthetic data for realistic UI captures. See `src/chad/ui/gradi
 - OAuth creds in `~/.gemini/oauth_creds.json`
 - CLI: `gemini -y` (YOLO mode)
 
+## API Reference
+
+All endpoints are prefixed with `/api/v1`. Keep this section up to date when adding or modifying endpoints.
+
+### Status
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/status` | Server status - returns health, version, uptime |
+
+### Sessions
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/sessions` | Create a new session |
+| GET | `/sessions` | List all active sessions |
+| GET | `/sessions/{id}` | Get session details |
+| DELETE | `/sessions/{id}` | Delete session and clean up resources |
+| POST | `/sessions/{id}/cancel` | Cancel running task in session |
+| POST | `/sessions/{id}/tasks` | Start a new coding task |
+| GET | `/sessions/{id}/tasks/{task_id}` | Get task status |
+
+### Accounts & Providers
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/providers` | List supported provider types |
+| GET | `/accounts` | List configured accounts |
+| POST | `/accounts` | Add new account (requires OAuth - use UI) |
+| GET | `/accounts/{name}` | Get account details |
+| DELETE | `/accounts/{name}` | Delete an account |
+| PUT | `/accounts/{name}/model` | Set account's model |
+| PUT | `/accounts/{name}/reasoning` | Set account's reasoning level |
+| PUT | `/accounts/{name}/role` | Assign role (CODING/VERIFICATION) |
+| GET | `/accounts/{name}/models` | Get available models for account |
+| GET | `/accounts/{name}/usage` | Get usage stats (not implemented) |
+
+### Worktree Operations
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/sessions/{id}/worktree` | Create git worktree for session |
+| GET | `/sessions/{id}/worktree` | Get worktree status |
+| GET | `/sessions/{id}/worktree/diff` | Get diff summary |
+| GET | `/sessions/{id}/worktree/diff/full` | Get full diff with hunks |
+| POST | `/sessions/{id}/worktree/merge` | Merge changes to main branch |
+| POST | `/sessions/{id}/worktree/reset` | Reset worktree (discard changes) |
+| DELETE | `/sessions/{id}/worktree` | Delete worktree |
+
+### Configuration
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/config/verification` | Get verification settings |
+| PUT | `/config/verification` | Update verification settings |
+| GET | `/config/cleanup` | Get cleanup settings |
+| PUT | `/config/cleanup` | Update cleanup settings |
+| GET | `/config/preferences` | Get user preferences |
+| PUT | `/config/preferences` | Update user preferences |
+
+### WebSocket
+
+| Endpoint | Description |
+|----------|-------------|
+| `/ws/{session_id}` | Real-time task updates |
+
+**WebSocket Message Types (server → client):**
+- `stream`: Raw AI output chunk
+- `activity`: Tool use or thinking activity
+- `status`: Status message
+- `message_start`: AI message started
+- `message_complete`: AI message completed
+- `progress`: Progress update
+- `complete`: Task completed
+- `error`: Error occurred
+
+**WebSocket Message Types (client → server):**
+- `ping`: Heartbeat (receives `pong`)
+- `cancel`: Cancel current task
+
 ## File Structure
 
 The readme file is `README.md` (all caps), not `Readme.md`.
@@ -98,11 +178,9 @@ src/chad/
     │   ├── web_ui.py     # Main UI implementation
     │   └── verification/ # Visual testing tools
     ├── client/           # API + WebSocket clients
-    └── cli/              # Textual CLI interface
-        ├── app.py        # Main Textual application
-        ├── pty_runner.py # PTY passthrough for agent CLIs
-        ├── screens/      # Task, Setup, Merge screens
-        └── widgets/      # AgentPicker, DiffViewer
+    └── cli/              # Simple CLI interface
+        ├── app.py        # Menu-driven CLI
+        └── pty_runner.py # PTY passthrough for agent CLIs
 
 .claude/skills/           # Claude Code skills (auto-activated)
 ├── verifying/

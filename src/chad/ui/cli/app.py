@@ -1,9 +1,11 @@
-"""Simple CLI for Chad - minimal terminal UI."""
+"""Simple CLI for Chad - minimal terminal UI using API."""
 
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+from chad.ui.client import APIClient
 
 
 def clear_screen():
@@ -57,12 +59,244 @@ def select_from_list(prompt: str, options: list[tuple[str, str]], default_idx: i
             return None
 
 
-def run_cli(config_manager, password: str | None = None) -> None:
+def run_settings_menu(client: APIClient) -> None:
+    """Run the settings submenu.
+
+    Args:
+        client: API client instance
+    """
+    while True:
+        clear_screen()
+        print("=" * 50)
+        print("  CHAD - Settings")
+        print("=" * 50)
+        print()
+
+        # Get current settings from API
+        accounts = client.list_accounts()
+        cleanup = client.get_cleanup_settings()
+
+        # Find coding and verification agents
+        coding_agent = None
+        verification_agent = None
+        for acc in accounts:
+            if acc.role == "CODING":
+                coding_agent = acc.name
+            if acc.role == "VERIFICATION":
+                verification_agent = acc.name
+
+        print("Current Settings:")
+        print(f"  Accounts:     {len(accounts)} configured")
+        print(f"  Cleanup:      {cleanup.get('cleanup_days', 7)} days")
+        print(f"  Coding Agent: {coding_agent or '(not set)'}")
+        print(f"  Verification: {verification_agent or '(not set)'}")
+        print()
+
+        print("Settings Menu:")
+        print("  [1] Manage accounts")
+        print("  [2] Set cleanup days")
+        print("  [3] Set verification agent")
+        print("  [b] Back to main menu")
+        print()
+
+        try:
+            choice = input("Choice: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            break
+
+        if choice == "b":
+            break
+
+        elif choice == "1":
+            run_accounts_menu(client)
+
+        elif choice == "2":
+            print()
+            current_days = cleanup.get("cleanup_days", 7)
+            print(f"Current cleanup: {current_days} days")
+            try:
+                new_days = input("New cleanup days (1-365): ").strip()
+                if new_days:
+                    days = int(new_days)
+                    if 1 <= days <= 365:
+                        client.update_cleanup_settings(cleanup_days=days)
+                        print(f"Cleanup set to {days} days")
+                    else:
+                        print("Please enter a number between 1 and 365")
+            except ValueError:
+                print("Invalid number")
+            input("Press Enter to continue...")
+
+        elif choice == "3":
+            print()
+            if not accounts:
+                print("No accounts configured.")
+            else:
+                options = [("None (disabled)", "")] + [
+                    (f"{acc.name} ({acc.provider})", acc.name)
+                    for acc in accounts
+                ]
+                default_idx = 0
+                if verification_agent:
+                    for i, (_, val) in enumerate(options):
+                        if val == verification_agent:
+                            default_idx = i
+                            break
+
+                selected = select_from_list("Select verification agent:", options, default_idx)
+                if selected is not None:
+                    if selected == "":
+                        # Clear verification role - need to find who has it
+                        for acc in accounts:
+                            if acc.role == "VERIFICATION":
+                                client.set_account_role(acc.name, "")
+                        print("Verification agent disabled")
+                    else:
+                        client.set_account_role(selected, "VERIFICATION")
+                        print(f"Verification agent set to: {selected}")
+            input("Press Enter to continue...")
+
+
+def run_accounts_menu(client: APIClient) -> None:
+    """Run the accounts management submenu.
+
+    Args:
+        client: API client instance
+    """
+    while True:
+        clear_screen()
+        print("=" * 50)
+        print("  CHAD - Manage Accounts")
+        print("=" * 50)
+        print()
+
+        accounts = client.list_accounts()
+        coding_agent = None
+        for acc in accounts:
+            if acc.role == "CODING":
+                coding_agent = acc.name
+
+        if accounts:
+            print("Configured Accounts:")
+            for acc in accounts:
+                role_marker = f" [{acc.role}]" if acc.role else ""
+                print(f"  - {acc.name} ({acc.provider}){role_marker}")
+            print()
+        else:
+            print("No accounts configured.")
+            print()
+
+        print("Account Menu:")
+        print("  [1] Add account")
+        print("  [2] Delete account")
+        print("  [3] Set as coding agent")
+        print("  [b] Back to settings")
+        print()
+
+        try:
+            choice = input("Choice: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            break
+
+        if choice == "b":
+            break
+
+        elif choice == "1":
+            print()
+            providers = client.list_providers()
+            print("Supported providers:")
+            for i, p in enumerate(providers, 1):
+                print(f"  {i}. {p['type']:10} - {p['name']}")
+            print()
+
+            try:
+                provider_choice = input(f"Select provider [1-{len(providers)}]: ").strip()
+                if not provider_choice.isdigit() or not (1 <= int(provider_choice) <= len(providers)):
+                    print("Invalid selection")
+                    input("Press Enter to continue...")
+                    continue
+
+                provider = providers[int(provider_choice) - 1]["type"]
+
+                account_name = input(f"Account name (e.g., my-{provider}): ").strip()
+                if not account_name:
+                    print("Account name is required")
+                    input("Press Enter to continue...")
+                    continue
+
+                # Check if account exists
+                existing = [acc.name for acc in accounts]
+                if account_name in existing:
+                    print(f"Account '{account_name}' already exists")
+                    input("Press Enter to continue...")
+                    continue
+
+                print()
+                print("Account creation requires authentication.")
+
+                if provider == "anthropic":
+                    print("For Claude Code, run: claude auth login")
+                    print("Then the account will use ~/.claude/.credentials.json")
+                elif provider == "openai":
+                    home_dir = Path.home() / ".chad" / "codex-homes" / account_name
+                    print(f"For Codex, set CODEX_HOME={home_dir}")
+                    print("Then run: codex auth")
+                elif provider == "gemini":
+                    print("For Gemini, run: gemini auth")
+                    print("Then the account will use ~/.gemini/oauth_creds.json")
+                elif provider == "qwen":
+                    print("For Qwen, run: qwen auth")
+                elif provider == "mistral":
+                    print("For Vibe, run: vibe auth")
+
+                print()
+                print("Note: Account creation via API requires OAuth flow.")
+                print("Use the Gradio UI for full account setup, or manually")
+                print("configure credentials and add to ~/.chad.conf")
+
+            except (EOFError, KeyboardInterrupt):
+                pass
+
+            input("Press Enter to continue...")
+
+        elif choice == "2":
+            print()
+            if not accounts:
+                print("No accounts to delete.")
+            else:
+                options = [(f"{acc.name} ({acc.provider})", acc.name) for acc in accounts]
+                selected = select_from_list("Select account to delete:", options)
+                if selected:
+                    confirm = input(f"Delete '{selected}'? [y/N]: ").strip().lower()
+                    if confirm == "y":
+                        client.delete_account(selected)
+                        print(f"Account '{selected}' deleted")
+            input("Press Enter to continue...")
+
+        elif choice == "3":
+            print()
+            if not accounts:
+                print("No accounts configured.")
+            else:
+                options = [(f"{acc.name} ({acc.provider})", acc.name) for acc in accounts]
+                default_idx = 0
+                if coding_agent:
+                    for i, (_, val) in enumerate(options):
+                        if val == coding_agent:
+                            default_idx = i
+                            break
+                selected = select_from_list("Select coding agent:", options, default_idx)
+                if selected:
+                    client.set_account_role(selected, "CODING")
+                    print(f"Coding agent set to: {selected}")
+            input("Press Enter to continue...")
+
+
+def run_cli(client: APIClient) -> None:
     """Run the simple CLI interface.
 
     Args:
-        config_manager: ConfigManager instance
-        password: Main password (already verified)
+        client: API client instance
     """
     from chad.ui.cli.pty_runner import build_agent_command, run_agent_pty
     from chad.util.git_worktree import GitWorktreeManager
@@ -71,25 +305,29 @@ def run_cli(config_manager, password: str | None = None) -> None:
         clear_screen()
         print_header()
 
-        # Load accounts and preferences
-        accounts = config_manager.list_accounts()
-        prefs = config_manager.load_preferences() or {}
-        default_project = prefs.get("project_path", "")
-        coding_account = config_manager.get_role_assignment("CODING")
+        # Load accounts and preferences from API
+        accounts = client.list_accounts()
+        prefs = client.get_preferences()
+        default_project = prefs.get("last_project_path", "")
+
+        # Find coding agent
+        coding_account = None
+        coding_provider = None
+        for acc in accounts:
+            if acc.role == "CODING":
+                coding_account = acc.name
+                coding_provider = acc.provider
+                break
 
         if not accounts:
             print("No accounts configured.")
-            print("Please run Chad in Gradio mode to set up accounts:")
-            print("  chad --ui gradio")
+            print("Press [s] to open settings and add an account.")
             print()
-            input("Press Enter to exit...")
-            return
 
         # Show current settings
         print(f"Project: {default_project or '(not set)'}")
-        if coding_account and coding_account in accounts:
-            provider = accounts[coding_account]
-            print(f"Agent:   {coding_account} ({provider})")
+        if coding_account:
+            print(f"Agent:   {coding_account} ({coding_provider})")
         print()
 
         # Main menu
@@ -97,7 +335,7 @@ def run_cli(config_manager, password: str | None = None) -> None:
         print("  [1] Start a task")
         print("  [2] Change project path")
         print("  [3] Change agent")
-        print("  [s] Settings (opens Gradio)")
+        print("  [s] Settings")
         print("  [q] Quit")
         print()
 
@@ -110,8 +348,7 @@ def run_cli(config_manager, password: str | None = None) -> None:
             break
 
         elif choice == "s":
-            print("\nTo access settings, run: chad --ui gradio")
-            input("Press Enter to continue...")
+            run_settings_menu(client)
 
         elif choice == "2":
             # Change project path
@@ -120,7 +357,7 @@ def run_cli(config_manager, password: str | None = None) -> None:
             if new_path:
                 expanded = str(Path(new_path).expanduser().resolve())
                 if Path(expanded).exists():
-                    config_manager.save_preferences(expanded)
+                    client.update_preferences(last_project_path=expanded)
                     print(f"Project path set to: {expanded}")
                 else:
                     print(f"Path does not exist: {expanded}")
@@ -129,18 +366,21 @@ def run_cli(config_manager, password: str | None = None) -> None:
         elif choice == "3":
             # Change agent
             print()
-            options = [(f"{name} ({provider})", name) for name, provider in accounts.items()]
-            default_idx = 0
-            if coding_account:
-                for i, (_, val) in enumerate(options):
-                    if val == coding_account:
-                        default_idx = i
-                        break
+            if not accounts:
+                print("No accounts configured.")
+            else:
+                options = [(f"{acc.name} ({acc.provider})", acc.name) for acc in accounts]
+                default_idx = 0
+                if coding_account:
+                    for i, (_, val) in enumerate(options):
+                        if val == coding_account:
+                            default_idx = i
+                            break
 
-            selected = select_from_list("Select coding agent:", options, default_idx)
-            if selected:
-                config_manager.assign_role(selected, "CODING")
-                print(f"Agent set to: {selected}")
+                selected = select_from_list("Select coding agent:", options, default_idx)
+                if selected:
+                    client.set_account_role(selected, "CODING")
+                    print(f"Agent set to: {selected}")
             input("Press Enter to continue...")
 
         elif choice == "1":
@@ -162,12 +402,10 @@ def run_cli(config_manager, password: str | None = None) -> None:
                 input("Press Enter to continue...")
                 continue
 
-            if not coding_account or coding_account not in accounts:
+            if not coding_account or not coding_provider:
                 print("\nPlease select a coding agent first.")
                 input("Press Enter to continue...")
                 continue
-
-            provider = accounts[coding_account]
 
             # Get task description
             print()
@@ -201,11 +439,11 @@ def run_cli(config_manager, password: str | None = None) -> None:
             print(f"Working in: {worktree_path}")
 
             # Build agent command
-            cmd, env = build_agent_command(provider, coding_account, Path(worktree_path))
+            cmd, env = build_agent_command(coding_provider, coding_account, Path(worktree_path))
 
             # Clear and hand off to agent
             clear_screen()
-            print(f"Handing off to {provider} agent...")
+            print(f"Handing off to {coding_provider} agent...")
             print(f"Working in: {worktree_path}")
             print(f"Task: {task_description[:80]}...")
             print("-" * 60)
@@ -213,7 +451,7 @@ def run_cli(config_manager, password: str | None = None) -> None:
 
             # For claude, send prompt via stdin
             initial_input = None
-            if provider == "anthropic":
+            if coding_provider == "anthropic":
                 initial_input = task_description + "\n"
 
             # Run agent with PTY passthrough
@@ -331,20 +569,28 @@ def run_cli(config_manager, password: str | None = None) -> None:
             input("\nPress Enter to continue...")
 
 
-def launch_cli_ui(config_manager=None, password: str | None = None) -> None:
+def launch_cli_ui(api_base_url: str = "http://localhost:8000", password: str | None = None) -> None:
     """Launch the Chad CLI UI.
 
     Args:
-        config_manager: Optional ConfigManager instance
-        password: Optional pre-authenticated password
+        api_base_url: Base URL of the Chad API server
+        password: Optional pre-authenticated password (unused, kept for compatibility)
     """
-    from chad.util.config_manager import ConfigManager
-
-    if config_manager is None:
-        config_manager = ConfigManager()
+    client = APIClient(base_url=api_base_url)
 
     try:
-        run_cli(config_manager, password)
+        # Verify server is available
+        status = client.get_status()
+        print(f"Connected to Chad server v{status.get('version', 'unknown')}")
+    except Exception as e:
+        print(f"Error: Cannot connect to Chad server at {api_base_url}")
+        print(f"  {e}")
+        print("\nMake sure the server is running (chad --mode server)")
+        sys.exit(1)
+
+    try:
+        run_cli(client)
     except KeyboardInterrupt:
         print("\n\nGoodbye!")
-        sys.exit(0)
+    finally:
+        client.close()

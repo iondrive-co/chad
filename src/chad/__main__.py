@@ -2,7 +2,6 @@
 
 import argparse
 import atexit
-import getpass
 import os
 import random
 import signal
@@ -155,8 +154,8 @@ def run_unified(
     # Run UI in main thread (blocking)
     if ui_mode == "cli":
         from chad.ui.cli import launch_cli_ui
-        config_mgr = ConfigManager()
-        launch_cli_ui(config_mgr, main_password)
+        api_base_url = f"http://127.0.0.1:{api_port}"
+        launch_cli_ui(api_base_url=api_base_url, password=main_password)
     else:
         from chad.ui.gradio.web_ui import launch_web_ui
         launch_web_ui(main_password, port=ui_port, dev_mode=dev_mode)
@@ -255,7 +254,8 @@ def main() -> int:
 
             if ui_mode == "cli":
                 from chad.ui.cli import launch_cli_ui
-                launch_cli_ui(config_mgr, main_password)
+                server_url = args.server_url or "http://localhost:8000"
+                launch_cli_ui(api_base_url=server_url, password=main_password)
             else:
                 from chad.ui.gradio.web_ui import launch_web_ui
                 launch_web_ui(main_password, port=args.port, dev_mode=args.dev)

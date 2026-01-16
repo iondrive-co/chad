@@ -1,4 +1,4 @@
-v0.8 Paper maximiser
+v0.8 Paper Maximiser
 
 Split ui code from core
 API allows for live stream from agent (rather than json)
@@ -6,18 +6,25 @@ New text only ui for testing
 Simplify tests after split
 Structured log format 
 
-v0.9 Hack-propagation
+v0.9 Token Effort
+
+Mid session inter-provider handoff
+
+v0.10 Hack-Propagation
 
 Full inter-provider handoff including summarize progress and resume from checkpoints
 Improve the mistral and gemini and qwen providers data 
 Load balance based on usage, user preference, context limits hit, etc.
 
-v0.10 Slip slop slap
+v0.11 Slip Slop Slap
 
 Use of /agents
+Repeated failures
+
+v0.12 Intentionality Reduction
+
 Telegram and slack integrations
 Packaging for different platforms
-Repeated failures
 
 ---- Repeated failures ----
 

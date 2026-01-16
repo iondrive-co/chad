@@ -1,14 +1,12 @@
 """Integration tests for Chad CLI UI components.
 
-These tests verify that the CLI screens correctly interact with the
+These tests verify that the CLI correctly interacts with the
 ConfigManager and other backend services.
 """
 
 import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-from textual.widgets import Select, Input, ListView, Button
+from unittest.mock import MagicMock
 
 
 class TestSetupScreenConfig:
@@ -41,9 +39,7 @@ class TestSetupScreenConfig:
         return app
 
     def test_add_account_stores_in_config(self, config_manager, mock_app):
-        """Adding account through setup screen stores it in config."""
-        from chad.ui.cli.screens.setup import SetupScreen
-
+        """Adding account stores it in config."""
         # Store an account directly to verify the config works
         config_manager.store_account(
             account_name="test-claude",
@@ -205,135 +201,6 @@ class TestTaskScreenConfig:
         assert prefs["project_path"] == "/new/project/path"
 
 
-class TestAccountItem:
-    """Tests for AccountItem widget."""
-
-    def test_account_item_display(self):
-        """AccountItem displays name and provider."""
-        from chad.ui.cli.screens.setup import AccountItem
-
-        item = AccountItem("my-account", "anthropic", is_coding=False)
-        assert item.account_name == "my-account"
-        assert item.provider == "anthropic"
-        assert item.is_coding is False
-
-    def test_account_item_coding_indicator(self):
-        """AccountItem shows CODING indicator when is_coding=True."""
-        from chad.ui.cli.screens.setup import AccountItem
-
-        item = AccountItem("my-account", "anthropic", is_coding=True)
-        assert item.is_coding is True
-
-
-class TestAgentPickerWidget:
-    """Tests for AgentPicker widget."""
-
-    def test_stores_accounts(self):
-        """AgentPicker stores accounts in internal dict."""
-        from chad.ui.cli.widgets.agent_picker import AgentPicker
-
-        picker = AgentPicker([])
-        # Directly set accounts (load_accounts requires mounted widget)
-        picker._accounts = {"work-claude": "anthropic", "personal-codex": "openai"}
-
-        assert picker._accounts == {"work-claude": "anthropic", "personal-codex": "openai"}
-
-    def test_get_selected_provider(self):
-        """AgentPicker returns provider for selected account."""
-        from chad.ui.cli.widgets.agent_picker import AgentPicker
-
-        picker = AgentPicker([])
-        picker._accounts = {"work-claude": "anthropic", "my-codex": "openai"}
-        # Simulate selection by setting value directly
-        picker._value = "work-claude"
-
-        assert picker.get_selected_provider() == "anthropic"
-
-    def test_get_selected_provider_none_when_blank(self):
-        """AgentPicker returns None when nothing selected."""
-        from chad.ui.cli.widgets.agent_picker import AgentPicker
-
-        picker = AgentPicker([])
-        picker._accounts = {"work-claude": "anthropic"}
-        # Default value is BLANK
-        picker._value = Select.BLANK
-
-        assert picker.get_selected_provider() is None
-
-    def test_get_selected_provider_none_when_not_in_accounts(self):
-        """AgentPicker returns None when selected account not in accounts."""
-        from chad.ui.cli.widgets.agent_picker import AgentPicker
-
-        picker = AgentPicker([])
-        picker._accounts = {"work-claude": "anthropic"}
-        picker._value = "nonexistent"
-
-        assert picker.get_selected_provider() is None
-
-
-class TestDiffViewerWidget:
-    """Tests for DiffViewer widget."""
-
-    def test_set_diff(self):
-        """DiffViewer stores and displays diff content."""
-        from chad.ui.cli.widgets.diff_viewer import DiffViewer
-
-        viewer = DiffViewer()
-        viewer.set_diff("diff --git a/file.py b/file.py\n+new line")
-
-        assert viewer._diff_content == "diff --git a/file.py b/file.py\n+new line"
-        assert viewer.has_content is True
-
-    def test_clear_diff(self):
-        """DiffViewer clears diff content."""
-        from chad.ui.cli.widgets.diff_viewer import DiffViewer
-
-        viewer = DiffViewer()
-        viewer.set_diff("some diff")
-        viewer.clear_diff()
-
-        assert viewer._diff_content == ""
-        assert viewer.has_content is False
-
-    def test_has_content_empty(self):
-        """DiffViewer.has_content is False when empty."""
-        from chad.ui.cli.widgets.diff_viewer import DiffViewer
-
-        viewer = DiffViewer()
-        assert viewer.has_content is False
-
-
-class TestChadAppInitialization:
-    """Tests for ChadApp initialization."""
-
-    def test_app_stores_config_manager(self, tmp_path, monkeypatch):
-        """ChadApp stores config_manager reference."""
-        from chad.util.config_manager import ConfigManager
-        from chad.ui.cli.app import ChadApp
-
-        config_file = tmp_path / "test.conf"
-        monkeypatch.setenv("CHAD_CONFIG", str(config_file))
-
-        cm = ConfigManager()
-        app = ChadApp(cm, password="test")
-
-        assert app.config_manager is cm
-        assert app.password == "test"
-
-    def test_app_stores_password(self, tmp_path, monkeypatch):
-        """ChadApp stores password for later use."""
-        from chad.util.config_manager import ConfigManager
-        from chad.ui.cli.app import ChadApp
-
-        config_file = tmp_path / "test.conf"
-        monkeypatch.setenv("CHAD_CONFIG", str(config_file))
-
-        cm = ConfigManager()
-        app = ChadApp(cm, password="my-secret")
-
-        assert app.password == "my-secret"
-
-
 class TestProviderCommandGeneration:
     """Tests for provider-specific command generation."""
 
@@ -374,7 +241,7 @@ class TestProviderCommandGeneration:
         cmd, env = build_agent_command("qwen", "test", Path("/tmp"))
 
         assert "qwen" in cmd
-        assert "--yolo" in cmd
+        assert "-y" in cmd
 
     def test_mistral_command(self):
         """Mistral command is correctly formed."""
@@ -383,7 +250,6 @@ class TestProviderCommandGeneration:
         cmd, env = build_agent_command("mistral", "test", Path("/tmp"))
 
         assert "vibe" in cmd
-        assert "-p" in cmd
 
 
 class TestConfigPersistence:

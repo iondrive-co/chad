@@ -3,34 +3,28 @@
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-from io import StringIO
+from dataclasses import dataclass
+
+
+@dataclass
+class MockAccount:
+    """Mock account for testing."""
+    name: str
+    provider: str
+    model: str | None = None
+    reasoning: str | None = None
+    role: str | None = None
+    ready: bool = True
 
 
 class TestCLIHelpers:
     """Tests for CLI helper functions."""
 
-    @pytest.fixture
-    def config_manager(self, tmp_path, monkeypatch):
-        """Create a ConfigManager with isolated config file."""
-        from chad.util.config_manager import ConfigManager
-
-        config_file = tmp_path / "test_chad.conf"
-        monkeypatch.setenv("CHAD_CONFIG", str(config_file))
-
-        cm = ConfigManager()
-        cm.save_config({
-            "password_hash": cm.hash_password("test"),
-            "encryption_salt": "dGVzdHNhbHQ=",
-            "accounts": {},
-            "ui_mode": "cli",
-        })
-        return cm
-
     def test_select_from_list_returns_default_on_enter(self, monkeypatch):
         """select_from_list returns default when Enter is pressed."""
         from chad.ui.cli.app import select_from_list
 
-        monkeypatch.setattr("builtins.input", lambda _: "")
+        monkeypatch.setattr("builtins.input", lambda *args: "")
         options = [("Option A", "a"), ("Option B", "b"), ("Option C", "c")]
 
         result = select_from_list("Choose:", options, default_idx=1)
@@ -40,7 +34,7 @@ class TestCLIHelpers:
         """select_from_list returns the value for the selected option."""
         from chad.ui.cli.app import select_from_list
 
-        monkeypatch.setattr("builtins.input", lambda _: "2")
+        monkeypatch.setattr("builtins.input", lambda *args: "2")
         options = [("Option A", "a"), ("Option B", "b"), ("Option C", "c")]
 
         result = select_from_list("Choose:", options, default_idx=0)
@@ -50,7 +44,7 @@ class TestCLIHelpers:
         """select_from_list returns None when 'q' is entered."""
         from chad.ui.cli.app import select_from_list
 
-        monkeypatch.setattr("builtins.input", lambda _: "q")
+        monkeypatch.setattr("builtins.input", lambda *args: "q")
         options = [("Option A", "a"), ("Option B", "b")]
 
         result = select_from_list("Choose:", options, default_idx=0)
@@ -66,127 +60,111 @@ class TestCLIHelpers:
         captured = capsys.readouterr()
         assert "No options available" in captured.out
 
-    def test_launch_cli_ui_creates_config_manager_if_none(self, tmp_path, monkeypatch):
-        """launch_cli_ui creates ConfigManager if not provided."""
+    def test_launch_cli_ui_connects_to_server(self, monkeypatch):
+        """launch_cli_ui connects to API server."""
         from chad.ui.cli.app import launch_cli_ui
 
-        config_file = tmp_path / "test_chad.conf"
-        monkeypatch.setenv("CHAD_CONFIG", str(config_file))
+        mock_client = MagicMock()
+        mock_client.get_status.return_value = {"version": "0.1.0", "status": "healthy"}
+        mock_client.list_accounts.return_value = []
 
-        # Mock run_cli to avoid full execution
-        with patch("chad.ui.cli.app.run_cli") as mock_run:
-            launch_cli_ui(password="test")
-            mock_run.assert_called_once()
-            # First arg should be a ConfigManager instance
-            args, _ = mock_run.call_args
-            assert args[0] is not None
+        with patch("chad.ui.cli.app.APIClient", return_value=mock_client):
+            with patch("chad.ui.cli.app.run_cli"):
+                launch_cli_ui(api_base_url="http://localhost:8000")
+
+        mock_client.get_status.assert_called_once()
 
 
 class TestCLIFlow:
     """Tests for CLI menu flow."""
 
     @pytest.fixture
-    def config_manager(self, tmp_path, monkeypatch):
-        """Create a ConfigManager with isolated config file."""
-        from chad.util.config_manager import ConfigManager
+    def mock_client(self):
+        """Create a mock API client."""
+        client = MagicMock()
+        client.get_status.return_value = {"version": "0.1.0", "status": "healthy"}
+        client.list_accounts.return_value = [
+            MockAccount(name="test-agent", provider="mock", role="CODING")
+        ]
+        client.get_preferences.return_value = {"last_project_path": ""}
+        client.get_cleanup_settings.return_value = {"cleanup_days": 7}
+        return client
 
-        config_file = tmp_path / "test_chad.conf"
-        monkeypatch.setenv("CHAD_CONFIG", str(config_file))
-
-        cm = ConfigManager()
-        cm.save_config({
-            "password_hash": cm.hash_password("test"),
-            "encryption_salt": "dGVzdHNhbHQ=",
-            "accounts": {},
-            "ui_mode": "cli",
-        })
-        return cm
-
-    def test_cli_exits_on_q(self, config_manager, monkeypatch, capsys):
+    def test_cli_exits_on_q(self, mock_client, monkeypatch, capsys):
         """CLI exits when 'q' is entered."""
         from chad.ui.cli.app import run_cli
 
-        # Setup an account so we get to the menu
-        config_manager.store_account("test-agent", "mock", "key", "test")
-        config_manager.assign_role("test-agent", "CODING")
-
         inputs = iter(["q"])
-        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
-        monkeypatch.setattr("os.system", lambda _: None)  # Mock clear_screen
+        monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
+        monkeypatch.setattr("os.system", lambda _: None)
 
-        run_cli(config_manager, "test")
+        run_cli(mock_client)
         # Should exit without error
 
-    def test_cli_shows_no_accounts_message(self, config_manager, monkeypatch, capsys):
+    def test_cli_shows_no_accounts_message(self, mock_client, monkeypatch, capsys):
         """CLI shows message when no accounts are configured."""
         from chad.ui.cli.app import run_cli
 
-        inputs = iter([""])  # Press Enter to exit
-        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+        mock_client.list_accounts.return_value = []
+
+        inputs = iter(["q"])
+        monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
         monkeypatch.setattr("os.system", lambda _: None)
 
-        run_cli(config_manager, "test")
+        run_cli(mock_client)
 
         captured = capsys.readouterr()
         assert "No accounts configured" in captured.out
+        assert "Press [s] to open settings" in captured.out
 
-    def test_cli_change_project_path(self, config_manager, monkeypatch, tmp_path):
+    def test_cli_change_project_path(self, mock_client, monkeypatch, tmp_path):
         """CLI can change project path."""
         from chad.ui.cli.app import run_cli
 
-        config_manager.store_account("test-agent", "mock", "key", "test")
-        config_manager.assign_role("test-agent", "CODING")
-
         test_path = str(tmp_path)
         inputs = iter(["2", test_path, "", "q"])
-        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+        monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
         monkeypatch.setattr("os.system", lambda _: None)
 
-        run_cli(config_manager, "test")
+        run_cli(mock_client)
 
-        # Check that preferences were saved
-        prefs = config_manager.load_preferences()
-        assert prefs is not None
-        assert prefs.get("project_path") == test_path
+        # Check that preferences were updated via API
+        mock_client.update_preferences.assert_called_with(last_project_path=test_path)
 
-    def test_cli_change_agent(self, config_manager, monkeypatch):
+    def test_cli_change_agent(self, mock_client, monkeypatch):
         """CLI can change coding agent."""
         from chad.ui.cli.app import run_cli
 
-        config_manager.store_account("agent-1", "mock", "key", "test")
-        config_manager.store_account("agent-2", "anthropic", "key", "test")
-        config_manager.assign_role("agent-1", "CODING")
+        mock_client.list_accounts.return_value = [
+            MockAccount(name="agent-1", provider="mock", role="CODING"),
+            MockAccount(name="agent-2", provider="anthropic"),
+        ]
 
         # Select option 3 (change agent), then option 2 (agent-2), then quit
         inputs = iter(["3", "2", "", "q"])
-        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+        monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
         monkeypatch.setattr("os.system", lambda _: None)
 
-        run_cli(config_manager, "test")
+        run_cli(mock_client)
 
-        # Check that agent was changed
-        assert config_manager.get_role_assignment("CODING") == "agent-2"
+        # Check that role was updated via API
+        mock_client.set_account_role.assert_called_with("agent-2", "CODING")
 
 
 class TestCLITaskFlow:
     """Integration tests for CLI task execution flow."""
 
     @pytest.fixture
-    def config_manager(self, tmp_path, monkeypatch):
-        """Create a ConfigManager with isolated config file."""
-        from chad.util.config_manager import ConfigManager
-
-        config_file = tmp_path / "test_chad.conf"
-        monkeypatch.setenv("CHAD_CONFIG", str(config_file))
-
-        cm = ConfigManager()
-        cm.save_config({
-            "password_hash": cm.hash_password("test"),
-            "encryption_salt": "dGVzdHNhbHQ=",
-            "accounts": {},
-            "ui_mode": "cli",
-        })
-        return cm
+    def mock_client(self):
+        """Create a mock API client."""
+        client = MagicMock()
+        client.get_status.return_value = {"version": "0.1.0", "status": "healthy"}
+        client.list_accounts.return_value = [
+            MockAccount(name="test-agent", provider="mock", role="CODING")
+        ]
+        client.get_preferences.return_value = {"last_project_path": ""}
+        client.get_cleanup_settings.return_value = {"cleanup_days": 7}
+        return client
 
     @pytest.fixture
     def git_repo(self, tmp_path):
@@ -208,16 +186,13 @@ class TestCLITaskFlow:
 
         return repo_path
 
-    def test_cli_task_creates_and_cleans_worktree(self, config_manager, git_repo, monkeypatch):
+    def test_cli_task_creates_and_cleans_worktree(self, mock_client, git_repo, monkeypatch):
         """CLI task flow creates worktree, runs agent, and cleans up."""
         from chad.ui.cli.app import run_cli
 
-        config_manager.store_account("test-agent", "mock", "key", "test")
-        config_manager.assign_role("test-agent", "CODING")
-        config_manager.save_preferences(str(git_repo))
+        mock_client.get_preferences.return_value = {"last_project_path": str(git_repo)}
 
         # Simulate: start task (1), enter task description, press enter twice, then quit
-        # The mock agent just echoes, so no changes will be made and worktree gets cleaned up
         inputs = iter([
             "1",           # Start task
             "test task",   # Task description
@@ -225,12 +200,12 @@ class TestCLITaskFlow:
             "",            # Press Enter to continue after agent exits
             "q",           # Quit
         ])
-        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+        monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
         monkeypatch.setattr("os.system", lambda _: None)
 
         # Mock run_agent_pty to avoid actual PTY operations
-        with patch("chad.ui.cli.app.run_agent_pty", return_value=0):
-            run_cli(config_manager, "test")
+        with patch("chad.ui.cli.pty_runner.run_agent_pty", return_value=0):
+            run_cli(mock_client)
 
         # Worktree should be cleaned up (no changes made by mock agent)
         worktree_base = git_repo / ".chad-worktrees"
@@ -238,14 +213,12 @@ class TestCLITaskFlow:
             worktrees = list(worktree_base.iterdir())
             assert len(worktrees) == 0, f"Worktree not cleaned up: {worktrees}"
 
-    def test_cli_task_keeps_worktree_on_request(self, config_manager, git_repo, monkeypatch):
+    def test_cli_task_keeps_worktree_on_request(self, mock_client, git_repo, monkeypatch):
         """CLI keeps worktree when user chooses 'k'."""
         from chad.ui.cli.app import run_cli
         import subprocess
 
-        config_manager.store_account("test-agent", "mock", "key", "test")
-        config_manager.assign_role("test-agent", "CODING")
-        config_manager.save_preferences(str(git_repo))
+        mock_client.get_preferences.return_value = {"last_project_path": str(git_repo)}
 
         # Track the worktree path created
         created_worktree = None
@@ -266,24 +239,22 @@ class TestCLITaskFlow:
             "",            # Press Enter to continue
             "q",           # Quit
         ])
-        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+        monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
         monkeypatch.setattr("os.system", lambda _: None)
 
-        with patch("chad.ui.cli.app.run_agent_pty", side_effect=mock_run_agent_pty):
-            run_cli(config_manager, "test")
+        with patch("chad.ui.cli.pty_runner.run_agent_pty", side_effect=mock_run_agent_pty):
+            run_cli(mock_client)
 
         # Worktree should still exist
         assert created_worktree is not None
         assert created_worktree.exists(), "Worktree should be kept"
 
-    def test_cli_task_discards_worktree(self, config_manager, git_repo, monkeypatch):
+    def test_cli_task_discards_worktree(self, mock_client, git_repo, monkeypatch):
         """CLI discards worktree when user chooses 'x'."""
         from chad.ui.cli.app import run_cli
         import subprocess
 
-        config_manager.store_account("test-agent", "mock", "key", "test")
-        config_manager.assign_role("test-agent", "CODING")
-        config_manager.save_preferences(str(git_repo))
+        mock_client.get_preferences.return_value = {"last_project_path": str(git_repo)}
 
         created_worktree = None
 
@@ -303,11 +274,11 @@ class TestCLITaskFlow:
             "",            # Press Enter to continue
             "q",           # Quit
         ])
-        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+        monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
         monkeypatch.setattr("os.system", lambda _: None)
 
-        with patch("chad.ui.cli.app.run_agent_pty", side_effect=mock_run_agent_pty):
-            run_cli(config_manager, "test")
+        with patch("chad.ui.cli.pty_runner.run_agent_pty", side_effect=mock_run_agent_pty):
+            run_cli(mock_client)
 
         # Worktree should be removed
         assert created_worktree is not None
