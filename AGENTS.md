@@ -46,9 +46,12 @@ When modifying functions that return tuples (e.g., `make_yield`, generator funct
    result = verify()  # Runs flake8 + all tests
    # Or: verify(lint_only=True)  # Just flake8
    ```
-3. **Run startup sanity check** to catch import/runtime errors not covered by tests:
+3. **Run startup sanity checks** to catch import/runtime errors not covered by tests:
    ```bash
-   timeout 5 .venv/bin/python -c "from chad.ui.gradio import launch_web_ui" 2>&1 || echo "Startup check failed"
+   # Gradio UI
+   timeout 5 .venv/bin/python -c "from chad.ui.gradio import launch_web_ui" 2>&1 || echo "Gradio startup failed"
+   # CLI UI
+   timeout 5 .venv/bin/python -c "from chad.ui.cli import launch_cli_ui" 2>&1 || echo "CLI startup failed"
    ```
    This catches NameErrors, missing imports, and other issues that flake8 and tests may miss.
 4. Perform a critical self-review and note any outstanding issues
@@ -95,7 +98,11 @@ src/chad/
     │   ├── web_ui.py     # Main UI implementation
     │   └── verification/ # Visual testing tools
     ├── client/           # API + WebSocket clients
-    └── cli/              # CLI interface (placeholder)
+    └── cli/              # Textual CLI interface
+        ├── app.py        # Main Textual application
+        ├── pty_runner.py # PTY passthrough for agent CLIs
+        ├── screens/      # Task, Setup, Merge screens
+        └── widgets/      # AgentPicker, DiffViewer
 
 .claude/skills/           # Claude Code skills (auto-activated)
 ├── verifying/
@@ -109,6 +116,15 @@ src/chad/
 ## Configuration
 
 Config stored in `~/.chad.conf` with encrypted provider tokens.
+
+### UI Mode
+
+Chad supports two UI modes:
+- `gradio` (default): Web interface with rich visual output
+- `cli`: Terminal interface with PTY passthrough to agent CLIs
+
+Set via config: `config_manager.set_ui_mode("cli")`
+Or command line: `chad --ui cli`
 
 ## Virtual Environment
 

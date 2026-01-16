@@ -16,7 +16,6 @@ from pathlib import Path
 
 from .util.cleanup import cleanup_on_startup, cleanup_on_shutdown
 from .util.config_manager import ConfigManager
-from .ui.gradio.web_ui import launch_web_ui
 from .util.config import ensure_project_root_env
 
 # Supported run modes
@@ -116,7 +115,13 @@ def run_server(host: str = "0.0.0.0", port: int = 0) -> None:
     uvicorn.run(app, host=host, port=port)
 
 
-def run_unified(main_password: str | None, ui_port: int, api_port: int, dev_mode: bool) -> None:
+def run_unified(
+    main_password: str | None,
+    ui_port: int,
+    api_port: int,
+    dev_mode: bool,
+    ui_mode: str = "gradio",
+) -> None:
     """Run both server and UI in one process.
 
     The API server runs in a background thread while the UI runs in the main thread.
@@ -126,6 +131,7 @@ def run_unified(main_password: str | None, ui_port: int, api_port: int, dev_mode
         ui_port: Port for Gradio UI (0 for ephemeral)
         api_port: Port for API server (0 for ephemeral)
         dev_mode: Enable development mode
+        ui_mode: UI mode - "gradio" or "cli"
     """
     import uvicorn
     from chad.server.main import create_app
@@ -146,8 +152,14 @@ def run_unified(main_password: str | None, ui_port: int, api_port: int, dev_mode
     time.sleep(0.5)
     print(f"API server running on http://127.0.0.1:{api_port}")
 
-    # Run UI in main thread (blocking) - Gradio handles ephemeral ports itself
-    launch_web_ui(main_password, port=ui_port, dev_mode=dev_mode)
+    # Run UI in main thread (blocking)
+    if ui_mode == "cli":
+        from chad.ui.cli import launch_cli_ui
+        config_mgr = ConfigManager()
+        launch_cli_ui(config_mgr, main_password)
+    else:
+        from chad.ui.gradio.web_ui import launch_web_ui
+        launch_web_ui(main_password, port=ui_port, dev_mode=dev_mode)
 
 
 def main() -> int:
@@ -181,6 +193,13 @@ def main() -> int:
     parser.add_argument(
         "--dev", action="store_true", help="Enable development mode (enables mock provider)"
     )
+    parser.add_argument(
+        "--ui",
+        type=str,
+        choices=["gradio", "cli"],
+        default=None,
+        help="UI mode: gradio (web) or cli (terminal). Overrides config preference.",
+    )
     args = parser.parse_args()
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -208,22 +227,38 @@ def main() -> int:
             run_server(host=args.api_host, port=args.api_port)
             return 0
 
-        # UI modes need password
+        # UI modes need password - verify before starting API
         main_password = os.environ.get("CHAD_PASSWORD")
 
         if main_password is None:
             if config_mgr.is_first_run():
-                sys.stdout.flush()
-                main_password = getpass.getpass("Create main password for Chad: ")
+                main_password = config_mgr.setup_main_password()
+            else:
+                main_password = config_mgr.verify_main_password()
+
+        # Determine UI mode from args or config
+        ui_mode = args.ui if args.ui else config_mgr.get_ui_mode()
 
         if args.mode == "unified":
             # Run both server and UI
-            run_unified(main_password, ui_port=args.port, api_port=args.api_port, dev_mode=args.dev)
+            run_unified(
+                main_password,
+                ui_port=args.port,
+                api_port=args.api_port,
+                dev_mode=args.dev,
+                ui_mode=ui_mode,
+            )
         else:
             # UI-only mode (connects to external server)
             if args.server_url:
                 os.environ["CHAD_SERVER_URL"] = args.server_url
-            launch_web_ui(main_password, port=args.port, dev_mode=args.dev)
+
+            if ui_mode == "cli":
+                from chad.ui.cli import launch_cli_ui
+                launch_cli_ui(config_mgr, main_password)
+            else:
+                from chad.ui.gradio.web_ui import launch_web_ui
+                launch_web_ui(main_password, port=args.port, dev_mode=args.dev)
 
         return 0
     except ValueError as e:
