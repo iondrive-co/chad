@@ -30,12 +30,12 @@ def client(tmp_path, monkeypatch):
     reset_state()
 
 
-class TestHealthEndpoint:
-    """Tests for health check endpoint."""
+class TestStatusEndpoint:
+    """Tests for status endpoint."""
 
-    def test_health_check(self, client):
-        """Health check returns status and version."""
-        response = client.get("/health")
+    def test_status(self, client):
+        """Status endpoint returns health, version, and uptime."""
+        response = client.get("/status")
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"

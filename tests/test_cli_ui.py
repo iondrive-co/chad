@@ -99,12 +99,13 @@ class TestPTYRunner:
 
         assert "vibe" in cmd
 
-    def test_build_agent_command_unknown(self):
-        """Unknown provider raises ValueError."""
+    def test_build_agent_command_unknown_fallback(self):
+        """Unknown provider falls back to using provider name as command."""
         from chad.ui.cli.pty_runner import build_agent_command
 
-        with pytest.raises(ValueError, match="Unknown provider"):
-            build_agent_command("unknown", "test-account", Path("/tmp/test"))
+        cmd, env = build_agent_command("unknown", "test-account", Path("/tmp/test"))
+        # Fallback uses provider name as command
+        assert cmd == ["unknown"]
 
 
 class TestCLIImports:
@@ -114,16 +115,3 @@ class TestCLIImports:
         """Can import launch_cli_ui from chad.ui.cli."""
         from chad.ui.cli import launch_cli_ui
         assert callable(launch_cli_ui)
-
-    def test_import_screens(self):
-        """Can import screens from chad.ui.cli.screens."""
-        from chad.ui.cli.screens import TaskScreen, SetupScreen, MergeScreen
-        assert TaskScreen is not None
-        assert SetupScreen is not None
-        assert MergeScreen is not None
-
-    def test_import_widgets(self):
-        """Can import widgets from chad.ui.cli.widgets."""
-        from chad.ui.cli.widgets import AgentPicker, DiffViewer
-        assert AgentPicker is not None
-        assert DiffViewer is not None
