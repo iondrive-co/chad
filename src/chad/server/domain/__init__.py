@@ -1,0 +1,122 @@
+"""Domain layer - re-exports core business logic from chad package."""
+
+# Re-export from chad.util.providers
+from chad.util.providers import (
+    AIProvider,
+    ClaudeCodeProvider,
+    OpenAICodexProvider,
+    GeminiCodeAssistProvider,
+    QwenCodeProvider,
+    MistralVibeProvider,
+    MockProvider,
+    ModelConfig,
+    create_provider,
+    parse_codex_output,
+)
+
+# Re-export from chad.util.git_worktree
+from chad.util.git_worktree import (
+    GitWorktreeManager,
+    MergeConflict,
+    ConflictHunk,
+    FileDiff,
+    DiffHunk,
+    DiffLine,
+)
+
+# Re-export from chad.util.config_manager
+from chad.util.config_manager import ConfigManager
+
+# Re-export from chad.util.model_catalog
+from chad.util.model_catalog import ModelCatalog
+
+# Re-export from chad.util.prompts
+from chad.util.prompts import (
+    CODING_AGENT_PROMPT,
+    VERIFICATION_AGENT_PROMPT,
+    build_coding_prompt,
+    get_verification_prompt,
+    parse_verification_response,
+    extract_coding_summary,
+    extract_progress_update,
+    check_verification_mentioned,
+    CodingSummary,
+    ProgressUpdate,
+    VerificationParseError,
+)
+
+# Re-export from chad.util.session_logger
+from chad.util.session_logger import SessionLogger
+
+# Re-export from chad.util.installer
+from chad.util.installer import AIToolInstaller, DEFAULT_TOOLS_DIR
+
+# Re-export from chad.util.cleanup
+from chad.util.cleanup import (
+    cleanup_old_worktrees,
+    cleanup_old_logs,
+    cleanup_old_screenshots,
+    cleanup_temp_files,
+    cleanup_on_startup,
+    cleanup_on_shutdown,
+)
+
+# Re-export from chad.util.utils
+from chad.util.utils import platform_path, safe_home
+
+# Re-export from chad.util.process_registry
+from chad.util.process_registry import ProcessRegistry
+
+__all__ = [
+    # Providers
+    "AIProvider",
+    "ClaudeCodeProvider",
+    "OpenAICodexProvider",
+    "GeminiCodeAssistProvider",
+    "QwenCodeProvider",
+    "MistralVibeProvider",
+    "MockProvider",
+    "ModelConfig",
+    "create_provider",
+    "parse_codex_output",
+    # Git worktree
+    "GitWorktreeManager",
+    "MergeConflict",
+    "ConflictHunk",
+    "FileDiff",
+    "DiffHunk",
+    "DiffLine",
+    # Config
+    "ConfigManager",
+    # Model catalog
+    "ModelCatalog",
+    # Prompts
+    "CODING_AGENT_PROMPT",
+    "VERIFICATION_AGENT_PROMPT",
+    "build_coding_prompt",
+    "get_verification_prompt",
+    "parse_verification_response",
+    "extract_coding_summary",
+    "extract_progress_update",
+    "check_verification_mentioned",
+    "CodingSummary",
+    "ProgressUpdate",
+    "VerificationParseError",
+    # Session
+    "SessionLogger",
+    # Installer
+    "AIToolInstaller",
+    "DEFAULT_TOOLS_DIR",
+    # Cleanup
+    "cleanup_old_worktrees",
+    "cleanup_old_logs",
+    "cleanup_old_screenshots",
+    "cleanup_temp_files",
+    "cleanup_on_startup",
+    "cleanup_on_shutdown",
+    # Utils
+    "platform_path",
+    "safe_home",
+    # Process registry
+    "ProcessRegistry",
+]

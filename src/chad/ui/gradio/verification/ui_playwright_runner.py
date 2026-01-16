@@ -14,8 +14,8 @@ from typing import Dict, Iterator, Optional, TYPE_CHECKING
 
 import bcrypt
 
-from chad.config_manager import ConfigManager
-from chad.process_registry import ProcessRegistry
+from chad.util.config_manager import ConfigManager
+from chad.util.process_registry import ProcessRegistry
 
 # Module-level registry for test servers (uses shared pidfile)
 _test_server_registry: ProcessRegistry | None = None
@@ -953,7 +953,7 @@ def inject_chatbot_message(page: "Page", messages: list[dict], container_selecto
     The content will be processed through make_chat_message for proper formatting.
     """
     # Import here to avoid circular deps
-    from chad.web_ui import make_chat_message
+    from chad.ui.gradio.web_ui import make_chat_message
 
     # Convert messages to Gradio chatbot format
     formatted_messages = []

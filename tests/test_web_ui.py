@@ -9,8 +9,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 import pytest
 
-from chad.git_worktree import GitWorktreeManager
-from chad.providers import ModelConfig, MockProvider
+from chad.util.git_worktree import GitWorktreeManager
+from chad.util.providers import ModelConfig, MockProvider
 
 
 @pytest.fixture
@@ -71,7 +71,7 @@ class TestChadWebUI:
     @pytest.fixture
     def web_ui(self, mock_security_mgr):
         """Create a ChadWebUI instance with mocked dependencies."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
         ui = ChadWebUI(mock_security_mgr, "test-password")
         ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/codex"))
@@ -436,7 +436,7 @@ class TestChadWebUI:
         """Stored models should always be present in dropdown choices."""
         mock_security_mgr.list_accounts.return_value = {"gpt": "openai"}
         mock_security_mgr.get_account_model.return_value = "gpt-5.1-codex-max"
-        from chad.model_catalog import ModelCatalog
+        from chad.util.model_catalog import ModelCatalog
 
         web_ui.model_catalog = ModelCatalog(security_mgr=mock_security_mgr, home_dir=tmp_path, cache_ttl=0)
         models = web_ui.get_models_for_account("gpt")
@@ -504,7 +504,7 @@ class TestPortResolution:
 
     def test_resolve_port_keeps_requested_when_free(self):
         """Requested port should be used when it is available."""
-        from chad.web_ui import _resolve_port
+        from chad.ui.gradio.web_ui import _resolve_port
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
@@ -518,7 +518,7 @@ class TestPortResolution:
 
     def test_resolve_port_returns_ephemeral_when_in_use(self):
         """If the requested port is busy, fall back to an ephemeral choice."""
-        from chad.web_ui import _resolve_port
+        from chad.ui.gradio.web_ui import _resolve_port
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
@@ -533,7 +533,7 @@ class TestPortResolution:
 
     def test_resolve_port_supports_explicit_ephemeral(self):
         """Port zero should always yield an ephemeral assignment."""
-        from chad.web_ui import _resolve_port
+        from chad.ui.gradio.web_ui import _resolve_port
 
         port, ephemeral, conflicted = _resolve_port(0)
 
@@ -573,7 +573,7 @@ class TestPortResolution:
 
 def test_live_stream_display_buffer_trims_to_tail():
     """Live stream display buffer should keep only the most recent content."""
-    from chad.web_ui import LiveStreamDisplayBuffer
+    from chad.ui.gradio.web_ui import LiveStreamDisplayBuffer
 
     buffer = LiveStreamDisplayBuffer(max_chars=100)
     buffer.append("a" * 60)
@@ -585,7 +585,7 @@ def test_live_stream_display_buffer_trims_to_tail():
 
 def test_live_stream_render_state_resets_for_rerender():
     """Resetting render state should allow re-rendering the same output."""
-    from chad.web_ui import LiveStreamRenderState
+    from chad.ui.gradio.web_ui import LiveStreamRenderState
 
     state = LiveStreamRenderState()
     rendered = "<div>output</div>"
@@ -614,7 +614,7 @@ class TestChadWebUITaskExecution:
     @pytest.fixture
     def web_ui(self, mock_security_mgr):
         """Create a ChadWebUI instance."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
         return ChadWebUI(mock_security_mgr, "test-password")
 
@@ -664,7 +664,7 @@ class TestChadWebUITaskExecution:
 
     def test_start_task_missing_agents(self, mock_security_mgr):
         """Test starting task when agents are not selected."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
         mock_security_mgr.list_role_assignments.return_value = {}
 
@@ -989,7 +989,7 @@ class TestChadWebUITaskExecution:
     def test_followup_revision_runtime_error_handled(self, monkeypatch, tmp_path):
         """Follow-up revisions should surface RuntimeError without crashing."""
         from chad import web_ui
-        from chad.providers import ModelConfig
+        from chad.util.providers import ModelConfig
 
         security_mgr = Mock()
         security_mgr.list_accounts.return_value = {"claude": "anthropic"}
@@ -1040,7 +1040,7 @@ class TestChadWebUITaskExecution:
     def test_followup_verification_banner_yields_before_result(self, monkeypatch, tmp_path, git_repo):
         """Follow-up verification banner should appear before results stream back."""
         from chad import web_ui
-        from chad.providers import ModelConfig
+        from chad.util.providers import ModelConfig
 
         security_mgr = Mock()
         security_mgr.list_accounts.return_value = {"claude": "anthropic"}
@@ -1200,7 +1200,7 @@ class TestChadWebUITaskExecution:
 
     def test_verification_dropdown_rejects_invalid_models_for_provider(self):
         """When verification is 'Same as Coding Agent', switching coding agents must validate model/reasoning."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
         security_mgr = Mock()
         security_mgr.list_accounts.return_value = {"codex-work": "openai", "claude-pro": "anthropic"}
@@ -1263,7 +1263,7 @@ class TestChadWebUIInterface:
     @patch("chad.web_ui.gr")
     def test_create_interface(self, mock_gr, mock_security_mgr):
         """Test that create_interface creates a Gradio Blocks interface."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
         # Mock the Gradio components
         mock_blocks = MagicMock()
@@ -1285,7 +1285,7 @@ class TestLaunchWebUI:
     @patch("chad.web_ui.ConfigManager")
     def test_launch_with_existing_password(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """Test launching with existing user and provided password (trusted)."""
-        from chad.web_ui import launch_web_ui
+        from chad.ui.gradio.web_ui import launch_web_ui
 
         mock_security = Mock()
         mock_security.is_first_run.return_value = False
@@ -1314,7 +1314,7 @@ class TestLaunchWebUI:
     @patch("chad.web_ui.ConfigManager")
     def test_launch_without_password_verifies(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """Test launching without password triggers verification."""
-        from chad.web_ui import launch_web_ui
+        from chad.ui.gradio.web_ui import launch_web_ui
 
         mock_security = Mock()
         mock_security.is_first_run.return_value = False
@@ -1342,7 +1342,7 @@ class TestLaunchWebUI:
     @patch("chad.web_ui.ConfigManager")
     def test_launch_first_run_with_password(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """Test launching on first run with password provided."""
-        from chad.web_ui import launch_web_ui
+        from chad.ui.gradio.web_ui import launch_web_ui
 
         mock_security = Mock()
         mock_security.is_first_run.return_value = True
@@ -1370,7 +1370,7 @@ class TestLaunchWebUI:
     @patch("chad.web_ui.ConfigManager")
     def test_launch_falls_back_when_port_busy(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """New launches should fall back to an ephemeral port if the default is in use."""
-        from chad.web_ui import launch_web_ui
+        from chad.ui.gradio.web_ui import launch_web_ui
 
         mock_security = Mock()
         mock_security.is_first_run.return_value = False
@@ -1410,7 +1410,7 @@ class TestGeminiUsage:
     @pytest.fixture
     def web_ui(self, mock_security_mgr):
         """Create a ChadWebUI instance."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
         return ChadWebUI(mock_security_mgr, "test-password")
 
@@ -1492,7 +1492,7 @@ class TestModelSelection:
     @pytest.fixture
     def web_ui(self, mock_security_mgr):
         """Create a ChadWebUI instance."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
         return ChadWebUI(mock_security_mgr, "test-password")
 
@@ -1554,7 +1554,7 @@ class TestModelSelection:
 
     def test_provider_models_constant(self, web_ui):
         """Test that PROVIDER_MODELS includes expected providers."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
         assert "anthropic" in ChadWebUI.SUPPORTED_PROVIDERS
         assert "openai" in ChadWebUI.SUPPORTED_PROVIDERS
@@ -1580,7 +1580,7 @@ class TestRemainingUsage:
     @pytest.fixture
     def web_ui(self, mock_security_mgr):
         """Create a ChadWebUI instance."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
         return ChadWebUI(mock_security_mgr, "test-password")
 
@@ -1683,7 +1683,7 @@ class TestClaudeMultiAccount:
     @pytest.fixture
     def web_ui(self, mock_security_mgr):
         """Create a ChadWebUI instance with mocked dependencies."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
         ui = ChadWebUI(mock_security_mgr, "test-password")
         ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "claude"))
@@ -1900,7 +1900,7 @@ class TestSessionLogging:
     @pytest.fixture
     def web_ui(self, mock_security_mgr):
         """Create a ChadWebUI instance."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
         return ChadWebUI(mock_security_mgr, "test-password")
 
@@ -1971,7 +1971,7 @@ class TestSessionLogging:
 
 def test_session_logger_preserves_streaming_history_with_agent_names():
     """Session logger should preserve structured streaming history with agent names."""
-    from chad.session_logger import SessionLogger
+    from chad.util.session_logger import SessionLogger
 
     logger = SessionLogger()
     log_path = logger.create_log(
@@ -2034,7 +2034,7 @@ class TestSessionLogIncludesTask:
     @pytest.fixture
     def web_ui(self, mock_security_mgr):
         """Create a ChadWebUI instance."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
         return ChadWebUI(mock_security_mgr, "test-password")
 
@@ -2094,7 +2094,7 @@ class TestSessionLogFailureVisibility:
 
     @pytest.fixture
     def web_ui(self, mock_security_mgr):
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
         ui = ChadWebUI(mock_security_mgr, "test-password")
         return ui
@@ -2166,7 +2166,7 @@ class TestCodingSummaryExtraction:
 
     def test_extract_coding_summary_from_json_block(self):
         """Extract summary from a ```json code block."""
-        from chad.prompts import extract_coding_summary
+        from chad.util.prompts import extract_coding_summary
 
         content = """Some thinking text here...
 
@@ -2180,7 +2180,7 @@ class TestCodingSummaryExtraction:
 
     def test_extract_coding_summary_from_raw_json(self):
         """Extract summary from raw JSON without code block."""
-        from chad.prompts import extract_coding_summary
+        from chad.util.prompts import extract_coding_summary
 
         content = 'Done! {"change_summary": "Added new feature"}'
         result = extract_coding_summary(content)
@@ -2189,7 +2189,7 @@ class TestCodingSummaryExtraction:
 
     def test_extract_coding_summary_with_all_fields(self):
         """Extract summary with hypothesis and screenshots."""
-        from chad.prompts import extract_coding_summary
+        from chad.util.prompts import extract_coding_summary
 
         content = '''Done with the fix.
 
@@ -2211,7 +2211,7 @@ class TestCodingSummaryExtraction:
 
     def test_extract_coding_summary_partial_fields(self):
         """Extract summary with only some optional fields."""
-        from chad.prompts import extract_coding_summary
+        from chad.util.prompts import extract_coding_summary
 
         content = '''```json
 {"change_summary": "Added feature", "hypothesis": "User needs this"}
@@ -2225,7 +2225,7 @@ class TestCodingSummaryExtraction:
 
     def test_extract_coding_summary_returns_none_when_missing(self):
         """Return None when no change_summary found."""
-        from chad.prompts import extract_coding_summary
+        from chad.util.prompts import extract_coding_summary
 
         content = "Just some regular text without any JSON."
         result = extract_coding_summary(content)
@@ -2233,7 +2233,7 @@ class TestCodingSummaryExtraction:
 
     def test_make_chat_message_uses_extracted_summary(self):
         """make_chat_message should prefer extracted JSON summary over heuristics."""
-        from chad.web_ui import make_chat_message
+        from chad.ui.gradio.web_ui import make_chat_message
 
         # Content needs to be > 300 chars to trigger collapsible mode
         content = """I'm thinking about this task...
@@ -2257,7 +2257,7 @@ Here's some more filler text to ensure we hit that threshold.
 
     def test_make_chat_message_falls_back_to_heuristic(self):
         """make_chat_message should use heuristics when no JSON summary."""
-        from chad.web_ui import make_chat_message
+        from chad.ui.gradio.web_ui import make_chat_message
 
         content = (
             """Some thinking text...
@@ -2274,7 +2274,7 @@ More details here...
 
     def test_make_chat_message_displays_hypothesis_and_screenshots(self, tmp_path):
         """make_chat_message should show hypothesis and inline screenshot images."""
-        from chad.web_ui import make_chat_message
+        from chad.ui.gradio.web_ui import make_chat_message
 
         # Create minimal PNG files for testing
         before_png = tmp_path / "before.png"
@@ -2324,7 +2324,7 @@ class TestVerificationPrompt:
 
     def test_get_verification_prompt_includes_task_and_summary(self):
         """Task and change summary should be prefixed for the verifier."""
-        from chad.prompts import get_verification_prompt
+        from chad.util.prompts import get_verification_prompt
 
         prompt = get_verification_prompt("Full response content", "Do the thing", "Did the thing")
         assert "Do the thing" in prompt
@@ -2334,7 +2334,7 @@ class TestVerificationPrompt:
 
     def test_truncation_keeps_indicator_and_fits_limit(self):
         """Verification payloads should be compact and annotated when truncated."""
-        from chad.web_ui import _truncate_verification_output, MAX_VERIFICATION_PROMPT_CHARS
+        from chad.ui.gradio.web_ui import _truncate_verification_output, MAX_VERIFICATION_PROMPT_CHARS
 
         long_text = "a" * (MAX_VERIFICATION_PROMPT_CHARS + 500)
         truncated = _truncate_verification_output(long_text)
@@ -2343,7 +2343,7 @@ class TestVerificationPrompt:
 
     def test_run_verification_aborts_without_required_inputs(self, monkeypatch, tmp_path):
         """Verification should abort before contacting providers when inputs are missing."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
         class DummySecurityMgr:
             def list_accounts(self):
@@ -2377,7 +2377,7 @@ class TestVerificationPrompt:
 
     def test_run_verification_returns_rich_feedback(self, monkeypatch, tmp_path):
         """Verification failures should include lint details (tests no longer run)."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
         import chad.web_ui as web_ui
         import chad.verification.tools as verification_tools
 
@@ -2437,7 +2437,7 @@ class TestAnsiToHtml:
 
     def test_converts_basic_color_codes_to_html(self):
         """Basic SGR color codes should be converted to HTML spans."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         # Purple/magenta color code
         text = "\x1b[35mPurple text\x1b[0m"
@@ -2449,7 +2449,7 @@ class TestAnsiToHtml:
 
     def test_converts_256_color_codes(self):
         """256-color codes should be converted to HTML spans."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         # 256-color purple
         text = "\x1b[38;5;141mColored\x1b[0m"
@@ -2459,7 +2459,7 @@ class TestAnsiToHtml:
 
     def test_converts_rgb_color_codes(self):
         """RGB true-color codes should be converted to HTML spans."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         # RGB purple
         text = "\x1b[38;2;198;120;221mRGB color\x1b[0m"
@@ -2469,7 +2469,7 @@ class TestAnsiToHtml:
 
     def test_strips_cursor_codes(self):
         """Cursor control sequences with ? should be stripped."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         # Show/hide cursor - these use different ending chars, should be skipped
         text = "\x1b[?25hVisible\x1b[?25l"
@@ -2478,7 +2478,7 @@ class TestAnsiToHtml:
 
     def test_strips_osc_sequences(self):
         """OSC sequences (like terminal title) should be stripped."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         # Set terminal title - uses different format, should be skipped
         text = "\x1b]0;My Title\x07Content here"
@@ -2487,7 +2487,7 @@ class TestAnsiToHtml:
 
     def test_preserves_newlines(self):
         """Newlines should be preserved."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         text = "Line 1\n\nLine 3"
         result = ansi_to_html(text)
@@ -2495,7 +2495,7 @@ class TestAnsiToHtml:
 
     def test_escapes_html_entities(self):
         """HTML entities should be escaped."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         text = "<script>alert('xss')</script>"
         result = ansi_to_html(text)
@@ -2504,7 +2504,7 @@ class TestAnsiToHtml:
 
     def test_converts_unclosed_color_codes(self):
         """Unclosed color codes should generate HTML span that closes at end."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         # Color without reset
         text = "\x1b[35mPurple start\n\nText after blank line"
@@ -2518,7 +2518,7 @@ class TestAnsiToHtml:
 
     def test_handles_stray_escape_characters(self):
         """Stray escape characters in non-m sequences should be handled."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         # Stray escape that doesn't match known patterns - skipped
         text = "Before\x1b[999zAfter"
@@ -2529,7 +2529,7 @@ class TestAnsiToHtml:
 
     def test_strips_background_colors(self):
         """Background colors (40-47) should be stripped to prevent white-on-dark issues."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         # White background (47) - would make text unreadable on dark theme
         text = "\x1b[47mWhite bg text\x1b[0m"
@@ -2561,7 +2561,7 @@ class TestBuildInlineLiveHtml:
         can't find the element to update, and live view never works.
         This was the root cause of the live view regression.
         """
-        from chad.web_ui import build_inline_live_html
+        from chad.ui.gradio.web_ui import build_inline_live_html
 
         result = build_inline_live_html("", "CODING AI", live_id="test-123")
 
@@ -2577,7 +2577,7 @@ class TestBuildInlineLiveHtml:
 
     def test_content_creates_container_with_live_id(self):
         """Content should create a container with data-live-id."""
-        from chad.web_ui import build_inline_live_html
+        from chad.ui.gradio.web_ui import build_inline_live_html
 
         result = build_inline_live_html("Test output", "CODING AI", live_id="abc-456")
 
@@ -2587,7 +2587,7 @@ class TestBuildInlineLiveHtml:
 
     def test_no_live_id_still_creates_container(self):
         """Without live_id, container should still be created (just without data attribute)."""
-        from chad.web_ui import build_inline_live_html
+        from chad.ui.gradio.web_ui import build_inline_live_html
 
         result = build_inline_live_html("Some output", "CODING AI", live_id=None)
 
@@ -2597,7 +2597,7 @@ class TestBuildInlineLiveHtml:
 
     def test_empty_content_without_live_id_still_creates_structure(self):
         """Even empty content without live_id should create proper HTML structure."""
-        from chad.web_ui import build_inline_live_html
+        from chad.ui.gradio.web_ui import build_inline_live_html
 
         result = build_inline_live_html("", "TEST AI", live_id=None)
 

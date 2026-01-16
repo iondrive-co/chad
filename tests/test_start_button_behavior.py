@@ -7,7 +7,7 @@ import threading
 import time
 import subprocess
 
-from chad.web_ui import ChadWebUI
+from chad.ui.gradio.web_ui import ChadWebUI
 
 
 class TestStartButtonBehavior:

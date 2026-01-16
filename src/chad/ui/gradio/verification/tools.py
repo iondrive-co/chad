@@ -1,7 +1,7 @@
 """Chad verification and screenshot tools.
 
 These functions can be called directly from agent code:
-    from chad.verification.tools import verify, screenshot
+    from chad.ui.gradio.verification.tools import verify, screenshot
     verify()  # Run lint + tests
     screenshot(tab="run")  # Capture UI
 """
@@ -14,8 +14,8 @@ import sys
 from pathlib import Path
 from typing import Dict
 
-from chad.config import resolve_project_root
-from chad.verification.ui_playwright_runner import (
+from chad.util.config import resolve_project_root
+from chad.ui.gradio.verification.ui_playwright_runner import (
     ensure_playwright_browsers,
     run_screenshot_subprocess,
 )
