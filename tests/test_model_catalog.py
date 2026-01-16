@@ -3,7 +3,7 @@ import json
 import os
 from pathlib import Path
 
-from chad.model_catalog import ModelCatalog
+from chad.util.model_catalog import ModelCatalog
 
 
 def _write_auth(auth_file: Path, plan_type: str) -> None:

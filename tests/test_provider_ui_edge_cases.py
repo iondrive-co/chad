@@ -8,10 +8,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from chad.model_catalog import ModelCatalog
-from chad.provider_ui import ProviderUIManager
-from chad.config_manager import ConfigManager
-from chad.verification.ui_playwright_runner import create_temp_env
+from chad.util.model_catalog import ModelCatalog
+from chad.ui.gradio.provider_ui import ProviderUIManager
+from chad.util.config_manager import ConfigManager
+from chad.ui.gradio.verification.ui_playwright_runner import create_temp_env
 
 
 class TestProviderScreenshotMode:

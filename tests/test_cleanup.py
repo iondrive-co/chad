@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from chad.cleanup import (
+from chad.util.cleanup import (
     _is_older_than_days,
     cleanup_old_worktrees,
     cleanup_old_logs,
@@ -278,14 +278,14 @@ class TestConfigManagerCleanupDays:
 
     def test_get_cleanup_days_default(self, tmp_path):
         """Should return default of 3 when not configured."""
-        from chad.config_manager import ConfigManager
+        from chad.util.config_manager import ConfigManager
 
         mgr = ConfigManager(tmp_path / "test.conf")
         assert mgr.get_cleanup_days() == 3
 
     def test_set_and_get_cleanup_days(self, tmp_path):
         """Should store and retrieve cleanup_days."""
-        from chad.config_manager import ConfigManager
+        from chad.util.config_manager import ConfigManager
 
         mgr = ConfigManager(tmp_path / "test.conf")
         mgr.set_cleanup_days(7)
@@ -293,7 +293,7 @@ class TestConfigManagerCleanupDays:
 
     def test_set_cleanup_days_invalid(self, tmp_path):
         """Should reject invalid cleanup_days values."""
-        from chad.config_manager import ConfigManager
+        from chad.util.config_manager import ConfigManager
 
         mgr = ConfigManager(tmp_path / "test.conf")
         with pytest.raises(ValueError):

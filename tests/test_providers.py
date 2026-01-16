@@ -9,7 +9,7 @@ import time
 from unittest.mock import Mock, patch
 
 import pytest
-from chad.providers import (
+from chad.util.providers import (
     ModelConfig,
     create_provider,
     ClaudeCodeProvider,
@@ -244,7 +244,7 @@ Second thought
 
 def test_strip_ansi_codes_helper():
     """Ensure ANSI stripping helper removes escape sequences."""
-    from chad.providers import _strip_ansi_codes
+    from chad.util.providers import _strip_ansi_codes
 
     colored = "\x1b[31mError\x1b[0m message"
     assert _strip_ansi_codes(colored) == "Error message"
@@ -1035,7 +1035,7 @@ class TestOpenAICodexProvider:
 
     def test_get_env_sets_windows_home_variables(self, monkeypatch):
         """Test that _get_env sets all Windows home-related environment variables."""
-        from chad.utils import platform_path
+        from chad.util.utils import platform_path
 
         monkeypatch.setattr("os.name", "nt")
         config = ModelConfig(provider="openai", model_name="gpt-4", account_name="test-account")
@@ -1450,7 +1450,7 @@ class TestCodexLiveViewFormatting:
             "item": {"type": "reasoning", "text": "**Preparing to locate visual_test_map**"}
         }
         # We need to call the format function - get it from a provider
-        from chad.providers import OpenAICodexProvider, ModelConfig
+        from chad.util.providers import OpenAICodexProvider, ModelConfig
         config = ModelConfig(provider="openai", model_name="gpt-4")
         provider = OpenAICodexProvider(config)
         provider.project_path = "/tmp/test"

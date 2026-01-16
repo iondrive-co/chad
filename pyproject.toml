@@ -32,6 +32,12 @@ dependencies = [
     "hf-xet==1.1.0",
     "huggingface-hub>=0.16.4,<1.0.0",
     "filelock>=3.0.0",
+    # Server API dependencies
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.20.0",
+    "websockets>=11.0",
+    "httpx>=0.24.0",
+    "pydantic>=2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -67,6 +73,7 @@ python_functions = ["test_*"]
 addopts = "-v"
 markers = [
     "visual: marks tests as visual/UI tests requiring Playwright (deselect with '-m \"not visual\"')",
+    "api: marks tests as API endpoint tests",
 ]
 filterwarnings = [
     "ignore:datetime.datetime.utcfromtimestamp:DeprecationWarning",

@@ -3,7 +3,7 @@
 from unittest.mock import patch
 import os
 import pytest
-from chad.config_manager import CONFIG_BASE_KEYS, ConfigManager, validate_config_keys
+from chad.util.config_manager import CONFIG_BASE_KEYS, ConfigManager, validate_config_keys
 
 
 class TestConfigManager:

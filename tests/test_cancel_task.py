@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import MagicMock
 
-from chad.web_ui import ChadWebUI, Session
+from chad.ui.gradio.web_ui import ChadWebUI, Session
 
 
 class TestCancelTask:
