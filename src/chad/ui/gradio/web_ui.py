@@ -12,12 +12,14 @@ import html
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, TYPE_CHECKING
 
 import gradio as gr
 
 from .provider_ui import ProviderUIManager
-from chad.util.config_manager import ConfigManager, validate_config_keys
+
+if TYPE_CHECKING:
+    from chad.ui.client import APIClient
 from chad.util.session_logger import SessionLogger
 from chad.util.providers import ModelConfig, parse_codex_output, create_provider
 from chad.util.model_catalog import ModelCatalog
@@ -1966,14 +1968,13 @@ class ChadWebUI:
     VERIFICATION_NONE = "__verification_none__"
     VERIFICATION_NONE_LABEL = "None"
 
-    def __init__(self, security_mgr: ConfigManager, main_password: str, dev_mode: bool = False):
-        self.security_mgr = security_mgr
-        self.main_password = main_password
+    def __init__(self, api_client: "APIClient", dev_mode: bool = False):
+        self.api_client = api_client
         self.dev_mode = dev_mode
         self.sessions: dict[str, Session] = {}
         self.provider_card_count = 10
-        self.model_catalog = ModelCatalog(security_mgr)
-        self.provider_ui = ProviderUIManager(security_mgr, main_password, self.model_catalog, dev_mode=dev_mode)
+        self.model_catalog = ModelCatalog(api_client)
+        self.provider_ui = ProviderUIManager(api_client, self.model_catalog, dev_mode=dev_mode)
         self.session_logger = SessionLogger()
         # Store dropdown references for cross-tab updates
         self._session_dropdowns: dict[str, dict] = {}
@@ -2107,13 +2108,14 @@ class ChadWebUI:
             - verified=False means revisions are needed, feedback contains issues
             - verified=None means verification aborted due to missing inputs
         """
-        accounts = self.security_mgr.list_accounts()
-        if verification_account not in accounts:
+        try:
+            account = self.api_client.get_account(verification_account)
+        except Exception:
             return True, "Verification skipped: account not found"
 
-        verification_provider = accounts[verification_account]
-        stored_model = self.security_mgr.get_account_model(verification_account)
-        stored_reasoning = self.security_mgr.get_account_reasoning(verification_account)
+        verification_provider = account.provider
+        stored_model = account.model
+        stored_reasoning = account.reasoning
         verification_model = verification_model or stored_model
         verification_reasoning = verification_reasoning or stored_reasoning
 
@@ -2273,11 +2275,12 @@ class ChadWebUI:
         if not account_name:
             return "❌ Please select an account to login"
 
-        accounts = self.security_mgr.list_accounts()
-        if account_name not in accounts:
+        try:
+            account = self.api_client.get_account(account_name)
+        except Exception:
             return f"❌ Account '{account_name}' not found"
 
-        if accounts[account_name] != "openai":
+        if account.provider != "openai":
             return f"❌ Account '{account_name}' is not an OpenAI account"
 
         cli_ok, cli_detail = self.provider_ui._ensure_provider_cli("openai")
@@ -2373,11 +2376,12 @@ class ChadWebUI:
         verification_reasoning: str | None = None,
     ) -> tuple[str | None, str, str]:
         """Resolve verification account/model/reasoning selections without mutating coding prefs."""
-        accounts = self.security_mgr.list_accounts()
+        accounts = self.api_client.list_accounts()
+        account_names = {acc.name for acc in accounts}
         if verification_agent == self.VERIFICATION_NONE:
             return None, coding_model, coding_reasoning
         actual_account = coding_account if verification_agent == self.SAME_AS_CODING else verification_agent
-        if not actual_account or actual_account not in accounts:
+        if not actual_account or actual_account not in account_names:
             return None, coding_model, coding_reasoning
 
         def normalize(value: str | None, fallback: str) -> str:
@@ -2390,17 +2394,22 @@ class ChadWebUI:
             resolved_reasoning = normalize(coding_reasoning, "default")
             return actual_account, resolved_model, resolved_reasoning
 
-        account_model = self.security_mgr.get_account_model(actual_account)
-        account_reasoning = self.security_mgr.get_account_reasoning(actual_account)
+        try:
+            acc = self.api_client.get_account(actual_account)
+            account_model = acc.model or "default"
+            account_reasoning = acc.reasoning or "default"
+        except Exception:
+            account_model = "default"
+            account_reasoning = "default"
         resolved_model = normalize(verification_model, account_model)
         resolved_reasoning = normalize(verification_reasoning, account_reasoning)
 
         # Persist explicit verification preferences to the verification account only
         try:
             if verification_model and verification_model != self.SAME_AS_CODING:
-                self.security_mgr.set_account_model(actual_account, resolved_model)
+                self.api_client.set_account_model(actual_account, resolved_model)
             if verification_reasoning and verification_reasoning != self.SAME_AS_CODING:
-                self.security_mgr.set_account_reasoning(actual_account, resolved_reasoning)
+                self.api_client.set_account_reasoning(actual_account, resolved_reasoning)
         except Exception:
             pass
 
@@ -2424,7 +2433,8 @@ class ChadWebUI:
                 "default",
                 False,
             )
-        accounts_map = self.security_mgr.list_accounts()
+        accounts = self.api_client.list_accounts()
+        accounts_map = {acc.name: acc.provider for acc in accounts}
         account_choices = list(accounts_map.keys())
         actual_account = coding_agent if verification_agent == self.SAME_AS_CODING else verification_agent
         interactive = bool(
@@ -2454,11 +2464,16 @@ class ChadWebUI:
             model_value = value_or_default(coding_model_value, model_choices, allow_custom=False)
             reasoning_value = value_or_default(coding_reasoning_value, reasoning_choices, allow_custom=False)
         else:
-            stored_model = self.security_mgr.get_account_model(actual_account) or "default"
+            try:
+                acc = self.api_client.get_account(actual_account)
+                stored_model = acc.model or "default"
+                stored_reasoning = acc.reasoning or "default"
+            except Exception:
+                stored_model = "default"
+                stored_reasoning = "default"
             preferred_model = current_verification_model or stored_model
             model_value = value_or_default(preferred_model, model_choices)
 
-            stored_reasoning = self.security_mgr.get_account_reasoning(actual_account) or "default"
             preferred_reasoning = current_verification_reasoning or stored_reasoning
             reasoning_value = value_or_default(preferred_reasoning, reasoning_choices)
 
@@ -2591,8 +2606,9 @@ class ChadWebUI:
                 yield make_yield([], msg, summary=msg, interactive=True)
                 return
 
-            accounts = self.security_mgr.list_accounts()
-            if coding_agent not in accounts:
+            try:
+                account = self.api_client.get_account(coding_agent)
+            except Exception:
                 msg = f"❌ Coding agent '{coding_agent}' not found"
                 yield make_yield([], msg, summary=msg, interactive=True)
                 return
@@ -2620,13 +2636,11 @@ class ChadWebUI:
                 return
 
             coding_account = coding_agent
-            coding_provider = accounts[coding_account]
-            self.security_mgr.assign_role(coding_account, "CODING")
+            coding_provider = account.provider
+            self.api_client.set_account_role(coding_account, "CODING")
 
-            selected_model = coding_model or self.security_mgr.get_account_model(coding_account) or "default"
-            selected_reasoning = (
-                coding_reasoning or self.security_mgr.get_account_reasoning(coding_account) or "default"
-            )
+            selected_model = coding_model or account.model or "default"
+            selected_reasoning = coding_reasoning or account.reasoning or "default"
             verification_model_value = verification_model or self.SAME_AS_CODING
             verification_reasoning_value = verification_reasoning or self.SAME_AS_CODING
             (
@@ -2643,11 +2657,11 @@ class ChadWebUI:
             )
 
             try:
-                self.security_mgr.set_account_model(coding_account, selected_model)
+                self.api_client.set_account_model(coding_account, selected_model)
             except Exception:
                 pass
             try:
-                self.security_mgr.set_account_reasoning(coding_account, selected_reasoning)
+                self.api_client.set_account_reasoning(coding_account, selected_reasoning)
             except Exception:
                 pass
 
@@ -3526,8 +3540,9 @@ class ChadWebUI:
             yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
             return
 
-        accounts = self.security_mgr.list_accounts()
-        has_account = bool(coding_agent and coding_agent in accounts)
+        accounts = self.api_client.list_accounts()
+        account_names = {acc.name for acc in accounts}
+        has_account = bool(coding_agent and coding_agent in account_names)
 
         def normalize_model_value(value: str | None) -> str:
             return value if value else "default"
@@ -3535,15 +3550,23 @@ class ChadWebUI:
         def normalize_reasoning_value(value: str | None) -> str:
             return value if value else "default"
 
+        # Get account details for model/reasoning defaults
+        coding_acc = None
+        if has_account:
+            try:
+                coding_acc = self.api_client.get_account(coding_agent)
+            except Exception:
+                pass
+
         requested_model = normalize_model_value(
             coding_model
             if coding_model is not None
-            else (self.security_mgr.get_account_model(coding_agent) if has_account else "default")
+            else (coding_acc.model if coding_acc else "default")
         )
         requested_reasoning = normalize_reasoning_value(
             coding_reasoning
             if coding_reasoning is not None
-            else (self.security_mgr.get_account_reasoning(coding_agent) if has_account else "default")
+            else (coding_acc.reasoning if coding_acc else "default")
         )
         verification_model_value = verification_model or self.SAME_AS_CODING
         verification_reasoning_value = verification_reasoning or self.SAME_AS_CODING
@@ -3562,8 +3585,8 @@ class ChadWebUI:
 
         if has_account:
             try:
-                self.security_mgr.set_account_model(coding_agent, requested_model)
-                self.security_mgr.set_account_reasoning(coding_agent, requested_reasoning)
+                self.api_client.set_account_model(coding_agent, requested_model)
+                self.api_client.set_account_reasoning(coding_agent, requested_reasoning)
             except Exception:
                 pass
 
@@ -4555,17 +4578,23 @@ class ChadWebUI:
         session = self.get_session(session_id)
         default_path = os.environ.get("CHAD_PROJECT_PATH", str(Path.cwd()))
 
-        accounts_map = self.security_mgr.list_accounts()
+        accounts = self.api_client.list_accounts()
+        accounts_map = {acc.name: acc for acc in accounts}
         account_choices = list(accounts_map.keys())
-        role_assignments = self.security_mgr.list_role_assignments()
-        initial_coding = role_assignments.get("CODING", "")
+
+        # Find account with CODING role
+        initial_coding = ""
+        for acc in accounts:
+            if acc.role == "CODING":
+                initial_coding = acc.name
+                break
 
         # Auto-select first provider if no coding agent is assigned
         if (not initial_coding or initial_coding not in account_choices) and account_choices:
             initial_coding = account_choices[0]
             # Persist the auto-selection
             try:
-                self.security_mgr.assign_role(initial_coding, "CODING")
+                self.api_client.set_account_role(initial_coding, "CODING")
             except Exception:
                 pass
 
@@ -4582,27 +4611,26 @@ class ChadWebUI:
             (none_label, self.VERIFICATION_NONE),
             *[(account, account) for account in account_choices],
         ]
-        stored_verification = self.security_mgr.get_verification_agent()
+        stored_verification = self.api_client.get_verification_agent()
         initial_verification = stored_verification if stored_verification in account_choices else self.SAME_AS_CODING
 
         # Get initial model/reasoning choices for coding agent
         coding_model_choices = self.get_models_for_account(initial_coding) if initial_coding else ["default"]
         if not coding_model_choices:
             coding_model_choices = ["default"]
-        stored_coding_model = self.security_mgr.get_account_model(initial_coding) if initial_coding else "default"
+        coding_acc = accounts_map.get(initial_coding)
+        stored_coding_model = coding_acc.model if coding_acc else "default"
         coding_model_value = (
             stored_coding_model if stored_coding_model in coding_model_choices else coding_model_choices[0]
         )
 
-        coding_provider_type = accounts_map.get(initial_coding, "")
+        coding_provider_type = coding_acc.provider if coding_acc else ""
         coding_reasoning_choices = (
             self.get_reasoning_choices(coding_provider_type, initial_coding) if coding_provider_type else ["default"]
         )
         if not coding_reasoning_choices:
             coding_reasoning_choices = ["default"]
-        stored_coding_reasoning = (
-            self.security_mgr.get_account_reasoning(initial_coding) if initial_coding else "default"
-        )
+        stored_coding_reasoning = coding_acc.reasoning if coding_acc else "default"
         coding_reasoning_value = (
             stored_coding_reasoning
             if stored_coding_reasoning in coding_reasoning_choices
@@ -5082,7 +5110,7 @@ class ChadWebUI:
 
             # Assign the coding role
             try:
-                self.security_mgr.assign_role(selected_account, "CODING")
+                self.api_client.set_account_role(selected_account, "CODING")
             except Exception:
                 pass
 
@@ -5094,16 +5122,19 @@ class ChadWebUI:
             model_choices = self.get_models_for_account(selected_account)
             if not model_choices:
                 model_choices = ["default"]
-            stored_model = self.security_mgr.get_account_model(selected_account) or "default"
+            try:
+                acc = self.api_client.get_account(selected_account)
+                stored_model = acc.model or "default"
+            except Exception:
+                stored_model = "default"
             model_value = stored_model if stored_model in model_choices else model_choices[0]
 
             # Get reasoning choices
-            accounts = self.security_mgr.list_accounts()
-            provider_type = accounts.get(selected_account, "")
+            provider_type = acc.provider if acc else ""
             reasoning_choices = self.get_reasoning_choices(provider_type, selected_account)
             if not reasoning_choices:
                 reasoning_choices = ["default"]
-            stored_reasoning = self.security_mgr.get_account_reasoning(selected_account) or "default"
+            stored_reasoning = acc.reasoning if acc else "default"
             reasoning_value = stored_reasoning if stored_reasoning in reasoning_choices else reasoning_choices[0]
 
             verif_model_update, verif_reasoning_update = verification_dropdown_updates(
@@ -5310,18 +5341,31 @@ class ChadWebUI:
             elem_classes=["config-accordion"],
         ):
             config_status = gr.Markdown("", elem_classes=["config-panel__status"])
-            # Validate config keys to force developers to update this panel when adding new settings
-            validate_config_keys(self.security_mgr.load_config(), allow=[])
+            # Load settings from API
+            try:
+                preferences = self.api_client.get_preferences()
+                prefs_dict = {"project_path": preferences.last_project_path} if preferences else {}
+                ui_mode = preferences.ui_mode if preferences else "gradio"
+            except Exception:
+                prefs_dict = {}
+                ui_mode = "gradio"
 
-            preferences = self.security_mgr.load_preferences() or {}
-            retention_days = self.security_mgr.get_cleanup_days()
-            role_assignments = self.security_mgr.list_role_assignments()
-            coding_assignment = role_assignments.get("CODING", "")
-            accounts = self.security_mgr.list_accounts()
-            account_choices = list(accounts.keys())
+            try:
+                cleanup_settings = self.api_client.get_cleanup_settings()
+                retention_days = cleanup_settings.retention_days
+            except Exception:
+                retention_days = 7
+
+            accounts = self.api_client.list_accounts()
+            account_choices = [acc.name for acc in accounts]
+            coding_assignment = ""
+            for acc in accounts:
+                if acc.role == "CODING":
+                    coding_assignment = acc.name
+                    break
             coding_value = coding_assignment if coding_assignment in account_choices else None
 
-            verification_value = self.security_mgr.get_verification_agent() or self.SAME_AS_CODING
+            verification_value = self.api_client.get_verification_agent() or self.SAME_AS_CODING
             if verification_value not in account_choices:
                 verification_value = self.SAME_AS_CODING
             verification_choices = [(self.SAME_AS_CODING, self.SAME_AS_CODING)] + [
@@ -5356,13 +5400,13 @@ class ChadWebUI:
                 project_path_pref = gr.Textbox(
                     label="Default Project Path",
                     placeholder="/path/to/project",
-                    value=preferences.get("project_path", ""),
+                    value=prefs_dict.get("project_path", ""),
                 )
             with gr.Row():
                 ui_mode_pref = gr.Dropdown(
                     label="UI Mode",
                     choices=["gradio", "cli"],
-                    value=self.security_mgr.get_ui_mode(),
+                    value=ui_mode,
                     allow_custom_value=False,
                     info="Gradio (web) or CLI (terminal) - applies on next launch",
                 )
@@ -5408,7 +5452,7 @@ class ChadWebUI:
 
         def on_retention_change(days):
             try:
-                self.security_mgr.set_cleanup_days(int(days))
+                self.api_client.set_cleanup_settings(retention_days=int(days))
                 return "✅ Retention days saved"
             except Exception as exc:
                 return f"❌ {exc}"
@@ -5418,12 +5462,16 @@ class ChadWebUI:
         def on_coding_pref_change(account_name):
             if not account_name:
                 try:
-                    self.security_mgr.clear_role("CODING")
+                    # Find the current coding account and clear its role
+                    for acc in self.api_client.list_accounts():
+                        if acc.role == "CODING":
+                            self.api_client.set_account_role(acc.name, "")
+                            break
                     return "🧹 Cleared preferred coding agent"
                 except Exception as exc:
                     return f"❌ {exc}"
             try:
-                self.security_mgr.assign_role(account_name, "CODING")
+                self.api_client.set_account_role(account_name, "CODING")
                 return f"✅ Preferred coding agent saved: {account_name}"
             except Exception as exc:
                 return f"❌ {exc}"
@@ -5433,12 +5481,12 @@ class ChadWebUI:
         def on_verification_pref_change(account_name):
             if not account_name or account_name == self.SAME_AS_CODING:
                 try:
-                    self.security_mgr.set_verification_agent(None)
+                    self.api_client.set_verification_agent(None)
                     return "✅ Verification agent set to same as coding"
                 except Exception as exc:
                     return f"❌ {exc}"
             try:
-                self.security_mgr.set_verification_agent(account_name)
+                self.api_client.set_verification_agent(account_name)
                 return f"✅ Verification agent saved: {account_name}"
             except Exception as exc:
                 return f"❌ {exc}"
@@ -5450,14 +5498,17 @@ class ChadWebUI:
         )
 
         def on_project_path_change(path):
-            self.security_mgr.save_preferences(path.strip())
-            return "✅ Default project path saved"
+            try:
+                self.api_client.set_preferences(last_project_path=path.strip())
+                return "✅ Default project path saved"
+            except Exception as exc:
+                return f"❌ {exc}"
 
         project_path_pref.input(on_project_path_change, inputs=[project_path_pref], outputs=[config_status])
 
         def on_ui_mode_change(mode):
             try:
-                self.security_mgr.set_ui_mode(mode)
+                self.api_client.set_preferences(ui_mode=mode)
                 return f"✅ UI mode set to {mode} (applies on next launch)"
             except Exception as exc:
                 return f"❌ {exc}"
@@ -6103,8 +6154,8 @@ window._setupLivePatchListener();
                     return [gr.update() for _ in range(len(self._session_dropdowns) * 2)]
 
                 # Get current account choices
-                accounts = self.security_mgr.list_accounts()
-                account_choices = list(accounts.keys())
+                accounts = self.api_client.list_accounts()
+                account_choices = [acc.name for acc in accounts]
                 none_label = (
                     "None (disable verification)"
                     if self.VERIFICATION_NONE_LABEL in account_choices
@@ -6137,8 +6188,8 @@ window._setupLivePatchListener();
             # This ensures dropdowns update when providers are deleted
             def refresh_dropdowns_after_delete():
                 """Refresh all session dropdowns after a provider is deleted."""
-                accounts = self.security_mgr.list_accounts()
-                account_choices = list(accounts.keys())
+                accounts = self.api_client.list_accounts()
+                account_choices = [acc.name for acc in accounts]
                 none_label = (
                     "None (disable verification)"
                     if self.VERIFICATION_NONE_LABEL in account_choices
@@ -6168,11 +6219,15 @@ window._setupLivePatchListener();
             return interface
 
 
-def launch_web_ui(password: str = None, port: int = 7860, dev_mode: bool = False) -> tuple[None, int]:
+def launch_web_ui(
+    api_base_url: str = "http://localhost:8000",
+    port: int = 7860,
+    dev_mode: bool = False,
+) -> tuple[None, int]:
     """Launch the Chad web interface.
 
     Args:
-        password: Main password. If not provided, will prompt via CLI
+        api_base_url: Base URL of the Chad API server
         port: Port to run on. Use 0 for ephemeral port.
         dev_mode: If True, enable development features like mock provider
 
@@ -6188,41 +6243,18 @@ def launch_web_ui(password: str = None, port: int = 7860, dev_mode: bool = False
         # Non-fatal; continue without forcing env
         pass
 
-    security_mgr = ConfigManager()
-
-    # Get or verify password
-    if security_mgr.is_first_run():
-        if password:
-            # Setup with provided password
-            import bcrypt
-            import base64
-
-            password_hash = security_mgr.hash_password(password)
-            encryption_salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
-            config = {
-                "password_hash": password_hash,
-                "encryption_salt": encryption_salt,
-                "accounts": {},
-            }
-            security_mgr.save_config(config)
-            main_password = password
-        else:
-            main_password = security_mgr.setup_main_password()
-    else:
-        if password is not None:
-            # Use provided password (for automation/screenshots)
-            main_password = password
-        else:
-            # Interactive mode - verify password which includes the reset flow
-            main_password = security_mgr.verify_main_password()
+    # Create API client for communication with server
+    from chad.ui.client import APIClient
+    api_client = APIClient(api_base_url)
 
     # Create and launch UI
-    ui = ChadWebUI(security_mgr, main_password, dev_mode=dev_mode)
+    ui = ChadWebUI(api_client, dev_mode=dev_mode)
     app = ui.create_interface()
 
     requested_port = port
     port, ephemeral, conflicted = _resolve_port(port)
-    open_browser = not (requested_port == 0 and ephemeral)
+    screenshot_mode = os.environ.get("CHAD_SCREENSHOT_MODE") == "1"
+    open_browser = not screenshot_mode
     if conflicted:
         print(f"Port {requested_port} already in use; launching on ephemeral port {port}")
 

@@ -12,12 +12,12 @@ class TestCancelTask:
     @pytest.fixture
     def web_ui(self, tmp_path):
         """Create ChadWebUI instance."""
-        security_mgr = MagicMock()
-        security_mgr.list_accounts.return_value = {"test-account": "anthropic"}
-        security_mgr.list_role_assignments.return_value = {"CODING": "test-account"}
-        security_mgr.get_account_model.return_value = "default"
-        security_mgr.get_account_reasoning.return_value = "default"
-        return ChadWebUI(security_mgr, "", str(tmp_path))
+        api_client = MagicMock()
+        api_client.list_accounts.return_value = [
+            {"name": "test-account", "provider": "anthropic", "role": "CODING"}
+        ]
+        api_client.list_providers.return_value = ["anthropic"]
+        return ChadWebUI(api_client)
 
     def test_cancel_marks_session_inactive(self, web_ui):
         """Canceling a task should mark session as inactive and clear provider."""

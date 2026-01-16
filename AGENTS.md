@@ -201,6 +201,14 @@ Chad supports two UI modes:
 Set via config: `config_manager.set_ui_mode("cli")`
 Or command line: `chad --ui cli`
 
+### Connecting to an Existing Server
+
+To connect to an existing API server instead of starting a local one:
+```bash
+chad --server-url http://localhost:8000
+chad --server-url http://localhost:8000 --ui cli
+```
+
 ## Virtual Environment
 
 The project uses `.venv` (not `venv`). Worktrees automatically symlink to the main project's `.venv` so agents don't 

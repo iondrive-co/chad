@@ -308,7 +308,7 @@ def run_cli(client: APIClient) -> None:
         # Load accounts and preferences from API
         accounts = client.list_accounts()
         prefs = client.get_preferences()
-        default_project = prefs.get("last_project_path", "")
+        default_project = prefs.last_project_path or ""
 
         # Find coding agent
         coding_account = None

@@ -5,12 +5,24 @@ import os
 import re
 import socket
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 import pytest
 
 from chad.util.git_worktree import GitWorktreeManager
 from chad.util.providers import ModelConfig, MockProvider
+
+
+@dataclass
+class MockAccount:
+    """Mock account for tests."""
+
+    name: str
+    provider: str
+    model: str | None = "default"
+    reasoning: str | None = "default"
+    role: str | None = None
 
 
 @pytest.fixture
@@ -59,28 +71,34 @@ class TestChadWebUI:
     """Test cases for ChadWebUI class."""
 
     @pytest.fixture
-    def mock_security_mgr(self):
-        """Create a mock security manager."""
-        mgr = Mock()
-        mgr.list_accounts.return_value = {"claude": "anthropic", "gpt": "openai"}
-        mgr.list_role_assignments.return_value = {"CODING": "claude"}
-        mgr.get_account_model.return_value = "default"
-        mgr.get_account_reasoning.return_value = "default"
-        return mgr
+    def mock_api_client(self):
+        """Create a mock API client."""
+        client = Mock()
+        # Default accounts
+        claude_account = MockAccount(name="claude", provider="anthropic", role="CODING")
+        gpt_account = MockAccount(name="gpt", provider="openai")
+        client.list_accounts.return_value = [claude_account, gpt_account]
+        client.get_account.side_effect = lambda name: {
+            "claude": claude_account,
+            "gpt": gpt_account,
+        }.get(name, Mock(name=name, provider="unknown", model="default", reasoning="default", role=None))
+        client.get_verification_agent.return_value = None
+        client.get_preferences.return_value = Mock(last_project_path=None, dark_mode=True, ui_mode="gradio")
+        client.get_cleanup_settings.return_value = Mock(retention_days=7, auto_cleanup=True)
+        return client
 
     @pytest.fixture
-    def web_ui(self, mock_security_mgr):
+    def web_ui(self, mock_api_client):
         """Create a ChadWebUI instance with mocked dependencies."""
         from chad.ui.gradio.web_ui import ChadWebUI
 
-        ui = ChadWebUI(mock_security_mgr, "test-password")
+        ui = ChadWebUI(mock_api_client)
         ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/codex"))
         return ui
 
-    def test_init(self, web_ui, mock_security_mgr):
+    def test_init(self, web_ui, mock_api_client):
         """Test ChadWebUI initialization."""
-        assert web_ui.security_mgr == mock_security_mgr
-        assert web_ui.main_password == "test-password"
+        assert web_ui.api_client == mock_api_client
 
     def test_progress_bar_helper(self, web_ui):
         """Progress bar helper should clamp values and preserve width."""
@@ -92,9 +110,9 @@ class TestChadWebUI:
         assert full_bar == "█" * 20
 
     @patch("subprocess.run")
-    def test_add_provider_success(self, mock_run, web_ui, mock_security_mgr, tmp_path):
+    def test_add_provider_success(self, mock_run, web_ui, mock_api_client, tmp_path):
         """Test adding a new provider successfully (OpenAI/Codex)."""
-        mock_security_mgr.list_accounts.return_value = {}
+        mock_api_client.list_accounts.return_value = []
         mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
         with (
@@ -105,12 +123,12 @@ class TestChadWebUI:
 
         assert "✅" in result or "✓" in result
         assert "my-codex" in result
-        mock_security_mgr.store_account.assert_called_once_with("my-codex", "openai", "", "test-password")
+        mock_api_client.create_account.assert_called_once_with("my-codex", "openai")
 
     @patch("subprocess.run")
-    def test_add_provider_auto_name(self, mock_run, web_ui, mock_security_mgr, tmp_path):
+    def test_add_provider_auto_name(self, mock_run, web_ui, mock_api_client, tmp_path):
         """Test adding provider with auto-generated name."""
-        mock_security_mgr.list_accounts.return_value = {}
+        mock_api_client.list_accounts.return_value = []
         mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
         with (
@@ -121,12 +139,12 @@ class TestChadWebUI:
 
         assert "✓" in result or "Provider" in result
         assert "openai" in result
-        mock_security_mgr.store_account.assert_called_once_with("openai", "openai", "", "test-password")
+        mock_api_client.create_account.assert_called_once_with("openai", "openai")
 
     @patch("subprocess.run")
-    def test_add_provider_duplicate_name(self, mock_run, web_ui, mock_security_mgr, tmp_path):
+    def test_add_provider_duplicate_name(self, mock_run, web_ui, mock_api_client, tmp_path):
         """Test adding provider when name already exists (OpenAI/Codex)."""
-        mock_security_mgr.list_accounts.return_value = {"openai": "openai"}
+        mock_api_client.list_accounts.return_value = [MockAccount(name="openai", provider="openai")]
         mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
         with (
@@ -137,12 +155,12 @@ class TestChadWebUI:
 
         # Should create openai-1
         assert "✅" in result or "✓" in result
-        mock_security_mgr.store_account.assert_called_once_with("openai-1", "openai", "", "test-password")
+        mock_api_client.create_account.assert_called_once_with("openai-1", "openai")
 
     @patch("subprocess.run")
-    def test_add_provider_error(self, mock_run, web_ui, mock_security_mgr, tmp_path):
+    def test_add_provider_error(self, mock_run, web_ui, mock_api_client, tmp_path):
         """Test adding provider when login fails (OpenAI/Codex)."""
-        mock_security_mgr.list_accounts.return_value = {}
+        mock_api_client.list_accounts.return_value = []
         # Mock Codex login to fail
         mock_run.return_value = Mock(returncode=1, stderr="Login cancelled", stdout="")
 
@@ -155,67 +173,67 @@ class TestChadWebUI:
         assert "❌" in result
         assert "Login failed" in result or "cancelled" in result.lower()
 
-    def test_assign_role_success(self, web_ui, mock_security_mgr):
+    def test_assign_role_success(self, web_ui, mock_api_client):
         """Test assigning a role successfully."""
         result = web_ui.assign_role("claude", "CODING")[0]
 
         assert "✓" in result
         assert "CODING" in result
-        mock_security_mgr.assign_role.assert_called_once_with("claude", "CODING")
+        mock_api_client.set_account_role.assert_called_once_with("claude", "CODING")
 
-    def test_assign_role_not_found(self, web_ui, mock_security_mgr):
+    def test_assign_role_not_found(self, web_ui, mock_api_client):
         """Test assigning role to non-existent provider."""
         result = web_ui.assign_role("nonexistent", "CODING")[0]
 
         assert "❌" in result
         assert "not found" in result
 
-    def test_assign_role_lowercase_converted(self, web_ui, mock_security_mgr):
+    def test_assign_role_lowercase_converted(self, web_ui, mock_api_client):
         """Test that lowercase role names are converted to uppercase."""
         web_ui.assign_role("claude", "coding")
 
-        mock_security_mgr.assign_role.assert_called_once_with("claude", "CODING")
+        mock_api_client.set_account_role.assert_called_once_with("claude", "CODING")
 
-    def test_assign_role_missing_account(self, web_ui, mock_security_mgr):
+    def test_assign_role_missing_account(self, web_ui, mock_api_client):
         """Test assigning role without selecting account."""
         result = web_ui.assign_role("", "CODING")[0]
 
         assert "❌" in result
         assert "select an account" in result
 
-    def test_assign_role_missing_role(self, web_ui, mock_security_mgr):
+    def test_assign_role_missing_role(self, web_ui, mock_api_client):
         """Test assigning role without selecting role."""
         result = web_ui.assign_role("claude", "")[0]
 
         assert "❌" in result
         assert "select a role" in result
 
-    def test_delete_provider_success(self, web_ui, mock_security_mgr):
+    def test_delete_provider_success(self, web_ui, mock_api_client):
         """Test deleting a provider successfully."""
         result = web_ui.delete_provider("claude", True)[0]
 
         assert "✓" in result
         assert "deleted" in result
-        mock_security_mgr.delete_account.assert_called_once_with("claude")
+        mock_api_client.delete_account.assert_called_once_with("claude")
 
-    def test_delete_provider_requires_confirmation(self, web_ui, mock_security_mgr):
+    def test_delete_provider_requires_confirmation(self, web_ui, mock_api_client):
         """Test that deletion requires confirmation."""
         result = web_ui.delete_provider("claude", False)[0]
 
         # When not confirmed, deletion is cancelled
         assert "cancelled" in result.lower()
-        mock_security_mgr.delete_account.assert_not_called()
+        mock_api_client.delete_account.assert_not_called()
 
-    def test_delete_provider_error(self, web_ui, mock_security_mgr):
+    def test_delete_provider_error(self, web_ui, mock_api_client):
         """Test deleting provider when error occurs."""
-        mock_security_mgr.delete_account.side_effect = Exception("Delete error")
+        mock_api_client.delete_account.side_effect = Exception("Delete error")
 
         result = web_ui.delete_provider("claude", True)[0]
 
         assert "❌" in result
         assert "Error" in result
 
-    def test_delete_provider_missing_account(self, web_ui, mock_security_mgr):
+    def test_delete_provider_missing_account(self, web_ui, mock_api_client):
         """Test deleting provider without selecting account."""
         result = web_ui.delete_provider("", False)[0]
 
@@ -413,45 +431,45 @@ class TestChadWebUI:
             "Error" in msg.get("content", "") for msg in session.chat_history if msg.get("role") == "assistant"
         ), "Follow-up response should not include errors"
 
-    def test_set_reasoning_success(self, web_ui, mock_security_mgr):
+    def test_set_reasoning_success(self, web_ui, mock_api_client):
         """Test setting reasoning level for an account."""
         result = web_ui.set_reasoning("claude", "high")[0]
 
         assert "✓" in result
         assert "high" in result
-        mock_security_mgr.set_account_reasoning.assert_called_once_with("claude", "high")
+        mock_api_client.set_account_reasoning.assert_called_once_with("claude", "high")
 
-    def test_add_provider_install_failure(self, web_ui, mock_security_mgr):
+    def test_add_provider_install_failure(self, web_ui, mock_api_client):
         """Installer failures should surface to the user."""
         web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(False, "Node missing"))
-        mock_security_mgr.list_accounts.return_value = {}
+        mock_api_client.list_accounts.return_value = []
 
         result = web_ui.add_provider("", "openai")[0]
 
         assert "❌" in result
         assert "Node missing" in result
-        mock_security_mgr.store_account.assert_not_called()
+        mock_api_client.create_account.assert_not_called()
 
-    def test_get_models_includes_stored_model(self, web_ui, mock_security_mgr, tmp_path):
+    def test_get_models_includes_stored_model(self, web_ui, mock_api_client, tmp_path):
         """Stored models should always be present in dropdown choices."""
-        mock_security_mgr.list_accounts.return_value = {"gpt": "openai"}
-        mock_security_mgr.get_account_model.return_value = "gpt-5.1-codex-max"
+        mock_api_client.list_accounts.return_value = [MockAccount(name="gpt", provider="openai")]
+        mock_api_client.get_account_model.return_value = "gpt-5.1-codex-max"
         from chad.util.model_catalog import ModelCatalog
 
-        web_ui.model_catalog = ModelCatalog(security_mgr=mock_security_mgr, home_dir=tmp_path, cache_ttl=0)
+        web_ui.model_catalog = ModelCatalog(api_client=mock_api_client, home_dir=tmp_path, cache_ttl=0)
         models = web_ui.get_models_for_account("gpt")
 
         assert "gpt-5.1-codex-max" in models
         assert "default" in models
 
-    def test_get_account_choices(self, web_ui, mock_security_mgr):
+    def test_get_account_choices(self, web_ui, mock_api_client):
         """Test getting account choices for dropdowns."""
         choices = web_ui.get_account_choices()
 
         assert "claude" in choices
         assert "gpt" in choices
 
-    def test_cancel_task(self, web_ui, mock_security_mgr):
+    def test_cancel_task(self, web_ui, mock_api_client):
         """Test cancelling a running task."""
         session = web_ui.create_session("test")
         mock_provider = Mock()
@@ -464,7 +482,7 @@ class TestChadWebUI:
         assert session.cancel_requested is True
         mock_provider.stop_session.assert_called_once()
 
-    def test_cancel_task_no_session(self, web_ui, mock_security_mgr):
+    def test_cancel_task_no_session(self, web_ui, mock_api_client):
         """Test cancelling when no session is running."""
         session = web_ui.create_session("test")
         result = web_ui.cancel_task(session.id)
@@ -478,7 +496,7 @@ class TestLiveStreamPresentation:
 
     def test_live_stream_spacing_removes_all_blank_lines(self):
         """Live stream should remove all blank lines for compact display."""
-        from chad import web_ui
+        from chad.ui.gradio import web_ui
 
         raw = "first line\n\n\nsecond block\n\n\n\nthird"
         normalized = web_ui.normalize_live_stream_spacing(raw)
@@ -543,7 +561,7 @@ class TestPortResolution:
 
     def test_live_stream_inline_code_is_color_only(self):
         """Inline code should be colored text without a background box."""
-        from chad import web_ui
+        from chad.ui.gradio import web_ui
 
         code_css_match = re.search(
             r"#live-stream-box\s+code[^}]*\{([^}]*)\}",
@@ -557,7 +575,7 @@ class TestPortResolution:
 
     def test_live_stream_box_visibility_not_forced_globally(self):
         """Live stream box should not be forced visible in normal UI CSS."""
-        from chad import web_ui
+        from chad.ui.gradio import web_ui
 
         css = web_ui.PROVIDER_PANEL_CSS
         start_idx = css.find("#live-stream-box")
@@ -602,21 +620,21 @@ class TestChadWebUITaskExecution:
     """Test cases for task execution in ChadWebUI."""
 
     @pytest.fixture
-    def mock_security_mgr(self):
+    def mock_api_client(self):
         """Create a mock security manager."""
         mgr = Mock()
-        mgr.list_accounts.return_value = {"claude": "anthropic"}
+        mgr.list_accounts.return_value = [MockAccount(name="claude", provider="anthropic", role="CODING")]
         mgr.list_role_assignments.return_value = {"CODING": "claude"}
         mgr.get_account_model.return_value = "default"
         mgr.get_account_reasoning.return_value = "default"
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_security_mgr):
+    def web_ui(self, mock_api_client):
         """Create a ChadWebUI instance."""
         from chad.ui.gradio.web_ui import ChadWebUI
 
-        return ChadWebUI(mock_security_mgr, "test-password")
+        return ChadWebUI(mock_api_client)
 
     def test_claude_remaining_usage_wrapper_requires_account(self, web_ui):
         """Public wrapper should pass account name through to provider UI."""
@@ -662,13 +680,13 @@ class TestChadWebUITaskExecution:
         assert "❌" in status_value
         assert "Invalid project path" in status_value
 
-    def test_start_task_missing_agents(self, mock_security_mgr):
+    def test_start_task_missing_agents(self, mock_api_client):
         """Test starting task when agents are not selected."""
         from chad.ui.gradio.web_ui import ChadWebUI
 
-        mock_security_mgr.list_role_assignments.return_value = {}
+        mock_api_client.list_role_assignments.return_value = {}
 
-        web_ui = ChadWebUI(mock_security_mgr, "test-password")
+        web_ui = ChadWebUI(mock_api_client)
         session = web_ui.create_session("test")
         results = list(web_ui.start_chad_task(session.id, "/tmp", "do something", ""))
 
@@ -682,16 +700,16 @@ class TestChadWebUITaskExecution:
 
     def test_verification_preferences_use_verification_agent(self, monkeypatch, tmp_path, git_repo):
         """Verification dropdowns should apply to verification agent without mutating coding prefs."""
-        from chad import web_ui
+        from chad.ui.gradio import web_ui
 
-        security_mgr = Mock()
-        security_mgr.list_accounts.return_value = {"coder": "anthropic", "verifier": "openai"}
-        security_mgr.list_role_assignments.return_value = {"CODING": "coder"}
-        security_mgr.get_account_model.side_effect = lambda acct: {"coder": "claude-3", "verifier": "gpt-4"}[acct]
-        security_mgr.get_account_reasoning.side_effect = lambda acct: {"coder": "medium", "verifier": "high"}[acct]
-        security_mgr.assign_role = Mock()
-        security_mgr.set_account_model = Mock()
-        security_mgr.set_account_reasoning = Mock()
+        api_client = Mock()
+        api_client.list_accounts.return_value = [MockAccount(name="coder", provider="anthropic", role="CODING"), MockAccount(name="verifier", provider="openai")]
+        api_client.list_role_assignments.return_value = {"CODING": "coder"}
+        api_client.get_account_model.side_effect = lambda acct: {"coder": "claude-3", "verifier": "gpt-4"}[acct]
+        api_client.get_account_reasoning.side_effect = lambda acct: {"coder": "medium", "verifier": "high"}[acct]
+        api_client.assign_role = Mock()
+        api_client.set_account_model = Mock()
+        api_client.set_account_reasoning = Mock()
 
         captured = {}
 
@@ -740,7 +758,7 @@ class TestChadWebUITaskExecution:
             return True, "ok"
 
         monkeypatch.setattr(web_ui, "create_provider", fake_create_provider)
-        ui = web_ui.ChadWebUI(security_mgr, "test-password")
+        ui = web_ui.ChadWebUI(api_client)
         ui.session_logger.base_dir = tmp_path
         monkeypatch.setattr(ui, "_run_verification", fake_run_verification)
 
@@ -763,19 +781,19 @@ class TestChadWebUITaskExecution:
         assert captured["model"] == "gpt-4o"
         assert captured["reasoning"] == "max"
 
-        model_calls = [call.args for call in security_mgr.set_account_model.call_args_list]
+        model_calls = [call.args for call in api_client.set_account_model.call_args_list]
         assert ("coder", "gpt-4o") not in model_calls
         assert ("verifier", "gpt-4o") in model_calls
-        reasoning_calls = [call.args for call in security_mgr.set_account_reasoning.call_args_list]
+        reasoning_calls = [call.args for call in api_client.set_account_reasoning.call_args_list]
         assert ("coder", "max") not in reasoning_calls
         assert ("verifier", "max") in reasoning_calls
 
-    def test_same_as_coding_uses_coding_preferences(self, mock_security_mgr):
+    def test_same_as_coding_uses_coding_preferences(self, mock_api_client):
         """Verification prefs must mirror coding selections when using same agent."""
-        from chad import web_ui
+        from chad.ui.gradio import web_ui
 
-        mock_security_mgr.list_accounts.return_value = {"claude": "anthropic", "gpt": "openai"}
-        ui = web_ui.ChadWebUI(mock_security_mgr, "test-password")
+        mock_api_client.list_accounts.return_value = [MockAccount(name="claude", provider="anthropic", role="CODING"), MockAccount(name="gpt", provider="openai")]
+        ui = web_ui.ChadWebUI(mock_api_client)
 
         verification_agent = ui.SAME_AS_CODING
         account, model, reasoning = ui._resolve_verification_preferences(
@@ -793,16 +811,16 @@ class TestChadWebUITaskExecution:
 
     def test_verification_none_disables_verification(self, monkeypatch, tmp_path, git_repo):
         """Selecting None for verification should skip verification runs."""
-        from chad import web_ui
+        from chad.ui.gradio import web_ui
 
-        security_mgr = Mock()
-        security_mgr.list_accounts.return_value = {"coder": "anthropic"}
-        security_mgr.list_role_assignments.return_value = {"CODING": "coder"}
-        security_mgr.get_account_model.return_value = "claude-3"
-        security_mgr.get_account_reasoning.return_value = "medium"
-        security_mgr.assign_role = Mock()
-        security_mgr.set_account_model = Mock()
-        security_mgr.set_account_reasoning = Mock()
+        api_client = Mock()
+        api_client.list_accounts.return_value = [MockAccount(name="coder", provider="anthropic", role="CODING")]
+        api_client.list_role_assignments.return_value = {"CODING": "coder"}
+        api_client.get_account_model.return_value = "claude-3"
+        api_client.get_account_reasoning.return_value = "medium"
+        api_client.assign_role = Mock()
+        api_client.set_account_model = Mock()
+        api_client.set_account_reasoning = Mock()
 
         class StubProvider:
             def __init__(self, config):
@@ -838,7 +856,7 @@ class TestChadWebUITaskExecution:
             verification_called["called"] = True
             return True, "ok"
 
-        ui = web_ui.ChadWebUI(security_mgr, "test-password")
+        ui = web_ui.ChadWebUI(api_client)
         ui.session_logger.base_dir = tmp_path
         monkeypatch.setattr(ui, "_run_verification", fake_run_verification)
 
@@ -861,16 +879,16 @@ class TestChadWebUITaskExecution:
 
     def test_start_task_revision_runtime_error_handled(self, monkeypatch, tmp_path, git_repo):
         """Runtime errors during revision should be surfaced without crashing."""
-        from chad import web_ui
+        from chad.ui.gradio import web_ui
 
-        security_mgr = Mock()
-        security_mgr.list_accounts.return_value = {"claude": "anthropic"}
-        security_mgr.list_role_assignments.return_value = {"CODING": "claude"}
-        security_mgr.get_account_model.return_value = "default"
-        security_mgr.get_account_reasoning.return_value = "default"
-        security_mgr.assign_role = Mock()
-        security_mgr.set_account_model = Mock()
-        security_mgr.set_account_reasoning = Mock()
+        api_client = Mock()
+        api_client.list_accounts.return_value = [MockAccount(name="claude", provider="anthropic", role="CODING")]
+        api_client.list_role_assignments.return_value = {"CODING": "claude"}
+        api_client.get_account_model.return_value = "default"
+        api_client.get_account_reasoning.return_value = "default"
+        api_client.assign_role = Mock()
+        api_client.set_account_model = Mock()
+        api_client.set_account_reasoning = Mock()
 
         class StubProvider:
             def __init__(self, config):
@@ -903,7 +921,7 @@ class TestChadWebUITaskExecution:
                 return not self.stopped
 
         monkeypatch.setattr(web_ui, "create_provider", lambda config: StubProvider(config))
-        ui = web_ui.ChadWebUI(security_mgr, "test-password")
+        ui = web_ui.ChadWebUI(api_client)
         ui.session_logger.base_dir = tmp_path
         monkeypatch.setattr(ui, "_run_verification", lambda *args, **kwargs: (False, "issues"))
 
@@ -914,13 +932,13 @@ class TestChadWebUITaskExecution:
 
     def test_verification_banner_yields_before_result(self, monkeypatch, tmp_path, git_repo):
         """Verification banner should render immediately before verification finishes."""
-        from chad import web_ui
+        from chad.ui.gradio import web_ui
 
-        security_mgr = Mock()
-        security_mgr.list_accounts.return_value = {"claude": "anthropic"}
-        security_mgr.list_role_assignments.return_value = {"CODING": "claude"}
-        security_mgr.get_account_model.return_value = "default"
-        security_mgr.get_account_reasoning.return_value = "default"
+        api_client = Mock()
+        api_client.list_accounts.return_value = [MockAccount(name="claude", provider="anthropic", role="CODING")]
+        api_client.list_role_assignments.return_value = {"CODING": "claude"}
+        api_client.get_account_model.return_value = "default"
+        api_client.get_account_reasoning.return_value = "default"
 
         class StubProvider:
             def __init__(self):
@@ -950,7 +968,7 @@ class TestChadWebUITaskExecution:
         monkeypatch.setattr(web_ui, "create_provider", lambda config: StubProvider())
         monkeypatch.setattr(web_ui.ChadWebUI, "_run_verification", lambda *args, **kwargs: (True, "verified"))
 
-        ui = web_ui.ChadWebUI(security_mgr, "test-password")
+        ui = web_ui.ChadWebUI(api_client)
         ui.session_logger.base_dir = tmp_path
 
         session = ui.create_session("test")
@@ -988,17 +1006,17 @@ class TestChadWebUITaskExecution:
 
     def test_followup_revision_runtime_error_handled(self, monkeypatch, tmp_path):
         """Follow-up revisions should surface RuntimeError without crashing."""
-        from chad import web_ui
+        from chad.ui.gradio import web_ui
         from chad.util.providers import ModelConfig
 
-        security_mgr = Mock()
-        security_mgr.list_accounts.return_value = {"claude": "anthropic"}
-        security_mgr.list_role_assignments.return_value = {"CODING": "claude"}
-        security_mgr.get_account_model.return_value = "default"
-        security_mgr.get_account_reasoning.return_value = "default"
-        security_mgr.assign_role = Mock()
-        security_mgr.set_account_model = Mock()
-        security_mgr.set_account_reasoning = Mock()
+        api_client = Mock()
+        api_client.list_accounts.return_value = [MockAccount(name="claude", provider="anthropic", role="CODING")]
+        api_client.list_role_assignments.return_value = {"CODING": "claude"}
+        api_client.get_account_model.return_value = "default"
+        api_client.get_account_reasoning.return_value = "default"
+        api_client.assign_role = Mock()
+        api_client.set_account_model = Mock()
+        api_client.set_account_reasoning = Mock()
 
         class StubProvider:
             def __init__(self):
@@ -1020,7 +1038,7 @@ class TestChadWebUITaskExecution:
             def is_alive(self):
                 return not self.stopped
 
-        ui = web_ui.ChadWebUI(security_mgr, "test-password")
+        ui = web_ui.ChadWebUI(api_client)
         ui.session_logger.base_dir = tmp_path
         session = ui.create_session("test")
         session.active = True
@@ -1039,14 +1057,14 @@ class TestChadWebUITaskExecution:
 
     def test_followup_verification_banner_yields_before_result(self, monkeypatch, tmp_path, git_repo):
         """Follow-up verification banner should appear before results stream back."""
-        from chad import web_ui
+        from chad.ui.gradio import web_ui
         from chad.util.providers import ModelConfig
 
-        security_mgr = Mock()
-        security_mgr.list_accounts.return_value = {"claude": "anthropic"}
-        security_mgr.list_role_assignments.return_value = {"CODING": "claude"}
-        security_mgr.get_account_model.return_value = "default"
-        security_mgr.get_account_reasoning.return_value = "default"
+        api_client = Mock()
+        api_client.list_accounts.return_value = [MockAccount(name="claude", provider="anthropic", role="CODING")]
+        api_client.list_role_assignments.return_value = {"CODING": "claude"}
+        api_client.get_account_model.return_value = "default"
+        api_client.get_account_reasoning.return_value = "default"
 
         class StubProvider:
             def __init__(self):
@@ -1072,7 +1090,7 @@ class TestChadWebUITaskExecution:
 
         monkeypatch.setattr(web_ui.ChadWebUI, "_run_verification", lambda *args, **kwargs: (True, "verified"))
 
-        ui = web_ui.ChadWebUI(security_mgr, "test-password")
+        ui = web_ui.ChadWebUI(api_client)
         ui.session_logger.base_dir = tmp_path
 
         session = ui.create_session("test")
@@ -1125,18 +1143,18 @@ class TestChadWebUITaskExecution:
 
     def test_followup_restarts_with_updated_preferences(self, tmp_path, monkeypatch, git_repo):
         """Follow-up should honor updated model/reasoning after task completion."""
-        from chad import web_ui
+        from chad.ui.gradio import web_ui
 
-        security_mgr = Mock()
-        security_mgr.list_accounts.return_value = {"claude": "anthropic"}
-        security_mgr.list_role_assignments.return_value = {"CODING": "claude"}
-        security_mgr.get_account_model.return_value = "claude-3"
-        security_mgr.get_account_reasoning.return_value = "medium"
-        security_mgr.assign_role = Mock()
-        security_mgr.set_account_model = Mock()
-        security_mgr.set_account_reasoning = Mock()
-        security_mgr.set_verification_agent = Mock()
-        security_mgr.clear_role = Mock()
+        api_client = Mock()
+        api_client.list_accounts.return_value = [MockAccount(name="claude", provider="anthropic", role="CODING")]
+        api_client.list_role_assignments.return_value = {"CODING": "claude"}
+        api_client.get_account_model.return_value = "claude-3"
+        api_client.get_account_reasoning.return_value = "medium"
+        api_client.assign_role = Mock()
+        api_client.set_account_model = Mock()
+        api_client.set_account_reasoning = Mock()
+        api_client.set_verification_agent = Mock()
+        api_client.clear_role = Mock()
 
         created_configs = []
 
@@ -1173,14 +1191,14 @@ class TestChadWebUITaskExecution:
         monkeypatch.setattr(web_ui, "create_provider", fake_create_provider)
         monkeypatch.setattr(web_ui.ChadWebUI, "_run_verification", lambda *args, **kwargs: (True, "ok"))
 
-        ui = web_ui.ChadWebUI(security_mgr, "test-password")
+        ui = web_ui.ChadWebUI(api_client)
         ui.session_logger.base_dir = tmp_path
 
         session = ui.create_session("test")
         list(ui.start_chad_task(session.id, str(git_repo), "do something", "claude", ""))
 
-        security_mgr.get_account_model.return_value = "claude-latest"
-        security_mgr.get_account_reasoning.return_value = "high"
+        api_client.get_account_model.return_value = "claude-latest"
+        api_client.get_account_reasoning.return_value = "high"
 
         list(
             ui.send_followup(
@@ -1202,10 +1220,10 @@ class TestChadWebUITaskExecution:
         """When verification is 'Same as Coding Agent', switching coding agents must validate model/reasoning."""
         from chad.ui.gradio.web_ui import ChadWebUI
 
-        security_mgr = Mock()
-        security_mgr.list_accounts.return_value = {"codex-work": "openai", "claude-pro": "anthropic"}
+        api_client = Mock()
+        api_client.list_accounts.return_value = [MockAccount(name="codex-work", provider="openai"), MockAccount(name="claude-pro", provider="anthropic")]
 
-        web_ui = ChadWebUI(security_mgr, "test-password")
+        web_ui = ChadWebUI(api_client)
 
         # Mock get_models_for_account to return provider-specific models
         def mock_get_models(account):
@@ -1249,10 +1267,10 @@ class TestChadWebUIInterface:
     """Test cases for Gradio interface creation."""
 
     @pytest.fixture
-    def mock_security_mgr(self):
+    def mock_api_client(self):
         """Create a mock security manager."""
         mgr = Mock()
-        mgr.list_accounts.return_value = {}
+        mgr.list_accounts.return_value = []
         mgr.list_role_assignments.return_value = {}
         mgr.load_config.return_value = {}
         mgr.load_preferences.return_value = {}
@@ -1260,8 +1278,8 @@ class TestChadWebUIInterface:
         mgr.get_verification_agent.return_value = None
         return mgr
 
-    @patch("chad.web_ui.gr")
-    def test_create_interface(self, mock_gr, mock_security_mgr):
+    @patch("chad.ui.gradio.web_ui.gr")
+    def test_create_interface(self, mock_gr, mock_api_client):
         """Test that create_interface creates a Gradio Blocks interface."""
         from chad.ui.gradio.web_ui import ChadWebUI
 
@@ -1270,7 +1288,7 @@ class TestChadWebUIInterface:
         mock_gr.Blocks.return_value.__enter__ = Mock(return_value=mock_blocks)
         mock_gr.Blocks.return_value.__exit__ = Mock(return_value=None)
 
-        web_ui = ChadWebUI(mock_security_mgr, "test-password")
+        web_ui = ChadWebUI(mock_api_client)
         web_ui.create_interface()
 
         # Verify Blocks was called
@@ -1280,9 +1298,9 @@ class TestChadWebUIInterface:
 class TestLaunchWebUI:
     """Test cases for launch_web_ui function."""
 
-    @patch("chad.web_ui._resolve_port", return_value=(7860, False, False))
-    @patch("chad.web_ui.ChadWebUI")
-    @patch("chad.web_ui.ConfigManager")
+    @patch("chad.ui.gradio.web_ui._resolve_port", return_value=(7860, False, False))
+    @patch("chad.ui.gradio.web_ui.ChadWebUI")
+    @patch("chad.ui.gradio.web_ui.ConfigManager")
     def test_launch_with_existing_password(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """Test launching with existing user and provided password (trusted)."""
         from chad.ui.gradio.web_ui import launch_web_ui
@@ -1309,9 +1327,9 @@ class TestLaunchWebUI:
         mock_resolve_port.assert_called_once_with(7860)
         assert result == (None, 7860)
 
-    @patch("chad.web_ui._resolve_port", return_value=(7860, False, False))
-    @patch("chad.web_ui.ChadWebUI")
-    @patch("chad.web_ui.ConfigManager")
+    @patch("chad.ui.gradio.web_ui._resolve_port", return_value=(7860, False, False))
+    @patch("chad.ui.gradio.web_ui.ChadWebUI")
+    @patch("chad.ui.gradio.web_ui.ConfigManager")
     def test_launch_without_password_verifies(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """Test launching without password triggers verification."""
         from chad.ui.gradio.web_ui import launch_web_ui
@@ -1337,9 +1355,9 @@ class TestLaunchWebUI:
         mock_resolve_port.assert_called_once_with(7860)
         assert result == (None, 7860)
 
-    @patch("chad.web_ui._resolve_port", return_value=(7860, False, False))
-    @patch("chad.web_ui.ChadWebUI")
-    @patch("chad.web_ui.ConfigManager")
+    @patch("chad.ui.gradio.web_ui._resolve_port", return_value=(7860, False, False))
+    @patch("chad.ui.gradio.web_ui.ChadWebUI")
+    @patch("chad.ui.gradio.web_ui.ConfigManager")
     def test_launch_first_run_with_password(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """Test launching on first run with password provided."""
         from chad.ui.gradio.web_ui import launch_web_ui
@@ -1365,9 +1383,9 @@ class TestLaunchWebUI:
         mock_resolve_port.assert_called_once_with(7860)
         assert result == (None, 7860)
 
-    @patch("chad.web_ui._resolve_port", return_value=(43210, True, True))
-    @patch("chad.web_ui.ChadWebUI")
-    @patch("chad.web_ui.ConfigManager")
+    @patch("chad.ui.gradio.web_ui._resolve_port", return_value=(43210, True, True))
+    @patch("chad.ui.gradio.web_ui.ChadWebUI")
+    @patch("chad.ui.gradio.web_ui.ConfigManager")
     def test_launch_falls_back_when_port_busy(self, mock_security_class, mock_webui_class, mock_resolve_port):
         """New launches should fall back to an ephemeral port if the default is in use."""
         from chad.ui.gradio.web_ui import launch_web_ui
@@ -1399,20 +1417,20 @@ class TestGeminiUsage:
     """Test cases for Gemini usage stats parsing."""
 
     @pytest.fixture
-    def mock_security_mgr(self):
+    def mock_api_client(self):
         """Create a mock security manager."""
         mgr = Mock()
-        mgr.list_accounts.return_value = {"gemini": "gemini"}
+        mgr.list_accounts.return_value = [MockAccount(name="gemini", provider="gemini")]
         mgr.list_role_assignments.return_value = {}
         mgr.get_account_model.return_value = "default"
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_security_mgr):
+    def web_ui(self, mock_api_client):
         """Create a ChadWebUI instance."""
         from chad.ui.gradio.web_ui import ChadWebUI
 
-        return ChadWebUI(mock_security_mgr, "test-password")
+        return ChadWebUI(mock_api_client)
 
     @patch("pathlib.Path.home")
     def test_gemini_not_logged_in(self, mock_home, web_ui, tmp_path):
@@ -1481,44 +1499,44 @@ class TestModelSelection:
     """Test cases for model selection functionality."""
 
     @pytest.fixture
-    def mock_security_mgr(self):
+    def mock_api_client(self):
         """Create a mock security manager."""
         mgr = Mock()
-        mgr.list_accounts.return_value = {"claude": "anthropic", "gpt": "openai"}
+        mgr.list_accounts.return_value = [MockAccount(name="claude", provider="anthropic", role="CODING"), MockAccount(name="gpt", provider="openai")]
         mgr.list_role_assignments.return_value = {}
         mgr.get_account_model.return_value = "default"
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_security_mgr):
+    def web_ui(self, mock_api_client):
         """Create a ChadWebUI instance."""
         from chad.ui.gradio.web_ui import ChadWebUI
 
-        return ChadWebUI(mock_security_mgr, "test-password")
+        return ChadWebUI(mock_api_client)
 
-    def test_set_model_success(self, web_ui, mock_security_mgr):
+    def test_set_model_success(self, web_ui, mock_api_client):
         """Test setting model successfully."""
         result = web_ui.set_model("claude", "claude-opus-4-20250514")[0]
 
         assert "✓" in result
         assert "claude-opus-4-20250514" in result
-        mock_security_mgr.set_account_model.assert_called_once_with("claude", "claude-opus-4-20250514")
+        mock_api_client.set_account_model.assert_called_once_with("claude", "claude-opus-4-20250514")
 
-    def test_set_model_missing_account(self, web_ui, mock_security_mgr):
+    def test_set_model_missing_account(self, web_ui, mock_api_client):
         """Test setting model without selecting account."""
         result = web_ui.set_model("", "some-model")[0]
 
         assert "❌" in result
         assert "select an account" in result
 
-    def test_set_model_missing_model(self, web_ui, mock_security_mgr):
+    def test_set_model_missing_model(self, web_ui, mock_api_client):
         """Test setting model without selecting model."""
         result = web_ui.set_model("claude", "")[0]
 
         assert "❌" in result
         assert "select a model" in result
 
-    def test_set_model_account_not_found(self, web_ui, mock_security_mgr):
+    def test_set_model_account_not_found(self, web_ui, mock_api_client):
         """Test setting model for non-existent account."""
         result = web_ui.set_model("nonexistent", "some-model")[0]
 
@@ -1569,20 +1587,20 @@ class TestRemainingUsage:
     """Test cases for remaining_usage calculation and sorting."""
 
     @pytest.fixture
-    def mock_security_mgr(self):
+    def mock_api_client(self):
         """Create a mock security manager."""
         mgr = Mock()
-        mgr.list_accounts.return_value = {"claude": "anthropic", "codex": "openai", "gemini": "gemini"}
+        mgr.list_accounts.return_value = [MockAccount(name="claude", provider="anthropic", role="CODING"), MockAccount(name="codex", provider="openai"), MockAccount(name="gemini", provider="gemini")]
         mgr.list_role_assignments.return_value = {}
         mgr.get_account_model.return_value = "default"
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_security_mgr):
+    def web_ui(self, mock_api_client):
         """Create a ChadWebUI instance."""
         from chad.ui.gradio.web_ui import ChadWebUI
 
-        return ChadWebUI(mock_security_mgr, "test-password")
+        return ChadWebUI(mock_api_client)
 
     def test_remaining_usage_unknown_account(self, web_ui):
         """Unknown account returns 0.0."""
@@ -1671,21 +1689,21 @@ class TestClaudeMultiAccount:
     """Test cases for Claude multi-account support."""
 
     @pytest.fixture
-    def mock_security_mgr(self):
+    def mock_api_client(self):
         """Create a mock security manager."""
         mgr = Mock()
-        mgr.list_accounts.return_value = {"claude-1": "anthropic", "claude-2": "anthropic"}
+        mgr.list_accounts.return_value = [MockAccount(name="claude-1", provider="anthropic"), MockAccount(name="claude-2", provider="anthropic")]
         mgr.list_role_assignments.return_value = {}
         mgr.get_account_model.return_value = "default"
         mgr.get_account_reasoning.return_value = "default"
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_security_mgr):
+    def web_ui(self, mock_api_client):
         """Create a ChadWebUI instance with mocked dependencies."""
         from chad.ui.gradio.web_ui import ChadWebUI
 
-        ui = ChadWebUI(mock_security_mgr, "test-password")
+        ui = ChadWebUI(mock_api_client)
         ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "claude"))
         return ui
 
@@ -1778,7 +1796,7 @@ class TestClaudeMultiAccount:
         assert logged_in_2 is False
 
     @patch("pathlib.Path.home")
-    def test_delete_provider_cleans_up_claude_config(self, mock_home, web_ui, mock_security_mgr, tmp_path):
+    def test_delete_provider_cleans_up_claude_config(self, mock_home, web_ui, mock_api_client, tmp_path):
         """Deleting Claude provider removes its config directory."""
         mock_home.return_value = tmp_path
 
@@ -1794,10 +1812,10 @@ class TestClaudeMultiAccount:
         assert not config_dir.exists()
 
     @patch("pathlib.Path.home")
-    def test_add_provider_claude_login_timeout(self, mock_home, web_ui, mock_security_mgr, tmp_path):
+    def test_add_provider_claude_login_timeout(self, mock_home, web_ui, mock_api_client, tmp_path):
         """Adding Claude provider times out if OAuth not completed."""
         mock_home.return_value = tmp_path
-        mock_security_mgr.list_accounts.return_value = {}
+        mock_api_client.list_accounts.return_value = []
 
         # Mock pexpect to simulate timeout (no credentials created)
         mock_child = Mock()
@@ -1821,7 +1839,7 @@ class TestClaudeMultiAccount:
                         result = web_ui.add_provider("my-claude", "anthropic")[0]
 
         # Provider should NOT be stored (login timed out)
-        mock_security_mgr.store_account.assert_not_called()
+        mock_api_client.create_account.assert_not_called()
 
         # Should show timeout error
         assert "❌" in result
@@ -1832,12 +1850,12 @@ class TestClaudeMultiAccount:
         assert not config_dir.exists()
 
     @patch("pathlib.Path.home")
-    def test_add_provider_claude_login_success(self, mock_home, web_ui, mock_security_mgr, tmp_path):
+    def test_add_provider_claude_login_success(self, mock_home, web_ui, mock_api_client, tmp_path):
         """Adding Claude provider succeeds when OAuth completes."""
         import json
 
         mock_home.return_value = tmp_path
-        mock_security_mgr.list_accounts.return_value = {}
+        mock_api_client.list_accounts.return_value = []
 
         # Create the config directory and credentials file to simulate successful OAuth
         config_dir = tmp_path / ".chad" / "claude-configs" / "my-claude"
@@ -1850,7 +1868,7 @@ class TestClaudeMultiAccount:
         result = web_ui.add_provider("my-claude", "anthropic")[0]
 
         # Provider should be stored
-        mock_security_mgr.store_account.assert_called_once_with("my-claude", "anthropic", "", "test-password")
+        mock_api_client.create_account.assert_called_once_with("my-claude", "anthropic")
 
         # Should show success
         assert "✅" in result
@@ -1858,12 +1876,12 @@ class TestClaudeMultiAccount:
 
     @patch("pathlib.Path.home")
     @patch("requests.get")
-    def test_add_provider_claude_already_logged_in(self, mock_get, mock_home, web_ui, mock_security_mgr, tmp_path):
+    def test_add_provider_claude_already_logged_in(self, mock_get, mock_home, web_ui, mock_api_client, tmp_path):
         """Adding Claude provider when already logged in shows success."""
         import json
 
         mock_home.return_value = tmp_path
-        mock_security_mgr.list_accounts.return_value = {}
+        mock_api_client.list_accounts.return_value = []
 
         # Pre-create credentials file (user already logged in)
         config_dir = tmp_path / ".chad" / "claude-configs" / "my-claude"
@@ -1882,27 +1900,27 @@ class TestClaudeMultiAccount:
         # Should show logged in status
         assert "✅" in result
         assert "logged in" in result.lower()
-        mock_security_mgr.store_account.assert_called_once()
+        mock_api_client.create_account.assert_called_once()
 
 
 class TestSessionLogging:
     """Test cases for session log saving."""
 
     @pytest.fixture
-    def mock_security_mgr(self):
+    def mock_api_client(self):
         """Create a mock security manager."""
         mgr = Mock()
-        mgr.list_accounts.return_value = {"claude": "anthropic"}
+        mgr.list_accounts.return_value = [MockAccount(name="claude", provider="anthropic", role="CODING")]
         mgr.list_role_assignments.return_value = {}
         mgr.get_account_model.return_value = "default"
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_security_mgr):
+    def web_ui(self, mock_api_client):
         """Create a ChadWebUI instance."""
         from chad.ui.gradio.web_ui import ChadWebUI
 
-        return ChadWebUI(mock_security_mgr, "test-password")
+        return ChadWebUI(mock_api_client)
 
     def test_session_log_lifecycle(self, web_ui):
         """Session log should be created, updated, and finalized correctly."""
@@ -2022,23 +2040,23 @@ class TestSessionLogIncludesTask:
     """Test that session log conversation includes the task description."""
 
     @pytest.fixture
-    def mock_security_mgr(self):
+    def mock_api_client(self):
         """Create a mock security manager with roles assigned."""
         mgr = Mock()
-        mgr.list_accounts.return_value = {"coding-ai": "mock"}
+        mgr.list_accounts.return_value = [MockAccount(name="coding-ai", provider="mock", role="CODING")]
         mgr.list_role_assignments.return_value = {"CODING": "coding-ai"}
         mgr.get_account_model.return_value = "default"
         mgr.get_account_reasoning.return_value = "default"
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_security_mgr):
+    def web_ui(self, mock_api_client):
         """Create a ChadWebUI instance."""
         from chad.ui.gradio.web_ui import ChadWebUI
 
-        return ChadWebUI(mock_security_mgr, "test-password")
+        return ChadWebUI(mock_api_client)
 
-    @patch("chad.web_ui.create_provider")
+    @patch("chad.ui.gradio.web_ui.create_provider")
     def test_session_log_starts_with_task(self, mock_create_provider, web_ui, tmp_path, git_repo):
         """Session log should include task description as first message."""
         import json
@@ -2084,19 +2102,19 @@ class TestSessionLogFailureVisibility:
     """Ensure failure details are recorded clearly in session logs."""
 
     @pytest.fixture
-    def mock_security_mgr(self):
+    def mock_api_client(self):
         mgr = Mock()
-        mgr.list_accounts.return_value = {"claude": "anthropic"}
+        mgr.list_accounts.return_value = [MockAccount(name="claude", provider="anthropic", role="CODING")]
         mgr.list_role_assignments.return_value = {"CODING": "claude"}
         mgr.get_account_model.return_value = "default"
         mgr.get_account_reasoning.return_value = "default"
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_security_mgr):
+    def web_ui(self, mock_api_client):
         from chad.ui.gradio.web_ui import ChadWebUI
 
-        ui = ChadWebUI(mock_security_mgr, "test-password")
+        ui = ChadWebUI(mock_api_client)
         return ui
 
     class _FailingProvider:
@@ -2124,7 +2142,7 @@ class TestSessionLogFailureVisibility:
         def is_alive(self):
             return False
 
-    @patch("chad.web_ui.create_provider")
+    @patch("chad.ui.gradio.web_ui.create_provider")
     def test_failure_status_written_to_transcript(self, mock_create_provider, web_ui, tmp_path, git_repo):
         """Timeout failures should be visible in streaming transcript within the session log."""
         mock_create_provider.return_value = self._FailingProvider()
@@ -2143,7 +2161,7 @@ class TestSessionLogFailureVisibility:
         transcript = data.get("streaming_transcript", "")
         assert "Simulated timeout" in transcript
 
-    @patch("chad.web_ui.create_provider")
+    @patch("chad.ui.gradio.web_ui.create_provider")
     def test_merge_section_shown_after_failure_if_changes_exist(
         self, mock_create_provider, web_ui, tmp_path, git_repo, monkeypatch
     ):
@@ -2345,23 +2363,23 @@ class TestVerificationPrompt:
         """Verification should abort before contacting providers when inputs are missing."""
         from chad.ui.gradio.web_ui import ChadWebUI
 
-        class DummySecurityMgr:
+        class DummyAPIClient:
             def list_accounts(self):
-                return {"verifier": "anthropic"}
+                return [MockAccount(name="verifier", provider="anthropic")]
 
-            def get_account_model(self, _):
-                return "default"
+            def get_account(self, name):
+                return MockAccount(name=name, provider="anthropic")
 
-            def get_account_reasoning(self, _):
-                return "default"
+            def get_verification_agent(self):
+                return None
 
         # Fail fast if provider creation is attempted
         def _fail_if_called(*_args, **_kwargs):
             raise AssertionError("create_provider should not be called when inputs are missing")
 
-        monkeypatch.setattr("chad.web_ui.create_provider", _fail_if_called)
+        monkeypatch.setattr("chad.ui.gradio.web_ui.create_provider", _fail_if_called)
 
-        web_ui = ChadWebUI(DummySecurityMgr(), "test-password")
+        web_ui = ChadWebUI(DummyAPIClient())
 
         verified, feedback = web_ui._run_verification(
             str(tmp_path), "output present", "", "verifier"
@@ -2378,19 +2396,19 @@ class TestVerificationPrompt:
     def test_run_verification_returns_rich_feedback(self, monkeypatch, tmp_path):
         """Verification failures should include lint details (tests no longer run)."""
         from chad.ui.gradio.web_ui import ChadWebUI
-        import chad.web_ui as web_ui
+        import chad.ui.gradio.web_ui as web_ui
         import chad.verification.tools as verification_tools
 
-        class DummySecurityMgr:
+        class DummyAPIClient:
             def list_accounts(self):
                 # Use anthropic (non-mock) to trigger automated verification
-                return {"verifier": "anthropic"}
+                return [MockAccount(name="verifier", provider="anthropic")]
 
-            def get_account_model(self, _):
-                return "default"
+            def get_account(self, name):
+                return MockAccount(name=name, provider="anthropic")
 
-            def get_account_reasoning(self, _):
-                return "default"
+            def get_verification_agent(self):
+                return None
 
         # Patch verification tool to avoid running real lint
         # Note: verification now only runs lint (lint_only=True)
@@ -2423,7 +2441,7 @@ class TestVerificationPrompt:
         monkeypatch.setattr(web_ui, "check_verification_mentioned", lambda *_args, **_kwargs: False)
         monkeypatch.setattr(verification_tools, "verify", fake_verify)
 
-        web_ui = ChadWebUI(DummySecurityMgr(), "test-password")
+        web_ui = ChadWebUI(DummyAPIClient())
         verified, feedback = web_ui._run_verification(str(tmp_path), "output", "Task", "verifier")
 
         assert verified is False

@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import threading
 from dataclasses import dataclass
 from typing import Any, Callable
 

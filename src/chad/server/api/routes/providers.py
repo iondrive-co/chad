@@ -107,17 +107,28 @@ async def list_accounts() -> AccountListResponse:
 
 @router.post("/accounts", response_model=AccountResponse, status_code=201)
 async def create_account(request: AccountCreate) -> AccountResponse:
-    """Add a new account.
+    """Register a new account after OAuth authentication.
 
-    Note: This initiates the OAuth flow for the provider.
-    The account won't be ready until OAuth completes.
+    The UI handles the OAuth flow; this endpoint stores the account
+    configuration after authentication succeeds.
     """
-    # Creating accounts requires OAuth flow which is complex
-    # and needs interactive browser authentication
-    raise HTTPException(
-        status_code=501,
-        detail="Account creation requires OAuth flow - use the UI"
+    config_mgr = get_config_manager()
+
+    if config_mgr.has_account(request.name):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Account '{request.name}' already exists"
+        )
+
+    # Store account with empty API key (OAuth handles auth)
+    config_mgr.store_account(
+        account_name=request.name,
+        provider=request.provider,
+        api_key="",
+        password="",  # Not used for OAuth accounts
     )
+
+    return _account_to_response(request.name, request.provider, config_mgr)
 
 
 @router.get("/accounts/{name}", response_model=AccountResponse)

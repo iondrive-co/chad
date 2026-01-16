@@ -33,7 +33,7 @@ def _safe_stat_mtime(path: Path) -> float:
 class ModelCatalog:
     """Discover and cache available models per provider."""
 
-    security_mgr: object | None = None
+    api_client: object | None = None
     home_dir: Path = field(default_factory=safe_home)
     cache_ttl: float = 300.0
     max_session_files: int = 60
@@ -104,13 +104,11 @@ class ModelCatalog:
         }.get(provider, ("default",))
 
     def _stored_model(self, provider: str, account_name: str | None) -> set[str]:
-        if not account_name or not self.security_mgr:
-            return set()
-        getter = getattr(self.security_mgr, "get_account_model", None)
-        if not getter:
+        if not account_name or not self.api_client:
             return set()
         try:
-            model = getter(account_name)
+            account = self.api_client.get_account(account_name)
+            model = account.model
         except Exception:
             return set()
         return {str(model)} if model else set()
