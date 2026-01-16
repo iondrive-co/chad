@@ -22,11 +22,3 @@ class UserPreferences(BaseModel):
 
     last_project_path: str | None = Field(default=None, description="Last used project path")
     dark_mode: bool = Field(default=True, description="Whether dark mode is enabled")
-
-
-class HealthResponse(BaseModel):
-    """Response model for health check."""
-
-    status: str = Field(default="healthy", description="Health status")
-    version: str = Field(description="Server version")
-    uptime_seconds: float = Field(description="Server uptime in seconds")

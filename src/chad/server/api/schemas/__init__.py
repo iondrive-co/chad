@@ -46,7 +46,6 @@ from .config import (
     VerificationSettings,
     CleanupSettings,
     UserPreferences,
-    HealthResponse,
 )
 from .streaming import (
     StreamMessage,
@@ -108,7 +107,6 @@ __all__ = [
     "VerificationSettings",
     "CleanupSettings",
     "UserPreferences",
-    "HealthResponse",
     # Streaming
     "StreamMessage",
     "StreamMessageType",

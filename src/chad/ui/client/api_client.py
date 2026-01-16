@@ -108,10 +108,10 @@ class APIClient:
             return None
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
-    # Health check
-    def health_check(self) -> dict[str, Any]:
-        """Check server health."""
-        resp = self._client.get(f"{self.base_url}/health")
+    # Status
+    def get_status(self) -> dict[str, Any]:
+        """Get server status including health, version, and uptime."""
+        resp = self._client.get(f"{self.base_url}/status")
         resp.raise_for_status()
         return resp.json()
 
