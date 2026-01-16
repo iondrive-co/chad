@@ -5358,6 +5358,14 @@ class ChadWebUI:
                     placeholder="/path/to/project",
                     value=preferences.get("project_path", ""),
                 )
+            with gr.Row():
+                ui_mode_pref = gr.Dropdown(
+                    label="UI Mode",
+                    choices=["gradio", "cli"],
+                    value=self.security_mgr.get_ui_mode(),
+                    allow_custom_value=False,
+                    info="Gradio (web) or CLI (terminal) - applies on next launch",
+                )
 
         provider_outputs = [provider_feedback]
         for card in provider_cards:
@@ -5446,6 +5454,15 @@ class ChadWebUI:
             return "✅ Default project path saved"
 
         project_path_pref.input(on_project_path_change, inputs=[project_path_pref], outputs=[config_status])
+
+        def on_ui_mode_change(mode):
+            try:
+                self.security_mgr.set_ui_mode(mode)
+                return f"✅ UI mode set to {mode} (applies on next launch)"
+            except Exception as exc:
+                return f"❌ {exc}"
+
+        ui_mode_pref.change(on_ui_mode_change, inputs=[ui_mode_pref], outputs=[config_status])
 
         for card in provider_cards:
 
