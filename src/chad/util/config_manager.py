@@ -21,6 +21,7 @@ CONFIG_BASE_KEYS: set[str] = {
     "preferences",
     "verification_agent",
     "cleanup_days",
+    "ui_mode",
 }
 
 
@@ -207,7 +208,7 @@ class ConfigManager:
         # Generate a salt for encryption (different from bcrypt salt)
         encryption_salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
 
-        config = {"password_hash": password_hash, "encryption_salt": encryption_salt, "accounts": {}}
+        config = {"password_hash": password_hash, "encryption_salt": encryption_salt, "accounts": {}, "ui_mode": "gradio"}
         self.save_config(config)
 
         print("\nMain password configured successfully!")
@@ -265,7 +266,7 @@ class ConfigManager:
                 new_password_hash = self.hash_password(password)
                 encryption_salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
 
-                config = {"password_hash": new_password_hash, "encryption_salt": encryption_salt, "accounts": {}}
+                config = {"password_hash": new_password_hash, "encryption_salt": encryption_salt, "accounts": {}, "ui_mode": "gradio"}
                 self.save_config(config)
 
                 print("\nMain password reset complete. All stored accounts have been deleted.")
@@ -557,6 +558,30 @@ class ConfigManager:
             raise ValueError("cleanup_days must be at least 1")
         config = self.load_config()
         config["cleanup_days"] = days
+        self.save_config(config)
+
+    def get_ui_mode(self) -> str:
+        """Get the UI mode preference.
+
+        Returns:
+            UI mode: "gradio" (default) or "cli"
+        """
+        config = self.load_config()
+        return config.get("ui_mode", "gradio")
+
+    def set_ui_mode(self, mode: str) -> None:
+        """Set the UI mode preference.
+
+        Args:
+            mode: "gradio" or "cli"
+
+        Raises:
+            ValueError: If mode is not valid
+        """
+        if mode not in ("gradio", "cli"):
+            raise ValueError(f"Invalid ui_mode: {mode}. Must be 'gradio' or 'cli'")
+        config = self.load_config()
+        config["ui_mode"] = mode
         self.save_config(config)
 
 
