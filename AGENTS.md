@@ -7,11 +7,14 @@ flawlessly working features.
 
 ## Before making changes
 
-**For UI work, first search `src/chad/ui/gradio/verification/visual_test_map.py` for keywords from your task** (e.g., "reasoning effort",
-"verification agent"). The `UI_COMPONENT_MAP` tells you which screenshot component to use and which tests cover it.
-
-Then write a test which should fail until the issue is fixed or feature is implemented. Take a before screenshot to
-confirm you understand the issue.
+For all work, write test which should fail until the issue is fixed or feature is implemented. Additionally, for gradio 
+ui work also search `src/chad/ui/gradio/verification/visual_test_map.py` for keywords from your task ("reasoning effort", 
+"verification agent" etc) and use the `UI_COMPONENT_MAP` to determine a screenshot component (and which tests cover it) 
+in order to take a before screenshot. Describe what you see in the screenshot and confirm it matches the problem/lack of 
+feature you were given, if not as part of your changes you will write a new test which DOES visually show the issue/lack 
+of feature, and before making changes you will look at its screenshot, describe the image, and confirm that description 
+matches the issue/lack of feature you were given to work on. See `src/chad/ui/gradio/verification/screenshot_fixtures.py` 
+for example data to use for screenshots.
 
 When designing new code, never make fallback code to handle paths other than the happy one, instead spend as much effort
 as necessary to make sure that everyone using your feature sees the same happy path you tested. Similarly don't provide
@@ -19,18 +22,16 @@ config options, instead decide which option makes the most sense and implement t
 options. Keep code simple rather than using abstractions, and find and delete unused or redundant code and tests as
 part of your change.
 
-When fixing bugs, generate many plausible root-cause theories then use the screenshot and existing tests to eliminate
-candidates and research which remaining theory is most likely. Define the failure as a binary, assertable condition and
-build a single reliable reproducer case. Iterate with one-variable hypotheses ("if I change X, the failure stops"), run
-the experiment by changing only X and re-running the reproducer, discard falsified hypotheses immediately, and stop to
-re-evaluate if results are unexpected. Once a hypothesis predicts both failure and non-failure, minimize it to the
-smallest causal change and add a regression test that fails before the fix and passes after.
+When fixing bugs, generate many plausible root-cause theories then use tests to eliminate candidates and research which 
+remaining theory is most likely. Define the failure as a binary, assertable condition and build a single reliable 
+reproducer case. Iterate with one-variable hypotheses ("if I change X, the failure stops"), run the experiment by 
+changing only X and re-running the reproducer, discard falsified hypotheses immediately, and stop to re-evaluate if 
+results are unexpected. Once a hypothesis predicts both failure and non-failure, minimize it to the smallest causal 
+change and add a regression test that fails before the fix and passes after.
 
 ## During changes
 
-For UI changes add any new display functionality to `src/chad/ui/gradio/verification/visual_test_map.py`.
-
-### Test Index Awareness
+For gradio UI changes add any new display functionality to `src/chad/ui/gradio/verification/visual_test_map.py`.
 
 When modifying functions that return tuples (e.g., `make_yield`, generator functions) and adding/removing elements:
 1. Search for tests that access tuple elements by index (e.g., `result[12]`, `output[N]`)
@@ -56,10 +57,6 @@ When modifying functions that return tuples (e.g., `make_yield`, generator funct
    This catches NameErrors, missing imports, and other issues that flake8 and tests may miss.
 4. Perform a critical self-review and note any outstanding issues
 5. All tests must pass even if you did not break them, never skip tests for any reason.
-
-## Screenshot Fixtures
-
-Screenshots use synthetic data for realistic UI captures. See `src/chad/ui/gradio/verification/screenshot_fixtures.py` for fixture definitions.
 
 ## Providers
 
@@ -206,9 +203,11 @@ Or command line: `chad --ui cli`
 
 ## Virtual Environment
 
-The project uses `.venv` (not `venv`). Worktrees automatically symlink to the main project's `.venv` so agents don't need to reinstall dependencies.
+The project uses `.venv` (not `venv`). Worktrees automatically symlink to the main project's `.venv` so agents don't 
+need to reinstall dependencies.
 
-**For running lint/tests**: Always use `verify()` from `chad.ui.gradio.verification.tools` instead of hardcoded paths like `./.venv/bin/python`. The verify() function automatically detects the correct Python interpreter.
+**For running lint/tests**: Always use `verify()` from `chad.ui.gradio.verification.tools` instead of hardcoded paths 
+like `./.venv/bin/python`. The verify() function automatically detects the correct Python interpreter.
 
 To create a fresh virtual environment (rarely needed):
 
