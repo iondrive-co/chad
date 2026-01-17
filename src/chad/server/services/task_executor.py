@@ -19,6 +19,7 @@ from chad.util.event_log import (
     SessionEndedEvent,
 )
 from chad.server.services.pty_stream import get_pty_stream_service, PTYEvent
+from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS
 
 
 class TaskState(str, Enum):
@@ -365,12 +366,15 @@ class TaskExecutor:
                         ))
 
             # Start PTY session with logging callback
+            # Use the same geometry as the terminal emulator for consistent rendering
             pty_service = get_pty_stream_service()
             stream_id = pty_service.start_pty_session(
                 session_id=task.session_id,
                 cmd=cmd,
                 cwd=worktree_path,
                 env=env,
+                rows=TERMINAL_ROWS,
+                cols=TERMINAL_COLS,
                 log_callback=log_pty_event,
             )
             task.stream_id = stream_id

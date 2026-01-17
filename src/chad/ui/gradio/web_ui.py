@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from chad.ui.client import APIClient
 
 from chad.ui.client.stream_client import SyncStreamClient
-from chad.ui.terminal_emulator import TerminalEmulator
+from chad.ui.terminal_emulator import TerminalEmulator, TERMINAL_COLS, TERMINAL_ROWS
 from chad.util.event_log import (
     EventLog,
     SessionStartedEvent,
@@ -528,15 +528,16 @@ body, .gradio-container, .gradio-container * {
   border-radius: 0 0 8px 8px !important;
   padding: 12px !important;
   margin: 0 !important;
-  max-height: 400px !important;
+  max-height: 500px !important;
   min-height: 100px !important;
   overflow-y: auto !important;
+  overflow-x: auto !important;
   overflow-anchor: none !important;
-  white-space: pre-wrap;
-  word-wrap: break-word;
+  /* Use pre to preserve exact terminal layout from pyte - no word wrapping */
+  white-space: pre;
   font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.4;
 }
 
 /* Syntax highlighting colors for live stream */
@@ -796,10 +797,11 @@ body, .gradio-container, .gradio-container * {
   border-radius: 0 0 6px 6px !important;
   padding: 10px !important;
   margin: 0 !important;
-  max-height: 350px;
+  max-height: 400px;
   overflow-y: auto;
-  white-space: pre-wrap;
-  word-wrap: break-word;
+  overflow-x: auto;
+  /* Use pre to preserve exact terminal layout from pyte - no word wrapping */
+  white-space: pre;
   font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
   font-size: 12px;
   line-height: 1.4;
@@ -1754,6 +1756,27 @@ def build_live_stream_html_from_pyte(content_html: str, ai_name: str = "CODING A
     return f"{header}\n{body}"
 
 
+def build_inline_live_html_from_pyte(
+    pyte_html: str, ai_name: str = "CODING AI", live_id: str | None = None
+) -> str:
+    """Render inline live stream using pyte-generated HTML.
+
+    This is the pyte equivalent of build_inline_live_html, using pre-rendered
+    terminal HTML from pyte instead of raw text with ANSI codes.
+
+    Args:
+        pyte_html: HTML content already rendered by pyte terminal emulator
+        ai_name: Name of the AI to show in header
+        live_id: Optional stable ID for JS patching
+    """
+    if not pyte_html or not pyte_html.strip():
+        pyte_html = "<em>Working...</em>"
+    header = f'<div class="inline-live-header">▶ {ai_name} (Live)</div>'
+    live_id_attr = f' data-live-id="{live_id}"' if live_id else ""
+    body = f'<div class="inline-live-content"{live_id_attr}>{pyte_html}</div>'
+    return f"**{ai_name}**\n\n{header}\n{body}"
+
+
 def build_inline_live_inner_html(content: str) -> str:
     """Build just the inner HTML content for a live stream container.
 
@@ -2036,7 +2059,7 @@ class ChadWebUI:
             - ("error", error_message, None) - Error occurred
         """
         stream_client = self._get_stream_client()
-        terminal = TerminalEmulator(cols=120, rows=50)
+        terminal = TerminalEmulator(cols=TERMINAL_COLS, rows=TERMINAL_ROWS)
 
         for event in stream_client.stream_events(session_id, include_terminal=include_terminal):
             if event.event_type == "terminal":
@@ -2119,7 +2142,7 @@ class ChadWebUI:
 
         # Stream output via SSE using server session ID with pyte terminal emulation
         stream_client = self._get_stream_client()
-        terminal = TerminalEmulator(cols=120, rows=50)
+        terminal = TerminalEmulator(cols=TERMINAL_COLS, rows=TERMINAL_ROWS)
         exit_code = 0
 
         try:
@@ -2956,6 +2979,7 @@ class ChadWebUI:
             streaming_buffer = ""
             full_history = []  # Infinite history - list of (ai_name, content, timestamp) tuples
             display_buffer = LiveStreamDisplayBuffer()
+            latest_pyte_html = ""  # Track latest pyte-rendered HTML for inline display
             last_yield_time = 0.0
             last_log_update_time = time_module.time()
             log_update_interval = 10.0  # Update session log every 10 seconds
@@ -2978,6 +3002,7 @@ class ChadWebUI:
                         streaming_buffer = ""
                         last_activity = ""
                         current_live_stream = ""
+                        latest_pyte_html = ""
                         render_state.reset()
                         yield make_yield(chat_history, current_status, current_live_stream)
                         last_yield_time = time_module.time()
@@ -2998,6 +3023,7 @@ class ChadWebUI:
                         streaming_buffer = ""
                         last_activity = ""
                         current_live_stream = ""
+                        latest_pyte_html = ""
                         render_state.reset()
                         yield make_yield(chat_history, current_status, current_live_stream)
                         last_yield_time = time_module.time()
@@ -3012,6 +3038,7 @@ class ChadWebUI:
                         streaming_buffer = ""
                         last_activity = ""
                         current_live_stream = ""
+                        latest_pyte_html = ""
                         render_state.reset()
                         # Log assistant message completion
                         if session.event_log and content:
@@ -3025,6 +3052,7 @@ class ChadWebUI:
                         current_status = f"{status_prefix}{msg[1]}"
                         streaming_buffer = ""
                         current_live_stream = ""
+                        latest_pyte_html = ""
                         render_state.reset()
                         summary_text = current_status
                         yield make_yield(
@@ -3044,6 +3072,8 @@ class ChadWebUI:
                     elif msg_type == "stream":
                         chunk = msg[1]
                         html_chunk = msg[2] if len(msg) > 2 else None
+                        if html_chunk:
+                            latest_pyte_html = html_chunk  # Track for activity/empty handlers
                         if chunk.strip():
                             streaming_buffer += chunk
                             full_history.append(_history_entry(current_ai, chunk))
@@ -3069,6 +3099,7 @@ class ChadWebUI:
                                         }
                                         # Reset display buffer so live view starts fresh after progress
                                         display_buffer = LiveStreamDisplayBuffer()
+                                        latest_pyte_html = ""
                                         render_state.reset()
                                     else:
                                         chat_history.append(progress_msg)
@@ -3077,10 +3108,15 @@ class ChadWebUI:
 
                             now = time_module.time()
                             if now - last_yield_time >= min_yield_interval:
-                                # Update chat bubble with inline live content
-                                # Also send JS patch for scroll position preservation
-                                inline_html = build_inline_live_html(display_buffer.content, current_ai, live_id=current_live_id)
-                                inner_html = build_inline_live_inner_html(display_buffer.content)
+                                # Update chat bubble with inline live content using pyte HTML
+                                # when available (preserves terminal layout), falling back to old
+                                # ANSI conversion otherwise
+                                if html_chunk:
+                                    inline_html = build_inline_live_html_from_pyte(html_chunk, current_ai, live_id=current_live_id)
+                                    inner_html = html_chunk  # pyte HTML is already the inner content
+                                else:
+                                    inline_html = build_inline_live_html(display_buffer.content, current_ai, live_id=current_live_id)
+                                    inner_html = build_inline_live_inner_html(display_buffer.content)
                                 if inner_html and render_state.should_render(inline_html):
                                     if pending_message_idx is not None:
                                         chat_history[pending_message_idx] = {
@@ -3103,14 +3139,20 @@ class ChadWebUI:
                         last_activity = msg[1]
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
-                            display_content = display_buffer.content
-                            if display_content:
-                                content = display_content + f"\n\n{last_activity}"
+                            # Use pyte HTML when available for proper terminal layout
+                            if latest_pyte_html:
+                                # Append activity to pyte HTML
+                                combined_html = latest_pyte_html + f"\n\n{html.escape(last_activity)}"
+                                inline_html = build_inline_live_html_from_pyte(combined_html, current_ai, live_id=current_live_id)
+                                inner_html = combined_html
                             else:
-                                content = last_activity
-                            # Update chat bubble with inline live content
-                            inline_html = build_inline_live_html(content, current_ai, live_id=current_live_id)
-                            inner_html = build_inline_live_inner_html(content)
+                                display_content = display_buffer.content
+                                if display_content:
+                                    content = display_content + f"\n\n{last_activity}"
+                                else:
+                                    content = last_activity
+                                inline_html = build_inline_live_html(content, current_ai, live_id=current_live_id)
+                                inner_html = build_inline_live_inner_html(content)
                             if inner_html and render_state.should_render(inline_html):
                                 if pending_message_idx is not None:
                                     chat_history[pending_message_idx] = {
@@ -3127,24 +3169,31 @@ class ChadWebUI:
                 except queue.Empty:
                     now = time_module.time()
                     if now - last_yield_time >= 0.3:
-                        display_content = display_buffer.content
-                        if display_content or last_activity:
-                            content = display_content if display_content else last_activity
-                            # Update chat bubble with inline live content
-                            inline_html = build_inline_live_html(content, current_ai, live_id=current_live_id)
-                            inner_html = build_inline_live_inner_html(content)
-                            if inner_html and render_state.should_render(inline_html):
-                                if pending_message_idx is not None:
-                                    chat_history[pending_message_idx] = {
-                                        "role": "assistant",
-                                        "content": inline_html,
-                                    }
-                                yield make_yield(
-                                    chat_history, current_status, "",
-                                    live_patch=(current_live_id, inner_html) if current_live_id else None
-                                )
-                                render_state.record(inline_html)
-                                last_yield_time = now
+                        # Use pyte HTML when available for proper terminal layout
+                        if latest_pyte_html:
+                            inline_html = build_inline_live_html_from_pyte(latest_pyte_html, current_ai, live_id=current_live_id)
+                            inner_html = latest_pyte_html
+                        else:
+                            display_content = display_buffer.content
+                            if display_content or last_activity:
+                                content = display_content if display_content else last_activity
+                                inline_html = build_inline_live_html(content, current_ai, live_id=current_live_id)
+                                inner_html = build_inline_live_inner_html(content)
+                            else:
+                                inline_html = ""
+                                inner_html = ""
+                        if inner_html and render_state.should_render(inline_html):
+                            if pending_message_idx is not None:
+                                chat_history[pending_message_idx] = {
+                                    "role": "assistant",
+                                    "content": inline_html,
+                                }
+                            yield make_yield(
+                                chat_history, current_status, "",
+                                live_patch=(current_live_id, inner_html) if current_live_id else None
+                            )
+                            render_state.record(inline_html)
+                            last_yield_time = now
 
                     # Periodically update session log with streaming history
                     if full_history and now - last_log_update_time >= log_update_interval:
