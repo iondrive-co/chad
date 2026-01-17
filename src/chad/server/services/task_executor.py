@@ -205,9 +205,15 @@ writeln(f"{{GRAY}}Changes made to BUGS.md{{RESET}}")
 class TaskExecutor:
     """Executes coding tasks using PTY-based agent CLIs."""
 
-    def __init__(self, config_manager, session_manager):
+    def __init__(
+        self,
+        config_manager,
+        session_manager,
+        inactivity_timeout: float | None = 900.0,
+    ):
         self.config_manager = config_manager
         self.session_manager = session_manager
+        self.inactivity_timeout = inactivity_timeout
         self._tasks: dict[str, Task] = {}
         self._lock = threading.RLock()
 
@@ -305,6 +311,8 @@ class TaskExecutor:
     ):
         """Execute the task in a background thread using PTY."""
 
+        last_output_time = time.time()
+
         def emit(event_type: str, **data):
             event = StreamEvent(type=event_type, data=data)
             task._event_queue.put(event)
@@ -357,7 +365,9 @@ class TaskExecutor:
             # This callback is called synchronously for every PTY event
             # and doesn't compete with client subscriber queues
             def log_pty_event(event: PTYEvent):
+                nonlocal last_output_time
                 if event.type == "output":
+                    last_output_time = time.time()
                     emit("stream", chunk=event.data)
                     if task.event_log:
                         task.event_log.log(TerminalOutputEvent(
@@ -406,6 +416,32 @@ class TaskExecutor:
                             reason="cancelled",
                         ))
                     return
+
+                # Inactivity timeout to catch hung agents
+                if self.inactivity_timeout is not None:
+                    now = time.time()
+                    if now - last_output_time > self.inactivity_timeout:
+                        pty_service.terminate(stream_id)
+                        emit(
+                            "complete",
+                            success=False,
+                            message="Agent timed out due to inactivity",
+                            exit_code=-1,
+                        )
+                        task.state = TaskState.FAILED
+                        task.error = "Agent timed out due to inactivity"
+                        task.completed_at = datetime.now(timezone.utc)
+                        session.active = False
+                        session.has_worktree_changes = git_mgr.has_changes(task.session_id)
+
+                        if task.event_log:
+                            task.event_log.log(SessionEndedEvent(
+                                success=False,
+                                reason="timeout",
+                            ))
+
+                        pty_service.cleanup_session(stream_id)
+                        return
 
                 time.sleep(0.1)
                 pty_session = pty_service.get_session(stream_id)
