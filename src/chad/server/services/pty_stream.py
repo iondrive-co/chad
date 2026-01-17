@@ -166,6 +166,10 @@ class PTYStreamService:
                     try:
                         data = os.read(session.master_fd, 4096)
                         if data:
+                            # Respond to cursor position requests (CSI 6n) so TUI libraries don't hang
+                            data = self._handle_cpr_request(session, data)
+                            if not data:
+                                continue
                             # Check for ANSI codes
                             has_ansi = b"\x1b[" in data or b"\x1b]" in data
 
@@ -359,6 +363,31 @@ class PTYStreamService:
         threading.Timer(2.0, force_kill).start()
 
         return True
+
+    # -------------------------------------------------------------------------
+    # Terminal emulation helpers
+    # -------------------------------------------------------------------------
+    def _handle_cpr_request(self, session: PTYSession, data: bytes) -> bytes:
+        """Detect and respond to cursor position requests (CSI 6n).
+
+        prompt_toolkit sends \x1b[6n to ask the terminal for the cursor
+        position. In headless PTYs (Gradio path) there is no real terminal
+        to answer, so real agents would hang and abort. We fake a response
+        of ESC[1;1R to unblock them and strip the request from the stream.
+        """
+        cpr_seq = b"\x1b[6n"
+        if cpr_seq not in data:
+            return data
+
+        # Respond with a plausible cursor position
+        try:
+            # Append carriage return so cooked mode delivers immediately
+            os.write(session.master_fd, b"\x1b[1;1R\r")
+        except OSError:
+            pass
+
+        # Remove the request from the outgoing data so it doesn't appear in logs/UI
+        return data.replace(cpr_seq, b"")
 
     def get_session(self, stream_id: str) -> PTYSession | None:
         """Get a PTY session by ID."""
