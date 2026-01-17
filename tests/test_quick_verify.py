@@ -17,7 +17,7 @@ def test_build_pytest_command():
 
 
 def test_run_quick_pytest_sets_env(monkeypatch, tmp_path):
-    import chad.verification.quick_verify as quick_verify
+    import chad.ui.gradio.verification.quick_verify as quick_verify
 
     called = {}
 

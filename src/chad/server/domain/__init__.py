@@ -45,8 +45,17 @@ from chad.util.prompts import (
     VerificationParseError,
 )
 
-# Re-export from chad.util.session_logger
-from chad.util.session_logger import SessionLogger
+# Re-export from chad.util.event_log
+from chad.util.event_log import (
+    EventLog,
+    SessionStartedEvent,
+    SessionEndedEvent,
+    UserMessageEvent,
+    AssistantMessageEvent,
+    ToolCallStartedEvent,
+    ToolCallFinishedEvent,
+    VerificationAttemptEvent,
+)
 
 # Re-export from chad.util.installer
 from chad.util.installer import AIToolInstaller, DEFAULT_TOOLS_DIR
@@ -102,8 +111,15 @@ __all__ = [
     "CodingSummary",
     "ProgressUpdate",
     "VerificationParseError",
-    # Session
-    "SessionLogger",
+    # Event log
+    "EventLog",
+    "SessionStartedEvent",
+    "SessionEndedEvent",
+    "UserMessageEvent",
+    "AssistantMessageEvent",
+    "ToolCallStartedEvent",
+    "ToolCallFinishedEvent",
+    "VerificationAttemptEvent",
     # Installer
     "AIToolInstaller",
     "DEFAULT_TOOLS_DIR",
