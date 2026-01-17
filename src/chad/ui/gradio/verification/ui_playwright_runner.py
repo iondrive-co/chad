@@ -41,7 +41,9 @@ if TYPE_CHECKING:
     from playwright.sync_api import Page
 
 # Repository root; used for locating scripts and setting PYTHONPATH.
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# Path structure: <repo>/src/chad/ui/gradio/verification/ui_playwright_runner.py
+# parents[5] resolves to the repo root.
+PROJECT_ROOT = Path(__file__).resolve().parents[5]
 
 # Get the user's real home directory for shared browser cache
 # On Windows, use Path.home(); on Unix, use pwd to get the actual home even if HOME is overridden

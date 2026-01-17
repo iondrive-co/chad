@@ -45,7 +45,7 @@ except Exception:
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 try:
-    from chad.verification.ui_playwright_runner import (
+    from chad.ui.gradio.verification.ui_playwright_runner import (
         ChadLaunchError,
         PlaywrightUnavailable,
         create_temp_env,
@@ -56,7 +56,7 @@ try:
         start_chad,
         stop_chad,
     )
-    from chad.verification.screenshot_fixtures import (
+    from chad.ui.gradio.verification.screenshot_fixtures import (
         LIVE_VIEW_CONTENT,
         create_sample_screenshots,
         get_chat_history_with_screenshots,

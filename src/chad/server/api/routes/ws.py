@@ -9,6 +9,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from chad.server.services import get_session_manager, get_task_executor
 from chad.server.services.pty_stream import get_pty_stream_service
+from chad.server.services.event_mux import EventMultiplexer
 
 router = APIRouter()
 
@@ -86,74 +87,37 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         pty_service = get_pty_stream_service()
         executor = get_task_executor()
 
-        async def stream_pty_output():
-            """Stream PTY output to WebSocket."""
-            seq = 0
-            while True:
-                pty_session = pty_service.get_session_by_session_id(session_id)
-                if pty_session:
-                    try:
-                        async for event in pty_service.subscribe(pty_session.stream_id):
-                            seq += 1
-                            if event.type == "output":
-                                message = {
-                                    "type": "terminal",
-                                    "session_id": session_id,
-                                    "data": {
-                                        "data": event.data,
-                                        "seq": seq,
-                                        "has_ansi": event.has_ansi,
-                                    },
-                                }
-                            elif event.type == "exit":
-                                message = {
-                                    "type": "complete",
-                                    "session_id": session_id,
-                                    "data": {
-                                        "exit_code": event.exit_code,
-                                        "seq": seq,
-                                    },
-                                }
-                            elif event.type == "error":
-                                message = {
-                                    "type": "error",
-                                    "session_id": session_id,
-                                    "data": {
-                                        "error": event.error,
-                                        "seq": seq,
-                                    },
-                                }
-                            else:
-                                continue
+        async def stream_events():
+            """Stream events to WebSocket using EventMultiplexer."""
+            # Find the task for this session to access its EventLog
+            task = None
+            for t in executor._tasks.values():
+                if t.session_id == session_id:
+                    task = t
+                    break
 
-                            await manager.send_to_session(session_id, message)
+            # Create multiplexer with task's EventLog
+            event_log = task.event_log if task else None
+            mux = EventMultiplexer(session_id, event_log)
 
-                            if event.type in ("exit", "error"):
-                                return
+            # Stream events through the multiplexer
+            async for event in mux.stream_events(
+                pty_service,
+                include_terminal=True,
+                include_events=True,
+            ):
+                message = {
+                    "type": event.type,
+                    "session_id": session_id,
+                    "data": {**event.data, "seq": event.seq},
+                }
+                await manager.send_to_session(session_id, message)
 
-                    except Exception:
-                        pass
-
-                # Also poll for task executor events (fallback for non-PTY tasks)
-                for task_id, task in list(executor._tasks.items()):
-                    if task.session_id == session_id:
-                        events = executor.get_events(task_id, timeout=0.01)
-                        for event in events:
-                            seq += 1
-                            message = {
-                                "type": "event",
-                                "session_id": session_id,
-                                "data": {"seq": seq, "event_type": event.type, **event.data},
-                            }
-                            await manager.send_to_session(session_id, message)
-
-                            if event.type in ("complete", "error"):
-                                return
-
-                await asyncio.sleep(0.1)
+                if event.type in ("complete", "error"):
+                    return
 
         # Start background task for streaming
-        stream_task = asyncio.create_task(stream_pty_output())
+        stream_task = asyncio.create_task(stream_events())
 
         try:
             # Handle incoming messages

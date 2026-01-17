@@ -1,11 +1,10 @@
 """Tests for Chad simple CLI."""
 
 import pytest
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 from dataclasses import dataclass
 
-from chad.ui.client.api_client import Preferences, CleanupSettings, Account
+from chad.ui.client.api_client import Preferences, CleanupSettings
 
 
 @dataclass

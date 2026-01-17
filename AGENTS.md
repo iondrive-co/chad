@@ -167,7 +167,7 @@ Both Gradio UI and CLI use the same PTY-based streaming API for real-time agent 
 
 | Endpoint | Description |
 |----------|-------------|
-| `/ws/{session_id}` | Bidirectional WebSocket |
+| `/api/v1/ws/{session_id}` | Bidirectional WebSocket |
 
 **Client → Server:**
 - `input`: Send bytes to PTY (`{type: "input", data: "base64..."}`)

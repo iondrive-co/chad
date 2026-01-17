@@ -1,9 +1,6 @@
 """Session management endpoints."""
 
-import asyncio
 import base64
-import json
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -23,6 +20,7 @@ from chad.server.api.schemas.events import (
 )
 from chad.server.services import Session, get_session_manager, get_task_executor, TaskState
 from chad.server.services.pty_stream import get_pty_stream_service
+from chad.server.services.event_mux import EventMultiplexer, format_sse_event
 
 router = APIRouter()
 
@@ -207,6 +205,9 @@ async def stream_session(
 ):
     """SSE endpoint for real-time session events.
 
+    Uses EventMultiplexer to unify PTY and EventLog events into a single
+    ordered stream with consistent sequence numbers.
+
     Event types:
     - terminal: Raw PTY output (base64 encoded)
     - event: Structured event from event log
@@ -220,119 +221,29 @@ async def stream_session(
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
 
     async def event_generator():
-        """Generate SSE events from PTY output and EventLog."""
+        """Generate SSE events using EventMultiplexer."""
         pty_service = get_pty_stream_service()
         executor = get_task_executor()
-        seq = since_seq
-        event_log_seq = since_seq  # Track EventLog sequence separately
-        last_ping = datetime.now(timezone.utc)
-        ping_interval = 15  # seconds
 
-        while True:
-            # Check for PTY session
-            pty_session = pty_service.get_session_by_session_id(session_id)
+        # Find the task for this session to access its EventLog
+        task = None
+        for t in executor._tasks.values():
+            if t.session_id == session_id:
+                task = t
+                break
 
-            # Find the task for this session to access its EventLog
-            task = None
-            for t in executor._tasks.values():
-                if t.session_id == session_id:
-                    task = t
-                    break
+        # Create multiplexer with task's EventLog
+        event_log = task.event_log if task else None
+        mux = EventMultiplexer(session_id, event_log)
 
-            if pty_session and include_terminal:
-                # Stream PTY events with EventLog events interspersed
-                try:
-                    async for event in pty_service.subscribe(pty_session.stream_id):
-                        seq += 1
-                        if event.type == "output":
-                            data = {
-                                "data": event.data,
-                                "seq": seq,
-                                "has_ansi": event.has_ansi,
-                            }
-                            yield f"event: terminal\ndata: {json.dumps(data)}\nid: {seq}\n\n"
-
-                            # Also emit any new EventLog events (non-terminal types)
-                            if include_events and task and task.event_log:
-                                new_events = task.event_log.get_events(since_seq=event_log_seq)
-                                for log_event in new_events:
-                                    # Skip terminal_output events - already streamed above
-                                    if log_event.get("type") == "terminal_output":
-                                        continue
-                                    event_log_seq = log_event.get("seq", event_log_seq)
-                                    seq += 1
-                                    log_event["seq"] = seq
-                                    yield f"event: event\ndata: {json.dumps(log_event)}\nid: {seq}\n\n"
-
-                        elif event.type == "exit":
-                            # Emit any remaining EventLog events before completion
-                            if include_events and task and task.event_log:
-                                new_events = task.event_log.get_events(since_seq=event_log_seq)
-                                for log_event in new_events:
-                                    if log_event.get("type") == "terminal_output":
-                                        continue
-                                    event_log_seq = log_event.get("seq", event_log_seq)
-                                    seq += 1
-                                    log_event["seq"] = seq
-                                    yield f"event: event\ndata: {json.dumps(log_event)}\nid: {seq}\n\n"
-
-                            seq += 1
-                            data = {
-                                "exit_code": event.exit_code,
-                                "seq": seq,
-                            }
-                            yield f"event: complete\ndata: {json.dumps(data)}\nid: {seq}\n\n"
-                            return
-                        elif event.type == "error":
-                            seq += 1
-                            data = {
-                                "error": event.error,
-                                "seq": seq,
-                            }
-                            yield f"event: error\ndata: {json.dumps(data)}\nid: {seq}\n\n"
-                            return
-                except Exception as e:
-                    yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
-                    return
-            else:
-                # No active PTY - poll for task events from executor
-                found_task = False
-
-                for task_id, t in list(executor._tasks.items()):
-                    if t.session_id == session_id:
-                        found_task = True
-                        events = executor.get_events(task_id, timeout=0.01)
-                        for event in events:
-                            seq += 1
-                            data = {"type": event.type, "seq": seq, **event.data}
-                            yield f"event: event\ndata: {json.dumps(data)}\nid: {seq}\n\n"
-
-                            if event.type in ("complete", "error"):
-                                return
-
-                        # Also check EventLog for structured events
-                        if include_events and t.event_log:
-                            new_events = t.event_log.get_events(since_seq=event_log_seq)
-                            for log_event in new_events:
-                                if log_event.get("type") == "terminal_output":
-                                    continue
-                                event_log_seq = log_event.get("seq", event_log_seq)
-                                seq += 1
-                                log_event["seq"] = seq
-                                yield f"event: event\ndata: {json.dumps(log_event)}\nid: {seq}\n\n"
-
-                # Send ping if needed
-                now = datetime.now(timezone.utc)
-                if (now - last_ping).total_seconds() >= ping_interval:
-                    last_ping = now
-                    ping_data = {"ts": now.isoformat()}
-                    yield f"event: ping\ndata: {json.dumps(ping_data)}\n\n"
-
-                # Brief sleep if no PTY session
-                if not found_task:
-                    await asyncio.sleep(0.5)
-                else:
-                    await asyncio.sleep(0.1)
+        # Stream events through the multiplexer
+        async for event in mux.stream_with_since(
+            pty_service,
+            since_seq=since_seq,
+            include_terminal=include_terminal,
+            include_events=include_events,
+        ):
+            yield format_sse_event(event)
 
     return StreamingResponse(
         event_generator(),
