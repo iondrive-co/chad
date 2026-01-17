@@ -1217,3 +1217,47 @@ class TestEventMultiplexer:
 
         # After ping, should not need another immediately
         assert not mux._should_ping()
+
+
+class TestPTYCursorResponse:
+    """Ensure PTY stream responds to cursor position requests."""
+
+    def test_handles_cpr_request(self, tmp_path):
+        """PTYStreamService should fake a cursor position reply."""
+        from chad.server.services.pty_stream import PTYStreamService
+
+        service = PTYStreamService()
+
+        # Script writes CPR request, reads reply, then prints OK and exits
+        import sys
+
+        script = (
+            "import sys, os, time; "
+            "sys.stdout.write('\\x1b[6n'); sys.stdout.flush(); "
+            "resp = sys.stdin.buffer.read(6); "
+            "sys.stdout.write('RESP:' + repr(resp)); sys.stdout.flush(); "
+            "time.sleep(0.1)"
+        )
+
+        stream_id = service.start_pty_session(
+            session_id="cpr-test",
+            cmd=["bash", "-lc", f"{sys.executable} -c \"{script}\""],
+            cwd=tmp_path,
+            env={},
+        )
+
+        events = []
+
+        async def collect():
+            async for event in service.subscribe(stream_id):
+                events.append(event)
+                if event.type == "exit":
+                    break
+
+        import asyncio
+        asyncio.run(collect())
+
+        output = b"".join(
+            [base64.b64decode(e.data) for e in events if e.type == "output"]
+        )
+        assert b"RESP:b'\\x1b[1;1R'" in output, "Should respond with cursor position"
