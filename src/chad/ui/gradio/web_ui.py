@@ -73,6 +73,10 @@ class Session:
     @property
     def log_path(self) -> Path | None:
         """Get the event log path for backwards compatibility."""
+        if self.server_session_id:
+            from chad.util.event_log import EventLog
+
+            return EventLog.get_log_dir() / f"{self.server_session_id}.jsonl"
         return self.event_log.log_path if self.event_log else None
 
 
@@ -2093,6 +2097,7 @@ class ChadWebUI:
         message_queue: "queue.Queue",
         coding_model: str | None = None,
         coding_reasoning: str | None = None,
+        server_session_id: str | None = None,
     ) -> tuple[bool, str, str | None]:
         """Run a task via the API and post events to the message queue.
 
@@ -2111,16 +2116,20 @@ class ChadWebUI:
         Returns:
             Tuple of (success, final_output_text, server_session_id)
         """
-        # Create server-side session first
-        try:
-            server_session = self.api_client.create_session(
-                project_path=project_path,
-                name=f"task-{session_id}"
-            )
-            server_session_id = server_session.id
-        except Exception as e:
-            message_queue.put(("status", f"❌ Failed to create session: {e}"))
-            return False, str(e), None
+        # Create server-side session first when not provided
+        if server_session_id is None:
+            try:
+                server_session = self.api_client.create_session(
+                    project_path=project_path,
+                    name=f"task-{session_id}"
+                )
+                server_session_id = server_session.id
+            except Exception as e:
+                message_queue.put(("status", f"❌ Failed to create session: {e}"))
+                return False, str(e), None
+
+        if server_session_id:
+            message_queue.put(("session_id", server_session_id))
 
         # Start the task via API using the server session ID
         try:
@@ -3060,6 +3069,16 @@ class ChadWebUI:
                             current_status,
                             current_live_stream,
                             summary=summary_text,
+                        )
+                        last_yield_time = time_module.time()
+
+                    elif msg_type == "session_id":
+                        session.server_session_id = msg[1]
+                        yield make_yield(
+                            chat_history,
+                            current_status,
+                            current_live_stream,
+                            summary=current_status,
                         )
                         last_yield_time = time_module.time()
 
@@ -5946,6 +5965,38 @@ function initializeLiveStreamScrollTracking() {
         containers.forEach(container => {
             if (container) {
                 setupScrollTracking(container);
+
+                // Also sync with persistent liveId-based scroll state
+                const liveId = container.getAttribute('data-live-id');
+                if (liveId && !container._liveIdScrollSetup) {
+                    container._liveIdScrollSetup = true;
+
+                    // Restore scroll from persistent state if available
+                    if (window._liveScrollByLiveId && window._liveScrollByLiveId[liveId]) {
+                        const persistentState = window._liveScrollByLiveId[liveId];
+                        if (persistentState.userScrolledUp && persistentState.savedScrollTop > 0) {
+                            container.scrollTop = persistentState.savedScrollTop;
+                        }
+                    }
+
+                    // Update persistent state on scroll
+                    container.addEventListener('scroll', () => {
+                        if (!window._liveScrollByLiveId) window._liveScrollByLiveId = {};
+                        if (!window._liveScrollByLiveId[liveId]) {
+                            window._liveScrollByLiveId[liveId] = { userScrolledUp: false, savedScrollTop: 0 };
+                        }
+                        const persistentState = window._liveScrollByLiveId[liveId];
+                        const isAtBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 10;
+
+                        if (isAtBottom) {
+                            persistentState.userScrolledUp = false;
+                            persistentState.savedScrollTop = 0;
+                        } else if (container.scrollTop > 0) {
+                            persistentState.userScrolledUp = true;
+                            persistentState.savedScrollTop = container.scrollTop;
+                        }
+                    });
+                }
             }
         });
     }
@@ -5957,8 +6008,43 @@ function initializeLiveStreamScrollTracking() {
 
 initializeLiveStreamScrollTracking();
 
+// Track scroll state by liveId (string key) rather than DOM element
+// This survives Gradio replacing the DOM container
+window._liveScrollByLiveId = window._liveScrollByLiveId || {};
+
+// Check if user has text selected within a container
+function hasTextSelectionIn(container) {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) return false;
+
+    const range = selection.getRangeAt(0);
+    return container.contains(range.commonAncestorContainer);
+}
+
+// Check if user has any text selected in live content areas
+function hasLiveContentSelection() {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) return false;
+
+    const range = selection.getRangeAt(0);
+    const ancestor = range.commonAncestorContainer;
+
+    // Check if selection is within any live content container
+    const getRoot = () => {
+        const app = document.querySelector('gradio-app');
+        return (app && app.shadowRoot) ? app.shadowRoot : document;
+    };
+    const root = getRoot();
+    const liveContainers = root.querySelectorAll('[data-live-id], .inline-live-content');
+
+    for (const container of liveContainers) {
+        if (container.contains(ancestor)) return true;
+    }
+    return false;
+}
+
 // Live content patching - update innerHTML without replacing container element
-// This preserves scroll position and text selection during streaming updates
+// Preserves scroll position and skips updates during text selection
 window._patchLiveContent = function(liveId, innerHtml) {
     const getRoot = () => {
         const app = document.querySelector('gradio-app');
@@ -5969,34 +6055,44 @@ window._patchLiveContent = function(liveId, innerHtml) {
     const container = root.querySelector(`[data-live-id="${liveId}"]`);
     if (!container) return false;
 
-    // Get scroll state before update
+    // Skip update if user has text selected in this container - preserve selection
+    if (hasTextSelectionIn(container)) {
+        return true; // Return true so caller doesn't retry
+    }
+
+    // Get current scroll state
     const scrollTop = container.scrollTop;
     const scrollHeight = container.scrollHeight;
     const clientHeight = container.clientHeight;
     const wasAtBottom = scrollTop + clientHeight >= scrollHeight - 5;
 
-    // Check if user has scrolled up (use our tracking state if available)
-    let userScrolledUp = false;
-    if (window._liveStreamScroll && window._liveStreamScroll.has(container)) {
-        const state = window._liveStreamScroll.get(container);
-        userScrolledUp = state.userScrolledUp;
-    } else {
-        userScrolledUp = !wasAtBottom;
+    // Get or create scroll state for this liveId (persists across DOM replacement)
+    if (!window._liveScrollByLiveId[liveId]) {
+        window._liveScrollByLiveId[liveId] = {
+            userScrolledUp: false,
+            savedScrollTop: 0
+        };
+    }
+    const state = window._liveScrollByLiveId[liveId];
+
+    // Update state based on current scroll position
+    if (wasAtBottom) {
+        state.userScrolledUp = false;
+    } else if (scrollTop > 0) {
+        // User has scrolled up from bottom
+        state.userScrolledUp = true;
+        state.savedScrollTop = scrollTop;
     }
 
     // Patch content in place
     container.innerHTML = innerHtml;
 
-    // Restore scroll position
-    requestAnimationFrame(() => {
-        if (userScrolledUp) {
-            // User scrolled up - maintain their position
-            container.scrollTop = scrollTop;
-        } else {
-            // User was at bottom - scroll to new bottom
-            container.scrollTop = container.scrollHeight;
-        }
-    });
+    // Restore scroll position synchronously (not in RAF to avoid flash)
+    if (state.userScrolledUp && state.savedScrollTop > 0) {
+        container.scrollTop = state.savedScrollTop;
+    } else {
+        container.scrollTop = container.scrollHeight;
+    }
 
     return true;
 };
