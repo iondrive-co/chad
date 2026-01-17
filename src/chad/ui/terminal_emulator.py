@@ -14,6 +14,13 @@ from typing import Iterator
 import pyte
 
 
+# Terminal geometry constants - used by PTY and emulator for consistency
+# These values should match what the PTY is configured with so that
+# cursor positioning and text wrapping work correctly.
+TERMINAL_COLS = 120
+TERMINAL_ROWS = 50
+
+
 # ANSI 16-color to RGB mapping (One Dark theme-inspired)
 ANSI_COLORS = {
     0: (40, 44, 52),      # black
@@ -118,7 +125,7 @@ class TerminalEmulator:
     and renders to HTML with proper styling.
     """
 
-    def __init__(self, cols: int = 120, rows: int = 50):
+    def __init__(self, cols: int = TERMINAL_COLS, rows: int = TERMINAL_ROWS):
         """Initialize the terminal emulator.
 
         Args:
@@ -176,17 +183,30 @@ class TerminalEmulator:
         lines = []
 
         for y in range(self.screen.lines):
+            # First, find the last non-whitespace column on this line
+            last_nonspace = -1
+            for x in range(self.screen.columns - 1, -1, -1):
+                char_data = self.screen.buffer[y][x].data
+                if char_data and char_data.strip():
+                    last_nonspace = x
+                    break
+
+            # Skip entirely empty lines
+            if last_nonspace < 0:
+                continue
+
+            # Render up to and including the last non-whitespace character
             line_spans = []
             x = 0
 
-            while x < self.screen.columns:
+            while x <= last_nonspace:
                 char = self.screen.buffer[y][x]
 
                 # Collect consecutive characters with same style
                 span_chars = []
                 span_style = self._get_char_style(char)
 
-                while x < self.screen.columns:
+                while x <= last_nonspace:
                     char = self.screen.buffer[y][x]
                     if self._get_char_style(char) != span_style:
                         break
@@ -205,15 +225,13 @@ class TerminalEmulator:
                     else:
                         line_spans.append(content)
 
-            # Strip trailing whitespace but preserve at least one space for empty lines
-            line = "".join(line_spans).rstrip()
-            if not line:
-                line = " "
-            lines.append(line)
+            line = "".join(line_spans)
+            if line:
+                lines.append(line)
 
-        # Remove trailing empty lines
-        while lines and lines[-1].strip() == "":
-            lines.pop()
+        # Add at least one line if buffer was all whitespace
+        if not lines:
+            lines.append(" ")
 
         return "\n".join(lines)
 
@@ -228,9 +246,10 @@ class TerminalEmulator:
         """
         styles = []
 
-        # Foreground color
+        # Foreground color - always include to ensure visibility on dark backgrounds
+        # (CSS inheritance may fail due to specificity issues in chat bubbles)
         fg = _color_to_rgb(char.fg, DEFAULT_FG)
-        if fg and fg != DEFAULT_FG:
+        if fg:
             styles.append(f"color:rgb({fg[0]},{fg[1]},{fg[2]})")
 
         # Background color (skip for default/transparent)
@@ -282,7 +301,7 @@ class TerminalEmulator:
         return self._total_bytes
 
 
-def replay_terminal_events(events: list[dict], cols: int = 120, rows: int = 50) -> TerminalEmulator:
+def replay_terminal_events(events: list[dict], cols: int = TERMINAL_COLS, rows: int = TERMINAL_ROWS) -> TerminalEmulator:
     """Replay terminal events to reconstruct screen state.
 
     Args:
@@ -304,7 +323,7 @@ def replay_terminal_events(events: list[dict], cols: int = 120, rows: int = 50) 
     return emu
 
 
-def stream_terminal_html(events: Iterator[dict], cols: int = 120, rows: int = 50) -> Iterator[str]:
+def stream_terminal_html(events: Iterator[dict], cols: int = TERMINAL_COLS, rows: int = TERMINAL_ROWS) -> Iterator[str]:
     """Stream HTML renders as events arrive.
 
     Args:
