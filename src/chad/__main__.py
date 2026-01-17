@@ -75,6 +75,7 @@ SCS = [
     "Chad is a singleton and ready to mingle-a-ton",
     "Chad likes you for its next paperclip",
     "Chad only gets one-shot and does not miss a chance to blow",
+    "Chad is hyping its parameters",
     "Chad has no problem with control",
     "Chad's touring is complete",
     "Chad has hardly taken off",

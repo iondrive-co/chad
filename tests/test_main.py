@@ -11,73 +11,150 @@ from chad.__main__ import main, _start_parent_watchdog
 class TestMain:
     """Test cases for main function."""
 
-    @patch("chad.__main__.launch_web_ui")
+    @patch("chad.__main__.run_unified")
     @patch("chad.__main__.ConfigManager")
-    def test_main_existing_user(self, mock_security_class, mock_launch):
-        """Test main with existing user - password handled by launch_web_ui."""
-        mock_security = Mock()
-        mock_security.is_first_run.return_value = False
-        mock_security.get_cleanup_days.return_value = 3
-        mock_security_class.return_value = mock_security
-
-        mock_launch.return_value = (None, 7860)
+    def test_main_existing_user(self, mock_config_class, mock_run_unified):
+        """Test main with existing user - password verified via ConfigManager."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.verify_main_password.return_value = "verified-password"
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config_class.return_value = mock_config
 
         with patch.object(sys, "argv", ["chad"]):
-            result = main()
+            with patch.dict(os.environ, {}, clear=True):
+                # Remove CHAD_PASSWORD to force interactive mode
+                os.environ.pop("CHAD_PASSWORD", None)
+                result = main()
 
         assert result == 0
-        mock_launch.assert_called_once_with(None, port=7860, dev_mode=False)
+        mock_config.verify_main_password.assert_called_once()
+        mock_run_unified.assert_called_once()
+        call_args = mock_run_unified.call_args
+        assert call_args.args[0] == "verified-password"  # main_password
 
-    @patch("chad.__main__.launch_web_ui")
+    @patch("chad.__main__.run_unified")
     @patch("chad.__main__.ConfigManager")
-    @patch("chad.__main__.getpass.getpass", return_value="test-password")
-    def test_main_first_run(self, mock_getpass, mock_security_class, mock_launch):
-        """Test main with first run - prompts for password."""
-        mock_security = Mock()
-        mock_security.is_first_run.return_value = True
-        mock_security.get_cleanup_days.return_value = 3
-        mock_security_class.return_value = mock_security
-
-        mock_launch.return_value = (None, 7860)
+    def test_main_first_run(self, mock_config_class, mock_run_unified):
+        """Test main with first run - prompts for password setup."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = True
+        mock_config.setup_main_password.return_value = "new-password"
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config_class.return_value = mock_config
 
         with patch.object(sys, "argv", ["chad"]):
-            result = main()
+            with patch.dict(os.environ, {}, clear=True):
+                os.environ.pop("CHAD_PASSWORD", None)
+                result = main()
 
         assert result == 0
-        mock_getpass.assert_called_once()
-        mock_launch.assert_called_once_with("test-password", port=7860, dev_mode=False)
+        mock_config.setup_main_password.assert_called_once()
+        mock_run_unified.assert_called_once()
+        call_args = mock_run_unified.call_args
+        assert call_args.args[0] == "new-password"  # main_password
 
-    @patch("chad.__main__.launch_web_ui")
+    @patch("chad.__main__.run_unified")
     @patch("chad.__main__.ConfigManager")
-    def test_main_launch_error(self, mock_security_class, mock_launch):
-        """Test main when web UI launch fails."""
-        mock_security = Mock()
-        mock_security.is_first_run.return_value = False
-        mock_security.get_cleanup_days.return_value = 3
-        mock_security_class.return_value = mock_security
-
-        mock_launch.side_effect = ValueError("Invalid password")
+    def test_main_with_env_password(self, mock_config_class, mock_run_unified):
+        """Test main uses CHAD_PASSWORD env var when set."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config_class.return_value = mock_config
 
         with patch.object(sys, "argv", ["chad"]):
-            result = main()
+            with patch.dict(os.environ, {"CHAD_PASSWORD": "env-password"}):
+                result = main()
+
+        assert result == 0
+        # Should NOT call verify_main_password when env var is set
+        mock_config.verify_main_password.assert_not_called()
+        mock_config.setup_main_password.assert_not_called()
+        mock_run_unified.assert_called_once()
+        call_args = mock_run_unified.call_args
+        assert call_args.args[0] == "env-password"
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.ConfigManager")
+    def test_main_launch_error(self, mock_config_class, mock_run_unified):
+        """Test main when UI launch fails."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.verify_main_password.return_value = "password"
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config_class.return_value = mock_config
+
+        mock_run_unified.side_effect = ValueError("Invalid password")
+
+        with patch.object(sys, "argv", ["chad"]):
+            with patch.dict(os.environ, {}, clear=True):
+                os.environ.pop("CHAD_PASSWORD", None)
+                result = main()
 
         assert result == 1
 
-    @patch("chad.__main__.launch_web_ui")
+    @patch("chad.__main__.run_unified")
     @patch("chad.__main__.ConfigManager")
-    def test_main_keyboard_interrupt(self, mock_security_class, mock_launch):
+    def test_main_keyboard_interrupt(self, mock_config_class, mock_run_unified):
         """Test main with keyboard interrupt."""
-        mock_security = Mock()
-        mock_security.is_first_run.return_value = False
-        mock_security.get_cleanup_days.return_value = 3
-        mock_security_class.return_value = mock_security
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.verify_main_password.return_value = "password"
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config_class.return_value = mock_config
 
-        mock_launch.side_effect = KeyboardInterrupt()
+        mock_run_unified.side_effect = KeyboardInterrupt()
 
         with patch.object(sys, "argv", ["chad"]):
+            with patch.dict(os.environ, {}, clear=True):
+                os.environ.pop("CHAD_PASSWORD", None)
+                result = main()
+
+        assert result == 0
+
+    @patch("chad.__main__.run_server")
+    @patch("chad.__main__.ConfigManager")
+    def test_main_server_only_mode(self, mock_config_class, mock_run_server):
+        """Test main in server-only mode (no password needed)."""
+        mock_config = Mock()
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad", "--mode", "server"]):
             result = main()
 
         assert result == 0
+        mock_run_server.assert_called_once()
+        # Should NOT prompt for password in server mode
+        mock_config.verify_main_password.assert_not_called()
+        mock_config.setup_main_password.assert_not_called()
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.ConfigManager")
+    def test_main_cli_mode(self, mock_config_class, mock_run_unified):
+        """Test main with CLI ui mode."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.verify_main_password.return_value = "password"
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.get_ui_mode.return_value = "cli"
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad", "--ui", "cli"]):
+            with patch.dict(os.environ, {}, clear=True):
+                os.environ.pop("CHAD_PASSWORD", None)
+                result = main()
+
+        assert result == 0
+        mock_run_unified.assert_called_once()
+        call_kwargs = mock_run_unified.call_args.kwargs
+        assert call_kwargs.get("ui_mode") == "cli"
 
 
 class TestParentWatchdog:

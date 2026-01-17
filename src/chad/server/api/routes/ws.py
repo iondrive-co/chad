@@ -1,12 +1,14 @@
 """WebSocket streaming endpoints."""
 
 import asyncio
+import base64
 import json
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from chad.server.services import get_session_manager, get_task_executor
+from chad.server.services.pty_stream import get_pty_stream_service
 
 router = APIRouter()
 
@@ -56,16 +58,20 @@ manager = ConnectionManager()
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
     """WebSocket endpoint for streaming task updates.
 
-    Clients connect to receive real-time updates for a session's tasks.
-    Message types:
-    - stream: Raw AI output chunk
-    - activity: Tool use or thinking activity
-    - status: Status message
-    - message_start: AI message started
-    - message_complete: AI message completed
-    - progress: Progress update
-    - complete: Task completed
+    Bidirectional communication with PTY sessions.
+
+    Server -> Client message types:
+    - terminal: Raw PTY output (base64 encoded)
+    - event: Structured event
+    - complete: Task/PTY exited
     - error: Error occurred
+    - pong: Response to ping
+
+    Client -> Server message types:
+    - input: Send bytes to PTY (base64 encoded data field)
+    - resize: Resize terminal (rows, cols fields)
+    - cancel: Cancel/terminate PTY
+    - ping: Heartbeat
     """
     # Verify session exists
     session_mgr = get_session_manager()
@@ -77,34 +83,77 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     await manager.connect(websocket, session_id)
 
     try:
-        # Start a background task to poll for events
+        pty_service = get_pty_stream_service()
         executor = get_task_executor()
 
-        async def poll_events():
-            """Poll for task events and forward to WebSocket."""
-            current_task_id = None
-
+        async def stream_pty_output():
+            """Stream PTY output to WebSocket."""
+            seq = 0
             while True:
-                await asyncio.sleep(0.1)  # Poll every 100ms
+                pty_session = pty_service.get_session_by_session_id(session_id)
+                if pty_session:
+                    try:
+                        async for event in pty_service.subscribe(pty_session.stream_id):
+                            seq += 1
+                            if event.type == "output":
+                                message = {
+                                    "type": "terminal",
+                                    "session_id": session_id,
+                                    "data": {
+                                        "data": event.data,
+                                        "seq": seq,
+                                        "has_ansi": event.has_ansi,
+                                    },
+                                }
+                            elif event.type == "exit":
+                                message = {
+                                    "type": "complete",
+                                    "session_id": session_id,
+                                    "data": {
+                                        "exit_code": event.exit_code,
+                                        "seq": seq,
+                                    },
+                                }
+                            elif event.type == "error":
+                                message = {
+                                    "type": "error",
+                                    "session_id": session_id,
+                                    "data": {
+                                        "error": event.error,
+                                        "seq": seq,
+                                    },
+                                }
+                            else:
+                                continue
 
-                # Find active task for this session
-                # Note: This is a simple approach; could track task_id explicitly
+                            await manager.send_to_session(session_id, message)
+
+                            if event.type in ("exit", "error"):
+                                return
+
+                    except Exception:
+                        pass
+
+                # Also poll for task executor events (fallback for non-PTY tasks)
                 for task_id, task in list(executor._tasks.items()):
                     if task.session_id == session_id:
-                        current_task_id = task_id
-                        break
+                        events = executor.get_events(task_id, timeout=0.01)
+                        for event in events:
+                            seq += 1
+                            message = {
+                                "type": "event",
+                                "session_id": session_id,
+                                "data": {"seq": seq, "event_type": event.type, **event.data},
+                            }
+                            await manager.send_to_session(session_id, message)
 
-                if current_task_id:
-                    events = executor.get_events(current_task_id, timeout=0.01)
-                    for event in events:
-                        message = {
-                            "type": event.type,
-                            "session_id": session_id,
-                            "data": event.data,
-                        }
-                        await manager.send_to_session(session_id, message)
+                            if event.type in ("complete", "error"):
+                                return
 
-        poll_task = asyncio.create_task(poll_events())
+                await asyncio.sleep(0.1)
+
+        # Start background task for streaming
+        stream_task = asyncio.create_task(stream_pty_output())
 
         try:
             # Handle incoming messages
@@ -117,17 +166,61 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     if msg_type == "ping":
                         await websocket.send_json({"type": "pong", "session_id": session_id})
 
-                    elif msg_type == "cancel":
-                        # Cancel the current task
-                        for task_id, task in list(executor._tasks.items()):
-                            if task.session_id == session_id:
-                                executor.cancel_task(task_id)
+                    elif msg_type == "input":
+                        # Send input to PTY
+                        pty_session = pty_service.get_session_by_session_id(session_id)
+                        if pty_session and pty_session.active:
+                            try:
+                                input_data = base64.b64decode(msg.get("data", ""))
+                                pty_service.send_input(pty_session.stream_id, input_data)
+                            except Exception as e:
                                 await websocket.send_json({
-                                    "type": "status",
+                                    "type": "error",
                                     "session_id": session_id,
-                                    "data": {"status": "Cancellation requested"},
+                                    "data": {"error": f"Failed to send input: {e}"},
                                 })
-                                break
+                        else:
+                            await websocket.send_json({
+                                "type": "error",
+                                "session_id": session_id,
+                                "data": {"error": "No active PTY session"},
+                            })
+
+                    elif msg_type == "resize":
+                        # Resize PTY terminal
+                        pty_session = pty_service.get_session_by_session_id(session_id)
+                        if pty_session and pty_session.active:
+                            rows = msg.get("rows", 24)
+                            cols = msg.get("cols", 80)
+                            pty_service.resize(pty_session.stream_id, rows, cols)
+                        else:
+                            await websocket.send_json({
+                                "type": "error",
+                                "session_id": session_id,
+                                "data": {"error": "No active PTY session"},
+                            })
+
+                    elif msg_type == "cancel":
+                        # Cancel/terminate PTY
+                        pty_session = pty_service.get_session_by_session_id(session_id)
+                        if pty_session:
+                            pty_service.terminate(pty_session.stream_id)
+                            await websocket.send_json({
+                                "type": "status",
+                                "session_id": session_id,
+                                "data": {"status": "PTY terminated"},
+                            })
+                        else:
+                            # Try cancelling via task executor
+                            for task_id, task in list(executor._tasks.items()):
+                                if task.session_id == session_id:
+                                    executor.cancel_task(task_id)
+                                    await websocket.send_json({
+                                        "type": "status",
+                                        "session_id": session_id,
+                                        "data": {"status": "Cancellation requested"},
+                                    })
+                                    break
 
                 except json.JSONDecodeError:
                     await websocket.send_json({
@@ -137,9 +230,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     })
 
         finally:
-            poll_task.cancel()
+            stream_task.cancel()
             try:
-                await poll_task
+                await stream_task
             except asyncio.CancelledError:
                 pass
 

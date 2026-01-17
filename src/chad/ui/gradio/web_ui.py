@@ -20,11 +20,19 @@ from .provider_ui import ProviderUIManager
 
 if TYPE_CHECKING:
     from chad.ui.client import APIClient
-from chad.util.session_logger import SessionLogger
+
+from chad.ui.client.stream_client import SyncStreamClient, decode_terminal_data
+from chad.util.event_log import (
+    EventLog,
+    SessionStartedEvent,
+    SessionEndedEvent,
+    UserMessageEvent,
+    AssistantMessageEvent,
+    VerificationAttemptEvent,
+)
 from chad.util.providers import ModelConfig, parse_codex_output, create_provider
 from chad.util.model_catalog import ModelCatalog
 from chad.util.prompts import (
-    build_coding_prompt,
     extract_coding_summary,
     extract_progress_update,
     check_verification_mentioned,
@@ -47,7 +55,7 @@ class Session:
     active: bool = False
     provider: object = None
     config: object = None
-    log_path: Path | None = None
+    event_log: EventLog | None = None  # Structured JSONL event log
     chat_history: list = field(default_factory=list)
     task_description: str | None = None
     project_path: str | None = None
@@ -58,6 +66,11 @@ class Session:
     worktree_base_commit: str | None = None  # Commit SHA worktree was created from
     has_worktree_changes: bool = False
     merge_conflicts: list[MergeConflict] | None = None
+
+    @property
+    def log_path(self) -> Path | None:
+        """Get the event log path for backwards compatibility."""
+        return self.event_log.log_path if self.event_log else None
 
 
 def _history_entry(agent: str, content: str) -> tuple[str, str, str]:
@@ -1975,11 +1988,178 @@ class ChadWebUI:
         self.provider_card_count = 10
         self.model_catalog = ModelCatalog(api_client)
         self.provider_ui = ProviderUIManager(api_client, self.model_catalog, dev_mode=dev_mode)
-        self.session_logger = SessionLogger()
         # Store dropdown references for cross-tab updates
         self._session_dropdowns: dict[str, dict] = {}
         # Store provider card delete events for chaining dropdown updates
         self._provider_delete_events: list = []
+        # Stream client for API-based task execution (same method as CLI)
+        self._stream_client: SyncStreamClient | None = None
+
+    def _get_stream_client(self) -> SyncStreamClient:
+        """Get or create the stream client for API-based task execution.
+
+        Uses the same SSE streaming method as the CLI for unified streaming.
+        """
+        if self._stream_client is None:
+            self._stream_client = SyncStreamClient(self.api_client.base_url)
+        return self._stream_client
+
+    def stream_task_output(
+        self, session_id: str, include_terminal: bool = True
+    ) -> Iterator[tuple[str, str | None, int | None]]:
+        """Stream task output from the API.
+
+        This method provides the same streaming interface as the CLI,
+        enabling unified streaming across both UI types.
+
+        Args:
+            session_id: Session to stream from
+            include_terminal: Whether to include raw terminal output
+
+        Yields:
+            Tuple of (event_type, data, exit_code):
+            - ("terminal", html_content, None) - Terminal output as HTML
+            - ("complete", None, exit_code) - Task completed
+            - ("error", error_message, None) - Error occurred
+        """
+        stream_client = self._get_stream_client()
+        terminal_buffer = ""
+
+        for event in stream_client.stream_events(session_id, include_terminal=include_terminal):
+            if event.event_type == "terminal":
+                # Decode base64 terminal data and convert to HTML
+                raw_data = decode_terminal_data(event.data.get("data", ""))
+                text_data = raw_data.decode("utf-8", errors="replace")
+                terminal_buffer += text_data
+                # Convert accumulated output to HTML
+                html_output = ansi_to_html(terminal_buffer)
+                yield ("terminal", html_output, None)
+
+            elif event.event_type == "complete":
+                exit_code = event.data.get("exit_code", 0)
+                yield ("complete", None, exit_code)
+                break
+
+            elif event.event_type == "error":
+                error_msg = event.data.get("error", "Unknown error")
+                yield ("error", error_msg, None)
+                break
+
+            elif event.event_type == "ping":
+                # Keepalive, ignore
+                continue
+
+    def run_task_via_api(
+        self,
+        session_id: str,
+        project_path: str,
+        task_description: str,
+        coding_account: str,
+        message_queue: "queue.Queue",
+        coding_model: str | None = None,
+        coding_reasoning: str | None = None,
+    ) -> tuple[bool, str, str | None]:
+        """Run a task via the API and post events to the message queue.
+
+        This method enables unified streaming - both CLI and Gradio UI use
+        the same SSE endpoint for task execution.
+
+        Args:
+            session_id: Local session ID (used for naming, not for API calls)
+            project_path: Path to the project directory
+            task_description: Task description
+            coding_account: Account name for the coding agent
+            message_queue: Queue to post events to (for UI integration)
+            coding_model: Optional model override
+            coding_reasoning: Optional reasoning level
+
+        Returns:
+            Tuple of (success, final_output_text, server_session_id)
+        """
+        # Create server-side session first
+        try:
+            server_session = self.api_client.create_session(
+                project_path=project_path,
+                name=f"task-{session_id}"
+            )
+            server_session_id = server_session.id
+        except Exception as e:
+            message_queue.put(("status", f"❌ Failed to create session: {e}"))
+            return False, str(e), None
+
+        # Start the task via API using the server session ID
+        try:
+            self.api_client.start_task(
+                session_id=server_session_id,
+                project_path=project_path,
+                task_description=task_description,
+                coding_agent=coding_account,
+                coding_model=coding_model,
+                coding_reasoning=coding_reasoning,
+            )
+        except Exception as e:
+            message_queue.put(("status", f"❌ Failed to start task: {e}"))
+            return False, str(e), server_session_id
+
+        # Emit message start
+        message_queue.put(("ai_switch", "CODING AI"))
+        message_queue.put(("message_start", "CODING AI"))
+
+        # Stream output via SSE using server session ID
+        stream_client = self._get_stream_client()
+        terminal_buffer = ""
+        exit_code = 0
+
+        try:
+            for event in stream_client.stream_events(server_session_id, include_terminal=True):
+                if event.event_type == "terminal":
+                    # Decode base64 terminal data
+                    raw_data = decode_terminal_data(event.data.get("data", ""))
+                    text_chunk = raw_data.decode("utf-8", errors="replace")
+                    terminal_buffer += text_chunk
+
+                    # Post chunk to message queue for real-time display
+                    if text_chunk.strip():
+                        message_queue.put(("stream", text_chunk))
+
+                elif event.event_type == "complete":
+                    exit_code = event.data.get("exit_code", 0)
+                    break
+
+                elif event.event_type == "error":
+                    error_msg = event.data.get("error", "Unknown error")
+                    message_queue.put(("status", f"❌ Error: {error_msg}"))
+                    return False, error_msg
+
+                elif event.event_type == "event":
+                    # Structured events from EventLog
+                    event_type = event.data.get("type", "")
+                    if event_type == "session_started":
+                        pass  # Already handled by task start
+                    elif event_type == "tool_call_started":
+                        tool = event.data.get("tool", "")
+                        if tool == "bash":
+                            cmd = event.data.get("command", "")[:50]
+                            message_queue.put(("activity", f"● bash: {cmd}"))
+                        elif tool in ("read", "write", "edit"):
+                            path = event.data.get("path", "")
+                            message_queue.put(("activity", f"● {tool}: {path}"))
+
+        except Exception as e:
+            message_queue.put(("status", f"❌ Stream error: {e}"))
+            return False, str(e), server_session_id
+
+        # Strip ANSI codes for final output
+        final_output = ANSI_ESCAPE_RE.sub("", terminal_buffer)
+
+        # Emit completion
+        if exit_code == 0:
+            message_queue.put(("message_complete", "CODING AI", final_output))
+            return True, final_output, server_session_id
+        else:
+            message_queue.put(("status", f"❌ Agent exited with code {exit_code}"))
+            message_queue.put(("message_complete", "CODING AI", final_output))
+            return False, f"Agent exited with code {exit_code}", server_session_id
 
     def get_session(self, session_id: str) -> Session:
         """Get or create a session by ID."""
@@ -2621,19 +2801,10 @@ class ChadWebUI:
                 return
 
             session.task_description = task_description
+            session.project_path = str(path_obj)
 
-            # Create worktree for this task
-            try:
-                worktree_path, base_commit = git_mgr.create_worktree(session_id)
-                session.worktree_path = worktree_path
-                session.worktree_branch = git_mgr._branch_name(session_id)
-                session.worktree_base_commit = base_commit
-                session.project_path = str(path_obj)
-                task_working_dir = worktree_path
-            except Exception as e:
-                error_msg = f"❌ Failed to create worktree: {e}"
-                yield make_yield([], error_msg, summary=error_msg, interactive=True)
-                return
+            # Worktree will be created by the API when the task starts
+            # For now, set the project path; worktree info will be fetched after task starts
 
             coding_account = coding_agent
             coding_provider = account.provider
@@ -2672,16 +2843,17 @@ class ChadWebUI:
                 reasoning_effort=None if selected_reasoning == "default" else selected_reasoning,
             )
 
-            coding_timeout = DEFAULT_CODING_TIMEOUT
-
-            session.log_path = session.log_path or self.session_logger.precreate_log()
-            self.session_logger.initialize_log(
-                session.log_path,
+            # Create event log for structured logging
+            if not session.event_log:
+                session.event_log = EventLog(session.id)
+            session.event_log.log(SessionStartedEvent(
                 task_description=task_description,
                 project_path=str(path_obj),
-                coding_account=coding_account,
                 coding_provider=coding_provider,
-            )
+                coding_account=coding_account,
+                coding_model=selected_model if selected_model != "default" else None,
+            ))
+            session.event_log.start_turn()
 
             status_prefix = "**Starting Chad...**\n\n"
             status_prefix += f"• Project: {path_obj}\n"
@@ -2693,93 +2865,62 @@ class ChadWebUI:
             status_prefix += "• Mode: Direct (coding AI only)\n\n"
 
             chat_history.append({"role": "user", "content": f"**Task**\n\n{task_description}"})
-            self.session_logger.update_log(
-                session.log_path, chat_history, last_event=self._last_event_info(session)
-            )
+            session.event_log.log(UserMessageEvent(content=task_description))
 
             initial_status = f"{status_prefix}⏳ Initializing session..."
             yield make_yield(chat_history, initial_status, summary=initial_status, interactive=False)
 
-            def format_tool_activity(detail: str) -> str:
-                if ": " in detail:
-                    tool_name, args = detail.split(": ", 1)
-                    return f"● {tool_name}({args})"
-                if detail.startswith("Running: "):
-                    return f"● {detail[9:]}"
-                return f"● {detail}"
-
-            def on_activity(activity_type: str, detail: str):
-                if activity_type == "stream":
-                    message_queue.put(("stream", detail))
-                elif activity_type == "tool":
-                    formatted = format_tool_activity(detail)
-                    message_queue.put(("activity", formatted))
-                elif activity_type == "thinking":
-                    message_queue.put(("activity", f"⋯ {detail}"))
-                elif activity_type == "text" and detail:
-                    message_queue.put(("activity", f"  ⎿ {detail[:80]}"))
-
-            coding_provider_instance = create_provider(coding_config)
-            session.provider = coding_provider_instance
-            coding_provider_instance.set_activity_callback(on_activity)
-
-            # Read project documentation from worktree (AGENTS.md, CLAUDE.md, etc.)
-            project_docs = self._read_project_docs(task_working_dir)
-
-            if not coding_provider_instance.start_session(str(task_working_dir), None):
-                failure = f"{status_prefix}❌ Failed to start coding session"
-                session.provider = None
-                session.config = None
-                yield make_yield([], failure, summary=failure, interactive=True)
-                return
-
-            status_msg = f"{status_prefix}✓ Coding AI started\n\n⏳ Processing task..."
-            yield make_yield([], status_msg, summary=status_msg, interactive=False)
-
-            # Build the complete prompt with project docs + workflow + task
-            full_prompt = build_coding_prompt(task_description, project_docs)
-            coding_provider_instance.send_message(full_prompt)
-
+            # Use the streaming API to run the task
+            # This ensures both CLI and Gradio UI use the same PTY-based execution path
             relay_complete = threading.Event()
             task_success = [False]
             completion_reason = [""]
             coding_final_output: list[str] = [""]
 
-            def direct_loop():
+            def api_task_loop():
+                """Run the task via the API streaming endpoint."""
                 try:
-                    message_queue.put(("ai_switch", "CODING AI"))
-                    message_queue.put(("message_start", "CODING AI"))
-                    response = coding_provider_instance.get_response(timeout=coding_timeout)
-                    if response:
-                        parsed = parse_codex_output(response)
-                        coding_final_output[0] = parsed
-                        message_queue.put(("message_complete", "CODING AI", parsed))
-                        task_success[0] = True
+                    success, output, server_session_id = self.run_task_via_api(
+                        session_id=session_id,
+                        project_path=str(path_obj),
+                        task_description=task_description,
+                        coding_account=coding_account,
+                        message_queue=message_queue,
+                        coding_model=selected_model if selected_model != "default" else None,
+                        coding_reasoning=selected_reasoning if selected_reasoning != "default" else None,
+                    )
+                    task_success[0] = success
+                    coding_final_output[0] = output
+                    if success:
                         completion_reason[0] = "Coding AI completed task"
                     else:
-                        message_queue.put(("status", "❌ No response from coding AI"))
-                        completion_reason[0] = "No response from coding AI"
-                except Exception as exc:  # pragma: no cover - runtime safety
+                        completion_reason[0] = output
+
+                    # Fetch worktree info from API after task completes (use server session ID)
+                    if server_session_id:
+                        try:
+                            wt_status = self.api_client.get_worktree_status(server_session_id)
+                            if wt_status and wt_status.exists:
+                                session.worktree_path = Path(wt_status.path) if wt_status.path else None
+                                session.worktree_branch = wt_status.branch
+                                session.worktree_base_commit = wt_status.base_commit
+                                session.has_worktree_changes = wt_status.has_changes
+                        except Exception:
+                            pass  # Worktree info is optional
+
+                except Exception as exc:
                     message_queue.put(("status", f"❌ Error: {str(exc)}"))
                     completion_reason[0] = str(exc)
-                    # Stop session on error
-                    coding_provider_instance.stop_session()
-                    session.provider = None
-                    session.active = False
                 finally:
-                    # Keep session alive for follow-ups if provider supports multi-turn
-                    # and task succeeded
-                    if not coding_provider_instance.supports_multi_turn() or not task_success[0]:
-                        coding_provider_instance.stop_session()
-                        session.provider = None
-                        session.active = False
-                    else:
-                        # Keep session alive for follow-ups
-                        session.active = True
+                    session.active = task_success[0]  # Keep active only if task succeeded
+                    session.provider = None  # API-based execution doesn't keep a provider
                     relay_complete.set()
 
-            relay_thread = threading.Thread(target=direct_loop, daemon=True)
+            relay_thread = threading.Thread(target=api_task_loop, daemon=True)
             relay_thread.start()
+
+            status_msg = f"{status_prefix}✓ Task started via API\n\n⏳ Processing task..."
+            yield make_yield([], status_msg, summary=status_msg, interactive=False)
 
             current_status = f"{status_prefix}⏳ Coding AI is working..."
             current_ai = "CODING AI"
@@ -2855,9 +2996,11 @@ class ChadWebUI:
                         last_activity = ""
                         current_live_stream = ""
                         render_state.reset()
-                        self.session_logger.update_log(
-                            session.log_path, chat_history, last_event=self._last_event_info(session)
-                        )
+                        # Log assistant message completion
+                        if session.event_log and content:
+                            session.event_log.log(AssistantMessageEvent(
+                                blocks=[{"kind": "text", "content": content[:1000]}]
+                            ))
                         yield make_yield(chat_history, current_status, current_live_stream)
                         last_yield_time = time_module.time()
 
@@ -3014,9 +3157,11 @@ class ChadWebUI:
                                 chat_history[pending_message_idx] = make_chat_message(speaker, content)
                             else:
                                 chat_history.append(make_chat_message(speaker, content))
-                            self.session_logger.update_log(
-                                session.log_path, chat_history, last_event=self._last_event_info(session)
-                            )
+                            # Log assistant message
+                            if session.event_log and content:
+                                session.event_log.log(AssistantMessageEvent(
+                                    blocks=[{"kind": "text", "content": content[:1000]}]
+                                ))
                             yield make_yield(chat_history, current_status, "")
                     except queue.Empty:
                         break
@@ -3082,9 +3227,6 @@ class ChadWebUI:
                             "role": "user",
                             "content": f"───────────── 🔍 VERIFICATION (Attempt {verification_attempt}) ─────────────",
                         }
-                    )
-                    self.session_logger.update_log(
-                        session.log_path, chat_history, last_event=self._last_event_info(session)
                     )
 
                     # Show verification status
@@ -3160,12 +3302,13 @@ class ChadWebUI:
                                 "content": "───────────── ❌ VERIFICATION ERROR ─────────────",
                             }
                         )
-                        self.session_logger.update_log(
-                            session.log_path,
-                            chat_history,
-                            verification_attempts=verification_log,
-                            last_event=self._last_event_info(session),
-                        )
+                        # Log verification attempt error
+                        if session.event_log:
+                            session.event_log.log(VerificationAttemptEvent(
+                                attempt_number=verification_attempt,
+                                passed=False,
+                                summary="Verification error",
+                            ))
                         break
                     elif verified:
                         chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
@@ -3175,25 +3318,30 @@ class ChadWebUI:
                                 "content": "───────────── ✅ VERIFICATION PASSED ─────────────",
                             }
                         )
-                        self.session_logger.update_log(
-                            session.log_path,
-                            chat_history,
-                            verification_attempts=verification_log,
-                            last_event=self._last_event_info(session),
-                        )
+                        # Log verification attempt success
+                        if session.event_log:
+                            session.event_log.log(VerificationAttemptEvent(
+                                attempt_number=verification_attempt,
+                                passed=True,
+                                summary=verification_feedback[:500] if verification_feedback else "",
+                            ))
                     else:
                         chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
-                        self.session_logger.update_log(
-                            session.log_path,
-                            chat_history,
-                            verification_attempts=verification_log,
-                            last_event=self._last_event_info(session),
-                        )
+                        # Log verification attempt failure
+                        if session.event_log:
+                            session.event_log.log(VerificationAttemptEvent(
+                                attempt_number=verification_attempt,
+                                passed=False,
+                                summary=verification_feedback[:500] if verification_feedback else "",
+                            ))
 
-                        # If not verified and session is still active, send feedback to coding agent
+                        # If not verified and session is still active with a provider, send feedback to coding agent
+                        # Note: API-based execution doesn't support direct provider revision (session.provider is None)
                         can_revise = (
                             session.active
-                            and coding_provider_instance.is_alive()
+                            and session.provider is not None
+                            and hasattr(session.provider, 'is_alive')
+                            and session.provider.is_alive()
                             and verification_attempt < max_verification_attempts
                         )
                         if can_revise:
@@ -3202,9 +3350,9 @@ class ChadWebUI:
                                 "*Sending verification feedback to coding agent...*"
                             )
                             chat_history.append({"role": "user", "content": revision_content})
-                            self.session_logger.update_log(
-                                session.log_path, chat_history, last_event=self._last_event_info(session)
-                            )
+                            # Log revision request
+                            if session.event_log:
+                                session.event_log.log(UserMessageEvent(content="Revision requested"))
                             revision_status = f"{status_prefix}🔄 Sending revision request to coding agent..."
                             yield make_yield(chat_history, revision_status, "")
 
@@ -3226,9 +3374,6 @@ class ChadWebUI:
                                 }
                             )
                             revision_pending_idx = len(chat_history) - 1
-                            self.session_logger.update_log(
-                                session.log_path, chat_history, last_event=self._last_event_info(session)
-                            )
                             revision_status_msg = f"{status_prefix}⏳ Coding agent working on revisions..."
                             # Show live stream placeholder during revision setup
                             revision_placeholder = build_live_stream_html("⏳ Preparing revision...", "CODING AI")
@@ -3240,8 +3385,8 @@ class ChadWebUI:
 
                             def run_revision_thread():
                                 try:
-                                    coding_provider_instance.send_message(revision_request)
-                                    resp = coding_provider_instance.get_response(timeout=coding_timeout)
+                                    session.provider.send_message(revision_request)
+                                    resp = session.provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
                                     revision_result[0] = resp
                                 except Exception as exc:
                                     revision_result[1] = exc
@@ -3299,35 +3444,22 @@ class ChadWebUI:
                                 session.active = False
                                 session.provider = None
                                 session.config = None
-                                self.session_logger.update_log(
-                                    session.log_path,
-                                    chat_history,
-                                    verification_attempts=verification_log,
-                                    last_event=self._last_event_info(session),
-                                )
                                 break
 
                             if revision_response:
                                 parsed_revision = parse_codex_output(revision_response)
                                 chat_history[revision_pending_idx] = make_chat_message("CODING AI", parsed_revision)
                                 last_coding_output = parsed_revision
-                                self.session_logger.update_log(
-                                    session.log_path,
-                                    chat_history,
-                                    verification_attempts=verification_log,
-                                    last_event=self._last_event_info(session),
-                                )
+                                # Log revision response
+                                if session.event_log:
+                                    session.event_log.log(AssistantMessageEvent(
+                                        blocks=[{"kind": "text", "content": parsed_revision[:1000]}]
+                                    ))
                             else:
                                 chat_history[revision_pending_idx] = {
                                     "role": "assistant",
                                     "content": "**CODING AI**\n\n❌ *No response to revision request*",
                                 }
-                                self.session_logger.update_log(
-                                    session.log_path,
-                                    chat_history,
-                                    verification_attempts=verification_log,
-                                    last_event=self._last_event_info(session),
-                                )
                                 break
 
                             yield make_yield(
@@ -3338,13 +3470,6 @@ class ChadWebUI:
                         else:
                             # Can't continue - session not active or max attempts reached
                             break
-
-                    self.session_logger.update_log(
-                        session.log_path,
-                        chat_history,
-                        verification_attempts=verification_log,
-                        last_event=self._last_event_info(session),
-                    )
 
                 if verified is True:
                     final_status = "✓ Task completed and verified!"
@@ -3395,17 +3520,12 @@ class ChadWebUI:
                 session_status = "failed"
                 overall_success = False
 
-            self.session_logger.update_log(
-                session.log_path,
-                chat_history,
-                streaming_history=full_history if full_history else None,
-                success=overall_success,
-                completion_reason=completion_reason[0],
-                status=session_status,
-                verification_attempts=verification_log,
-                final_status=final_status,
-                last_event=self._last_event_info(session),
-            )
+            # Log session end event
+            if session.event_log:
+                session.event_log.log(SessionEndedEvent(
+                    success=overall_success,
+                    reason=completion_reason[0] or session_status,
+                ))
             if session.log_path:
                 final_status += f"\n\n*Session log: {session.log_path}*"
             final_summary = f"{status_prefix}{final_status}"
@@ -4558,15 +4678,8 @@ class ChadWebUI:
             chat_history: Current chat history
             streaming_history: Optional streaming history as (ai_name, content, timestamp) tuples
         """
-        if session.log_path:
-            self.session_logger.update_log(
-                session.log_path,
-                chat_history,
-                streaming_history=streaming_history,
-                status="continued",
-                verification_attempts=verification_attempts,
-                last_event=self._last_event_info(session),
-            )
+        # EventLog handles session logging automatically via events
+        pass
 
     def _create_session_ui(self, session_id: str, is_first: bool = False):
         """Create UI components for a single session within @gr.render.
@@ -5549,7 +5662,7 @@ class ChadWebUI:
         """Create the Gradio interface."""
         # Create initial session
         initial_session = self.create_session("Task 1")
-        initial_session.log_path = self.session_logger.precreate_log()
+        initial_session.event_log = EventLog(initial_session.id)
 
         with gr.Blocks(title="Chad", js="""
         () => {
@@ -6090,7 +6203,7 @@ window._setupLivePatchListener();
             all_sessions = [initial_session]
             for i in range(1, MAX_TASKS):
                 s = self.create_session(f"Task {i + 1}")
-                s.log_path = self.session_logger.precreate_log()
+                s.event_log = EventLog(s.id)
                 all_sessions.append(s)
 
             # Track how many tabs are currently visible (start with 1)
@@ -6269,12 +6382,16 @@ def launch_web_ui(
     # Print port marker for scripts to parse (before launch blocks)
     print(f"CHAD_PORT={port}", flush=True)
 
+    # Allow serving session log files from the logs directory
+    log_dir = str(EventLog.get_log_dir())
+
     app.launch(
         server_name="127.0.0.1",
         server_port=port,
         share=False,
         inbrowser=open_browser,  # Don't open browser for screenshot mode
         quiet=False,
+        allowed_paths=[log_dir],
     )
 
     return None, port

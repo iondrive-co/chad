@@ -13,7 +13,7 @@ class TestVerify:
         """verify(lint_only=True) should run only flake8."""
         from chad.ui.gradio.verification.tools import verify
 
-        with patch("chad.verification.tools.subprocess.run") as mock_run:
+        with patch("chad.ui.gradio.verification.tools.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = ""
 
@@ -27,7 +27,7 @@ class TestVerify:
         """verify should report lint failures."""
         from chad.ui.gradio.verification.tools import verify
 
-        with patch("chad.verification.tools.subprocess.run") as mock_run:
+        with patch("chad.ui.gradio.verification.tools.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 1
             mock_run.return_value.stdout = "file.py:1:1: E001 error"
 
@@ -46,7 +46,7 @@ class TestVerify:
         venv_python = venv_dir / ("python.exe" if os.name == "nt" else "python")
         venv_python.write_text("")  # presence is enough
 
-        monkeypatch.setattr("chad.verification.tools.resolve_project_root", lambda: (tmp_path, "test"))
+        monkeypatch.setattr("chad.ui.gradio.verification.tools.resolve_project_root", lambda: (tmp_path, "test"))
 
         commands = []
 
@@ -54,7 +54,7 @@ class TestVerify:
             commands.append(cmd[0])
             return type("Proc", (), {"returncode": 0, "stdout": ""})
 
-        monkeypatch.setattr("chad.verification.tools.subprocess.run", fake_run)
+        monkeypatch.setattr("chad.ui.gradio.verification.tools.subprocess.run", fake_run)
 
         result = verify(lint_only=True)
 
@@ -65,9 +65,9 @@ class TestVerify:
         """verify should surface stderr when pytest fails before running tests."""
         from chad.ui.gradio.verification.tools import verify
 
-        monkeypatch.setattr("chad.verification.tools.resolve_project_root", lambda: (tmp_path, "test"))
+        monkeypatch.setattr("chad.ui.gradio.verification.tools.resolve_project_root", lambda: (tmp_path, "test"))
         # Skip playwright setup since we're testing pytest error handling
-        monkeypatch.setattr("chad.verification.tools.ensure_playwright_browsers", lambda: True)
+        monkeypatch.setattr("chad.ui.gradio.verification.tools.ensure_playwright_browsers", lambda: True)
 
         class Proc:
             def __init__(self, returncode, stdout="", stderr=""):
@@ -83,7 +83,7 @@ class TestVerify:
             # pytest error
             return Proc(2, "", "ERROR: unrecognized arguments: -n")
 
-        monkeypatch.setattr("chad.verification.tools.subprocess.run", fake_run)
+        monkeypatch.setattr("chad.ui.gradio.verification.tools.subprocess.run", fake_run)
 
         result = verify()
 

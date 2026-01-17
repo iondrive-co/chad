@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 from dataclasses import dataclass
 
+from chad.ui.client.api_client import Preferences, CleanupSettings, Account
+
 
 @dataclass
 class MockAccount:
@@ -86,8 +88,15 @@ class TestCLIFlow:
         client.list_accounts.return_value = [
             MockAccount(name="test-agent", provider="mock", role="CODING")
         ]
-        client.get_preferences.return_value = {"last_project_path": ""}
-        client.get_cleanup_settings.return_value = {"cleanup_days": 7}
+        client.get_preferences.return_value = Preferences(
+            last_project_path="",
+            dark_mode=True,
+            ui_mode="cli",
+        )
+        client.get_cleanup_settings.return_value = CleanupSettings(
+            retention_days=7,
+            auto_cleanup=True,
+        )
         return client
 
     def test_cli_exits_on_q(self, mock_client, monkeypatch, capsys):
@@ -129,7 +138,7 @@ class TestCLIFlow:
         run_cli(mock_client)
 
         # Check that preferences were updated via API
-        mock_client.update_preferences.assert_called_with(last_project_path=test_path)
+        mock_client.set_preferences.assert_called_with(last_project_path=test_path)
 
     def test_cli_change_agent(self, mock_client, monkeypatch):
         """CLI can change coding agent."""
@@ -152,18 +161,26 @@ class TestCLIFlow:
 
 
 class TestCLITaskFlow:
-    """Integration tests for CLI task execution flow."""
+    """Integration tests for CLI task execution flow using API streaming."""
 
     @pytest.fixture
     def mock_client(self):
         """Create a mock API client."""
         client = MagicMock()
         client.get_status.return_value = {"version": "0.1.0", "status": "healthy"}
+        client.base_url = "http://localhost:8000"
         client.list_accounts.return_value = [
             MockAccount(name="test-agent", provider="mock", role="CODING")
         ]
-        client.get_preferences.return_value = {"last_project_path": ""}
-        client.get_cleanup_settings.return_value = {"cleanup_days": 7}
+        client.get_preferences.return_value = Preferences(
+            last_project_path="",
+            dark_mode=True,
+            ui_mode="cli",
+        )
+        client.get_cleanup_settings.return_value = CleanupSettings(
+            retention_days=7,
+            auto_cleanup=True,
+        )
         return client
 
     @pytest.fixture
@@ -186,51 +203,101 @@ class TestCLITaskFlow:
 
         return repo_path
 
-    def test_cli_task_creates_and_cleans_worktree(self, mock_client, git_repo, monkeypatch):
-        """CLI task flow creates worktree, runs agent, and cleans up."""
+    def test_cli_task_creates_session_and_runs(self, mock_client, git_repo, monkeypatch):
+        """CLI task flow creates session and runs task via API."""
         from chad.ui.cli.app import run_cli
+        from chad.ui.client.api_client import Session, WorktreeStatus
+        from datetime import datetime
 
-        mock_client.get_preferences.return_value = {"last_project_path": str(git_repo)}
+        mock_client.get_preferences.return_value = Preferences(
+            last_project_path=str(git_repo),
+            dark_mode=True,
+            ui_mode="cli",
+        )
 
-        # Simulate: start task (1), enter task description, press enter twice, then quit
+        # Mock session creation
+        mock_session = Session(
+            id="test-session-123",
+            name="Test task",
+            project_path=str(git_repo),
+            active=True,
+            has_worktree=False,
+            has_changes=False,
+            created_at=datetime.now(),
+            last_activity=datetime.now(),
+        )
+        mock_client.create_session.return_value = mock_session
+
+        # Mock worktree status (no changes)
+        mock_client.get_worktree_status.return_value = WorktreeStatus(
+            exists=True,
+            path=str(git_repo / ".chad-worktrees" / "test"),
+            branch="chad/test-session-123",
+            base_commit="abc123",
+            has_changes=False,
+        )
+
+        # Simulate: start task (1), enter task description, empty line, then quit
         inputs = iter([
             "1",           # Start task
             "test task",   # Task description
             "",            # Empty line to finish description
-            "",            # Press Enter to continue after agent exits
+            "",            # Press Enter to continue
             "q",           # Quit
         ])
         monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
         monkeypatch.setattr("os.system", lambda _: None)
 
-        # Mock run_agent_pty to avoid actual PTY operations
-        with patch("chad.ui.cli.pty_runner.run_agent_pty", return_value=0):
-            run_cli(mock_client)
+        # Mock run_task_with_streaming to avoid actual streaming
+        # Note: start_task is called INSIDE run_task_with_streaming, so patching
+        # the function means start_task won't be called
+        with patch("chad.ui.cli.app.run_task_with_streaming", return_value=0):
+            with patch("chad.ui.cli.app.SyncStreamClient"):
+                run_cli(mock_client)
 
-        # Worktree should be cleaned up (no changes made by mock agent)
-        worktree_base = git_repo / ".chad-worktrees"
-        if worktree_base.exists():
-            worktrees = list(worktree_base.iterdir())
-            assert len(worktrees) == 0, f"Worktree not cleaned up: {worktrees}"
+        # Session should have been created via API
+        mock_client.create_session.assert_called_once()
 
-    def test_cli_task_keeps_worktree_on_request(self, mock_client, git_repo, monkeypatch):
-        """CLI keeps worktree when user chooses 'k'."""
+    def test_cli_task_handles_worktree_changes(self, mock_client, git_repo, monkeypatch):
+        """CLI shows options when agent makes changes."""
         from chad.ui.cli.app import run_cli
-        import subprocess
+        from chad.ui.client.api_client import Session, WorktreeStatus, DiffSummary
+        from datetime import datetime
 
-        mock_client.get_preferences.return_value = {"last_project_path": str(git_repo)}
+        mock_client.get_preferences.return_value = Preferences(
+            last_project_path=str(git_repo),
+            dark_mode=True,
+            ui_mode="cli",
+        )
 
-        # Track the worktree path created
-        created_worktree = None
+        mock_session = Session(
+            id="test-session-123",
+            name="Test task",
+            project_path=str(git_repo),
+            active=True,
+            has_worktree=True,
+            has_changes=True,
+            created_at=datetime.now(),
+            last_activity=datetime.now(),
+        )
+        mock_client.create_session.return_value = mock_session
 
-        def mock_run_agent_pty(cmd, cwd, env, initial_input=None):
-            nonlocal created_worktree
-            created_worktree = cwd
-            # Simulate agent making changes
-            (cwd / "new_file.txt").write_text("New content")
-            subprocess.run(["git", "add", "."], cwd=cwd, capture_output=True)
-            return 0
+        # Mock worktree with changes
+        mock_client.get_worktree_status.return_value = WorktreeStatus(
+            exists=True,
+            path=str(git_repo / ".chad-worktrees" / "test"),
+            branch="chad/test-session-123",
+            base_commit="abc123",
+            has_changes=True,
+        )
+        mock_client.get_diff_summary.return_value = DiffSummary(
+            summary="1 file changed",
+            files_changed=1,
+            insertions=5,
+            deletions=2,
+        )
 
+        # Simulate: start task, description, keep worktree, continue, quit
         inputs = iter([
             "1",           # Start task
             "test task",   # Task description
@@ -242,29 +309,50 @@ class TestCLITaskFlow:
         monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
         monkeypatch.setattr("os.system", lambda _: None)
 
-        with patch("chad.ui.cli.pty_runner.run_agent_pty", side_effect=mock_run_agent_pty):
-            run_cli(mock_client)
+        with patch("chad.ui.cli.app.run_task_with_streaming", return_value=0):
+            with patch("chad.ui.cli.app.SyncStreamClient"):
+                run_cli(mock_client)
 
-        # Worktree should still exist
-        assert created_worktree is not None
-        assert created_worktree.exists(), "Worktree should be kept"
+        # Should NOT have called delete_session when keeping worktree
+        mock_client.delete_session.assert_not_called()
 
-    def test_cli_task_discards_worktree(self, mock_client, git_repo, monkeypatch):
+    def test_cli_task_discards_changes(self, mock_client, git_repo, monkeypatch, capsys):
         """CLI discards worktree when user chooses 'x'."""
         from chad.ui.cli.app import run_cli
-        import subprocess
+        from chad.ui.client.api_client import Session, WorktreeStatus, DiffSummary
+        from datetime import datetime
 
-        mock_client.get_preferences.return_value = {"last_project_path": str(git_repo)}
+        mock_client.get_preferences.return_value = Preferences(
+            last_project_path=str(git_repo),
+            dark_mode=True,
+            ui_mode="cli",
+        )
 
-        created_worktree = None
+        mock_session = Session(
+            id="test-session-123",
+            name="Test task",
+            project_path=str(git_repo),
+            active=True,
+            has_worktree=True,
+            has_changes=True,
+            created_at=datetime.now(),
+            last_activity=datetime.now(),
+        )
+        mock_client.create_session.return_value = mock_session
 
-        def mock_run_agent_pty(cmd, cwd, env, initial_input=None):
-            nonlocal created_worktree
-            created_worktree = cwd
-            # Simulate agent making changes
-            (cwd / "new_file.txt").write_text("New content")
-            subprocess.run(["git", "add", "."], cwd=cwd, capture_output=True)
-            return 0
+        mock_client.get_worktree_status.return_value = WorktreeStatus(
+            exists=True,
+            path=str(git_repo / ".chad-worktrees" / "test"),
+            branch="chad/test-session-123",
+            base_commit="abc123",
+            has_changes=True,
+        )
+        mock_client.get_diff_summary.return_value = DiffSummary(
+            summary="1 file changed",
+            files_changed=1,
+            insertions=5,
+            deletions=2,
+        )
 
         inputs = iter([
             "1",           # Start task
@@ -277,9 +365,13 @@ class TestCLITaskFlow:
         monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
         monkeypatch.setattr("os.system", lambda _: None)
 
-        with patch("chad.ui.cli.pty_runner.run_agent_pty", side_effect=mock_run_agent_pty):
-            run_cli(mock_client)
+        with patch("chad.ui.cli.app.run_task_with_streaming", return_value=0):
+            with patch("chad.ui.cli.app.SyncStreamClient"):
+                run_cli(mock_client)
 
-        # Worktree should be removed
-        assert created_worktree is not None
-        assert not created_worktree.exists(), "Worktree should be discarded"
+        # Should have called reset and delete worktree via API
+        mock_client.reset_worktree.assert_called_once_with("test-session-123")
+        mock_client.delete_worktree.assert_called_once_with("test-session-123")
+
+        captured = capsys.readouterr()
+        assert "discarded" in captured.out.lower()
