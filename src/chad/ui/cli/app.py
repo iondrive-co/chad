@@ -1,11 +1,14 @@
-"""Simple CLI for Chad - minimal terminal UI using API."""
+"""Simple CLI for Chad - minimal terminal UI using API streaming."""
 
 import os
-import subprocess
+import select
 import sys
+import termios
+import tty
 from pathlib import Path
 
 from chad.ui.client import APIClient
+from chad.ui.client.stream_client import SyncStreamClient, decode_terminal_data
 
 
 def clear_screen():
@@ -87,7 +90,7 @@ def run_settings_menu(client: APIClient) -> None:
 
         print("Current Settings:")
         print(f"  Accounts:     {len(accounts)} configured")
-        print(f"  Cleanup:      {cleanup.get('cleanup_days', 7)} days")
+        print(f"  Cleanup:      {cleanup.retention_days} days")
         print(f"  Coding Agent: {coding_agent or '(not set)'}")
         print(f"  Verification: {verification_agent or '(not set)'}")
         print()
@@ -112,14 +115,14 @@ def run_settings_menu(client: APIClient) -> None:
 
         elif choice == "2":
             print()
-            current_days = cleanup.get("cleanup_days", 7)
+            current_days = cleanup.retention_days
             print(f"Current cleanup: {current_days} days")
             try:
                 new_days = input("New cleanup days (1-365): ").strip()
                 if new_days:
                     days = int(new_days)
                     if 1 <= days <= 365:
-                        client.update_cleanup_settings(cleanup_days=days)
+                        client.set_cleanup_settings(retention_days=days)
                         print(f"Cleanup set to {days} days")
                     else:
                         print("Please enter a number between 1 and 365")
@@ -292,281 +295,331 @@ def run_accounts_menu(client: APIClient) -> None:
             input("Press Enter to continue...")
 
 
+def run_task_with_streaming(
+    client: APIClient,
+    stream_client: SyncStreamClient,
+    session_id: str,
+    project_path: str,
+    task_description: str,
+    coding_account: str,
+) -> int:
+    """Run a task with PTY streaming via API.
+
+    Args:
+        client: API client for REST calls
+        stream_client: Streaming client for SSE
+        session_id: Session ID
+        project_path: Project path
+        task_description: Task description
+        coding_account: Account to use
+
+    Returns:
+        Exit code from the agent
+    """
+    # Start the task
+    client.start_task(
+        session_id=session_id,
+        project_path=project_path,
+        task_description=task_description,
+        coding_agent=coding_account,
+    )
+
+    # Save terminal state
+    old_settings = None
+    try:
+        old_settings = termios.tcgetattr(sys.stdin)
+    except termios.error:
+        pass
+
+    exit_code = 0
+
+    try:
+        # Set terminal to raw mode for passthrough
+        if old_settings:
+            tty.setraw(sys.stdin.fileno())
+
+        # Stream events and relay I/O
+        for event in stream_client.stream_events(session_id, include_terminal=True):
+            if event.event_type == "terminal":
+                # Write terminal output
+                data = decode_terminal_data(event.data.get("data", ""))
+                os.write(sys.stdout.fileno(), data)
+
+            elif event.event_type == "complete":
+                exit_code = event.data.get("exit_code", 0)
+                break
+
+            elif event.event_type == "error":
+                # Restore terminal before printing error
+                if old_settings:
+                    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                print(f"\nError: {event.data.get('error', 'Unknown error')}")
+                exit_code = 1
+                break
+
+            # Check for user input (non-blocking)
+            if old_settings:
+                rlist, _, _ = select.select([sys.stdin], [], [], 0)
+                if sys.stdin in rlist:
+                    try:
+                        input_data = os.read(sys.stdin.fileno(), 1024)
+                        if input_data:
+                            stream_client.send_input(session_id, input_data)
+                    except OSError:
+                        pass
+
+    finally:
+        # Restore terminal state
+        if old_settings:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+
+    return exit_code
+
+
 def run_cli(client: APIClient) -> None:
     """Run the simple CLI interface.
 
     Args:
         client: API client instance
     """
-    from chad.ui.cli.pty_runner import build_agent_command, run_agent_pty
-    from chad.util.git_worktree import GitWorktreeManager
+    stream_client = SyncStreamClient(base_url=client.base_url)
 
-    while True:
-        clear_screen()
-        print_header()
+    try:
+        while True:
+            clear_screen()
+            print_header()
 
-        # Load accounts and preferences from API
-        accounts = client.list_accounts()
-        prefs = client.get_preferences()
-        default_project = prefs.last_project_path or ""
+            # Load accounts and preferences from API
+            accounts = client.list_accounts()
+            prefs = client.get_preferences()
+            default_project = prefs.last_project_path or ""
 
-        # Find coding agent
-        coding_account = None
-        coding_provider = None
-        for acc in accounts:
-            if acc.role == "CODING":
-                coding_account = acc.name
-                coding_provider = acc.provider
-                break
+            # Find coding agent
+            coding_account = None
+            coding_provider = None
+            for acc in accounts:
+                if acc.role == "CODING":
+                    coding_account = acc.name
+                    coding_provider = acc.provider
+                    break
 
-        if not accounts:
-            print("No accounts configured.")
-            print("Press [s] to open settings and add an account.")
-            print()
-
-        # Show current settings
-        print(f"Project: {default_project or '(not set)'}")
-        if coding_account:
-            print(f"Agent:   {coding_account} ({coding_provider})")
-        print()
-
-        # Main menu
-        print("What would you like to do?")
-        print("  [1] Start a task")
-        print("  [2] Change project path")
-        print("  [3] Change agent")
-        print("  [s] Settings")
-        print("  [q] Quit")
-        print()
-
-        try:
-            choice = input("Choice: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            break
-
-        if choice == "q":
-            break
-
-        elif choice == "s":
-            run_settings_menu(client)
-
-        elif choice == "2":
-            # Change project path
-            print()
-            new_path = input(f"Project path [{default_project}]: ").strip()
-            if new_path:
-                expanded = str(Path(new_path).expanduser().resolve())
-                if Path(expanded).exists():
-                    client.update_preferences(last_project_path=expanded)
-                    print(f"Project path set to: {expanded}")
-                else:
-                    print(f"Path does not exist: {expanded}")
-            input("Press Enter to continue...")
-
-        elif choice == "3":
-            # Change agent
-            print()
             if not accounts:
                 print("No accounts configured.")
-            else:
-                options = [(f"{acc.name} ({acc.provider})", acc.name) for acc in accounts]
-                default_idx = 0
-                if coding_account:
-                    for i, (_, val) in enumerate(options):
-                        if val == coding_account:
-                            default_idx = i
-                            break
+                print("Press [s] to open settings and add an account.")
+                print()
 
-                selected = select_from_list("Select coding agent:", options, default_idx)
-                if selected:
-                    client.set_account_role(selected, "CODING")
-                    print(f"Agent set to: {selected}")
-            input("Press Enter to continue...")
-
-        elif choice == "1":
-            # Start a task
-            if not default_project:
-                print("\nPlease set a project path first.")
-                input("Press Enter to continue...")
-                continue
-
-            project_path = str(Path(default_project).expanduser().resolve())
-            if not Path(project_path).exists():
-                print(f"\nProject path does not exist: {project_path}")
-                input("Press Enter to continue...")
-                continue
-
-            git_dir = Path(project_path) / ".git"
-            if not git_dir.exists():
-                print(f"\nProject is not a git repository: {project_path}")
-                input("Press Enter to continue...")
-                continue
-
-            if not coding_account or not coding_provider:
-                print("\nPlease select a coding agent first.")
-                input("Press Enter to continue...")
-                continue
-
-            # Get task description
+            # Show current settings
+            print(f"Project: {default_project or '(not set)'}")
+            if coding_account:
+                print(f"Agent:   {coding_account} ({coding_provider})")
             print()
-            print("Enter task description (Ctrl+D or empty line to finish):")
-            print("-" * 40)
 
-            lines = []
+            # Main menu
+            print("What would you like to do?")
+            print("  [1] Start a task")
+            print("  [2] Change project path")
+            print("  [3] Change agent")
+            print("  [s] Settings")
+            print("  [q] Quit")
+            print()
+
             try:
-                while True:
-                    line = input()
-                    if not line and lines:
-                        break
-                    lines.append(line)
-            except EOFError:
-                pass
+                choice = input("Choice: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                break
 
-            task_description = "\n".join(lines).strip()
-            if not task_description:
-                print("\nNo task description provided.")
+            if choice == "q":
+                break
+
+            elif choice == "s":
+                run_settings_menu(client)
+
+            elif choice == "2":
+                # Change project path
+                print()
+                new_path = input(f"Project path [{default_project}]: ").strip()
+                if new_path:
+                    expanded = str(Path(new_path).expanduser().resolve())
+                    if Path(expanded).exists():
+                        client.set_preferences(last_project_path=expanded)
+                        print(f"Project path set to: {expanded}")
+                    else:
+                        print(f"Path does not exist: {expanded}")
                 input("Press Enter to continue...")
-                continue
 
-            # Create worktree
-            print()
-            print("Creating worktree...")
-            import uuid
-            task_id = uuid.uuid4().hex[:8]
-            worktree_manager = GitWorktreeManager(project_path)
-            worktree_path, branch = worktree_manager.create_worktree(task_id)
-            print(f"Created worktree: {branch}")
-            print(f"Working in: {worktree_path}")
-
-            # Build agent command
-            cmd, env = build_agent_command(coding_provider, coding_account, Path(worktree_path))
-
-            # Clear and hand off to agent
-            clear_screen()
-            print(f"Handing off to {coding_provider} agent...")
-            print(f"Working in: {worktree_path}")
-            print(f"Task: {task_description[:80]}...")
-            print("-" * 60)
-            print()
-
-            # For claude, send prompt via stdin
-            initial_input = None
-            if coding_provider == "anthropic":
-                initial_input = task_description + "\n"
-
-            # Run agent with PTY passthrough
-            exit_code = run_agent_pty(
-                cmd=cmd,
-                cwd=Path(worktree_path),
-                env=env,
-                initial_input=initial_input,
-            )
-
-            print()
-            print("-" * 60)
-            print(f"Agent exited with code: {exit_code}")
-
-            # Check for changes
-            result = subprocess.run(
-                ["git", "diff", "--stat", "HEAD"],
-                cwd=worktree_path,
-                capture_output=True,
-                text=True,
-            )
-
-            if result.stdout.strip():
-                # There are changes - offer merge options
+            elif choice == "3":
+                # Change agent
                 print()
-                print("Changes detected:")
-                print(result.stdout)
+                if not accounts:
+                    print("No accounts configured.")
+                else:
+                    options = [(f"{acc.name} ({acc.provider})", acc.name) for acc in accounts]
+                    default_idx = 0
+                    if coding_account:
+                        for i, (_, val) in enumerate(options):
+                            if val == coding_account:
+                                default_idx = i
+                                break
+
+                    selected = select_from_list("Select coding agent:", options, default_idx)
+                    if selected:
+                        client.set_account_role(selected, "CODING")
+                        print(f"Agent set to: {selected}")
+                input("Press Enter to continue...")
+
+            elif choice == "1":
+                # Start a task
+                if not default_project:
+                    print("\nPlease set a project path first.")
+                    input("Press Enter to continue...")
+                    continue
+
+                project_path = str(Path(default_project).expanduser().resolve())
+                if not Path(project_path).exists():
+                    print(f"\nProject path does not exist: {project_path}")
+                    input("Press Enter to continue...")
+                    continue
+
+                git_dir = Path(project_path) / ".git"
+                if not git_dir.exists():
+                    print(f"\nProject is not a git repository: {project_path}")
+                    input("Press Enter to continue...")
+                    continue
+
+                if not coding_account or not coding_provider:
+                    print("\nPlease select a coding agent first.")
+                    input("Press Enter to continue...")
+                    continue
+
+                # Get task description
                 print()
-                print("What would you like to do?")
-                print("  [m] Merge changes to main branch")
-                print("  [d] View diff")
-                print("  [x] Discard changes")
-                print("  [k] Keep worktree for later")
+                print("Enter task description (Ctrl+D or empty line to finish):")
+                print("-" * 40)
 
-                while True:
-                    try:
-                        action = input("Choice: ").strip().lower()
-                    except (EOFError, KeyboardInterrupt):
-                        action = "k"
-                        break
+                lines = []
+                try:
+                    while True:
+                        line = input()
+                        if not line and lines:
+                            break
+                        lines.append(line)
+                except EOFError:
+                    pass
 
-                    if action == "d":
-                        # Show diff
-                        subprocess.run(["git", "diff", "HEAD"], cwd=worktree_path)
-                        continue
+                task_description = "\n".join(lines).strip()
+                if not task_description:
+                    print("\nNo task description provided.")
+                    input("Press Enter to continue...")
+                    continue
 
-                    elif action == "m":
-                        # Merge to main
-                        print("\nMerging changes...")
-                        try:
-                            # Get main branch name
-                            main_result = subprocess.run(
-                                ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
-                                cwd=project_path,
-                                capture_output=True,
-                                text=True,
-                            )
-                            if main_result.returncode == 0:
-                                main_branch = main_result.stdout.strip().replace("origin/", "")
+                # Create session via API
+                print()
+                print("Creating session...")
+                session = client.create_session(
+                    project_path=project_path,
+                    name=f"Task: {task_description[:30]}...",
+                )
+
+                # Run with streaming
+                clear_screen()
+                print(f"Starting {coding_provider} agent...")
+                print(f"Project: {project_path}")
+                print(f"Task: {task_description[:80]}...")
+                print("-" * 60)
+                print()
+
+                exit_code = run_task_with_streaming(
+                    client=client,
+                    stream_client=stream_client,
+                    session_id=session.id,
+                    project_path=project_path,
+                    task_description=task_description,
+                    coding_account=coding_account,
+                )
+
+                print()
+                print("-" * 60)
+                print(f"Agent exited with code: {exit_code}")
+
+                # Check for changes via API
+                try:
+                    worktree = client.get_worktree_status(session.id)
+                    if worktree.exists and worktree.has_changes:
+                        diff = client.get_diff_summary(session.id)
+                        print()
+                        print("Changes detected:")
+                        print(f"  {diff.files_changed} files changed, "
+                              f"+{diff.insertions} -{diff.deletions}")
+                        print()
+                        print("What would you like to do?")
+                        print("  [m] Merge changes to main branch")
+                        print("  [d] View diff")
+                        print("  [x] Discard changes")
+                        print("  [k] Keep worktree for later")
+
+                        while True:
+                            try:
+                                action = input("Choice: ").strip().lower()
+                            except (EOFError, KeyboardInterrupt):
+                                action = "k"
+                                break
+
+                            if action == "d":
+                                # Show diff
+                                full_diff = client.get_full_diff(session.id)
+                                print()
+                                for file_info in full_diff.get("files", []):
+                                    print(f"--- {file_info.get('path', 'unknown')}")
+                                    for hunk in file_info.get("hunks", []):
+                                        print(hunk.get("content", ""))
+                                continue
+
+                            elif action == "m":
+                                # Merge to main
+                                print("\nMerging changes...")
+                                result = client.merge_worktree(session.id)
+                                if result.success:
+                                    print("Merge successful!")
+                                else:
+                                    print(f"Merge failed: {result.message}")
+                                    if result.conflicts:
+                                        print("Conflicts:")
+                                        for c in result.conflicts:
+                                            print(f"  - {c}")
+                                break
+
+                            elif action == "x":
+                                # Discard
+                                print("\nDiscarding changes...")
+                                client.reset_worktree(session.id)
+                                client.delete_worktree(session.id)
+                                print("Changes discarded.")
+                                break
+
+                            elif action == "k":
+                                # Keep for later
+                                print(f"\nWorktree kept: {worktree.path}")
+                                print(f"Branch: {worktree.branch}")
+                                break
+
                             else:
-                                main_branch = "main"
-
-                            # Commit if needed
-                            subprocess.run(["git", "add", "-A"], cwd=worktree_path)
-                            subprocess.run(
-                                ["git", "commit", "-m", f"Task: {task_description[:50]}"],
-                                cwd=worktree_path,
-                            )
-
-                            # Merge
-                            subprocess.run(
-                                ["git", "checkout", main_branch],
-                                cwd=project_path,
-                            )
-                            merge_result = subprocess.run(
-                                ["git", "merge", "--no-ff", branch, "-m", f"Merge {branch}"],
-                                cwd=project_path,
-                                capture_output=True,
-                                text=True,
-                            )
-
-                            if merge_result.returncode == 0:
-                                print("Merge successful!")
-                                worktree_manager.delete_worktree(task_id)
-                            else:
-                                print("Merge failed:")
-                                print(merge_result.stderr)
-                                print("\nWorktree kept for manual resolution.")
-
-                        except Exception as e:
-                            print(f"Error during merge: {e}")
-
-                        break
-
-                    elif action == "x":
-                        # Discard
-                        print("\nDiscarding changes...")
-                        worktree_manager.delete_worktree(task_id)
-                        print("Worktree removed.")
-                        break
-
-                    elif action == "k":
-                        # Keep for later
-                        print(f"\nWorktree kept at: {worktree_path}")
-                        print(f"Branch: {branch}")
-                        break
+                                print("Please enter m, d, x, or k")
 
                     else:
-                        print("Please enter m, d, x, or k")
+                        print("\nNo changes made by agent.")
+                        # Clean up session
+                        try:
+                            client.delete_session(session.id)
+                        except Exception:
+                            pass
 
-            else:
-                print("\nNo changes made by agent.")
-                worktree_manager.delete_worktree(task_id)
+                except Exception as e:
+                    print(f"\nError checking worktree: {e}")
 
-            input("\nPress Enter to continue...")
+                input("\nPress Enter to continue...")
+
+    finally:
+        stream_client.close()
 
 
 def launch_cli_ui(api_base_url: str = "http://localhost:8000", password: str | None = None) -> None:

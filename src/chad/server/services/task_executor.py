@@ -1,7 +1,8 @@
-"""Task execution service for orchestrating AI coding tasks."""
+"""Task execution service for orchestrating AI coding tasks via PTY."""
 
 import queue
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -10,8 +11,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from chad.util.git_worktree import GitWorktreeManager
-from chad.util.prompts import build_coding_prompt
-from chad.util.providers import ModelConfig, create_provider, parse_codex_output
+from chad.util.event_log import (
+    EventLog,
+    SessionStartedEvent,
+    UserMessageEvent,
+    TerminalOutputEvent,
+    SessionEndedEvent,
+)
+from chad.server.services.pty_stream import get_pty_stream_service, PTYEvent
 
 
 class TaskState(str, Enum):
@@ -46,14 +53,156 @@ class Task:
     completed_at: datetime | None = None
     cancel_requested: bool = False
 
+    # PTY stream ID
+    stream_id: str | None = None
+
+    # Event log
+    event_log: EventLog | None = None
+
     # Internal
     _thread: threading.Thread | None = field(default=None, repr=False)
     _event_queue: queue.Queue = field(default_factory=queue.Queue, repr=False)
     _provider: Any = field(default=None, repr=False)
 
 
+def build_agent_command(
+    provider: str,
+    account_name: str,
+    project_path: Path,
+    task_description: str | None = None,
+) -> tuple[list[str], dict[str, str], str | None]:
+    """Build CLI command and environment for a provider.
+
+    Args:
+        provider: Provider type (anthropic, openai, gemini, qwen, mistral, mock)
+        account_name: Account name for provider-specific paths
+        project_path: Path to the project/worktree
+        task_description: Optional task to send as initial input
+
+    Returns:
+        Tuple of (command_list, environment_dict, initial_input)
+    """
+    env: dict[str, str] = {}
+    initial_input: str | None = None
+
+    if provider == "anthropic":
+        # Claude Code CLI
+        config_dir = Path.home() / ".chad" / "claude-configs" / account_name
+        cmd = ["claude", "-p", "--permission-mode", "bypassPermissions"]
+        env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+        if task_description:
+            initial_input = task_description + "\n"
+
+    elif provider == "openai":
+        # Codex CLI with isolated home
+        codex_home = Path.home() / ".chad" / "codex-homes" / account_name
+        cmd = [
+            "codex",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-C",
+            str(project_path),
+        ]
+        env["HOME"] = str(codex_home)
+        if task_description:
+            cmd.extend([task_description])
+
+    elif provider == "gemini":
+        # Gemini CLI in YOLO mode
+        cmd = ["gemini", "-y"]
+        if task_description:
+            initial_input = task_description + "\n"
+
+    elif provider == "qwen":
+        # Qwen Code CLI
+        cmd = ["qwen", "-y"]
+        if task_description:
+            initial_input = task_description + "\n"
+
+    elif provider == "mistral":
+        # Vibe CLI (Mistral)
+        cmd = ["vibe"]
+        if task_description:
+            initial_input = task_description + "\n"
+
+    elif provider == "mock":
+        # Mock provider - simulates an agent CLI with ANSI output
+        cmd = _build_mock_agent_command(project_path, task_description)
+
+    else:
+        # Fallback - try running provider name as command
+        cmd = [provider]
+        if task_description:
+            initial_input = task_description + "\n"
+
+    return cmd, env, initial_input
+
+
+def _build_mock_agent_command(project_path: Path, task_description: str | None) -> list[str]:
+    """Build mock agent command that simulates a real agent CLI."""
+    # Python script that outputs ANSI-formatted text like a real agent
+    # Uses minimal delays to keep tests fast while still demonstrating ANSI output
+    script = f'''
+import sys
+import os
+
+# ANSI colors
+BLUE = "\\033[1;34m"
+GREEN = "\\033[32m"
+YELLOW = "\\033[33m"
+CYAN = "\\033[36m"
+GRAY = "\\033[90m"
+RESET = "\\033[0m"
+BOLD = "\\033[1m"
+
+def writeln(text=""):
+    print(text, flush=True)
+
+# Header
+writeln(f"{{BLUE}}{{BOLD}}Mock Agent v1.0{{RESET}}")
+writeln(f"{{GRAY}}Working in: {project_path}{{RESET}}")
+writeln()
+
+# Thinking
+writeln(f"{{YELLOW}}> Analyzing task...{{RESET}}")
+
+# Tool call simulation
+writeln(f"{{CYAN}}Tool: Read{{RESET}} {{GRAY}}BUGS.md{{RESET}}")
+writeln(f"{{GREEN}}✓{{RESET}} Read 15 lines")
+
+writeln(f"{{CYAN}}Tool: Glob{{RESET}} {{GRAY}}src/**/*.py{{RESET}}")
+writeln(f"{{GREEN}}✓{{RESET}} Found 8 files")
+
+# Make actual change
+writeln()
+writeln(f"{{YELLOW}}> Making changes...{{RESET}}")
+
+import datetime
+bugs_path = "{project_path}/BUGS.md"
+try:
+    with open(bugs_path, "a") as f:
+        f.write(f"\\n## Mock Task - {{datetime.datetime.now().isoformat()}}\\n")
+        f.write("- Fixed simulated bug\\n")
+        f.write("- Added mock improvements\\n")
+    writeln(f"{{CYAN}}Tool: Edit{{RESET}} {{GRAY}}BUGS.md{{RESET}}")
+    writeln(f"{{GREEN}}✓{{RESET}} Modified BUGS.md")
+except Exception as e:
+    writeln(f"{{YELLOW}}Note:{{RESET}} Could not modify BUGS.md: {{e}}")
+
+# Verification
+writeln()
+writeln(f"{{YELLOW}}> Running verification...{{RESET}}")
+writeln(f"{{GREEN}}✓{{RESET}} All checks passed")
+
+# Summary
+writeln()
+writeln(f"{{BLUE}}{{BOLD}}Task Complete{{RESET}}")
+writeln(f"{{GRAY}}Changes made to BUGS.md{{RESET}}")
+'''
+    return ["python3", "-c", script]
+
+
 class TaskExecutor:
-    """Executes coding tasks using AI providers."""
+    """Executes coding tasks using PTY-based agent CLIs."""
 
     def __init__(self, config_manager, session_manager):
         self.config_manager = config_manager
@@ -109,8 +258,14 @@ class TaskExecutor:
         task.started_at = datetime.now(timezone.utc)
         task.state = TaskState.RUNNING
 
+        # Create event log
+        task.event_log = EventLog(session_id)
+
         with self._lock:
             self._tasks[task.id] = task
+
+        # Get provider info
+        coding_provider = accounts[coding_account]
 
         # Start execution thread
         thread = threading.Thread(
@@ -122,7 +277,7 @@ class TaskExecutor:
                 git_mgr,
                 task_description,
                 coding_account,
-                accounts[coding_account],
+                coding_provider,
                 coding_model,
                 coding_reasoning,
                 on_event,
@@ -147,7 +302,7 @@ class TaskExecutor:
         coding_reasoning: str | None,
         on_event: Callable[[StreamEvent], None] | None,
     ):
-        """Execute the task in a background thread."""
+        """Execute the task in a background thread using PTY."""
 
         def emit(event_type: str, **data):
             event = StreamEvent(type=event_type, data=data)
@@ -174,70 +329,94 @@ class TaskExecutor:
                 task.completed_at = datetime.now(timezone.utc)
                 return
 
-            # Get model config
-            model_name = coding_model or self.config_manager.get_account_model(coding_account) or "default"
-            reasoning = coding_reasoning or self.config_manager.get_account_reasoning(coding_account) or "default"
+            worktree_path = Path(worktree_path)
 
-            config = ModelConfig(
-                provider=coding_provider,
-                model_name=model_name,
-                account_name=coding_account,
-                reasoning_effort=None if reasoning == "default" else reasoning,
+            # Log session start
+            if task.event_log:
+                task.event_log.log(SessionStartedEvent(
+                    task_description=task_description,
+                    project_path=str(project_path),
+                    coding_provider=coding_provider,
+                    coding_account=coding_account,
+                    coding_model=coding_model,
+                ))
+                task.event_log.start_turn()
+                task.event_log.log(UserMessageEvent(content=task_description))
+
+            # Build agent command
+            emit("status", status=f"Starting {coding_provider} agent...")
+            cmd, env, initial_input = build_agent_command(
+                coding_provider,
+                coding_account,
+                worktree_path,
+                task_description,
             )
 
-            emit("status", status=f"Starting {coding_provider} provider...")
+            # Set up logging callback for EventLog persistence
+            # This callback is called synchronously for every PTY event
+            # and doesn't compete with client subscriber queues
+            def log_pty_event(event: PTYEvent):
+                if event.type == "output":
+                    emit("stream", chunk=event.data)
+                    if task.event_log:
+                        task.event_log.log(TerminalOutputEvent(
+                            data=event.data,
+                            has_ansi=event.has_ansi,
+                        ))
 
-            # Create provider
-            provider = create_provider(config)
-            task._provider = provider
-            session.provider = provider
-
-            # Set activity callback
-            def on_activity(activity_type: str, detail: str):
-                if activity_type == "stream":
-                    emit("stream", chunk=detail)
-                elif activity_type == "tool":
-                    emit("activity", activity_type="tool", detail=detail)
-                elif activity_type == "thinking":
-                    emit("activity", activity_type="thinking", detail=detail)
-
-            provider.set_activity_callback(on_activity)
-
-            # Start session
-            if not provider.start_session(str(worktree_path), None):
-                emit("error", error="Failed to start provider session")
-                task.state = TaskState.FAILED
-                task.error = "Failed to start provider session"
-                task.completed_at = datetime.now(timezone.utc)
-                return
-
+            # Start PTY session with logging callback
+            pty_service = get_pty_stream_service()
+            stream_id = pty_service.start_pty_session(
+                session_id=task.session_id,
+                cmd=cmd,
+                cwd=worktree_path,
+                env=env,
+                log_callback=log_pty_event,
+            )
+            task.stream_id = stream_id
             session.active = True
             session.coding_account = coding_account
 
-            emit("status", status="Provider started, processing task...")
             emit("message_start", speaker="CODING AI")
 
-            # Build and send prompt
-            full_prompt = build_coding_prompt(task_description, "")
-            provider.send_message(full_prompt)
+            # Send initial input if needed (for prompt)
+            if initial_input:
+                time.sleep(0.2)  # Brief delay for process to start
+                pty_service.send_input(stream_id, initial_input.encode())
 
-            # Get response
-            response = provider.get_response(timeout=900)  # 15 min timeout
+            # Wait for PTY to complete
+            # The logging callback handles emitting events and persisting to EventLog
+            pty_session = pty_service.get_session(stream_id)
 
-            if task.cancel_requested:
-                emit("status", status="Task cancelled")
-                task.state = TaskState.CANCELLED
-                task.completed_at = datetime.now(timezone.utc)
-                provider.stop_session()
-                session.provider = None
-                session.active = False
-                return
+            while pty_session and pty_session.active:
+                # Check for cancellation
+                if task.cancel_requested:
+                    pty_service.terminate(stream_id)
+                    emit("status", status="Task cancelled")
+                    task.state = TaskState.CANCELLED
+                    task.completed_at = datetime.now(timezone.utc)
 
-            if response:
-                parsed = parse_codex_output(response)
-                emit("message_complete", speaker="CODING AI", content=parsed)
-                task.result = parsed
+                    if task.event_log:
+                        task.event_log.log(SessionEndedEvent(
+                            success=False,
+                            reason="cancelled",
+                        ))
+                    return
+
+                time.sleep(0.1)
+                pty_session = pty_service.get_session(stream_id)
+
+            # Get final exit code
+            exit_code = 0
+            if pty_session:
+                exit_code = pty_session.exit_code or 0
+
+            # Emit completion
+            emit("message_complete", speaker="CODING AI", content="Task completed")
+
+            if exit_code == 0:
                 task.state = TaskState.COMPLETED
+                task.result = "Task completed successfully"
 
                 # Check for changes
                 session.has_worktree_changes = git_mgr.has_changes(task.session_id)
@@ -247,25 +426,42 @@ class TaskExecutor:
                     success=True,
                     message="Task completed successfully",
                     has_changes=session.has_worktree_changes,
+                    exit_code=exit_code,
                 )
             else:
-                emit("error", error="No response from coding AI")
                 task.state = TaskState.FAILED
-                task.error = "No response from coding AI"
+                task.error = f"Agent exited with code {exit_code}"
+                emit(
+                    "complete",
+                    success=False,
+                    message=f"Agent exited with code {exit_code}",
+                    exit_code=exit_code,
+                )
 
             task.completed_at = datetime.now(timezone.utc)
+            session.active = False
 
-            # Keep session alive for follow-ups if supported
-            if not provider.supports_multi_turn() or task.state != TaskState.COMPLETED:
-                provider.stop_session()
-                session.provider = None
-                session.active = False
+            # Log session end
+            if task.event_log:
+                task.event_log.log(SessionEndedEvent(
+                    success=task.state == TaskState.COMPLETED,
+                    reason="completed" if exit_code == 0 else f"exit_code_{exit_code}",
+                ))
+
+            # Cleanup PTY session
+            pty_service.cleanup_session(stream_id)
 
         except Exception as e:
             emit("error", error=str(e))
             task.state = TaskState.FAILED
             task.error = str(e)
             task.completed_at = datetime.now(timezone.utc)
+
+            if task.event_log:
+                task.event_log.log(SessionEndedEvent(
+                    success=False,
+                    reason=f"error: {e}",
+                ))
 
     def get_task(self, task_id: str) -> Task | None:
         """Get a task by ID."""
@@ -281,12 +477,12 @@ class TaskExecutor:
             if task.state != TaskState.RUNNING:
                 return False
             task.cancel_requested = True
-            # Try to stop the provider
-            if task._provider:
-                try:
-                    task._provider.stop_session()
-                except Exception:
-                    pass
+
+            # Terminate PTY if active
+            if task.stream_id:
+                pty_service = get_pty_stream_service()
+                pty_service.terminate(task.stream_id)
+
             return True
 
     def get_events(self, task_id: str, timeout: float = 0.1) -> list[StreamEvent]:
