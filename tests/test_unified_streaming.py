@@ -158,6 +158,19 @@ class TestEventLog:
         seqs = [e["seq"] for e in events]
         assert seqs == [1, 2, 3, 4, 5]
 
+    def test_event_log_reuses_existing_sequence(self, tmp_path):
+        """New EventLog instances pick up existing sequence numbers."""
+        log = EventLog("persisted-session", base_dir=tmp_path)
+        log.log(TerminalOutputEvent(data="first"))
+        log.log(TerminalOutputEvent(data="second"))
+
+        resumed = EventLog("persisted-session", base_dir=tmp_path)
+        resumed.log(TerminalOutputEvent(data="third"))
+
+        events = resumed.get_events()
+        seqs = [e["seq"] for e in events]
+        assert seqs[-1] == 3
+
     def test_get_events_since_seq(self, tmp_path):
         """Can retrieve events after a sequence number."""
         log = EventLog("test-session", base_dir=tmp_path)

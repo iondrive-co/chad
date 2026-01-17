@@ -262,6 +262,21 @@ class EventLog:
         # Log file path
         self.log_path = self.base_dir / f"{session_id}.jsonl"
 
+        # Seed sequence counter from existing log if present
+        if self.log_path.exists():
+            try:
+                last_line = ""
+                with open(self.log_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.strip():
+                            last_line = line
+                if last_line:
+                    last_event = json.loads(last_line)
+                    self._seq = int(last_event.get("seq", 0))
+            except Exception:
+                # If log is unreadable, fall back to starting at 0
+                self._seq = 0
+
     def _next_seq(self) -> int:
         """Get next sequence number."""
         self._seq += 1
