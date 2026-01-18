@@ -872,6 +872,60 @@ Line 4: Fourth line"""
         )
         assert content_count == 0, "Inject helper should not create live-output-content in non-live containers"
 
+    def test_no_inline_live_in_chatbot_when_dedicated_panel_active(self, page: Page):
+        """Chatbot should NOT have inline-live elements when dedicated live stream panel has content.
+
+        This test verifies the fix for the duplicate live view issue where both:
+        1. An inline "CODING AI (Live)" placeholder in the chatbot, AND
+        2. The dedicated live stream panel below
+
+        were visible simultaneously during streaming. The fix removes the inline
+        placeholder entirely, using only the dedicated panel for live output.
+        """
+        # Inject content into the dedicated live stream panel
+        inject_live_stream_content(page, "<p>Active streaming content</p>")
+
+        # Verify dedicated panel has content and is visible
+        dedicated_visible = page.evaluate(
+            """
+() => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    if (!box) return { found: false };
+    const content = box.querySelector('.live-output-content');
+    if (!content) return { found: true, hasContent: false };
+    return {
+        found: true,
+        hasContent: content.innerHTML.includes('Active streaming'),
+        visible: content.offsetParent !== null
+    };
+}
+"""
+        )
+        assert dedicated_visible.get("found"), "Dedicated live stream box should exist"
+        assert dedicated_visible.get("hasContent"), "Dedicated panel should have injected content"
+
+        # Verify chatbot does NOT have inline-live elements
+        inline_live_in_chatbot = page.evaluate(
+            """
+() => {
+    const chatbot = document.querySelector('#agent-chatbot');
+    if (!chatbot) return { chatbotFound: false };
+    const inlineLive = chatbot.querySelectorAll('.inline-live-content, .inline-live-header');
+    return {
+        chatbotFound: true,
+        inlineLiveCount: inlineLive.length,
+        inlineLiveTexts: [...inlineLive].map(el => el.textContent.substring(0, 50))
+    };
+}
+"""
+        )
+        assert inline_live_in_chatbot.get("chatbotFound"), "Chatbot should exist"
+        assert inline_live_in_chatbot.get("inlineLiveCount", 0) == 0, (
+            f"Chatbot should NOT have inline-live elements during streaming. "
+            f"Found {inline_live_in_chatbot.get('inlineLiveCount')} elements: "
+            f"{inline_live_in_chatbot.get('inlineLiveTexts')}"
+        )
+
 
 class TestRealisticLiveContent:
     """Test live view with realistic CLI-like content to verify all text is visible."""

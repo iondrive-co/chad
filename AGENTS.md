@@ -7,7 +7,8 @@ flawlessly working features.
 
 ## Before making changes
 
-For all work, write test which should fail until the issue is fixed or feature is implemented. Additionally, for gradio 
+For all work, write test(s) which should fail until the issue is fixed or feature is implemented. Make these tests 
+general enough to cover other work in the area rather than targeting just your work area. Additionally, for gradio 
 ui work also search `src/chad/ui/gradio/verification/visual_test_map.py` for keywords from your task ("reasoning effort", 
 "verification agent" etc) and use the `UI_COMPONENT_MAP` to determine a screenshot component (and which tests cover it) 
 in order to take a before screenshot. Describe what you see in the screenshot and confirm it matches the problem/lack of 
