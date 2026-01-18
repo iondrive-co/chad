@@ -499,8 +499,8 @@ body, .gradio-container, .gradio-container * {
 }
 
 
-/* Hide live stream box but keep in DOM - removed by inject_live_stream_content */
-.live-stream-hidden {
+/* Live stream box visibility controlled by :empty pseudo-selector */
+.live-stream-box:empty {
   display: none !important;
 }
 
@@ -4945,7 +4945,7 @@ class ChadWebUI:
             "",
             visible=True,
             elem_id="live-stream-box" if is_first else None,
-            elem_classes=["live-stream-hidden", "live-stream-box"],
+            elem_classes=["live-stream-box"],
         )
 
         # Hidden HTML element for JS live content patching
