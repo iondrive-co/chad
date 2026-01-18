@@ -20,7 +20,7 @@ from chad.util.event_log import (
     SessionEndedEvent,
 )
 from chad.server.services.pty_stream import get_pty_stream_service, PTYEvent
-from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS
+from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS, TerminalEmulator
 
 
 class TaskState(str, Enum):
@@ -319,22 +319,29 @@ class TaskExecutor:
         terminal_lock = threading.Lock()
         last_log_flush = time.time()
 
+        # Terminal emulator for extracting meaningful text from PTY output
+        log_emulator = TerminalEmulator(cols=TERMINAL_COLS, rows=TERMINAL_ROWS)
+        last_logged_text = ""
+
         def flush_terminal_buffer():
-            nonlocal last_log_flush
+            nonlocal last_log_flush, last_logged_text
             with terminal_lock:
                 if not terminal_buffer:
                     return
                 data_bytes = bytes(terminal_buffer)
                 terminal_buffer.clear()
 
-            b64 = base64.b64encode(data_bytes).decode("ascii")
-            text = data_bytes.decode("utf-8", errors="replace")
-            if task.event_log:
-                task.event_log.log(TerminalOutputEvent(
-                    data=b64,
-                    has_ansi=True,
-                    text=text,
-                ))
+            # Feed data to terminal emulator and extract visible text
+            log_emulator.feed(data_bytes)
+            current_text = log_emulator.get_text()
+
+            # Only log if there's meaningful new content
+            # Compare with last logged text to avoid logging cursor movement / redraws
+            if current_text != last_logged_text and current_text.strip():
+                # Log the current screen content for handoff
+                if task.event_log:
+                    task.event_log.log(TerminalOutputEvent(data=current_text))
+                last_logged_text = current_text
             last_log_flush = time.time()
 
         def emit(event_type: str, **data):

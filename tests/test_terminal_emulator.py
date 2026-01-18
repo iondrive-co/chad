@@ -4,8 +4,8 @@ import base64
 
 from chad.ui.terminal_emulator import (
     TerminalEmulator,
-    replay_terminal_events,
-    stream_terminal_html,
+    get_terminal_text_from_events,
+    stream_terminal_text,
     _color_to_rgb,
     ANSI_COLORS,
     DEFAULT_FG,
@@ -162,68 +162,67 @@ class TestTerminalEmulator:
         assert len(html) < 100
 
 
-class TestReplayTerminalEvents:
-    """Tests for replaying terminal events."""
+class TestGetTerminalTextFromEvents:
+    """Tests for extracting terminal text from events."""
 
-    def test_replay_single_event(self):
-        """Can replay a single terminal event."""
+    def test_get_text_single_event(self):
+        """Can get text from a single terminal event."""
         events = [
-            {
-                "type": "terminal_output",
-                "data": base64.b64encode(b"Hello!").decode(),
-            }
+            {"type": "terminal_output", "data": "Hello!"}
         ]
-        emu = replay_terminal_events(events)
-        assert "Hello!" in emu.get_text()
+        text = get_terminal_text_from_events(events)
+        assert text == "Hello!"
 
-    def test_replay_multiple_events(self):
-        """Can replay multiple terminal events."""
+    def test_get_text_multiple_events_returns_last(self):
+        """Multiple events returns the last one (full screen state)."""
         events = [
-            {"type": "terminal_output", "data": base64.b64encode(b"Line 1\n").decode()},
-            {"type": "terminal_output", "data": base64.b64encode(b"Line 2\n").decode()},
-            {"type": "terminal_output", "data": base64.b64encode(b"Line 3\n").decode()},
+            {"type": "terminal_output", "data": "First screen"},
+            {"type": "terminal_output", "data": "Second screen"},
+            {"type": "terminal_output", "data": "Final screen"},
         ]
-        emu = replay_terminal_events(events)
-        text = emu.get_text()
-        assert "Line 1" in text
-        assert "Line 2" in text
-        assert "Line 3" in text
+        text = get_terminal_text_from_events(events)
+        assert text == "Final screen"
 
-    def test_replay_ignores_non_terminal_events(self):
+    def test_get_text_ignores_non_terminal_events(self):
         """Non-terminal events are ignored."""
         events = [
             {"type": "session_started", "task_description": "test"},
-            {"type": "terminal_output", "data": base64.b64encode(b"Output").decode()},
+            {"type": "terminal_output", "data": "Output"},
             {"type": "session_ended", "success": True},
         ]
-        emu = replay_terminal_events(events)
-        assert "Output" in emu.get_text()
+        text = get_terminal_text_from_events(events)
+        assert text == "Output"
+
+    def test_get_text_empty_events(self):
+        """Empty event list returns empty string."""
+        text = get_terminal_text_from_events([])
+        assert text == ""
 
 
-class TestStreamTerminalHTML:
-    """Tests for streaming terminal HTML."""
+class TestStreamTerminalText:
+    """Tests for streaming terminal text."""
 
-    def test_stream_yields_html(self):
-        """Stream yields HTML after each terminal event."""
+    def test_stream_yields_text(self):
+        """Stream yields text from each terminal event."""
         events = [
-            {"type": "terminal_output", "data": base64.b64encode(b"A").decode()},
-            {"type": "terminal_output", "data": base64.b64encode(b"B").decode()},
+            {"type": "terminal_output", "data": "Screen A"},
+            {"type": "terminal_output", "data": "Screen B"},
         ]
-        html_outputs = list(stream_terminal_html(iter(events)))
-        assert len(html_outputs) == 2
-        assert "A" in html_outputs[0]
-        assert "B" in html_outputs[1]
+        outputs = list(stream_terminal_text(iter(events)))
+        assert len(outputs) == 2
+        assert outputs[0] == "Screen A"
+        assert outputs[1] == "Screen B"
 
-    def test_stream_accumulates_state(self):
-        """Streaming accumulates terminal state."""
+    def test_stream_ignores_other_events(self):
+        """Non-terminal events are skipped."""
         events = [
-            {"type": "terminal_output", "data": base64.b64encode(b"First ").decode()},
-            {"type": "terminal_output", "data": base64.b64encode(b"Second").decode()},
+            {"type": "session_started"},
+            {"type": "terminal_output", "data": "Output"},
+            {"type": "session_ended"},
         ]
-        html_outputs = list(stream_terminal_html(iter(events)))
-        # Second output should contain both
-        assert "First" in html_outputs[1]
-        assert "Second" in html_outputs[1]
+        outputs = list(stream_terminal_text(iter(events)))
+        assert len(outputs) == 1
+        assert outputs[0] == "Output"
 
 
 class TestTerminalEmulatorEdgeCases:

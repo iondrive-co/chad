@@ -101,7 +101,7 @@ class EventMultiplexer:
                         type="terminal",
                         data={
                             "data": log_event.get("data", ""),
-                            "has_ansi": log_event.get("has_ansi", True),
+                            "text": True,  # Indicates plain text, not base64
                             "ts": log_event.get("ts"),
                         },
                         seq=log_seq or self._next_seq(),
@@ -260,11 +260,12 @@ class EventMultiplexer:
 
                 if log_event.get("type") == "terminal_output":
                     if include_terminal:
+                        # EventLog terminal_output is plain text (not base64)
                         yield MuxEvent(
                             type="terminal",
                             data={
                                 "data": log_event.get("data", ""),
-                                "has_ansi": log_event.get("has_ansi", True),
+                                "text": True,  # Indicates plain text, not base64
                                 "ts": log_event.get("ts"),
                             },
                             seq=log_seq,
