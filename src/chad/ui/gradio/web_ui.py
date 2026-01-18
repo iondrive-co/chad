@@ -3105,6 +3105,10 @@ class ChadWebUI:
                             streaming_buffer += chunk
                             full_history.append(_history_entry(current_ai, chunk))
                             display_buffer.append(chunk)
+                            if not html_chunk:
+                                current_live_stream = build_live_stream_html(display_buffer.content, current_ai)
+                                if current_live_stream:
+                                    last_live_stream = current_live_stream
 
                             # Check for progress update in streaming buffer
                             if not progress_emitted:
@@ -3184,7 +3188,31 @@ class ChadWebUI:
                         }
                         break
                 session.active = False
+                # Flush any pending stream/activity messages so the live panel keeps latest output
+                while True:
+                    try:
+                        pending_msg = message_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    pending_type = pending_msg[0]
+                    if pending_type == "stream":
+                        chunk = pending_msg[1]
+                        html_chunk = pending_msg[2] if len(pending_msg) > 2 else None
+                        if html_chunk:
+                            last_live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai)
+                        elif chunk.strip():
+                            display_buffer.append(chunk)
+                    elif pending_type == "activity":
+                        detail = pending_msg[1]
+                        if display_buffer.content:
+                            display_buffer.append(f"\n\n{detail}")
+                        else:
+                            display_buffer.append(detail)
                 cancel_live_stream = current_live_stream or last_live_stream
+                if not cancel_live_stream:
+                    display_content = display_buffer.content
+                    if display_content:
+                        cancel_live_stream = build_live_stream_html(display_content, current_ai)
                 yield make_yield(
                     chat_history,
                     "🛑 Task cancelled",
