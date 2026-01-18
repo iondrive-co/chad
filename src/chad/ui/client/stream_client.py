@@ -278,13 +278,22 @@ class SyncStreamClient:
             return False
 
 
-def decode_terminal_data(data: str) -> bytes:
-    """Decode base64 terminal output data.
+def decode_terminal_data(data: str | bytes, *, is_text: bool = False) -> bytes:
+    """Decode terminal output data.
 
     Args:
-        data: Base64 encoded string from terminal event
+        data: Terminal payload from an event
+        is_text: True when payload is already plain text (not base64)
 
     Returns:
-        Decoded bytes
+        Terminal bytes suitable for writing to a TTY
     """
+    if is_text:
+        if isinstance(data, bytes):
+            return data
+        return str(data or "").encode("utf-8", errors="replace")
+
+    if not data:
+        return b""
+
     return base64.b64decode(data)

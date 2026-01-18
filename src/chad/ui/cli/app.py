@@ -342,7 +342,10 @@ def run_task_with_streaming(
         for event in stream_client.stream_events(session_id, include_terminal=True):
             if event.event_type == "terminal":
                 # Write terminal output
-                data = decode_terminal_data(event.data.get("data", ""))
+                data = decode_terminal_data(
+                    event.data.get("data", ""),
+                    is_text=event.data.get("text", False),
+                )
                 os.write(sys.stdout.fileno(), data)
 
             elif event.event_type == "complete":

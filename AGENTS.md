@@ -38,9 +38,11 @@ When modifying functions that return tuples (e.g., `make_yield`, generator funct
 2. Update all affected indices to match the new tuple structure
 3. Common patterns to search: `result[`, `output[`, `[pending_message_idx]`
 
+If you find unused or redundant code or tests, you can remove them. Clean up the code base as you go along.
+
 ## After making changes
 
-1. Take an after screenshot if the issue has a visual component
+1. Take an after screenshot for gradio ui work
 2. Run verification using the `verify()` function which handles Python detection automatically:
    ```python
    from chad.ui.gradio.verification.tools import verify

@@ -4,6 +4,8 @@ import os
 import re
 import socket
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
@@ -490,6 +492,40 @@ class TestChadWebUI:
 
         assert "🛑" in result
         assert session.cancel_requested is True
+
+    def test_cancel_preserves_live_stream(self, monkeypatch, web_ui, git_repo):
+        """Cancelling should not clear the live output panel."""
+
+        live_html = "<pre>MOCK LIVE OUTPUT</pre>"
+        cancel_gate = threading.Event()
+        stream_ready = threading.Event()
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", "working", live_html))
+            stream_ready.set()
+            cancel_gate.wait(timeout=1.0)
+            return False, "stopped", "server-session"
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("test")
+        updates = []
+
+        def trigger_cancel():
+            stream_ready.wait(timeout=1.0)
+            time.sleep(0.05)
+            session.cancel_requested = True
+            cancel_gate.set()
+
+        threading.Thread(target=trigger_cancel, daemon=True).start()
+
+        for update in web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
+            updates.append(update)
+
+        final_live_stream = updates[-1][1]
+        assert "MOCK LIVE OUTPUT" in final_live_stream
 
 
 class TestLiveStreamPresentation:

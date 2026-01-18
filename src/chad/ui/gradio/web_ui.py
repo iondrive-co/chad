@@ -2067,9 +2067,12 @@ class ChadWebUI:
 
         for event in stream_client.stream_events(session_id, include_terminal=include_terminal):
             if event.event_type == "terminal":
-                # Feed base64 terminal data to pyte emulator
-                raw_b64 = event.data.get("data", "")
-                terminal.feed_base64(raw_b64)
+                # Feed terminal data (base64 for live PTY, plain text for logs)
+                raw_data = event.data.get("data", "")
+                if event.data.get("text"):
+                    terminal.feed(raw_data or "")
+                else:
+                    terminal.feed_base64(raw_data)
                 # Render screen to HTML with proper layout
                 html_output = terminal.render_html()
                 yield ("terminal", html_output, None)
@@ -2157,12 +2160,16 @@ class ChadWebUI:
         try:
             for event in stream_client.stream_events(server_session_id, include_terminal=True):
                 if event.event_type == "terminal":
-                    # Feed base64 terminal data to pyte emulator
-                    raw_b64 = event.data.get("data", "")
-                    terminal.feed_base64(raw_b64)
+                    # Feed terminal data (base64 for live PTY, plain text for logs)
+                    raw_data = event.data.get("data", "")
+                    if event.data.get("text"):
+                        terminal.feed(raw_data or "")
+                        text_chunk = raw_data or ""
+                    else:
+                        terminal.feed_base64(raw_data)
+                        text_chunk = base64.b64decode(raw_data or "").decode("utf-8", errors="replace")
                     # Render and post to message queue for real-time display
                     html_output = terminal.render_html()
-                    text_chunk = base64.b64decode(raw_b64 or b"").decode("utf-8", errors="replace")
                     message_queue.put(("stream", text_chunk, html_output))
 
                 elif event.event_type == "complete":
@@ -2974,6 +2981,7 @@ class ChadWebUI:
             current_status = f"{status_prefix}⏳ Coding AI is working..."
             current_ai = "CODING AI"
             current_live_stream = ""
+            last_live_stream = ""
             yield make_yield(
                 chat_history,
                 current_status,
@@ -3128,6 +3136,8 @@ class ChadWebUI:
                             # Track current live stream content for the dedicated panel
                             if html_chunk:
                                 current_live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai)
+                                if current_live_stream:
+                                    last_live_stream = current_live_stream
 
                             now = time_module.time()
                             if now - last_yield_time >= min_yield_interval:
@@ -3151,6 +3161,7 @@ class ChadWebUI:
                                 content = f"{display_content}\n\n{last_activity}" if display_content else last_activity
                                 activity_stream = build_live_stream_html(content, current_ai)
                             if activity_stream:
+                                last_live_stream = activity_stream
                                 yield make_yield(chat_history, current_status, activity_stream)
                                 last_yield_time = now
 
@@ -3173,10 +3184,11 @@ class ChadWebUI:
                         }
                         break
                 session.active = False
+                cancel_live_stream = current_live_stream or last_live_stream
                 yield make_yield(
                     chat_history,
                     "🛑 Task cancelled",
-                    "",
+                    cancel_live_stream,
                     summary="🛑 Task cancelled",
                     show_followup=True,  # Always show follow-up after task starts
                 )
@@ -3593,10 +3605,11 @@ class ChadWebUI:
                 except Exception:
                     branches = ["main"]
 
+            final_live_stream = last_live_stream if session.cancel_requested else ""
             yield make_yield(
                 chat_history,
                 final_summary,
-                "",
+                final_live_stream,
                 summary=final_summary,
                 interactive=False,  # Task description locked after work begins
                 show_followup=can_continue,
