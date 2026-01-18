@@ -166,11 +166,10 @@ class ContextCondensedEventSchema(EventBaseSchema):
 
 
 class TerminalOutputEventSchema(EventBaseSchema):
-    """Terminal output event."""
+    """Terminal output event - human-readable screen content."""
 
     type: Literal["terminal_output"] = "terminal_output"
-    data: str = Field(description="Base64 encoded terminal output")
-    has_ansi: bool = Field(default=True, description="Whether output contains ANSI codes")
+    data: str = Field(description="Human-readable terminal screen text")
 
 
 class SessionEndedEventSchema(EventBaseSchema):
