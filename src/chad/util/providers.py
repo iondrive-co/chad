@@ -252,45 +252,6 @@ def parse_codex_output(raw_output: str | None) -> str:  # noqa: C901
     return "\n\n".join(formatted) if formatted else raw_output
 
 
-def extract_final_codex_response(raw_output: str | None) -> str:
-    """Extract only the final 'codex' response from Codex output.
-
-    This is useful for isolating the final instruction text
-    without all the context it was given.
-    """
-    if not raw_output:
-        return ""
-
-    lines = raw_output.split("\n")
-    last_codex_index = -1
-
-    # Find the last 'codex' marker
-    for i, line in enumerate(lines):
-        if line.strip() == "codex":
-            last_codex_index = i
-
-    if last_codex_index == -1:
-        return raw_output
-
-    # Collect everything after the last 'codex' marker until we hit a marker or end
-    final_response = []
-    for i in range(last_codex_index + 1, len(lines)):
-        stripped = lines[i].strip()
-
-        # Stop at next section marker
-        if stripped in ("thinking", "codex", "exec"):
-            break
-
-        # Skip token counts and metadata - including comma-separated like "4,481"
-        if stripped.startswith("tokens used") or (stripped.replace(",", "").isdigit() and len(stripped) <= 10):
-            continue
-
-        if stripped:
-            final_response.append(stripped)
-
-    return "\n".join(final_response) if final_response else raw_output
-
-
 @dataclass
 class ModelConfig:
     """Configuration for an AI model."""
@@ -302,9 +263,6 @@ class ModelConfig:
     reasoning_effort: str | None = None
 
 
-# Callback type for activity updates: (activity_type, detail)
-# activity_type: 'tool', 'thinking', 'text', 'stream' (for raw streaming chunks)
-ActivityCallback = Callable[[str, str], None] | None
 # Callback type for activity updates: (activity_type, detail)
 # activity_type: 'tool', 'thinking', 'text', 'stream' (for raw streaming chunks)
 ActivityCallback = Callable[[str, str], None] | None

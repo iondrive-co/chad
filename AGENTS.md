@@ -244,9 +244,54 @@ chad --server-url http://localhost:8000
 chad --server-url http://localhost:8000 --ui cli
 ```
 
+## Running Tests
+
+### Test Organization
+
+Tests are organized by module and marked for efficient targeting:
+
+| Test File | Tests | Description | Run Time |
+|-----------|-------|-------------|----------|
+| `test_providers.py` | 84 | Provider classes, CLI parsing | ~5s |
+| `test_web_ui.py` | 108 | Gradio UI logic (no browser) | ~8s |
+| `test_unified_streaming.py` | 53 | PTY/SSE streaming, EventLog | ~25s |
+| `test_git_worktree.py` | 43 | Git operations | ~3s |
+| `test_config_manager.py` | 38 | Config persistence | ~4s |
+| `test_ui_integration.py` | 49 | Visual tests (Playwright) | ~60s+ |
+| `test_code_syntax_highlighting.py` | 7 | Visual tests (Playwright) | ~20s |
+
+### Running Tests Efficiently
+
+```bash
+# Fast: Run non-visual tests only (~51s)
+.venv/bin/python -m pytest tests/ -m "not visual" -q
+
+# Target specific module
+.venv/bin/python -m pytest tests/test_providers.py -q
+
+# Target specific class
+.venv/bin/python -m pytest tests/test_web_ui.py::TestChadWebUI -q
+
+# Target specific test
+.venv/bin/python -m pytest tests/test_providers.py::TestCreateProvider::test_create_anthropic_provider -q
+
+# Run with test durations to find slow tests
+.venv/bin/python -m pytest tests/ -m "not visual" --durations=10 -q
+
+# Visual tests only (requires Playwright browser)
+.venv/bin/python -m pytest tests/ -m "visual" -q
+```
+
+### Pytest Markers
+
+- `visual`: Playwright tests that launch a browser (slower)
+- `api`: API endpoint tests
+
+Use `-m "not visual"` to skip browser tests for faster iteration.
+
 ## Virtual Environment
 
-The project uses `.venv` (not `venv`). Worktrees automatically symlink to the main project's `.venv` so agents don't 
+The project uses `.venv` (not `venv`). Worktrees automatically symlink to the main project's `.venv` so agents don't
 need to reinstall dependencies.
 
 **For running lint/tests**: Always use `verify()` from `chad.ui.gradio.verification.tools` instead of hardcoded paths 
