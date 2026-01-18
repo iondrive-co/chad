@@ -213,6 +213,7 @@ class TerminalOutputEvent(EventBase):
 
     data: str = ""  # Base64 encoded bytes
     has_ansi: bool = True
+    text: str | None = None  # Human-readable decoded text (best-effort)
 
 
 @dataclass

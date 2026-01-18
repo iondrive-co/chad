@@ -63,3 +63,50 @@ def test_task_executor_times_out_hung_agent(tmp_path, monkeypatch):
 
     # Ensure the PTY session was cleaned up
     assert get_pty_stream_service().list_sessions() == []
+
+
+def test_terminal_output_is_batched_and_decoded(tmp_path, monkeypatch):
+    """Terminal output is batched for readability and includes decoded text."""
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"accounts": {"idle": {"provider": "mock"}}}), encoding="utf-8")
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+    session_manager = SessionManager()
+    session = session_manager.create_session(project_path=str(repo_path), name="batch-test")
+
+    executor = TaskExecutor(
+        ConfigManager(),
+        session_manager,
+        inactivity_timeout=10.0,
+        terminal_flush_interval=0.1,
+    )
+
+    import chad.server.services.task_executor as te
+
+    script = "/usr/bin/env python3 -c \"import sys,time;[sys.stdout.write(f'line {i}\\n') or sys.stdout.flush() or time.sleep(0.05) for i in range(5)]\""
+
+    def noisy_command(provider, account_name, project_path, task_description=None):
+        return ["bash", "-c", script], {}, None
+
+    monkeypatch.setattr(te, "build_agent_command", noisy_command)
+
+    task = executor.start_task(
+        session_id=session.id,
+        project_path=str(repo_path),
+        task_description="log batching",
+        coding_account="idle",
+    )
+
+    task._thread.join(timeout=5)
+
+    terminal_events = [
+        e for e in task.event_log.get_events() if e.get("type") == "terminal_output"
+    ]
+    # Should be fewer events than individual lines because of batching
+    assert len(terminal_events) < 5
+    combined_text = "\n".join([e.get("text", "") or "" for e in terminal_events])
+    assert "line 0" in combined_text and "line 4" in combined_text

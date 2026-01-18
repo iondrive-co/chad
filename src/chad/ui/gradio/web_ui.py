@@ -3125,94 +3125,38 @@ class ChadWebUI:
                                     yield make_yield(chat_history, current_status, "")
                                     last_yield_time = time_module.time()
 
-                            now = time_module.time()
-                            if now - last_yield_time >= min_yield_interval:
-                                # Update chat bubble with inline live content using pyte HTML
-                                # when available (preserves terminal layout), falling back to old
-                                # ANSI conversion otherwise
-                                if html_chunk:
-                                    inline_html = build_inline_live_html_from_pyte(html_chunk, current_ai, live_id=current_live_id)
-                                    inner_html = html_chunk  # pyte HTML is already the inner content
-                                else:
-                                    inline_html = build_inline_live_html(display_buffer.content, current_ai, live_id=current_live_id)
-                                    inner_html = build_inline_live_inner_html(display_buffer.content)
-                                if inner_html and render_state.should_render(inline_html):
-                                    if pending_message_idx is not None:
-                                        chat_history[pending_message_idx] = {
-                                            "role": "assistant",
-                                            "content": inline_html,
-                                        }
-                                    # Also send live_patch for JS scroll preservation
-                                    yield make_yield(
-                                        chat_history, current_status, "",
-                                        live_patch=(current_live_id, inner_html) if current_live_id else None
-                                    )
-                                    render_state.record(inline_html)
-                                    last_yield_time = now
-                            # Update dedicated live stream panel using pyte-rendered HTML if available
+                            # Track current live stream content for the dedicated panel
                             if html_chunk:
                                 current_live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai)
-                                yield make_yield(chat_history, current_status, current_live_stream)
+
+                            now = time_module.time()
+                            if now - last_yield_time >= min_yield_interval:
+                                # Only update the dedicated live stream panel during streaming
+                                # Don't update chat_history to avoid constant DOM replacement
+                                # which breaks scroll position and text selection
+                                if current_live_stream:
+                                    yield make_yield(chat_history, current_status, current_live_stream)
+                                    last_yield_time = now
 
                     elif msg_type == "activity":
                         last_activity = msg[1]
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
-                            # Use pyte HTML when available for proper terminal layout
+                            # Update only the dedicated live stream panel with activity
                             if latest_pyte_html:
-                                # Append activity to pyte HTML
                                 combined_html = latest_pyte_html + f"\n\n{html.escape(last_activity)}"
-                                inline_html = build_inline_live_html_from_pyte(combined_html, current_ai, live_id=current_live_id)
-                                inner_html = combined_html
+                                activity_stream = build_live_stream_html_from_pyte(combined_html, current_ai)
                             else:
                                 display_content = display_buffer.content
-                                if display_content:
-                                    content = display_content + f"\n\n{last_activity}"
-                                else:
-                                    content = last_activity
-                                inline_html = build_inline_live_html(content, current_ai, live_id=current_live_id)
-                                inner_html = build_inline_live_inner_html(content)
-                            if inner_html and render_state.should_render(inline_html):
-                                if pending_message_idx is not None:
-                                    chat_history[pending_message_idx] = {
-                                        "role": "assistant",
-                                        "content": inline_html,
-                                    }
-                                yield make_yield(
-                                    chat_history, current_status, "",
-                                    live_patch=(current_live_id, inner_html) if current_live_id else None
-                                )
-                                render_state.record(inline_html)
+                                content = f"{display_content}\n\n{last_activity}" if display_content else last_activity
+                                activity_stream = build_live_stream_html(content, current_ai)
+                            if activity_stream:
+                                yield make_yield(chat_history, current_status, activity_stream)
                                 last_yield_time = now
 
                 except queue.Empty:
+                    # No updates needed on queue empty - live stream panel already up to date
                     now = time_module.time()
-                    if now - last_yield_time >= 0.3:
-                        # Use pyte HTML when available for proper terminal layout
-                        if latest_pyte_html:
-                            inline_html = build_inline_live_html_from_pyte(latest_pyte_html, current_ai, live_id=current_live_id)
-                            inner_html = latest_pyte_html
-                        else:
-                            display_content = display_buffer.content
-                            if display_content or last_activity:
-                                content = display_content if display_content else last_activity
-                                inline_html = build_inline_live_html(content, current_ai, live_id=current_live_id)
-                                inner_html = build_inline_live_inner_html(content)
-                            else:
-                                inline_html = ""
-                                inner_html = ""
-                        if inner_html and render_state.should_render(inline_html):
-                            if pending_message_idx is not None:
-                                chat_history[pending_message_idx] = {
-                                    "role": "assistant",
-                                    "content": inline_html,
-                                }
-                            yield make_yield(
-                                chat_history, current_status, "",
-                                live_patch=(current_live_id, inner_html) if current_live_id else None
-                            )
-                            render_state.record(inline_html)
-                            last_yield_time = now
 
                     # Periodically update session log with streaming history
                     if full_history and now - last_log_update_time >= log_update_interval:
