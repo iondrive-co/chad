@@ -1,5 +1,6 @@
 """Task execution service for orchestrating AI coding tasks via PTY."""
 
+import base64
 import queue
 import threading
 import time
@@ -210,10 +211,12 @@ class TaskExecutor:
         config_manager,
         session_manager,
         inactivity_timeout: float | None = 900.0,
+        terminal_flush_interval: float = 0.5,
     ):
         self.config_manager = config_manager
         self.session_manager = session_manager
         self.inactivity_timeout = inactivity_timeout
+        self.terminal_flush_interval = terminal_flush_interval
         self._tasks: dict[str, Task] = {}
         self._lock = threading.RLock()
 
@@ -312,6 +315,27 @@ class TaskExecutor:
         """Execute the task in a background thread using PTY."""
 
         last_output_time = time.time()
+        terminal_buffer = bytearray()
+        terminal_lock = threading.Lock()
+        last_log_flush = time.time()
+
+        def flush_terminal_buffer():
+            nonlocal last_log_flush
+            with terminal_lock:
+                if not terminal_buffer:
+                    return
+                data_bytes = bytes(terminal_buffer)
+                terminal_buffer.clear()
+
+            b64 = base64.b64encode(data_bytes).decode("ascii")
+            text = data_bytes.decode("utf-8", errors="replace")
+            if task.event_log:
+                task.event_log.log(TerminalOutputEvent(
+                    data=b64,
+                    has_ansi=True,
+                    text=text,
+                ))
+            last_log_flush = time.time()
 
         def emit(event_type: str, **data):
             event = StreamEvent(type=event_type, data=data)
@@ -369,11 +393,12 @@ class TaskExecutor:
                 if event.type == "output":
                     last_output_time = time.time()
                     emit("stream", chunk=event.data)
-                    if task.event_log:
-                        task.event_log.log(TerminalOutputEvent(
-                            data=event.data,
-                            has_ansi=event.has_ansi,
-                        ))
+                    try:
+                        chunk_bytes = base64.b64decode(event.data)
+                    except Exception:
+                        chunk_bytes = b""
+                    with terminal_lock:
+                        terminal_buffer.extend(chunk_bytes)
 
             # Start PTY session with logging callback
             # Use the same geometry as the terminal emulator for consistent rendering
@@ -421,6 +446,7 @@ class TaskExecutor:
                 if self.inactivity_timeout is not None:
                     now = time.time()
                     if now - last_output_time > self.inactivity_timeout:
+                        flush_terminal_buffer()
                         pty_service.terminate(stream_id)
                         emit(
                             "complete",
@@ -445,6 +471,8 @@ class TaskExecutor:
 
                 time.sleep(0.1)
                 pty_session = pty_service.get_session(stream_id)
+                if time.time() - last_log_flush >= self.terminal_flush_interval:
+                    flush_terminal_buffer()
 
             # Get final exit code
             exit_code = 0
@@ -483,6 +511,7 @@ class TaskExecutor:
 
             # Log session end
             if task.event_log:
+                flush_terminal_buffer()
                 task.event_log.log(SessionEndedEvent(
                     success=task.state == TaskState.COMPLETED,
                     reason="completed" if exit_code == 0 else f"exit_code_{exit_code}",
