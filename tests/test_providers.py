@@ -17,7 +17,6 @@ from chad.util.providers import (
     OpenAICodexProvider,
     MistralVibeProvider,
     parse_codex_output,
-    extract_final_codex_response,
 )
 
 
@@ -169,46 +168,6 @@ Here is the answer.
         assert "Here is the answer." in result
 
 
-class TestExtractFinalCodexResponse:
-    """Test cases for extract_final_codex_response function."""
-
-    def test_extracts_final_response_only(self):
-        raw_output = """thinking
-First thought
-
-codex
-First response
-
-thinking
-Second thought
-
-codex
-Final instruction here
-tokens used
-1234
-"""
-        result = extract_final_codex_response(raw_output)
-        assert result == "Final instruction here"
-        assert "First response" not in result
-        assert "thinking" not in result
-        assert "1234" not in result
-
-    def test_empty_input(self):
-        assert extract_final_codex_response("") == ""
-        assert extract_final_codex_response(None) == ""
-
-    def test_multiline_final_response(self):
-        raw_output = """codex
-Line 1
-Line 2
-Line 3
-tokens used
-500
-"""
-        result = extract_final_codex_response(raw_output)
-        assert result == "Line 1\nLine 2\nLine 3"
-
-
 class TestAdditionalParseCodexOutput:
     """Additional test cases for parse_codex_output function."""
 
@@ -337,44 +296,6 @@ tokens used
         assert "9,999" not in result
         assert "10,000" not in result
         assert "tokens used" not in result
-
-    def test_extract_final_codex_response_no_codex_marker(self):
-        """Test extract function when there's no 'codex' marker at all."""
-        raw_output = """thinking
-Some thinking here
-Just plain text response
-"""
-        result = extract_final_codex_response(raw_output)
-        # Should return the original output when no codex marker found
-        assert result == raw_output
-
-    def test_extract_final_codex_response_multiple_codex_preserves_only_last(self):
-        """Test that only the last codex section is extracted when multiple exist."""
-        raw_output = """codex
-First response
-
-thinking
-More thinking
-
-codex
-Final response here
-tokens used: 1234
-"""
-        result = extract_final_codex_response(raw_output)
-        assert result == "Final response here"
-        assert "First response" not in result
-        assert "thinking" not in result
-        assert "1234" not in result
-
-    def test_extract_final_codex_response_codex_with_nested_thinking_marker(self):
-        """Test that final response containing the word 'thinking' is still extracted."""
-        raw_output = """codex
-I am thinking about this problem and here is my solution
-tokens used: 500
-"""
-        result = extract_final_codex_response(raw_output)
-        assert result == "I am thinking about this problem and here is my solution"
-        assert "500" not in result
 
 
 class TestClaudeCodeProvider:
