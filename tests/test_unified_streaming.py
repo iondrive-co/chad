@@ -2,6 +2,7 @@
 
 import base64
 import json
+import queue
 import time
 from pathlib import Path
 
@@ -464,6 +465,15 @@ class TestStreamClient:
 
         assert decoded == original
 
+    def test_decode_terminal_text_passthrough(self):
+        """Plain text terminal events are returned as UTF-8 bytes."""
+        from chad.ui.client.stream_client import decode_terminal_data
+
+        text = "╭─ unicode box drawing"
+        decoded = decode_terminal_data(text, is_text=True)
+
+        assert decoded.decode("utf-8") == text
+
 
 class TestWebSocketEndpoint:
     """Tests for WebSocket endpoint."""
@@ -677,6 +687,68 @@ coding = mock-agent
         # Should be convertible to HTML
         html = ansi_to_html(output)
         assert "<span" in html or "Mock" in html  # Either styled or plain content
+
+
+class TestPlainTextTerminalEvents:
+    """Ensure text-flagged terminal events are handled without base64 decoding."""
+
+    def test_gradio_run_task_handles_plain_text_terminal_events(self):
+        """Gradio run_task_via_api streams plain text terminal output safely."""
+        from chad.ui.client.stream_client import StreamEvent
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        terminal_text = "╭─ streamed log line"
+
+        class DummyAPI:
+            base_url = "http://localhost:8000"
+
+            def start_task(
+                self,
+                *,
+                session_id: str,
+                project_path: str,
+                task_description: str,
+                coding_agent: str,
+                coding_model=None,
+                coding_reasoning=None,
+            ):
+                return None
+
+        class DummyStreamClient:
+            def stream_events(self, session_id: str, include_terminal: bool = True):
+                yield StreamEvent(
+                    event_type="terminal",
+                    data={"data": terminal_text, "text": True, "seq": 1},
+                    seq=1,
+                )
+                yield StreamEvent(
+                    event_type="complete",
+                    data={"exit_code": 0, "seq": 2},
+                    seq=2,
+                )
+
+        ui = ChadWebUI(DummyAPI())
+        ui._stream_client = DummyStreamClient()
+
+        msg_queue = queue.Queue()
+
+        success, final_output, server_session_id = ui.run_task_via_api(
+            session_id="local-plain",
+            project_path="/tmp",
+            task_description="Handle plain text terminal event",
+            coding_account="mock",
+            message_queue=msg_queue,
+            server_session_id="server-plain",
+        )
+
+        assert success is True
+        assert final_output.startswith("╭─")
+
+        stream_entries = [item for item in list(msg_queue.queue) if item[0] == "stream"]
+        assert len(stream_entries) == 1
+        _, text_chunk, html_output = stream_entries[0]
+        assert text_chunk.startswith("╭─")
+        assert "╭" in html_output
 
 
 class TestEndToEndSSEStreaming:

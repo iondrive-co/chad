@@ -33,10 +33,9 @@ For UI tasks: take a "before" screenshot first and include the path. For non-UI 
 4. Make the changes, adjusting tests as needed. If no changes are required, skip to step 9.
 5. Once you have completed your changes for the task, take an after screenshot (if that is supported) to confirm
 that the user's request is fixed/done.
-6. You MUST run verification before completing your task. Use the built-in verify() function for efficiency:
+6. You MUST run verification before completing your task. For example if you were working on this project, chad, you would do:
 - Recommended approach: python -c \"from chad.ui.gradio.verification.tools import verify; result = verify(); print('✓ Passed' if result['success'] else f'✗ Failed at {{result.get(\"failed_phase\", \"unknown\")}}'); exit(0 if result['success'] else 1)\"
 - For visual-only tests when needed: python -c \"from chad.ui.gradio.verification.tools import verify; result = verify(visual_only=True); print('✓ Passed' if result['success'] else f'✗ Failed at {{result.get(\"failed_phase\", \"unknown\")}}'); exit(0 if result['success'] else 1)\"
-
 If verify() is unavailable, use manual commands with intelligent Python detection:
 - Detect Python: Use ./.venv/bin/python if exists, otherwise ./.venv/Scripts/python.exe (Windows), ./venv/bin/python, ./venv/Scripts/python.exe (Windows), or fallback to python3
 - Run linting: {{detected_python}} -m flake8 src/chad
@@ -53,7 +52,7 @@ PY
     if [ -n "$VTESTS" ]; then {{detected_python}} -m pytest tests/test_ui_integration.py \\
                                                        tests/test_ui_playwright_runner.py -v --tb=short \\
                                                        -m \"visual\" -k "$VTESTS"; fi
-  If you add or change UI components, update visual_test_map.py so future runs pick the right visual tests.
+  When working on chad, if you add or change UI components, update visual_test_map.py so future runs pick the right visual tests.
 7. Fix ALL failures and retest if required.
 8. End your response with a JSON summary block like this:
 ```json
