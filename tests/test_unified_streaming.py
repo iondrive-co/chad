@@ -137,15 +137,14 @@ class TestEventLog:
         """Can log terminal output events."""
         log = EventLog("test-session", base_dir=tmp_path)
 
-        # Log some terminal output
-        output_data = base64.b64encode(b"\x1b[32mHello\x1b[0m").decode()
-        event = TerminalOutputEvent(data=output_data, has_ansi=True)
+        # Log terminal screen content (human-readable text)
+        event = TerminalOutputEvent(data="Hello World")
         log.log(event)
 
         events = log.get_events()
         assert len(events) == 1
         assert events[0]["type"] == "terminal_output"
-        assert events[0]["has_ansi"] is True
+        assert events[0]["data"] == "Hello World"
 
     def test_sequence_numbers(self, tmp_path):
         """Events have monotonically increasing sequence numbers."""
@@ -721,9 +720,8 @@ class TestEndToEndSSEStreaming:
         for event in terminal_events:
             assert "data" in event, "Terminal event should have data field"
             assert "seq" in event, "Terminal event should have seq field"
-            # Decode and verify it's actual output
-            decoded = base64.b64decode(event["data"]).decode("utf-8", errors="replace")
-            assert len(decoded) > 0, "Terminal data should not be empty"
+            # Data is now human-readable text (not base64)
+            assert len(event["data"]) > 0, "Terminal data should not be empty"
 
         # Verify we have session_started
         session_events = [e for e in events if e["type"] == "session_started"]
@@ -758,7 +756,7 @@ class TestEndToEndSSEStreaming:
 
         # Test SSE parsing logic manually
         sse_data = """event: terminal
-data: {"data": "SGVsbG8=", "seq": 1, "has_ansi": false}
+data: {"data": "SGVsbG8=", "seq": 1}
 
 event: complete
 data: {"exit_code": 0, "seq": 2}
@@ -1039,23 +1037,20 @@ class TestAgentHandover:
         assert "session-bbb" in sessions
         assert "session-ccc" in sessions
 
-    def test_eventlog_preserves_full_terminal_output(self, tmp_path):
-        """EventLog preserves complete terminal output for accurate handover."""
+    def test_eventlog_stores_terminal_screen_text(self, tmp_path):
+        """EventLog stores human-readable terminal screen text for handover."""
         log = EventLog("test-session", base_dir=tmp_path)
 
-        # Simulate terminal output with ANSI codes
-        ansi_output = b"\x1b[32mSuccess\x1b[0m: Task completed"
-        encoded = base64.b64encode(ansi_output).decode()
-
-        log.log(TerminalOutputEvent(data=encoded, has_ansi=True))
+        # Store terminal screen content (already processed by terminal emulator)
+        screen_text = "Success: Task completed\nAll tests passed."
+        log.log(TerminalOutputEvent(data=screen_text))
 
         # Read back
         events = log.get_events()
         assert len(events) == 1
 
-        # Decode and verify preservation
-        decoded = base64.b64decode(events[0]["data"])
-        assert decoded == ansi_output, "Terminal output should be preserved exactly"
+        # Verify the text is stored as-is
+        assert events[0]["data"] == screen_text
 
 
 class TestEventMultiplexer:
@@ -1094,7 +1089,7 @@ class TestEventMultiplexer:
             coding_provider="mock",
             coding_account="test",
         ))
-        log.log(TerminalOutputEvent(data="dGVzdA==", has_ansi=False))
+        log.log(TerminalOutputEvent(data="Screen content here"))
 
         mux = EventMultiplexer("mux-terminal-test", log)
 
@@ -1116,7 +1111,7 @@ class TestEventMultiplexer:
             coding_provider="mock",
             coding_account="test",
         ))
-        log.log(TerminalOutputEvent(data="dGVzdA==", has_ansi=False))
+        log.log(TerminalOutputEvent(data="Screen content here"))
 
         mux = EventMultiplexer("mux-no-pty-test", log)
 
@@ -1128,8 +1123,8 @@ class TestEventMultiplexer:
         assert events[0].type == "event"
         assert events[0].data["type"] == "session_started"
         assert events[1].type == "terminal"
-        assert events[1].data["data"] == "dGVzdA=="
-        assert events[1].data["has_ansi"] is False
+        assert events[1].data["data"] == "Screen content here"
+        assert events[1].data["text"] is True  # Plain text, not base64
 
     def test_mux_tracks_event_log_sequence(self, tmp_path):
         """EventMultiplexer tracks EventLog sequence to avoid duplicates."""
@@ -1154,7 +1149,7 @@ class TestEventMultiplexer:
         assert len(events2) == 0
 
         # Add new event and drain again
-        log.log(TerminalOutputEvent(data="dGVzdA==", has_ansi=False))
+        log.log(TerminalOutputEvent(data="More output"))
         events3 = mux._drain_event_log(skip_terminal=False)
         assert len(events3) == 1
         assert events3[0].seq == 2
@@ -1171,7 +1166,7 @@ class TestEventMultiplexer:
             coding_provider="mock",
             coding_account="test",
         ))
-        log.log(TerminalOutputEvent(data="ZGF0YQ==", has_ansi=True))
+        log.log(TerminalOutputEvent(data="Terminal screen content"))
 
         mux = EventMultiplexer("mux-resume", log)
 
@@ -1201,7 +1196,7 @@ class TestEventMultiplexer:
 
         event = MuxEvent(
             type="terminal",
-            data={"data": "SGVsbG8=", "has_ansi": False},
+            data={"data": "Screen content", "text": True},
             seq=42,
         )
 

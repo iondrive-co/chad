@@ -108,5 +108,6 @@ def test_terminal_output_is_batched_and_decoded(tmp_path, monkeypatch):
     ]
     # Should be fewer events than individual lines because of batching
     assert len(terminal_events) < 5
-    combined_text = "\n".join([e.get("text", "") or "" for e in terminal_events])
+    # Terminal output now stores human-readable text in 'data' field (not base64)
+    combined_text = "\n".join([e.get("data", "") or "" for e in terminal_events])
     assert "line 0" in combined_text and "line 4" in combined_text

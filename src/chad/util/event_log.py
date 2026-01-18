@@ -209,11 +209,14 @@ class ContextCondensedEvent(EventBase):
 
 @dataclass
 class TerminalOutputEvent(EventBase):
-    """Logged for raw PTY terminal output."""
+    """Logged for terminal screen content.
 
-    data: str = ""  # Base64 encoded bytes
-    has_ansi: bool = True
-    text: str | None = None  # Human-readable decoded text (best-effort)
+    Contains human-readable text extracted from the terminal screen,
+    with ANSI sequences processed by the terminal emulator. Only logged
+    when screen content meaningfully changes.
+    """
+
+    data: str = ""  # Human-readable screen text (processed by terminal emulator)
 
 
 @dataclass

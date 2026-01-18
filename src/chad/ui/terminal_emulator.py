@@ -301,44 +301,32 @@ class TerminalEmulator:
         return self._total_bytes
 
 
-def replay_terminal_events(events: list[dict], cols: int = TERMINAL_COLS, rows: int = TERMINAL_ROWS) -> TerminalEmulator:
-    """Replay terminal events to reconstruct screen state.
+def get_terminal_text_from_events(events: list[dict]) -> str:
+    """Get the final terminal text from a list of events.
 
     Args:
         events: List of event dicts (from EventLog)
-        cols: Terminal columns
-        rows: Terminal rows
 
     Returns:
-        TerminalEmulator with final screen state
+        Final terminal text content (from the last terminal_output event)
     """
-    emu = TerminalEmulator(cols, rows)
-
-    for event in events:
-        if event.get("type") == "terminal_output":
-            data = event.get("data", "")
-            if data:
-                emu.feed_base64(data)
-
-    return emu
+    terminal_events = [e for e in events if e.get("type") == "terminal_output"]
+    if terminal_events:
+        return terminal_events[-1].get("data", "")
+    return ""
 
 
-def stream_terminal_html(events: Iterator[dict], cols: int = TERMINAL_COLS, rows: int = TERMINAL_ROWS) -> Iterator[str]:
-    """Stream HTML renders as events arrive.
+def stream_terminal_text(events: Iterator[dict]) -> Iterator[str]:
+    """Stream terminal text as events arrive.
 
     Args:
         events: Iterator of event dicts
-        cols: Terminal columns
-        rows: Terminal rows
 
     Yields:
-        HTML renders after each terminal event
+        Terminal text from each terminal_output event
     """
-    emu = TerminalEmulator(cols, rows)
-
     for event in events:
         if event.get("type") == "terminal_output":
             data = event.get("data", "")
             if data:
-                emu.feed_base64(data)
-                yield emu.render_html()
+                yield data

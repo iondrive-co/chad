@@ -367,7 +367,7 @@ All events include:
 | `tool_call_finished` | Tool completed | `tool_call_id`, `exit_code?`, `duration_ms`, `stdout_ref?`, `stderr_ref?`, `llm_summary`, `after_sha256?`, `patch_ref?` |
 | `verification_attempt` | Verification run | `attempt_number`, `tool_call_refs`, `passed`, `summary`, `issues` |
 | `context_condensed` | Context summary | `replaces_seq_range`, `summary_text`, `policy` |
-| `terminal_output` | Raw PTY output | `data` (base64), `has_ansi` |
+| `terminal_output` | Terminal screen content | `data` (human-readable text) |
 | `session_ended` | Session complete | `success`, `reason`, `total_tool_calls?`, `total_turns?` |
 
 ### Artifact References
