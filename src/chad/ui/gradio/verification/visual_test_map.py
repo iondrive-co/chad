@@ -127,13 +127,13 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         source_file="chad/web_ui.py",
         keywords=["task", "task description", "input", "prompt"],
     ),
-    # --- Run Tab: Inline Live Streaming (in chat bubbles) ---
-    "INLINE_LIVE_STREAM": UIComponent(
+    # --- Run Tab: Live Stream Panel ---
+    "LIVE_STREAM": UIComponent(
         tab="run",
-        component="agent-communication",  # Now embedded in chat bubbles
+        component="agent-communication",  # Dedicated live stream panel below chat
         tests=["TestLiveViewFormat", "TestRealisticLiveContent", "TestLiveActivityFormat"],
         source_file="chad/web_ui.py",
-        keywords=["live view", "activity", "stream", "output", "live activity", "inline live"],
+        keywords=["live view", "activity", "stream", "output", "live activity", "live stream panel"],
     ),
     "MERGE_CONTROLS": UIComponent(
         tab="run",
