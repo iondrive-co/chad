@@ -7,8 +7,21 @@ flawlessly working features.
 
 ## Before making changes
 
+When designing new code, never make fallback code to handle paths other than the happy one, instead spend as much effort
+as necessary to make sure that everyone using your feature sees the same happy path you tested. Similarly don't provide
+config options, instead decide which option makes the most sense and implement that without writing code to handle other
+options. Keep code simple rather than using abstractions, and find and delete unused or redundant code and tests as
+part of your change. Don't worry about backwards compatibility.
+
+When fixing bugs, first describe the behavior of the software in detail, and then describe how the code makes that 
+happen. From that description generate plausible theories for the bug, then use tests and research to eliminate 
+candidates. Define the failure as a binary, assertable condition and aim to build a single reliable reproducer case 
+("if I change X, the failure stops"), then run each experiment by changing only X and re-running the reproducer. Once a 
+hypothesis predicts both failure and non-failure, minimize it to the smallest causal change and add a regression test 
+that fails before the fix and passes after.
+
 For all work, write test(s) which should fail until the issue is fixed or feature is implemented. Make these tests 
-general enough to cover other work in the area rather than targeting just your work area. Additionally, for gradio 
+general enough to cover later work in the area rather than targeting just the current work. Additionally, for gradio 
 ui work also search `src/chad/ui/gradio/verification/visual_test_map.py` for keywords from your task ("reasoning effort", 
 "verification agent" etc) and use the `UI_COMPONENT_MAP` to determine a screenshot component (and which tests cover it) 
 in order to take a before screenshot. Describe what you see in the screenshot and confirm it matches the problem/lack of 
@@ -16,19 +29,6 @@ feature you were given, if not as part of your changes you will write a new test
 of feature, and before making changes you will look at its screenshot, describe the image, and confirm that description 
 matches the issue/lack of feature you were given to work on. See `src/chad/ui/gradio/verification/screenshot_fixtures.py` 
 for example data to use for screenshots.
-
-When designing new code, never make fallback code to handle paths other than the happy one, instead spend as much effort
-as necessary to make sure that everyone using your feature sees the same happy path you tested. Similarly don't provide
-config options, instead decide which option makes the most sense and implement that without writing code to handle other
-options. Keep code simple rather than using abstractions, and find and delete unused or redundant code and tests as
-part of your change. Don't worry about backwards compatibility.
-
-When fixing bugs, generate many plausible root-cause theories then use tests to eliminate candidates and research which 
-remaining theory is most likely. Define the failure as a binary, assertable condition and build a single reliable 
-reproducer case. Iterate with one-variable hypotheses ("if I change X, the failure stops"), run the experiment by 
-changing only X and re-running the reproducer, discard falsified hypotheses immediately, and stop to re-evaluate if 
-results are unexpected. Once a hypothesis predicts both failure and non-failure, minimize it to the smallest causal 
-change and add a regression test that fails before the fix and passes after.
 
 ## During changes
 

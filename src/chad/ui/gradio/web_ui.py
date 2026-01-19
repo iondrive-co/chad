@@ -2028,6 +2028,8 @@ class ChadWebUI:
                 coding_agent=coding_account,
                 coding_model=coding_model,
                 coding_reasoning=coding_reasoning,
+                terminal_rows=TERMINAL_ROWS,
+                terminal_cols=TERMINAL_COLS,
             )
         except Exception as e:
             message_queue.put(("status", f"❌ Failed to start task: {e}"))
@@ -2484,7 +2486,7 @@ class ChadWebUI:
             session.worktree_path = None
             session.worktree_base_commit = None
 
-        return "🛑 Task cancelled"
+        return gr.update(value="🛑 Task cancelled")
 
     def _resolve_verification_preferences(
         self,
@@ -2689,7 +2691,7 @@ class ChadWebUI:
                 patch_html = ""
             return (
                 display_history,
-                display_stream,
+                gr.update(value=display_stream),  # Use gr.update for proper streaming to Markdown
                 # Task status - always visible in DOM, CSS :empty hides when blank
                 gr.update(value=status if is_error else ""),
                 gr.update(value=project_path, interactive=interactive),
@@ -3005,20 +3007,22 @@ class ChadWebUI:
                                     yield make_yield(chat_history, current_status, "")
                                     last_yield_time = time_module.time()
 
-                            # Track current live stream content for the dedicated panel
-                            if html_chunk:
-                                current_live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai)
-                                if current_live_stream:
-                                    last_live_stream = current_live_stream
+                        # Track current live stream content for the dedicated panel
+                        # Must be outside chunk.strip() check - terminal can have valid HTML
+                        # even when raw text is empty (e.g., cursor movements, screen updates)
+                        if html_chunk:
+                            current_live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai)
+                            if current_live_stream:
+                                last_live_stream = current_live_stream
 
-                            now = time_module.time()
-                            if now - last_yield_time >= min_yield_interval:
-                                # Only update the dedicated live stream panel during streaming
-                                # Don't update chat_history to avoid constant DOM replacement
-                                # which breaks scroll position and text selection
-                                if current_live_stream:
-                                    yield make_yield(chat_history, current_status, current_live_stream)
-                                    last_yield_time = now
+                        now = time_module.time()
+                        if now - last_yield_time >= min_yield_interval:
+                            # Only update the dedicated live stream panel during streaming
+                            # Don't update chat_history to avoid constant DOM replacement
+                            # which breaks scroll position and text selection
+                            if current_live_stream:
+                                yield make_yield(chat_history, current_status, current_live_stream)
+                                last_yield_time = now
 
                     elif msg_type == "activity":
                         last_activity = msg[1]
@@ -3038,8 +3042,17 @@ class ChadWebUI:
                                 last_yield_time = now
 
                 except queue.Empty:
-                    # No updates needed on queue empty - live stream panel already up to date
+                    # Yield periodically to keep Gradio generator alive and UI responsive
+                    # Without periodic yields, the UI won't update while waiting for SSE events
                     now = time_module.time()
+                    if now - last_yield_time >= min_yield_interval:
+                        # Yield current state - show waiting message if no content yet
+                        display = current_live_stream or last_live_stream
+                        if not display:
+                            # Show waiting placeholder so user knows task is running
+                            display = build_live_stream_html("⏳ Waiting for agent output...", current_ai)
+                        yield make_yield(chat_history, current_status, display)
+                        last_yield_time = now
 
                     # Periodically update session log with streaming history
                     if full_history and now - last_log_update_time >= log_update_interval:

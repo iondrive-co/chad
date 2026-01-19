@@ -2,6 +2,8 @@
 
 import os
 import select
+import shutil
+import signal
 import sys
 import termios
 import tty
@@ -9,6 +11,19 @@ from pathlib import Path
 
 from chad.ui.client import APIClient
 from chad.ui.client.stream_client import SyncStreamClient, decode_terminal_data
+
+
+def get_terminal_size() -> tuple[int, int]:
+    """Get the current terminal size (rows, cols).
+
+    Returns:
+        Tuple of (rows, cols) or (24, 80) as fallback
+    """
+    try:
+        size = shutil.get_terminal_size()
+        return (size.lines, size.columns)
+    except Exception:
+        return (24, 80)
 
 
 def clear_screen():
@@ -316,12 +331,17 @@ def run_task_with_streaming(
     Returns:
         Exit code from the agent
     """
-    # Start the task
+    # Get actual terminal size for PTY
+    rows, cols = get_terminal_size()
+
+    # Start the task with current terminal dimensions
     client.start_task(
         session_id=session_id,
         project_path=project_path,
         task_description=task_description,
         coding_agent=coding_account,
+        terminal_rows=rows,
+        terminal_cols=cols,
     )
 
     # Save terminal state
@@ -333,6 +353,21 @@ def run_task_with_streaming(
 
     exit_code = 0
 
+    # Track if we need to send resize
+    resize_pending = False
+
+    def handle_sigwinch(signum, frame):
+        """Handle terminal resize signal."""
+        nonlocal resize_pending
+        resize_pending = True
+
+    # Set up SIGWINCH handler for terminal resize
+    old_sigwinch = None
+    try:
+        old_sigwinch = signal.signal(signal.SIGWINCH, handle_sigwinch)
+    except (ValueError, OSError):
+        pass  # SIGWINCH not available (not Unix or not main thread)
+
     try:
         # Set terminal to raw mode for passthrough
         if old_settings:
@@ -340,6 +375,15 @@ def run_task_with_streaming(
 
         # Stream events and relay I/O
         for event in stream_client.stream_events(session_id, include_terminal=True):
+            # Check for pending resize
+            if resize_pending:
+                resize_pending = False
+                new_rows, new_cols = get_terminal_size()
+                try:
+                    stream_client.resize_terminal(session_id, new_rows, new_cols)
+                except Exception:
+                    pass  # Best effort resize
+
             if event.event_type == "terminal":
                 # Write terminal output
                 data = decode_terminal_data(
@@ -372,6 +416,13 @@ def run_task_with_streaming(
                         pass
 
     finally:
+        # Restore SIGWINCH handler
+        if old_sigwinch is not None:
+            try:
+                signal.signal(signal.SIGWINCH, old_sigwinch)
+            except (ValueError, OSError):
+                pass
+
         # Restore terminal state
         if old_settings:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)

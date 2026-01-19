@@ -1,8 +1,12 @@
 """Comprehensive tests for unified PTY streaming through API."""
 
+import anyio
 import base64
+import html
+import httpx
 import json
 import queue
+import re
 import time
 from pathlib import Path
 
@@ -13,6 +17,8 @@ from chad.server.main import create_app
 from chad.server.services import reset_session_manager, reset_task_executor
 from chad.server.services.pty_stream import reset_pty_stream_service
 from chad.server.state import reset_state
+from chad.ui.client.stream_client import StreamClient, decode_terminal_data
+from chad.ui.terminal_emulator import TerminalEmulator
 from chad.util.event_log import EventLog, SessionStartedEvent, TerminalOutputEvent
 
 
@@ -444,6 +450,125 @@ class TestMockProviderThroughAPI:
         assert result.returncode == 0
 
 
+class TestCliStreamAlignment:
+    """Ensure CLI-style streaming keeps output aligned."""
+
+    @pytest.mark.parametrize("terminal_cols", [80, 120])
+    def test_mock_agent_output_is_left_aligned(self, client, git_repo, terminal_cols):
+        """Mock agent lines should start at column 0 for CLI terminals."""
+        # Register a mock account via API
+        account_resp = client.post("/api/v1/accounts", json={"name": "cli-mock", "provider": "mock"})
+        assert account_resp.status_code == 201
+
+        # Create session
+        session_id = client.post("/api/v1/sessions", json={"name": "CLI alignment"}).json()["id"]
+
+        # Start task with specific terminal geometry
+        start_resp = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "check alignment",
+                "coding_agent": "cli-mock",
+                "terminal_rows": 24,
+                "terminal_cols": terminal_cols,
+            },
+        )
+        assert start_resp.status_code == 201
+
+        async def collect_output() -> bytes:
+            stream_client = StreamClient(str(client.base_url))
+            stream_client._async_client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=client.app),
+                base_url=str(client.base_url),
+                timeout=None,
+            )
+            chunks: list[bytes] = []
+            async for event in stream_client.stream_events(session_id, include_terminal=True):
+                if event.event_type == "terminal":
+                    chunks.append(
+                        decode_terminal_data(
+                            event.data.get("data", ""),
+                            is_text=event.data.get("text", False),
+                        )
+                    )
+                elif event.event_type == "complete":
+                    break
+            await stream_client.close()
+            return b"".join(chunks)
+
+        raw_bytes = anyio.run(collect_output)
+        assert raw_bytes, "Should capture mock agent terminal output"
+
+        emulator = TerminalEmulator(cols=terminal_cols, rows=80)
+        emulator.feed(raw_bytes)
+        rendered_lines = [line for line in emulator.get_text().split("\n") if line.strip()]
+        leading_spaces = [len(line) - len(line.lstrip(" ")) for line in rendered_lines]
+        base_indent = min(leading_spaces) if leading_spaces else 0
+
+        assert base_indent == 0 and all(space == base_indent for space in leading_spaces), (
+            f"Expected left-aligned lines for terminal width {terminal_cols}, "
+            f"got leading spaces per line: {leading_spaces}"
+        )
+
+
+class TestGradioStreamAlignment:
+    """Ensure Gradio stream rendering stays left-aligned."""
+
+    def test_stream_task_output_left_aligned(self, client, git_repo):
+        """stream_task_output HTML should not drift right across lines."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.client.stream_client import SyncStreamClient
+
+        account_resp = client.post("/api/v1/accounts", json={"name": "gradio-mock", "provider": "mock"})
+        assert account_resp.status_code == 201
+
+        session_id = client.post("/api/v1/sessions", json={"name": "Gradio alignment"}).json()["id"]
+
+        start_resp = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "gradio align",
+                "coding_agent": "gradio-mock",
+                "terminal_rows": 24,
+                "terminal_cols": 80,
+            },
+        )
+        assert start_resp.status_code == 201
+
+        stream_client = SyncStreamClient(str(client.base_url))
+        stream_client._sync_client = httpx.Client(
+            transport=client._transport,
+            base_url=str(client.base_url),
+            timeout=None,
+        )
+
+        # Build a minimal ChadWebUI instance without running full init
+        ui = ChadWebUI.__new__(ChadWebUI)
+        ui.api_client = type("DummyAPI", (), {"base_url": str(client.base_url)})()
+        ui._stream_client = stream_client
+
+        latest_html = ""
+        for event_type, html_content, exit_code in ui.stream_task_output(session_id, include_terminal=True):
+            if event_type == "terminal":
+                latest_html = html_content or ""
+            elif event_type == "complete":
+                break
+
+        assert latest_html, "Expected live stream HTML content"
+
+        plain = html.unescape(re.sub(r"<[^>]+>", "", latest_html))
+        rendered_lines = [line for line in plain.split("\n") if line.strip()]
+        leading_spaces = [len(line) - len(line.lstrip(" ")) for line in rendered_lines]
+        base_indent = min(leading_spaces) if leading_spaces else 0
+
+        assert base_indent == 0 and all(space == base_indent for space in leading_spaces), (
+            "Gradio stream_task_output should render lines starting at column 0; "
+            f"got leading spaces per line: {leading_spaces}"
+        )
+
+
 class TestStreamClient:
     """Tests for the stream client."""
 
@@ -473,6 +598,40 @@ class TestStreamClient:
         decoded = decode_terminal_data(text, is_text=True)
 
         assert decoded.decode("utf-8") == text
+
+    def test_decode_terminal_data_normalizes_lf_to_crlf(self):
+        """Bare LF is converted to CRLF for proper terminal display."""
+        from chad.ui.client.stream_client import decode_terminal_data
+
+        # Base64-encoded data with bare LF
+        original = b"Line1\nLine2\n"
+        encoded = base64.b64encode(original).decode()
+        decoded = decode_terminal_data(encoded)
+
+        # Should have CRLF, not bare LF
+        assert decoded == b"Line1\r\nLine2\r\n"
+
+    def test_decode_terminal_data_preserves_existing_crlf(self):
+        """Already-CRLF data is not double-normalized."""
+        from chad.ui.client.stream_client import decode_terminal_data
+
+        # Data already has CRLF
+        original = b"Line1\r\nLine2\r\n"
+        encoded = base64.b64encode(original).decode()
+        decoded = decode_terminal_data(encoded)
+
+        # Should remain unchanged
+        assert decoded == original
+
+    def test_decode_terminal_text_normalizes_lf_to_crlf(self):
+        """Plain text with bare LF is normalized to CRLF."""
+        from chad.ui.client.stream_client import decode_terminal_data
+
+        text = "Hello\nWorld\n"
+        decoded = decode_terminal_data(text, is_text=True)
+
+        # Should have CRLF
+        assert decoded == b"Hello\r\nWorld\r\n"
 
 
 class TestWebSocketEndpoint:
@@ -711,6 +870,8 @@ class TestPlainTextTerminalEvents:
                 coding_agent: str,
                 coding_model=None,
                 coding_reasoning=None,
+                terminal_rows=None,
+                terminal_cols=None,
             ):
                 return None
 
@@ -1341,3 +1502,157 @@ class TestPTYCursorResponse:
             [base64.b64decode(e.data) for e in events if e.type == "output"]
         )
         assert b"RESP:b'\\x1b[1;1R'" in output, "Should respond with cursor position"
+
+
+class TestTerminalDimensionsThroughAPI:
+    """Tests for terminal dimensions passed through the API to PTY sessions."""
+
+    def test_task_start_accepts_terminal_dimensions(self, client, git_repo):
+        """API accepts terminal_rows and terminal_cols in task creation."""
+        # Create session
+        create_resp = client.post("/api/v1/sessions", json={"name": "Dim Test"})
+        assert create_resp.status_code == 201
+        session_id = create_resp.json()["id"]
+
+        # Add mock account
+        client.post("/api/v1/accounts", json={"name": "dim-mock", "provider": "mock"})
+
+        # Start task with specific dimensions - verify API accepts the parameters
+        task_resp = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "Dimension test",
+                "coding_agent": "dim-mock",
+                "terminal_rows": 50,
+                "terminal_cols": 120,
+            },
+        )
+        # API should accept the request (task starts successfully)
+        assert task_resp.status_code == 201
+        task_data = task_resp.json()
+        assert task_data["task_id"] is not None
+        assert task_data["status"] in ("pending", "running")
+
+    def test_task_start_uses_defaults_when_no_dimensions(self, client, git_repo):
+        """API accepts task creation without explicit dimensions."""
+        # Create session
+        create_resp = client.post("/api/v1/sessions", json={"name": "Default Dim Test"})
+        assert create_resp.status_code == 201
+        session_id = create_resp.json()["id"]
+
+        # Add mock account
+        client.post("/api/v1/accounts", json={"name": "default-mock", "provider": "mock"})
+
+        # Start task without dimensions - should work with defaults
+        task_resp = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "Default dimension test",
+                "coding_agent": "default-mock",
+            },
+        )
+        # API should accept the request (using default dimensions)
+        assert task_resp.status_code == 201
+        task_data = task_resp.json()
+        assert task_data["task_id"] is not None
+
+    def test_terminal_dimensions_validation(self, client, git_repo):
+        """API validates terminal dimensions are within reasonable bounds."""
+        # Create session
+        create_resp = client.post("/api/v1/sessions", json={"name": "Validation Test"})
+        assert create_resp.status_code == 201
+        session_id = create_resp.json()["id"]
+
+        # Add mock account
+        client.post("/api/v1/accounts", json={"name": "val-mock", "provider": "mock"})
+
+        # Try invalid dimensions (too small)
+        task_resp = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "Invalid dimension test",
+                "coding_agent": "val-mock",
+                "terminal_rows": 5,  # Too small (min is 10)
+                "terminal_cols": 20,  # Too small (min is 40)
+            },
+        )
+        # Should fail validation
+        assert task_resp.status_code == 422
+
+    def test_pty_session_receives_dimensions(self, tmp_path):
+        """PTY session receives configured dimensions via winsize and env."""
+        from chad.server.services.pty_stream import PTYStreamService
+
+        service = PTYStreamService()
+
+        # Script that outputs terminal dimensions using stty
+        script = "stty size 2>/dev/null || echo '24 80'; sleep 0.1"
+
+        # Start PTY with specific dimensions
+        stream_id = service.start_pty_session(
+            session_id="dim-test",
+            cmd=["bash", "-c", script],
+            cwd=tmp_path,
+            env={},
+            rows=30,
+            cols=100,
+        )
+
+        events = []
+
+        async def collect():
+            async for event in service.subscribe(stream_id):
+                events.append(event)
+                if event.type == "exit":
+                    break
+
+        import asyncio
+        asyncio.run(collect())
+
+        output = b"".join(
+            [base64.b64decode(e.data) for e in events if e.type == "output"]
+        ).decode("utf-8", errors="replace")
+
+        # stty size outputs "rows cols" - verify our dimensions were used
+        assert "30 100" in output, f"Expected '30 100' in output, got: {output!r}"
+
+    def test_pty_session_env_contains_dimensions(self, tmp_path):
+        """PTY session environment contains LINES and COLUMNS."""
+        from chad.server.services.pty_stream import PTYStreamService
+
+        service = PTYStreamService()
+
+        # Script that outputs environment variables
+        script = "echo LINES=$LINES COLUMNS=$COLUMNS; sleep 0.1"
+
+        # Start PTY with specific dimensions
+        stream_id = service.start_pty_session(
+            session_id="env-test",
+            cmd=["bash", "-c", script],
+            cwd=tmp_path,
+            env={},
+            rows=45,
+            cols=150,
+        )
+
+        events = []
+
+        async def collect():
+            async for event in service.subscribe(stream_id):
+                events.append(event)
+                if event.type == "exit":
+                    break
+
+        import asyncio
+        asyncio.run(collect())
+
+        output = b"".join(
+            [base64.b64decode(e.data) for e in events if e.type == "output"]
+        ).decode("utf-8", errors="replace")
+
+        # Verify LINES and COLUMNS are in the environment
+        assert "LINES=45" in output, f"Expected 'LINES=45' in output, got: {output!r}"
+        assert "COLUMNS=150" in output, f"Expected 'COLUMNS=150' in output, got: {output!r}"

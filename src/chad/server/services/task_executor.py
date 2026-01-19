@@ -92,8 +92,9 @@ def build_agent_command(
         config_dir = Path.home() / ".chad" / "claude-configs" / account_name
         cmd = ["claude", "-p", "--permission-mode", "bypassPermissions"]
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+        # Pass task as CLI argument (like codex) - stdin mode fails with timing issues
         if task_description:
-            initial_input = task_description + "\n"
+            cmd.append(task_description)
 
     elif provider == "openai":
         # Codex CLI with isolated home
@@ -229,6 +230,8 @@ class TaskExecutor:
         coding_model: str | None = None,
         coding_reasoning: str | None = None,
         on_event: Callable[[StreamEvent], None] | None = None,
+        terminal_rows: int | None = None,
+        terminal_cols: int | None = None,
     ) -> Task:
         """Start a new coding task.
 
@@ -240,6 +243,8 @@ class TaskExecutor:
             coding_model: Optional model override
             coding_reasoning: Optional reasoning level override
             on_event: Optional callback for streaming events
+            terminal_rows: Optional terminal height (default: TERMINAL_ROWS)
+            terminal_cols: Optional terminal width (default: TERMINAL_COLS)
 
         Returns:
             The created Task object
@@ -291,6 +296,8 @@ class TaskExecutor:
                 coding_model,
                 coding_reasoning,
                 on_event,
+                terminal_rows,
+                terminal_cols,
             ),
             daemon=True,
         )
@@ -311,8 +318,13 @@ class TaskExecutor:
         coding_model: str | None,
         coding_reasoning: str | None,
         on_event: Callable[[StreamEvent], None] | None,
+        terminal_rows: int | None,
+        terminal_cols: int | None,
     ):
         """Execute the task in a background thread using PTY."""
+        # Use provided dimensions or fall back to defaults
+        rows = terminal_rows if terminal_rows else TERMINAL_ROWS
+        cols = terminal_cols if terminal_cols else TERMINAL_COLS
 
         last_output_time = time.time()
         terminal_buffer = bytearray()
@@ -320,7 +332,7 @@ class TaskExecutor:
         last_log_flush = time.time()
 
         # Terminal emulator for extracting meaningful text from PTY output
-        log_emulator = TerminalEmulator(cols=TERMINAL_COLS, rows=TERMINAL_ROWS)
+        log_emulator = TerminalEmulator(cols=cols, rows=rows)
         last_logged_text = ""
 
         def flush_terminal_buffer():
@@ -415,8 +427,8 @@ class TaskExecutor:
                 cmd=cmd,
                 cwd=worktree_path,
                 env=env,
-                rows=TERMINAL_ROWS,
-                cols=TERMINAL_COLS,
+                rows=rows,
+                cols=cols,
                 log_callback=log_pty_event,
             )
             task.stream_id = stream_id

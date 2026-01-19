@@ -8,17 +8,19 @@ It's used by the Gradio UI to render agent output with preserved layout.
 from __future__ import annotations
 
 import base64
+import re
 from html import escape
 from typing import Iterator
 
 import pyte
 
 
-# Terminal geometry constants - used by PTY and emulator for consistency
-# These values should match what the PTY is configured with so that
-# cursor positioning and text wrapping work correctly.
-TERMINAL_COLS = 120
-TERMINAL_ROWS = 50
+# Terminal geometry constants - default values used when client doesn't provide dimensions.
+# When possible, clients should pass their actual terminal size to start_task() and
+# send resize signals when the terminal is resized (via SIGWINCH on Unix).
+# These defaults are reasonable for fallback when dimensions aren't available.
+TERMINAL_COLS = 80
+TERMINAL_ROWS = 24
 
 
 # ANSI 16-color to RGB mapping (One Dark theme-inspired)
@@ -146,6 +148,9 @@ class TerminalEmulator:
             text = data.decode("utf-8", errors="replace")
         else:
             text = data
+
+        # Normalize bare LFs to CRLF so the cursor returns to column 0 on new lines.
+        text = re.sub(r"(?<!\r)\n", "\r\n", text)
 
         self._total_bytes += len(text.encode("utf-8"))
         self.stream.feed(text)

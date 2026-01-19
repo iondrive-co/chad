@@ -927,6 +927,70 @@ Line 4: Fourth line"""
         )
 
 
+class TestTUIContentRendering:
+    """Test that TUI-style content (boxes, cursor positioning) renders correctly.
+
+    These tests verify that agent CLI output with box drawing characters and
+    status panels doesn't get garbled when displayed in the live stream panel.
+    """
+
+    # Simulated TUI content with box drawing - typical of codex/claude status panels
+    TUI_BOX_HTML = """
+<p>┌────────────────────────────────────────────────────────────────────────┐</p>
+<p>│ <span style="color: rgb(97, 175, 239);">OpenAI Codex</span>                                                           │</p>
+<p>├────────────────────────────────────────────────────────────────────────┤</p>
+<p>│ model: gpt-5.1-code    100% context left • ? for shortcuts             │</p>
+<p>│ directory: /home/user/project                                          │</p>
+<p>└────────────────────────────────────────────────────────────────────────┘</p>
+<p></p>
+<p><span style="color: rgb(229, 192, 123);">Tip:</span> NEW! Try shell snapshotting to make your Codex faster.</p>
+<p></p>
+<p><span style="color: rgb(152, 195, 121);">></span> Long lines in the output view should wrap or scroll properly, not</p>
+<p>  cause garbled layout with text scattered across the screen.</p>
+"""
+
+    def test_tui_box_content_readable(self, page: Page):
+        """TUI box content should be readable without horizontal scrolling."""
+        inject_live_stream_content(page, self.TUI_BOX_HTML)
+        time.sleep(0.2)
+
+        # Check that box drawing characters are visible
+        result = verify_all_text_visible(page)
+        assert result.get("allVisible", False), f"TUI content not fully visible: {result}"
+
+    def test_tui_content_no_excessive_horizontal_scroll(self, page: Page):
+        """TUI content should not require excessive horizontal scrolling."""
+        inject_live_stream_content(page, self.TUI_BOX_HTML)
+        time.sleep(0.2)
+
+        # Check scroll width vs client width
+        scroll_info = page.evaluate(
+            """
+() => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    if (!box) return { error: 'no live-stream-box' };
+    const content = box.querySelector('.live-output-content');
+    if (!content) return { error: 'no live-output-content' };
+    return {
+        scrollWidth: content.scrollWidth,
+        clientWidth: content.clientWidth,
+        overflowRatio: content.scrollWidth / content.clientWidth
+    };
+}
+"""
+        )
+
+        assert "error" not in scroll_info, f"Error: {scroll_info.get('error')}"
+
+        # Allow some horizontal scroll but not excessive (>1.5x would be garbled)
+        overflow_ratio = scroll_info.get("overflowRatio", 1.0)
+        assert overflow_ratio < 1.5, (
+            f"TUI content requires too much horizontal scrolling: "
+            f"scrollWidth={scroll_info['scrollWidth']}, clientWidth={scroll_info['clientWidth']}, "
+            f"ratio={overflow_ratio:.2f}"
+        )
+
+
 class TestRealisticLiveContent:
     """Test live view with realistic CLI-like content to verify all text is visible."""
 

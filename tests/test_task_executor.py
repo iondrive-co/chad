@@ -4,8 +4,47 @@ from pathlib import Path
 
 from chad.server.services.session_manager import SessionManager
 from chad.server.services.pty_stream import get_pty_stream_service
-from chad.server.services.task_executor import TaskExecutor, TaskState
+from chad.server.services.task_executor import TaskExecutor, TaskState, build_agent_command
 from chad.util.config_manager import ConfigManager
+
+
+class TestBuildAgentCommand:
+    """Tests for build_agent_command function."""
+
+    def test_anthropic_includes_task_as_cli_arg(self, tmp_path):
+        """Anthropic provider passes task description as CLI argument, not stdin."""
+        cmd, env, initial_input = build_agent_command(
+            "anthropic", "test-account", tmp_path, "Fix the bug"
+        )
+
+        # Task should be in command, not initial_input
+        assert "claude" in cmd
+        assert "-p" in cmd
+        assert "Fix the bug" in cmd
+        assert initial_input is None
+
+    def test_anthropic_without_task(self, tmp_path):
+        """Anthropic provider works without task description."""
+        cmd, env, initial_input = build_agent_command(
+            "anthropic", "test-account", tmp_path, None
+        )
+
+        assert "claude" in cmd
+        assert "-p" in cmd
+        assert len(cmd) == 4  # claude, -p, --permission-mode, bypassPermissions
+        assert initial_input is None
+
+    def test_mock_provider_produces_output(self, tmp_path):
+        """Mock provider command produces ANSI-formatted output."""
+        cmd, env, initial_input = build_agent_command(
+            "mock", "test-account", tmp_path, "Test task"
+        )
+
+        # Run the mock command and verify it produces output
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        assert result.returncode == 0
+        assert "Mock Agent" in result.stdout
+        assert initial_input is None
 
 
 def _init_git_repo(repo_path: Path) -> None:

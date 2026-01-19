@@ -480,8 +480,10 @@ class TestChadWebUI:
 
         result = web_ui.cancel_task(session.id)
 
-        assert "🛑" in result
-        assert "cancelled" in result.lower()
+        # Handle gr.update dict
+        result_value = result.get("value", "") if isinstance(result, dict) else result
+        assert "🛑" in result_value
+        assert "cancelled" in result_value.lower()
         assert session.cancel_requested is True
         mock_provider.stop_session.assert_called_once()
 
@@ -490,7 +492,9 @@ class TestChadWebUI:
         session = web_ui.create_session("test")
         result = web_ui.cancel_task(session.id)
 
-        assert "🛑" in result
+        # Handle gr.update dict
+        result_value = result.get("value", "") if isinstance(result, dict) else result
+        assert "🛑" in result_value
         assert session.cancel_requested is True
 
     def test_cancel_preserves_live_stream(self, monkeypatch, web_ui, git_repo):
@@ -525,6 +529,9 @@ class TestChadWebUI:
             updates.append(update)
 
         final_live_stream = updates[-1][1]
+        # Handle both plain string and gr.update dict
+        if isinstance(final_live_stream, dict):
+            final_live_stream = final_live_stream.get("value", "")
         assert "MOCK LIVE OUTPUT" in final_live_stream
 
     def test_cancel_preserves_plain_live_stream(self, monkeypatch, web_ui, git_repo):
@@ -558,6 +565,9 @@ class TestChadWebUI:
             updates.append(update)
 
         final_live_stream = updates[-1][1]
+        # Handle both plain string and gr.update dict
+        if isinstance(final_live_stream, dict):
+            final_live_stream = final_live_stream.get("value", "")
         assert "MOCK LIVE OUTPUT FROM TEXT" in final_live_stream
 
 
