@@ -33,7 +33,9 @@ class TestCancelTask:
 
         result = web_ui.cancel_task("test-session")
 
-        assert "cancelled" in result.lower()
+        # Handle gr.update dict
+        result_value = result.get("value", "") if isinstance(result, dict) else result
+        assert "cancelled" in result_value.lower()
         assert session.cancel_requested is True
         assert session.active is False
         assert session.provider is None

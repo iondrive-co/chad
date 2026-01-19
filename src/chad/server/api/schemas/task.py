@@ -20,6 +20,9 @@ class TaskCreate(BaseModel):
     verification_model: str | None = Field(default=None, description="Optional model override for verification")
     verification_reasoning: str | None = Field(default=None, description="Optional reasoning level for verification")
     target_branch: str | None = Field(default=None, description="Optional target branch for changes")
+    # Terminal dimensions for PTY - should match client's actual terminal size
+    terminal_rows: int | None = Field(default=None, ge=10, le=500, description="Terminal rows (height)")
+    terminal_cols: int | None = Field(default=None, ge=40, le=500, description="Terminal columns (width)")
 
 
 class TaskStatusResponse(BaseModel):

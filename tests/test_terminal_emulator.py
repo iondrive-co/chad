@@ -263,3 +263,72 @@ class TestTerminalEmulatorEdgeCases:
         emu.feed("\x1b[0m")
         html = emu.render_html()
         assert "color:rgb" in html
+
+
+class TestTerminalLayoutForDisplay:
+    """Tests that terminal output renders correctly for UI display.
+
+    These tests verify that the terminal configuration produces output
+    suitable for display in a typical UI panel without excessive
+    horizontal scrolling or garbled layout.
+    """
+
+    def test_default_terminal_width_fits_typical_ui_panel(self):
+        """Default TERMINAL_COLS should be ≤80 to fit in typical UI panels.
+
+        A 120-column terminal requires ~960px at 8px per character, which
+        is too wide for many UI layouts. 80 columns (~640px) fits better.
+        """
+        from chad.ui.terminal_emulator import TERMINAL_COLS
+        assert TERMINAL_COLS <= 80, (
+            f"TERMINAL_COLS={TERMINAL_COLS} is too wide for typical UI panels. "
+            "Should be ≤80 to avoid horizontal scrolling and garbled layout."
+        )
+
+    def test_tui_box_renders_without_excessive_width(self):
+        """TUI-style box drawing should render within terminal width.
+
+        When a CLI tool draws a box (like status panel), the text should
+        stay within the terminal width without scattering across the screen.
+        """
+        from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS
+        emu = TerminalEmulator(TERMINAL_COLS, TERMINAL_ROWS)
+
+        # Simulate a TUI box being drawn (like codex/claude status panels)
+        # Box at column 50 would be problematic if terminal is narrower
+        box_width = min(40, TERMINAL_COLS - 5)
+        emu.feed("─" * box_width + "\n")
+        emu.feed("│ Status: Running" + " " * (box_width - 18) + "│\n")
+        emu.feed("─" * box_width + "\n")
+
+        html = emu.render_html()
+        lines = html.split("\n")
+
+        # Each line should be ≤ TERMINAL_COLS characters of actual content
+        for line in lines:
+            # Strip HTML tags to count visible characters
+            import re
+            text_only = re.sub(r'<[^>]+>', '', line)
+            assert len(text_only) <= TERMINAL_COLS + 5, (  # +5 for tolerance
+                f"Line exceeds terminal width: {len(text_only)} > {TERMINAL_COLS}"
+            )
+
+    def test_cursor_positioned_text_stays_within_bounds(self):
+        """Text positioned via cursor sequences should stay within terminal width."""
+        from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS
+        emu = TerminalEmulator(TERMINAL_COLS, TERMINAL_ROWS)
+
+        # Move cursor to various positions and write
+        emu.feed("\x1b[1;1HStart")  # Row 1, Col 1
+        emu.feed(f"\x1b[2;{TERMINAL_COLS - 5}HEnd")  # Row 2, near end
+
+        html = emu.render_html()
+        lines = html.split("\n")
+
+        # Text should be within bounds
+        for line in lines:
+            import re
+            text_only = re.sub(r'<[^>]+>', '', line)
+            assert len(text_only) <= TERMINAL_COLS + 5, (
+                f"Positioned text exceeds bounds: {len(text_only)} chars"
+            )

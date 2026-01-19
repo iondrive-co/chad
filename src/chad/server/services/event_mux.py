@@ -156,8 +156,29 @@ class EventMultiplexer:
 
         if pty_session and include_terminal:
             # Primary path: Stream PTY events with interspersed EventLog events
+            # Use async iteration with ping support to keep SSE connection alive
             try:
-                async for pty_event in pty_service.subscribe(pty_session.stream_id):
+                subscriber = pty_service.subscribe(pty_session.stream_id)
+                pty_iter = subscriber.__aiter__()
+
+                while True:
+                    # Check if we should send a ping (keepalive for long waits)
+                    if self._should_ping():
+                        yield self._create_ping()
+
+                    try:
+                        # Wait for next PTY event with timeout for ping checks
+                        pty_event = await asyncio.wait_for(
+                            pty_iter.__anext__(),
+                            timeout=self.ping_interval,
+                        )
+                    except asyncio.TimeoutError:
+                        # No PTY event within ping interval - loop to send ping
+                        continue
+                    except StopAsyncIteration:
+                        # PTY stream ended without explicit exit event
+                        break
+
                     if pty_event.type == "output":
                         # Align seq with EventLog which has already logged the chunk
                         if self.event_log:
