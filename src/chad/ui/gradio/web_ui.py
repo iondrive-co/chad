@@ -1158,13 +1158,15 @@ body, .gradio-container, .gradio-container * {
   font-size: 12px;
   background: #2e3440;
   border-radius: 8px;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .diff-file {
   margin-bottom: 12px;
   border: 1px solid #4c566a;
   border-radius: 4px;
+  overflow-x: auto;
 }
 
 .diff-file-header {
@@ -1197,12 +1199,15 @@ body, .gradio-container, .gradio-container * {
 
 .diff-comparison {
   display: flex;
+  min-width: 100%;
+  width: max-content;
+  overflow-x: auto;
 }
 
 .diff-side {
   flex: 1;
   min-width: 0;
-  overflow-x: auto;
+  overflow: visible;
 }
 
 .diff-side-left {
@@ -1237,7 +1242,8 @@ body, .gradio-container, .gradio-container * {
   flex: 1;
   padding: 0 8px;
   white-space: pre;
-  overflow-x: auto;
+  overflow: visible;
+  min-width: max-content;
 }
 
 .diff-line.added {

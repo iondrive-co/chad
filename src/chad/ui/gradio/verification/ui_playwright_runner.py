@@ -1191,6 +1191,32 @@ def verify_all_text_visible(
 
 
 # Sample merge conflict HTML for testing the merge viewer (side-by-side layout)
+SAMPLE_LONG_DIFF_HTML = '''
+<div class="diff-viewer">
+  <div class="diff-file">
+    <div class="diff-file-header">src/example.py</div>
+    <div class="diff-hunk">
+      <div class="diff-comparison">
+        <div class="diff-side diff-side-left">
+          <div class="diff-side-header">Original</div>
+          <div class="diff-line context">
+            <span class="diff-line-no">1</span>
+            <span class="diff-line-content">def very_long_function_name_with_many_parameters(param_one, param_two, param_three, param_four, param_five, param_six, param_seven, param_eight, param_nine, param_ten, param_eleven, param_twelve): return param_one + param_two + param_three + param_four + param_five + param_six + param_seven + param_eight + param_nine + param_ten + param_eleven + param_twelve</span>
+          </div>
+        </div>
+        <div class="diff-side diff-side-right">
+          <div class="diff-side-header">Modified</div>
+          <div class="diff-line context">
+            <span class="diff-line-no">1</span>
+            <span class="diff-line-content">def very_long_function_name_with_many_parameters(param_one, param_two, param_three, param_four, param_five, param_six, param_seven, param_eight, param_nine, param_ten, param_eleven, param_twelve): return (param_one + param_two + param_three + param_four + param_five + param_six + param_seven + param_eight + param_nine + param_ten + param_eleven + param_twelve)  # modified</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+'''
+
 SAMPLE_MERGE_CONFLICT_HTML = '''
 <div class="conflict-viewer">
   <div class="conflict-file">
@@ -1490,6 +1516,19 @@ class MergeViewerTestResult:
     raw_html: str
 
 
+@dataclass
+class DiffScrollMetrics:
+    """Basic metrics about diff viewer scrolling behavior."""
+
+    container_overflow_x: str = ""
+    left_overflow_x: str | None = None
+    right_overflow_x: str | None = None
+    container_scrollable: bool = False
+    left_scrollable: bool | None = None
+    right_scrollable: bool | None = None
+    error: str | None = None
+
+
 def check_merge_viewer(page: "Page") -> MergeViewerTestResult:
     """Check if the merge viewer is properly styled and visible.
 
@@ -1560,6 +1599,113 @@ def check_merge_viewer(page: "Page") -> MergeViewerTestResult:
         file_headers=result.get("fileHeaders", []),
         colors_correct=result.get("colorsCorrect", False),
         raw_html=result.get("rawHtml", ""),
+    )
+
+
+def inject_merge_diff_content(page: "Page", diff_html: str = SAMPLE_LONG_DIFF_HTML) -> bool:
+    """Inject diff HTML into the merge diff container for testing."""
+    result = page.evaluate(
+        """
+(html) => {
+    const diffContainer = document.querySelector('[id*="diff-content"]') ||
+                          document.querySelector('[key*="diff-content"]');
+    if (!diffContainer) {
+        return { ok: false, error: 'diff container not found' };
+    }
+
+    const mergeSection = diffContainer.closest('.merge-section') ||
+                         diffContainer.closest('[class*="merge-section"]');
+    if (mergeSection) {
+        mergeSection.style.display = 'block';
+        mergeSection.style.visibility = 'visible';
+        mergeSection.classList.remove('merge-section-hidden');
+    }
+
+    const accordion = diffContainer.closest('details');
+    if (accordion) {
+        accordion.open = true;
+    }
+
+    let node = diffContainer;
+    while (node) {
+        if (node.classList && node.classList.contains('hide-container')) {
+            node.classList.remove('hide-container');
+        }
+        if (node.classList && node.classList.contains('hide')) {
+            node.classList.remove('hide');
+        }
+        if (node.style) {
+            node.style.display = 'block';
+            node.style.visibility = 'visible';
+            node.style.opacity = '1';
+            node.style.minWidth = 'auto';
+            node.style.maxWidth = 'none';
+            node.style.height = 'auto';
+        }
+        node = node.parentElement;
+    }
+
+    diffContainer.innerHTML = html;
+    return { ok: true };
+}
+""",
+        diff_html,
+    )
+    return bool(result and result.get("ok"))
+
+
+def measure_diff_scrollbars(page: "Page") -> DiffScrollMetrics:
+    """Collect basic scrollbar/overflow metrics for the diff viewer."""
+    result = page.evaluate(
+        """
+() => {
+    const viewer = document.querySelector('.diff-viewer');
+    if (!viewer) {
+        return { error: 'diff viewer not found' };
+    }
+
+    const comparison = viewer.querySelector('.diff-comparison');
+    if (!comparison) {
+        return { error: 'diff comparison not found' };
+    }
+
+    const left = comparison.querySelector('.diff-side-left');
+    const right = comparison.querySelector('.diff-side-right');
+    const style = window.getComputedStyle(comparison);
+    const leftStyle = left ? window.getComputedStyle(left) : null;
+    const rightStyle = right ? window.getComputedStyle(right) : null;
+
+    const hasContainerScroll = comparison.scrollWidth > comparison.clientWidth;
+    const leftHasScroll = left
+        ? (["auto", "scroll"].includes(leftStyle.overflowX) && left.scrollWidth > left.clientWidth)
+        : false;
+    const rightHasScroll = right
+        ? (["auto", "scroll"].includes(rightStyle.overflowX) && right.scrollWidth > right.clientWidth)
+        : false;
+
+    return {
+        containerOverflowX: style.overflowX,
+        leftOverflowX: leftStyle ? leftStyle.overflowX : null,
+        rightOverflowX: rightStyle ? rightStyle.overflowX : null,
+        containerScrollable: hasContainerScroll,
+        leftScrollable: leftHasScroll,
+        rightScrollable: rightHasScroll,
+    };
+}
+"""
+    )
+
+    if not result:
+        return DiffScrollMetrics(error="diff scroll metrics evaluation failed")
+
+    return DiffScrollMetrics(
+        container_overflow_x=result.get("containerOverflowX", ""),
+        left_overflow_x=result.get("leftOverflowX"),
+        right_overflow_x=result.get("rightOverflowX"),
+        container_scrollable=bool(result.get("containerScrollable", False)),
+        left_scrollable=bool(result.get("leftScrollable", False)),
+        right_scrollable=bool(result.get("rightScrollable", False)),
+        error=result.get("error"),
     )
 
 
