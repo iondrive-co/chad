@@ -18,6 +18,8 @@ from chad.ui.gradio.verification.ui_playwright_runner import (
     get_card_visibility_debug,
     get_provider_names,
     inject_live_stream_content,
+    inject_merge_diff_content,
+    measure_diff_scrollbars,
     measure_add_provider_accordion,
     measure_provider_delete_button,
     open_playwright_page,
@@ -1175,6 +1177,27 @@ class TestMergeDiscardReset:
         # Header and summary should be empty
         assert merge_status["headerText"] == "", f"Header should be empty but got: '{merge_status['headerText']}'"
         assert merge_status["summaryText"] == "", f"Summary should be empty but got: '{merge_status['summaryText']}'"
+
+
+class TestMergeDiffScroll:
+    """Ensure merge diff uses a single horizontal scrollbar instead of per-column scrollbars."""
+
+    def test_merge_diff_uses_single_horizontal_scrollbar(self, page: Page):
+        """Long lines should scroll together via the container, not per side."""
+        injected = inject_merge_diff_content(page)
+        assert injected, "Failed to inject sample diff content"
+
+        metrics = measure_diff_scrollbars(page)
+        assert metrics.error is None, metrics.error
+
+        assert metrics.container_scrollable is True, "Diff container should be horizontally scrollable"
+        assert metrics.container_overflow_x in ("auto", "scroll"), "Container should manage horizontal overflow"
+
+        assert metrics.left_overflow_x not in ("auto", "scroll"), "Left pane should not have its own scrollbar"
+        assert metrics.right_overflow_x not in ("auto", "scroll"), "Right pane should not have its own scrollbar"
+
+        assert metrics.left_scrollable is False, "Left pane should not scroll independently"
+        assert metrics.right_scrollable is False, "Right pane should not scroll independently"
 
 
 class TestInlineScreenshots:
