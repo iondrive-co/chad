@@ -8,7 +8,10 @@ Structured log format
 
 v0.9 Token Effort
 
-Mid session inter-provider handoff
+Setup stage for each project, where the commands for verifying changes are established and checked to be true then
+saved to the config along with instructions for use (like a skill)
+
+Show in a collapsible section in the ui, the full prompt that was given to the coding and the verification agent
 
 v0.10 Hack-Propagation
 

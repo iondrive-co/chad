@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Iterator
 
@@ -290,10 +291,17 @@ def decode_terminal_data(data: str | bytes, *, is_text: bool = False) -> bytes:
     """
     if is_text:
         if isinstance(data, bytes):
-            return data
-        return str(data or "").encode("utf-8", errors="replace")
-
-    if not data:
+            result = data
+        else:
+            result = str(data or "").encode("utf-8", errors="replace")
+    elif not data:
         return b""
+    else:
+        result = base64.b64decode(data)
 
-    return base64.b64decode(data)
+    # Normalize bare LFs to CRLF so cursor returns to column 0 on new lines.
+    # Some terminal emulators (e.g., in IDEs) treat LF as line-feed only,
+    # causing text drift. The regex uses negative lookbehind to avoid double-CRLF.
+    text = result.decode("utf-8", errors="replace")
+    text = re.sub(r"(?<!\r)\n", "\r\n", text)
+    return text.encode("utf-8", errors="replace")

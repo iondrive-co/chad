@@ -279,8 +279,15 @@ class APIClient:
         verification_model: str | None = None,
         verification_reasoning: str | None = None,
         target_branch: str | None = None,
+        terminal_rows: int | None = None,
+        terminal_cols: int | None = None,
     ) -> TaskStatus:
-        """Start a new coding task."""
+        """Start a new coding task.
+
+        Args:
+            terminal_rows: Terminal height in rows (for PTY sizing)
+            terminal_cols: Terminal width in columns (for PTY sizing)
+        """
         data = {
             "project_path": project_path,
             "task_description": task_description,
@@ -298,6 +305,10 @@ class APIClient:
             data["verification_reasoning"] = verification_reasoning
         if target_branch:
             data["target_branch"] = target_branch
+        if terminal_rows:
+            data["terminal_rows"] = terminal_rows
+        if terminal_cols:
+            data["terminal_cols"] = terminal_cols
 
         resp = self._client.post(
             self._url(f"/sessions/{session_id}/tasks"),
