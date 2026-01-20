@@ -192,15 +192,15 @@ class TestCodingAgentLayout:
         assert status_box["width"] <= available_width
 
     def test_run_top_controls_stack_with_matching_widths(self, page: Page):
-        """Preferred/Reasoning controls should stack under matching agent selectors with aligned widths."""
+        """Model/Reasoning controls should stack under matching agent selectors with aligned widths."""
         project_path = page.get_by_label("Project Path")
         status = page.locator("#role-config-status")
         session_log = page.locator("#session-log-btn")
         coding_agent = page.get_by_label("Coding Agent")
-        coding_model = page.get_by_label("Preferred Model", exact=True)
+        coding_model = page.get_by_label("Model", exact=True)
         coding_reasoning = page.get_by_label("Reasoning Effort", exact=True)
         verification_agent = page.get_by_label("Verification Agent")
-        verification_model = page.get_by_label("Verification Preferred Model")
+        verification_model = page.get_by_label("Verification Model")
         verification_reasoning = page.get_by_label("Verification Reasoning Effort")
 
         expect(project_path).to_be_visible()
@@ -244,16 +244,16 @@ class TestCodingAgentLayout:
 
         assert (
             model_box["y"] >= coding_box["y"] + coding_box["height"] - 2
-        ), "Preferred Model should stack beneath Coding Agent"
+        ), "Model should stack beneath Coding Agent"
         assert (
             coding_reasoning_box["y"] >= model_box["y"] + model_box["height"] - 2
-        ), "Coding Reasoning should stack beneath Preferred Model"
+        ), "Coding Reasoning should stack beneath Model"
         assert (
             verification_model_box["y"] >= verification_box["y"] + verification_box["height"] - 2
-        ), "Verification Preferred Model should stack beneath Verification Agent"
+        ), "Verification Model should stack beneath Verification Agent"
         assert (
             verification_reasoning_box["y"] >= verification_model_box["y"] + verification_model_box["height"] - 2
-        ), "Verification Reasoning should stack beneath Verification Preferred Model"
+        ), "Verification Reasoning should stack beneath Verification Model"
 
         assert abs(model_box["x"] - coding_box["x"]) <= 4
         assert abs(model_box["width"] - coding_box["width"]) <= 4
@@ -348,8 +348,8 @@ class TestModelReasoningDropdowns:
     """
 
     def test_coding_model_dropdown_visible(self, page: Page):
-        """Coding agent 'Preferred Model' dropdown must be visible."""
-        dropdown = page.get_by_label("Preferred Model", exact=True)
+        """Coding agent 'Model' dropdown must be visible."""
+        dropdown = page.get_by_label("Model", exact=True)
         expect(dropdown).to_be_visible()
 
     def test_coding_reasoning_dropdown_visible(self, page: Page):
@@ -358,8 +358,8 @@ class TestModelReasoningDropdowns:
         expect(dropdown).to_be_visible()
 
     def test_verification_model_dropdown_visible(self, page: Page):
-        """Verification agent 'Verification Preferred Model' dropdown must be visible."""
-        dropdown = page.get_by_label("Verification Preferred Model")
+        """Verification agent 'Verification Model' dropdown must be visible."""
+        dropdown = page.get_by_label("Verification Model")
         expect(dropdown).to_be_visible()
 
     def test_verification_reasoning_dropdown_visible(self, page: Page):
@@ -374,9 +374,9 @@ class TestModelReasoningDropdowns:
         the UI refactoring has broken essential functionality.
         """
         # Get all four dropdowns
-        coding_model = page.get_by_label("Preferred Model", exact=True)
+        coding_model = page.get_by_label("Model", exact=True)
         coding_reasoning = page.get_by_label("Reasoning Effort", exact=True)
-        verif_model = page.get_by_label("Verification Preferred Model")
+        verif_model = page.get_by_label("Verification Model")
         verif_reasoning = page.get_by_label("Verification Reasoning Effort")
 
         # All must be visible
@@ -451,6 +451,20 @@ class TestSetupTab:
 
         assert config.get("cleanup_days") == 9
         assert config.get("role_assignments", {}).get("CODING") == "codex-work"
+
+    def test_verification_model_config_shows_when_agent_selected(self, page: Page):
+        """Verification model dropdown should appear once a verifier is chosen."""
+        page.get_by_role("tab", name="⚙️ Setup").click()
+        config_toggle = page.get_by_role("button", name="Config")
+        config_toggle.click()
+
+        verification_dropdown = page.get_by_label("Preferred Verification Agent")
+        verification_dropdown.click()
+        page.get_by_role("option", name="codex-work").click()
+
+        config_panel = page.locator("#config-panel")
+        model_dropdown = config_panel.get_by_label("Verification Model")
+        expect(model_dropdown).to_be_visible(timeout=5000)
 
 
 class TestSubtaskTabs:
