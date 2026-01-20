@@ -463,8 +463,26 @@ class TestSetupTab:
         page.get_by_role("option", name="codex-work").click()
 
         config_panel = page.locator("#config-panel")
-        model_dropdown = config_panel.get_by_label("Verification Model")
+        model_dropdown = config_panel.get_by_label("Preferred Verification Model")
         expect(model_dropdown).to_be_visible(timeout=5000)
+
+    def test_coding_model_config_shows_and_saves(self, page: Page, temp_env):
+        """Coding model dropdown should be visible and persist the selected value."""
+        page.get_by_role("tab", name="⚙️ Setup").click()
+        config_toggle = page.get_by_role("button", name="Config")
+        config_toggle.click()
+
+        coding_model_dropdown = page.get_by_label("Preferred Coding Model")
+        expect(coding_model_dropdown).to_be_visible(timeout=5000)
+
+        coding_model_dropdown.click()
+        page.get_by_role("option", name="claude-opus-4-20250514").click()
+
+        page.wait_for_timeout(800)
+        with open(temp_env.config_path, encoding="utf-8") as f:
+            config = json.load(f)
+
+        assert config.get("accounts", {}).get("claude-pro", {}).get("model") == "claude-opus-4-20250514"
 
 
 class TestSubtaskTabs:

@@ -5394,7 +5394,6 @@ class ChadWebUI:
                 retention_days = 7
 
             accounts = self.api_client.list_accounts()
-            accounts_map = {acc.name: acc for acc in accounts}
             account_choices = [acc.name for acc in accounts]
             coding_assignment = ""
             for acc in accounts:
@@ -5410,12 +5409,27 @@ class ChadWebUI:
                 (name, name) for name in account_choices
             ]
 
+            def coding_model_state(selected_agent: str | None) -> tuple[list[str], str, bool]:
+                if not selected_agent:
+                    return (["default"], "default", False)
+
+                model_choices = self.get_models_for_account(selected_agent) or ["default"]
+                try:
+                    acc = self.api_client.get_account(selected_agent)
+                    stored_model = (acc.model if acc else None) or "default"
+                except Exception:
+                    stored_model = "default"
+                if stored_model not in model_choices:
+                    model_choices = [*model_choices, stored_model]
+                model_value = stored_model if stored_model else model_choices[0]
+                return (model_choices, model_value, True)
+
             def verification_model_state(selected_agent: str | None) -> tuple[list[str], str, bool, bool]:
                 if not selected_agent or selected_agent == self.SAME_AS_CODING:
                     return (["default"], "default", False, False)
                 model_choices = self.get_models_for_account(selected_agent) or ["default"]
                 try:
-                    acc = accounts_map.get(selected_agent) or self.api_client.get_account(selected_agent)
+                    acc = self.api_client.get_account(selected_agent)
                     stored_model = (acc.model if acc else None) or "default"
                 except Exception:
                     stored_model = "default"
@@ -5424,6 +5438,7 @@ class ChadWebUI:
                 model_value = stored_model if stored_model else model_choices[0]
                 return (model_choices, model_value, True, True)
 
+            coding_model_choices, coding_model_value, coding_model_interactive = coding_model_state(coding_value)
             (
                 verification_model_choices,
                 verification_model_value,
@@ -5450,6 +5465,13 @@ class ChadWebUI:
                     allow_custom_value=False,
                 )
             with gr.Row():
+                coding_model_pref = gr.Dropdown(
+                    label="Preferred Coding Model",
+                    choices=coding_model_choices,
+                    value=coding_model_value,
+                    allow_custom_value=True,
+                    interactive=coding_model_interactive,
+                )
                 verification_pref = gr.Dropdown(
                     label="Preferred Verification Agent",
                     choices=verification_choices,
@@ -5457,7 +5479,7 @@ class ChadWebUI:
                     allow_custom_value=False,
                 )
                 verification_model_pref = gr.Dropdown(
-                    label="Verification Model",
+                    label="Preferred Verification Model",
                     choices=verification_model_choices,
                     value=verification_model_value,
                     allow_custom_value=True,
@@ -5534,16 +5556,37 @@ class ChadWebUI:
                         if acc.role == "CODING":
                             self.api_client.set_account_role(acc.name, "")
                             break
-                    return "🧹 Cleared preferred coding agent"
+                    status_msg = "🧹 Cleared preferred coding agent"
                 except Exception as exc:
-                    return f"❌ {exc}"
+                    status_msg = f"❌ {exc}"
+                dropdown_update = gr.update(choices=["default"], value="default", interactive=False)
+                return status_msg, dropdown_update
             try:
                 self.api_client.set_account_role(account_name, "CODING")
-                return f"✅ Preferred coding agent saved: {account_name}"
+                status_msg = f"✅ Preferred coding agent saved: {account_name}"
+            except Exception as exc:
+                status_msg = f"❌ {exc}"
+
+            model_choices, model_value, interactive = coding_model_state(account_name)
+            dropdown_update = gr.update(choices=model_choices, value=model_value, interactive=interactive)
+            return status_msg, dropdown_update
+
+        coding_pref.change(on_coding_pref_change, inputs=[coding_pref], outputs=[config_status, coding_model_pref])
+
+        def on_coding_model_change(model_name, account_name):
+            if not account_name:
+                return "❌ Select a coding agent before setting a model"
+            try:
+                self.api_client.set_account_model(account_name, model_name)
+                return f"✅ Preferred coding model saved for {account_name}"
             except Exception as exc:
                 return f"❌ {exc}"
 
-        coding_pref.change(on_coding_pref_change, inputs=[coding_pref], outputs=[config_status])
+        coding_model_pref.change(
+            on_coding_model_change,
+            inputs=[coding_model_pref, coding_pref],
+            outputs=[config_status],
+        )
 
         def on_verification_pref_change(account_name):
             if not account_name or account_name == self.SAME_AS_CODING:
@@ -5579,7 +5622,7 @@ class ChadWebUI:
                 return "❌ Select a verification agent before setting a model"
             try:
                 self.api_client.set_account_model(account_name, model_name)
-                return f"✅ Verification model saved for {account_name}"
+                return f"✅ Preferred verification model saved for {account_name}"
             except Exception as exc:
                 return f"❌ {exc}"
 
@@ -5657,6 +5700,16 @@ class ChadWebUI:
                 btn.style.visibility = 'hidden';
                 btn.style.opacity = '0';
             };
+            const focusLatestTask = () => {
+                const root = getRoot();
+                const taskTabs = Array.from(root.querySelectorAll('[role=\"tab\"]')).filter((tab) => {
+                    const text = (tab.textContent || tab.getAttribute('aria-label') || '').trim();
+                    return /^Task\\s+\\d+$/i.test(text);
+                });
+                if (!taskTabs.length) return;
+                const last = taskTabs[taskTabs.length - 1];
+                if (last) last.click();
+            };
             const clickAddTask = () => {
                 const root = getRoot();
                 let attempts = 0;
@@ -5665,6 +5718,7 @@ class ChadWebUI:
                     if (btn) {
                         hideButton(btn);
                         btn.click();
+                        setTimeout(focusLatestTask, 140);
                         return true;
                     }
                     attempts += 1;
@@ -5729,6 +5783,16 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
     btn.style.visibility = 'hidden';
     btn.style.opacity = '0';
   };
+  const focusLatestTask = () => {
+    const root = getRoot();
+    const taskTabs = Array.from(root.querySelectorAll('[role=\"tab\"]')).filter((tab) => {
+      const text = (tab.textContent || tab.getAttribute('aria-label') || '').trim();
+      return /^Task\\s+\\d+$/i.test(text);
+    });
+    if (!taskTabs.length) return;
+    const last = taskTabs[taskTabs.length - 1];
+    if (last) last.click();
+  };
   const triggerAdd = () => {
     let attempts = 0;
     const tick = () => {
@@ -5737,6 +5801,7 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
       if (btn) {
         hideButton(btn);
         btn.click();
+        setTimeout(focusLatestTask, 140);
         return;
       }
       if (attempts++ < 15) setTimeout(tick, 80);
