@@ -273,18 +273,17 @@ class TestTerminalLayoutForDisplay:
     horizontal scrolling or garbled layout.
     """
 
-    def test_default_terminal_width_allows_css_wrapping(self):
-        """Default TERMINAL_COLS should be very wide to let CSS handle wrapping.
+    def test_default_terminal_width_fits_chatbot_panel(self):
+        """Default TERMINAL_COLS should fit the chatbot panel without scrollbar.
 
-        We use a very wide terminal so CLI tools don't artificially break lines.
-        The CSS on the live stream panel uses pre-wrap to naturally wrap content
-        at the actual panel edge. This allows responsive behavior - content wraps
-        based on the actual UI width, not a hardcoded column count.
+        120 columns at ~8px per character = ~960px, which fits well in the
+        typical chatbot panel width (~1000px). This prevents horizontal
+        scrollbars while using most of the available space.
         """
         from chad.ui.terminal_emulator import TERMINAL_COLS
-        assert TERMINAL_COLS >= 200, (
-            f"TERMINAL_COLS={TERMINAL_COLS} should be very wide (>=200) so that "
-            "CLI tools don't artificially break lines. CSS handles responsive wrapping."
+        assert 100 <= TERMINAL_COLS <= 140, (
+            f"TERMINAL_COLS={TERMINAL_COLS} should be 100-140 to fit the chatbot "
+            "panel without causing horizontal scrollbars."
         )
 
     def test_tui_box_renders_within_terminal_width(self):
