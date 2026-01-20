@@ -1,9 +1,11 @@
 """Simple CLI for Chad - minimal terminal UI using API streaming."""
 
+import json
 import os
 import select
 import shutil
 import signal
+import subprocess
 import sys
 import termios
 import tty
@@ -11,6 +13,160 @@ from pathlib import Path
 
 from chad.ui.client import APIClient
 from chad.ui.client.stream_client import SyncStreamClient, decode_terminal_data
+
+
+def _get_codex_home(account_name: str) -> Path:
+    """Get the isolated HOME directory for a Codex account."""
+    return Path.home() / ".chad" / "codex-homes" / account_name
+
+
+def _get_claude_config_dir(account_name: str) -> Path:
+    """Get the isolated CLAUDE_CONFIG_DIR for a Claude account."""
+    return Path.home() / ".chad" / "claude-configs" / account_name
+
+
+def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
+    """Run the OAuth flow for a provider.
+
+    Args:
+        provider: Provider type (anthropic, openai, gemini, qwen, mistral)
+        account_name: Name for the new account
+
+    Returns:
+        Tuple of (success, message)
+    """
+    if provider == "openai":
+        # Codex uses isolated HOME directory
+        codex_home = _get_codex_home(account_name)
+        codex_home.mkdir(parents=True, exist_ok=True)
+        auth_file = codex_home / ".codex" / "auth.json"
+
+        env = os.environ.copy()
+        env["HOME"] = str(codex_home)
+
+        print("Starting Codex login... (browser will open)")
+        print()
+        try:
+            result = subprocess.run(
+                ["codex", "login"],
+                env=env,
+                timeout=120,
+            )
+            if result.returncode == 0 and auth_file.exists():
+                try:
+                    with open(auth_file, encoding="utf-8") as f:
+                        auth_data = json.load(f)
+                    if auth_data.get("tokens", {}).get("access_token"):
+                        return True, "Login successful"
+                except (json.JSONDecodeError, OSError):
+                    pass
+            return False, "Login failed or was cancelled"
+        except FileNotFoundError:
+            shutil.rmtree(codex_home, ignore_errors=True)
+            return False, "Codex CLI not found. Install with: npm install -g @openai/codex"
+        except subprocess.TimeoutExpired:
+            shutil.rmtree(codex_home, ignore_errors=True)
+            return False, "Login timed out"
+        except Exception as e:
+            shutil.rmtree(codex_home, ignore_errors=True)
+            return False, f"Login error: {e}"
+
+    elif provider == "anthropic":
+        # Claude uses isolated config directory
+        config_dir = _get_claude_config_dir(account_name)
+        config_dir.mkdir(parents=True, exist_ok=True)
+        creds_file = config_dir / ".credentials.json"
+
+        env = os.environ.copy()
+        env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+
+        print("Starting Claude login... (browser will open)")
+        print()
+        try:
+            # Run claude which will handle the OAuth flow
+            result = subprocess.run(
+                ["claude"],
+                env=env,
+                timeout=120,
+            )
+            # Check for credentials file
+            if creds_file.exists():
+                try:
+                    with open(creds_file, encoding="utf-8") as f:
+                        creds_data = json.load(f)
+                    if creds_data.get("claudeAiOauth", {}).get("accessToken"):
+                        return True, "Login successful"
+                except (json.JSONDecodeError, OSError):
+                    pass
+            return False, "Login failed or was cancelled"
+        except FileNotFoundError:
+            shutil.rmtree(config_dir, ignore_errors=True)
+            return False, "Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code"
+        except subprocess.TimeoutExpired:
+            shutil.rmtree(config_dir, ignore_errors=True)
+            return False, "Login timed out"
+        except Exception as e:
+            shutil.rmtree(config_dir, ignore_errors=True)
+            return False, f"Login error: {e}"
+
+    elif provider == "gemini":
+        creds_file = Path.home() / ".gemini" / "oauth_creds.json"
+
+        print("Starting Gemini login... (browser will open)")
+        print()
+        try:
+            result = subprocess.run(
+                ["gemini", "-y"],
+                timeout=120,
+            )
+            if result.returncode == 0 and creds_file.exists():
+                return True, "Login successful"
+            return False, "Login failed or was cancelled"
+        except FileNotFoundError:
+            return False, "Gemini CLI not found"
+        except subprocess.TimeoutExpired:
+            return False, "Login timed out"
+        except Exception as e:
+            return False, f"Login error: {e}"
+
+    elif provider == "qwen":
+        print("Starting Qwen login... (browser will open)")
+        print()
+        try:
+            result = subprocess.run(
+                ["qwen", "-y"],
+                timeout=120,
+            )
+            if result.returncode == 0:
+                return True, "Login successful"
+            return False, "Login failed or was cancelled"
+        except FileNotFoundError:
+            return False, "Qwen CLI not found"
+        except subprocess.TimeoutExpired:
+            return False, "Login timed out"
+        except Exception as e:
+            return False, f"Login error: {e}"
+
+    elif provider == "mistral":
+        print("Starting Vibe login... (browser will open)")
+        print()
+        try:
+            result = subprocess.run(
+                ["vibe"],
+                timeout=120,
+            )
+            if result.returncode == 0:
+                return True, "Login successful"
+            return False, "Login failed or was cancelled"
+        except FileNotFoundError:
+            return False, "Vibe CLI not found"
+        except subprocess.TimeoutExpired:
+            return False, "Login timed out"
+        except Exception as e:
+            return False, f"Login error: {e}"
+
+    else:
+        return False, f"Unsupported provider: {provider}"
 
 
 def get_terminal_size() -> tuple[int, int]:
@@ -250,27 +406,18 @@ def run_accounts_menu(client: APIClient) -> None:
                     continue
 
                 print()
-                print("Account creation requires authentication.")
+                # Run OAuth flow for the provider
+                success, message = _run_provider_oauth(provider, account_name)
 
-                if provider == "anthropic":
-                    print("For Claude Code, run: claude auth login")
-                    print("Then the account will use ~/.claude/.credentials.json")
-                elif provider == "openai":
-                    home_dir = Path.home() / ".chad" / "codex-homes" / account_name
-                    print(f"For Codex, set CODEX_HOME={home_dir}")
-                    print("Then run: codex auth")
-                elif provider == "gemini":
-                    print("For Gemini, run: gemini auth")
-                    print("Then the account will use ~/.gemini/oauth_creds.json")
-                elif provider == "qwen":
-                    print("For Qwen, run: qwen auth")
-                elif provider == "mistral":
-                    print("For Vibe, run: vibe auth")
-
-                print()
-                print("Note: Account creation via API requires OAuth flow.")
-                print("Use the Gradio UI for full account setup, or manually")
-                print("configure credentials and add to ~/.chad.conf")
+                if success:
+                    # Register the account via API
+                    try:
+                        client.create_account(account_name, provider)
+                        print(f"✓ Account '{account_name}' created successfully!")
+                    except Exception as e:
+                        print(f"✗ Failed to register account: {e}")
+                else:
+                    print(f"✗ {message}")
 
             except (EOFError, KeyboardInterrupt):
                 pass

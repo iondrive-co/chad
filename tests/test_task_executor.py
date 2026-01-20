@@ -17,10 +17,11 @@ class TestBuildAgentCommand:
             "anthropic", "test-account", tmp_path, "Fix the bug"
         )
 
-        # Task should be in command, not initial_input
+        # Task should be in command (wrapped in full prompt), not initial_input
         assert "claude" in cmd
         assert "-p" in cmd
-        assert "Fix the bug" in cmd
+        # The task is now wrapped in a full prompt with instructions
+        assert any("Fix the bug" in arg for arg in cmd)
         assert initial_input is None
 
     def test_anthropic_without_task(self, tmp_path):

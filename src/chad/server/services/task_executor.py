@@ -19,8 +19,35 @@ from chad.util.event_log import (
     TerminalOutputEvent,
     SessionEndedEvent,
 )
+from chad.util.prompts import build_coding_prompt
 from chad.server.services.pty_stream import get_pty_stream_service, PTYEvent
 from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS, TerminalEmulator
+
+
+def _read_project_docs(project_path: Path) -> str | None:
+    """Read project documentation if present.
+
+    Reads AGENTS.md, .claude/CLAUDE.md, or CLAUDE.md from the project.
+    Returns the first file found, or None if no documentation exists.
+    """
+    doc_files = [
+        project_path / "AGENTS.md",
+        project_path / ".claude" / "CLAUDE.md",
+        project_path / "CLAUDE.md",
+    ]
+
+    for doc_file in doc_files:
+        if doc_file.exists():
+            try:
+                content = doc_file.read_text(encoding="utf-8")
+                # Limit content to avoid overwhelming the context
+                if len(content) > 8000:
+                    content = content[:8000] + "\n\n[...truncated...]"
+                return content
+            except (OSError, UnicodeDecodeError):
+                continue
+
+    return None
 
 
 class TaskState(str, Enum):
@@ -87,14 +114,20 @@ def build_agent_command(
     env: dict[str, str] = {}
     initial_input: str | None = None
 
+    # Build full prompt with project docs and instructions (including progress update format)
+    full_prompt: str | None = None
+    if task_description:
+        project_docs = _read_project_docs(project_path)
+        full_prompt = build_coding_prompt(task_description, project_docs)
+
     if provider == "anthropic":
         # Claude Code CLI
         config_dir = Path.home() / ".chad" / "claude-configs" / account_name
         cmd = ["claude", "-p", "--permission-mode", "bypassPermissions"]
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
-        # Pass task as CLI argument (like codex) - stdin mode fails with timing issues
-        if task_description:
-            cmd.append(task_description)
+        # Pass full prompt as CLI argument (like codex) - stdin mode fails with timing issues
+        if full_prompt:
+            cmd.append(full_prompt)
 
     elif provider == "openai":
         # Codex CLI with isolated home
@@ -106,26 +139,26 @@ def build_agent_command(
             str(project_path),
         ]
         env["HOME"] = str(codex_home)
-        if task_description:
-            cmd.extend([task_description])
+        if full_prompt:
+            cmd.extend([full_prompt])
 
     elif provider == "gemini":
         # Gemini CLI in YOLO mode
         cmd = ["gemini", "-y"]
-        if task_description:
-            initial_input = task_description + "\n"
+        if full_prompt:
+            initial_input = full_prompt + "\n"
 
     elif provider == "qwen":
         # Qwen Code CLI
         cmd = ["qwen", "-y"]
-        if task_description:
-            initial_input = task_description + "\n"
+        if full_prompt:
+            initial_input = full_prompt + "\n"
 
     elif provider == "mistral":
         # Vibe CLI (Mistral)
         cmd = ["vibe"]
-        if task_description:
-            initial_input = task_description + "\n"
+        if full_prompt:
+            initial_input = full_prompt + "\n"
 
     elif provider == "mock":
         # Mock provider - simulates an agent CLI with ANSI output
@@ -134,8 +167,8 @@ def build_agent_command(
     else:
         # Fallback - try running provider name as command
         cmd = [provider]
-        if task_description:
-            initial_input = task_description + "\n"
+        if full_prompt:
+            initial_input = full_prompt + "\n"
 
     return cmd, env, initial_input
 
