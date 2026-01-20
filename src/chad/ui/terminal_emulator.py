@@ -16,13 +16,10 @@ import pyte
 
 
 # Terminal geometry constants - default values used when client doesn't provide dimensions.
-# We use a very wide terminal (500 columns) so that CLI tools don't artificially
-# break lines at a narrow width. The CSS on the live stream panel uses pre-wrap
-# to naturally wrap content at whatever the actual panel width is. This allows
-# the UI to be responsive - content wraps at the panel edge, not at a hardcoded
-# column count.
-TERMINAL_COLS = 500
-TERMINAL_ROWS = 50
+# 120 columns fits well in the typical chatbot panel width (~1000px at ~8px per char).
+# This prevents horizontal scrollbars while using most of the available space.
+TERMINAL_COLS = 120
+TERMINAL_ROWS = 40
 
 
 # ANSI 16-color to RGB mapping (One Dark theme-inspired)

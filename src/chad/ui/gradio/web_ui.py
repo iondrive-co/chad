@@ -890,12 +890,18 @@ body, .gradio-container, .gradio-container * {
   scroll-behavior: auto !important;
 }
 
+/* Agent communication chatbot - prevent horizontal scroll */
+.agent-chatbot {
+  overflow-x: hidden !important;
+}
+
 /* Agent communication chatbot - full-width speech bubbles */
 .agent-chatbot .message-row,
 .agent-chatbot .message {
   width: 100% !important;
   max-width: 100% !important;
   align-self: stretch !important;
+  overflow-x: hidden !important;
 }
 
 .agent-chatbot .bubble-wrap,
@@ -904,6 +910,9 @@ body, .gradio-container, .gradio-container * {
 .agent-chatbot .message .prose {
   width: 100% !important;
   max-width: 100% !important;
+  overflow-x: hidden !important;
+  overflow-wrap: break-word !important;
+  word-break: break-word !important;
 }
 
 /* Task entry styled like a user chat bubble */
