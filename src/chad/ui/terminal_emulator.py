@@ -16,11 +16,13 @@ import pyte
 
 
 # Terminal geometry constants - default values used when client doesn't provide dimensions.
-# When possible, clients should pass their actual terminal size to start_task() and
-# send resize signals when the terminal is resized (via SIGWINCH on Unix).
-# These defaults are reasonable for fallback when dimensions aren't available.
-TERMINAL_COLS = 80
-TERMINAL_ROWS = 24
+# We use a very wide terminal (500 columns) so that CLI tools don't artificially
+# break lines at a narrow width. The CSS on the live stream panel uses pre-wrap
+# to naturally wrap content at whatever the actual panel width is. This allows
+# the UI to be responsive - content wraps at the panel edge, not at a hardcoded
+# column count.
+TERMINAL_COLS = 500
+TERMINAL_ROWS = 50
 
 
 # ANSI 16-color to RGB mapping (One Dark theme-inspired)

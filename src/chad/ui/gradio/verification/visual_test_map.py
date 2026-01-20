@@ -176,7 +176,14 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         component="config",
         tests=["TestSetupTab"],
         source_file="chad/web_ui.py",
-        keywords=["config", "retention days", "coding agent", "verification agent", "default project path"],
+        keywords=[
+            "config",
+            "retention days",
+            "coding agent",
+            "verification agent",
+            "verification model",
+            "default project path",
+        ],
     ),
     # --- Task Tabs ---
     "TASK_TABS": UIComponent(
