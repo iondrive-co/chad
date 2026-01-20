@@ -18,7 +18,7 @@ class TestBuildAgentCommand:
         )
 
         # Task should be in command (wrapped in full prompt), not initial_input
-        assert "claude" in cmd
+        assert "claude" in Path(cmd[0]).name
         assert "-p" in cmd
         # The task is now wrapped in a full prompt with instructions
         assert any("Fix the bug" in arg for arg in cmd)
@@ -30,7 +30,7 @@ class TestBuildAgentCommand:
             "anthropic", "test-account", tmp_path, None
         )
 
-        assert "claude" in cmd
+        assert "claude" in Path(cmd[0]).name
         assert "-p" in cmd
         assert len(cmd) == 4  # claude, -p, --permission-mode, bypassPermissions
         assert initial_input is None

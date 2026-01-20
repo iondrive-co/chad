@@ -1,6 +1,7 @@
 """Task execution service for orchestrating AI coding tasks via PTY."""
 
 import base64
+import os
 import queue
 import threading
 import time
@@ -20,8 +21,12 @@ from chad.util.event_log import (
     SessionEndedEvent,
 )
 from chad.util.prompts import build_coding_prompt
+from chad.util.installer import AIToolInstaller
 from chad.server.services.pty_stream import get_pty_stream_service, PTYEvent
 from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS, TerminalEmulator
+
+
+_CLI_INSTALLER = AIToolInstaller()
 
 
 def _read_project_docs(project_path: Path) -> str | None:
@@ -112,6 +117,21 @@ def build_agent_command(
         Tuple of (command_list, environment_dict, initial_input)
     """
     env: dict[str, str] = {}
+
+    # Ensure Chad-installed CLIs are on PATH so we can find provider binaries
+    extra_paths = [
+        _CLI_INSTALLER.bin_dir,
+        _CLI_INSTALLER.tools_dir / "node_modules" / ".bin",
+    ]
+    existing_path = os.environ.get("PATH", "")
+    prepend = [str(p) for p in extra_paths if p.exists()]
+    if prepend:
+        env["PATH"] = os.pathsep.join(prepend + [existing_path])
+
+    def resolve_tool(binary: str) -> str:
+        resolved = _CLI_INSTALLER.resolve_tool_path(binary)
+        return str(resolved) if resolved else binary
+
     initial_input: str | None = None
 
     # Build full prompt with project docs and instructions (including progress update format)
@@ -123,7 +143,7 @@ def build_agent_command(
     if provider == "anthropic":
         # Claude Code CLI
         config_dir = Path.home() / ".chad" / "claude-configs" / account_name
-        cmd = ["claude", "-p", "--permission-mode", "bypassPermissions"]
+        cmd = [resolve_tool("claude"), "-p", "--permission-mode", "bypassPermissions"]
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
         # Pass full prompt as CLI argument (like codex) - stdin mode fails with timing issues
         if full_prompt:
@@ -133,7 +153,7 @@ def build_agent_command(
         # Codex CLI with isolated home
         codex_home = Path.home() / ".chad" / "codex-homes" / account_name
         cmd = [
-            "codex",
+            resolve_tool("codex"),
             "--dangerously-bypass-approvals-and-sandbox",
             "-C",
             str(project_path),
@@ -144,19 +164,19 @@ def build_agent_command(
 
     elif provider == "gemini":
         # Gemini CLI in YOLO mode
-        cmd = ["gemini", "-y"]
+        cmd = [resolve_tool("gemini"), "-y"]
         if full_prompt:
             initial_input = full_prompt + "\n"
 
     elif provider == "qwen":
         # Qwen Code CLI
-        cmd = ["qwen", "-y"]
+        cmd = [resolve_tool("qwen"), "-y"]
         if full_prompt:
             initial_input = full_prompt + "\n"
 
     elif provider == "mistral":
         # Vibe CLI (Mistral)
-        cmd = ["vibe"]
+        cmd = [resolve_tool("vibe")]
         if full_prompt:
             initial_input = full_prompt + "\n"
 
