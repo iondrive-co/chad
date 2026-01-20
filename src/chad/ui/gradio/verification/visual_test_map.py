@@ -180,6 +180,7 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
             "config",
             "retention days",
             "coding agent",
+            "coding model",
             "verification agent",
             "verification model",
             "default project path",
