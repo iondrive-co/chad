@@ -573,9 +573,12 @@ class GitWorktreeManager:
     ) -> tuple[bool, list[MergeConflict] | None, str | None]:
         """Attempt to merge worktree changes to a target branch.
 
+        Uses squash merge to create a single commit with the user's message,
+        combining all worktree changes into one clean commit.
+
         Args:
             task_id: The task ID whose worktree branch to merge
-            commit_message: Custom commit message for the merge
+            commit_message: Custom commit message for the squashed commit
             target_branch: Branch to merge into (defaults to main/master)
 
         Returns (success, conflicts, error_message) where conflicts is None on success
@@ -590,8 +593,8 @@ class GitWorktreeManager:
             return False, None, "Worktree not found"
 
         # First commit any uncommitted changes in the worktree
-        # Always use generic message for pre-merge commits; custom message is for merge itself
-        commit_ok, commit_error = self.commit_all_changes(task_id, "Agent changes")
+        # Message doesn't matter since we'll squash everything into one commit
+        commit_ok, commit_error = self.commit_all_changes(task_id, "WIP")
         if not commit_ok:
             status_result = self._run_git("status", "--short", cwd=worktree_path, check=False)
             status = status_result.stdout.strip()
@@ -614,30 +617,39 @@ class GitWorktreeManager:
                 detail = result.stderr.strip() or result.stdout.strip() or "Failed to checkout target branch"
                 return False, None, detail
 
-        # Build merge message
-        merge_msg = commit_message or f"Merge {branch_name}"
+        # Build commit message
+        final_msg = commit_message or f"Merge {branch_name}"
 
-        # Attempt merge
-        result = self._run_git("merge", "--no-ff", branch_name, "-m", merge_msg, check=False)
+        # Use squash merge to combine all changes into a single commit
+        result = self._run_git("merge", "--squash", branch_name, check=False)
 
-        if result.returncode == 0:
-            # Pop stash after successful merge
+        if result.returncode != 0:
+            # Check for conflicts
+            if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
+                conflicts = self._parse_conflicts()
+                # Don't pop stash yet - let user resolve merge conflicts first
+                return False, conflicts, None
+
+            # Other error - restore stash
             if stashed:
                 self._pop_stash()
-            return True, None, None
+            detail = result.stderr.strip() or result.stdout.strip() or "Merge failed"
+            return False, None, detail
 
-        # Check for conflicts
-        if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
-            conflicts = self._parse_conflicts()
-            # Don't pop stash yet - let user resolve merge conflicts first
-            # The stash will be popped after merge is complete
-            return False, conflicts, None
+        # Squash merge succeeded - now commit with the user's message
+        commit_result = self._run_git("commit", "-m", final_msg, check=False)
+        if commit_result.returncode != 0:
+            # Commit failed - abort the merge and restore state
+            self._run_git("reset", "--hard", "HEAD", check=False)
+            if stashed:
+                self._pop_stash()
+            detail = commit_result.stderr.strip() or commit_result.stdout.strip() or "Commit failed"
+            return False, None, detail
 
-        # Other error - restore stash
+        # Pop stash after successful merge
         if stashed:
             self._pop_stash()
-        detail = result.stderr.strip() or result.stdout.strip() or "Merge failed"
-        return False, None, detail
+        return True, None, None
 
     def _parse_conflicts(self) -> list[MergeConflict]:
         """Parse conflict markers from conflicted files."""
@@ -782,17 +794,45 @@ class GitWorktreeManager:
         result = self._run_git("diff", "--name-only", "--diff-filter=U", check=False)
         return bool(result.stdout.strip())
 
+    def _is_squash_merge_in_progress(self) -> bool:
+        """Check if we're in a squash merge state (not a regular merge)."""
+        squash_msg = self.project_path / ".git" / "SQUASH_MSG"
+        merge_head = self.project_path / ".git" / "MERGE_HEAD"
+        return squash_msg.exists() and not merge_head.exists()
+
+    def _is_regular_merge_in_progress(self) -> bool:
+        """Check if we're in a regular merge state."""
+        merge_head = self.project_path / ".git" / "MERGE_HEAD"
+        return merge_head.exists()
+
     def abort_merge(self) -> bool:
-        """Abort an in-progress merge."""
-        result = self._run_git("merge", "--abort", check=False)
-        if result.returncode != 0:
+        """Abort an in-progress merge (regular or squash)."""
+        if self._is_regular_merge_in_progress():
+            # Regular merge - use git merge --abort
+            result = self._run_git("merge", "--abort", check=False)
+            if result.returncode != 0:
+                return False
+        elif self._is_squash_merge_in_progress():
+            # Squash merge - reset to HEAD and clean up SQUASH_MSG
+            result = self._run_git("reset", "--hard", "HEAD", check=False)
+            if result.returncode != 0:
+                return False
+            squash_msg = self.project_path / ".git" / "SQUASH_MSG"
+            if squash_msg.exists():
+                squash_msg.unlink()
+        else:
+            # No merge in progress
             return False
         # Restore any stashed changes from before the merge
         self._pop_chad_stash_if_exists()
         return True
 
-    def complete_merge(self) -> bool:
-        """Complete the merge after all conflicts resolved."""
+    def complete_merge(self, commit_message: str | None = None) -> bool:
+        """Complete the merge after all conflicts resolved.
+
+        Args:
+            commit_message: Optional custom commit message (required for squash merge)
+        """
         # Stage all resolved files
         result = self._run_git("add", "-A", check=False)
         if result.returncode != 0:
@@ -803,8 +843,32 @@ class GitWorktreeManager:
         if result.stdout.strip():
             return False  # Still have conflicts
 
+        # Check if there's anything to commit (may be empty if conflict resolved to no changes)
+        result = self._run_git("diff", "--cached", "--quiet", check=False)
+        is_squash = self._is_squash_merge_in_progress()
+
+        if result.returncode == 0:
+            # Nothing to commit - this is OK if we resolved conflict to no net changes
+            # Clean up the squash merge state if present
+            if is_squash:
+                squash_msg = self.project_path / ".git" / "SQUASH_MSG"
+                if squash_msg.exists():
+                    squash_msg.unlink()
+            self._pop_chad_stash_if_exists()
+            return True
+
         # Commit the merge
-        result = self._run_git("commit", "--no-edit", check=False)
+        if is_squash:
+            # Squash merge - need to provide a message or use SQUASH_MSG
+            if commit_message:
+                result = self._run_git("commit", "-m", commit_message, check=False)
+            else:
+                # Use the default SQUASH_MSG
+                result = self._run_git("commit", "--no-edit", check=False)
+        else:
+            # Regular merge - can use --no-edit
+            result = self._run_git("commit", "--no-edit", check=False)
+
         if result.returncode != 0:
             return False
 
