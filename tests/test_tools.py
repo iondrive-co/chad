@@ -114,29 +114,6 @@ class TestScreenshot:
         assert "provider-summary" in COMPONENT_SELECTORS
 
 
-class TestSkillsEfficiency:
-    """Test skills use efficient python detection."""
-
-    def test_skills_should_recommend_verify_function(self):
-        """Skills should guide agents to use verify() function instead of hardcoded paths."""
-        # Read the verifying skill definition
-        from pathlib import Path
-        skill_path = Path(".claude/skills/verifying/SKILL.md")
-
-        if skill_path.exists():
-            skill_content = skill_path.read_text()
-
-            # The skill should guide toward using the verify() function or have fallback logic
-            # Currently it hardcodes ./.venv/bin/python which causes inefficiency
-            # This test documents the expected improvement
-            assert "./.venv/bin/python" in skill_content, "Current skill hardcodes venv path"
-
-            # After improvement, the skill should either:
-            # 1. Recommend using verify() function from chad.ui.gradio.verification.tools
-            # 2. Include fallback logic for when .venv doesn't exist
-            # This test will pass when the skill is improved
-
-
 class TestParseVerificationResponse:
     """Test parse_verification_response with various inputs."""
 
