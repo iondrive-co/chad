@@ -5764,7 +5764,9 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
 })();
 
 // Live view scroll tracking to prevent auto-scroll when user has scrolled up
-window._liveStreamScroll = window._liveStreamScroll || new WeakMap();
+// State is stored by parent container ID since .live-output-content gets recreated on updates
+window._liveStreamScrollState = window._liveStreamScrollState || {};
+window._liveStreamTrackedParents = window._liveStreamTrackedParents || new WeakSet();
 
 function initializeLiveStreamScrollTracking() {
     const getRoot = () => {
@@ -5772,88 +5774,87 @@ function initializeLiveStreamScrollTracking() {
         return (app && app.shadowRoot) ? app.shadowRoot : document;
     };
 
-    function setupScrollTracking(container) {
-        if (window._liveStreamScroll.has(container)) {
-            return; // Already setup
+    // Generate a stable ID for a parent container
+    function getParentId(parent) {
+        if (parent.id) return parent.id;
+        // Generate and assign an ID if none exists
+        if (!parent.dataset.scrollTrackId) {
+            parent.dataset.scrollTrackId = 'scroll-' + Math.random().toString(36).substr(2, 9);
         }
+        return parent.dataset.scrollTrackId;
+    }
 
-        // Initialize state for this container
-        const state = {
-            userScrolledUp: false,      // True when user actively scrolled away from bottom
-            savedScrollTop: null,       // User's scroll position (null = auto-scroll, number = restore position)
-            ignoreNextScroll: false,    // Prevent feedback loops when setting scrollTop programmatically
-            lastScrollHeight: container.scrollHeight
-        };
+    // Get or create state for a parent container
+    function getState(parentId) {
+        if (!window._liveStreamScrollState[parentId]) {
+            window._liveStreamScrollState[parentId] = {
+                userScrolledUp: false,
+                savedScrollTop: null,
+                ignoreNextScroll: false
+            };
+        }
+        return window._liveStreamScrollState[parentId];
+    }
 
-        window._liveStreamScroll.set(container, state);
+    // Setup scroll tracking on a parent container (stable element)
+    function setupParentTracking(parent) {
+        if (window._liveStreamTrackedParents.has(parent)) {
+            return;
+        }
+        window._liveStreamTrackedParents.add(parent);
 
-        // Track user scroll behavior
-        container.addEventListener('scroll', () => {
+        const parentId = getParentId(parent);
+        const state = getState(parentId);
+
+        // Use event delegation for scroll events on .live-output-content
+        parent.addEventListener('scroll', (e) => {
+            const content = e.target.closest('.live-output-content');
+            if (!content) return;
             if (state.ignoreNextScroll) return;
 
-            const isAtBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 1;
+            const isAtBottom = content.scrollTop + content.clientHeight >= content.scrollHeight - 5;
 
             if (isAtBottom) {
-                // User scrolled back to bottom - resume auto-scrolling
                 state.userScrolledUp = false;
                 state.savedScrollTop = null;
             } else {
-                // User scrolled up from bottom - preserve their position
                 state.userScrolledUp = true;
-                state.savedScrollTop = container.scrollTop;
+                state.savedScrollTop = content.scrollTop;
             }
-        });
+        }, true);
 
-        // Watch for content changes using MutationObserver
+        // Watch for DOM changes (content replacement)
         const observer = new MutationObserver(() => {
-            if (container.scrollHeight !== state.lastScrollHeight) {
-                state.lastScrollHeight = container.scrollHeight;
-                restoreScrollPosition(container, state);
-            }
+            const content = parent.querySelector('.live-output-content');
+            if (!content) return;
+
+            requestAnimationFrame(() => {
+                state.ignoreNextScroll = true;
+                if (state.userScrolledUp && state.savedScrollTop !== null) {
+                    content.scrollTop = state.savedScrollTop;
+                }
+                setTimeout(() => { state.ignoreNextScroll = false; }, 50);
+            });
         });
 
-        observer.observe(container, {
+        observer.observe(parent, {
             childList: true,
-            subtree: true,
-            characterData: true
+            subtree: true
         });
     }
 
-    function restoreScrollPosition(container, state) {
-        if (!container || !state) return;
-        state.ignoreNextScroll = true;
-
-        requestAnimationFrame(() => {
-            // If user has scrolled away from bottom, maintain their position
-            if (state.userScrolledUp && state.savedScrollTop !== null) {
-                container.scrollTop = state.savedScrollTop;
-            }
-            // Otherwise, if user is at bottom or hasn't scrolled, scroll to bottom for new content
-            else if (!state.userScrolledUp) {
-                container.scrollTop = container.scrollHeight;
-            }
-
-            setTimeout(() => { state.ignoreNextScroll = false; }, 100);
-        });
-    }
-
-    function findAndSetupContainers() {
+    function findAndSetupParents() {
         const root = getRoot();
-        const containers = [
-            ...root.querySelectorAll('#live-stream-box .live-output-content'),
-            ...root.querySelectorAll('.live-stream-box .live-output-content')
-        ];
+        const parents = [
+            root.querySelector('#live-stream-box'),
+            ...root.querySelectorAll('.live-stream-box')
+        ].filter(Boolean);
 
-        containers.forEach(container => {
-            if (container) {
-                setupScrollTracking(container);
-            }
-        });
+        parents.forEach(parent => setupParentTracking(parent));
     }
 
-    // Setup scroll tracking for existing and future containers
-    setInterval(findAndSetupContainers, 500);
-    setTimeout(findAndSetupContainers, 100);
+    setInterval(findAndSetupParents, 500);
+    setTimeout(findAndSetupParents, 100);
 }
 
 initializeLiveStreamScrollTracking();
