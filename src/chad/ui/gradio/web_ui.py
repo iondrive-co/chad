@@ -4722,7 +4722,7 @@ class ChadWebUI:
                         coding_model = gr.Dropdown(
                             choices=coding_model_choices,
                             value=coding_model_value,
-                            label="Preferred Model",
+                            label="Model",
                             allow_custom_value=True,
                             scale=1,
                             min_width=200,
@@ -4751,7 +4751,7 @@ class ChadWebUI:
                         verification_model = gr.Dropdown(
                             choices=verif_state.model_choices,
                             value=verif_state.model_value,
-                            label="Verification Preferred Model",
+                            label="Verification Model",
                             allow_custom_value=True,
                             scale=1,
                             min_width=200,
@@ -5385,6 +5385,7 @@ class ChadWebUI:
                 retention_days = 7
 
             accounts = self.api_client.list_accounts()
+            accounts_map = {acc.name: acc for acc in accounts}
             account_choices = [acc.name for acc in accounts]
             coding_assignment = ""
             for acc in accounts:
@@ -5400,26 +5401,31 @@ class ChadWebUI:
                 (name, name) for name in account_choices
             ]
 
+            def verification_model_state(selected_agent: str | None) -> tuple[list[str], str, bool, bool]:
+                if not selected_agent or selected_agent == self.SAME_AS_CODING:
+                    return (["default"], "default", False, False)
+                model_choices = self.get_models_for_account(selected_agent) or ["default"]
+                try:
+                    acc = accounts_map.get(selected_agent) or self.api_client.get_account(selected_agent)
+                    stored_model = (acc.model if acc else None) or "default"
+                except Exception:
+                    stored_model = "default"
+                if stored_model not in model_choices:
+                    model_choices = [*model_choices, stored_model]
+                model_value = stored_model if stored_model else model_choices[0]
+                return (model_choices, model_value, True, True)
+
+            (
+                verification_model_choices,
+                verification_model_value,
+                verification_model_visible,
+                verification_model_interactive,
+            ) = verification_model_state(verification_value)
+
             gr.Markdown(
                 "Manage global settings that live in `.chad.conf`. Changes save immediately.",
                 elem_classes=["config-panel__intro"],
             )
-
-            # Get initial model choices and value for coding agent
-            if coding_value:
-                coding_model_choices = self.get_models_for_account(coding_value) or ["default"]
-                try:
-                    coding_acc = self.api_client.get_account(coding_value)
-                    stored_model = coding_acc.model or "default"
-                except Exception:
-                    stored_model = "default"
-                coding_model_value = stored_model if stored_model in coding_model_choices else (
-                    coding_model_choices[0] if coding_model_choices else "default"
-                )
-            else:
-                coding_model_choices = ["default"]
-                coding_model_value = "default"
-
             with gr.Row():
                 retention_input = gr.Number(
                     label="Retention Days",
@@ -5435,26 +5441,26 @@ class ChadWebUI:
                     allow_custom_value=False,
                 )
             with gr.Row():
-                preferred_model = gr.Dropdown(
-                    label="Preferred Model",
-                    choices=coding_model_choices,
-                    value=coding_model_value,
-                    allow_custom_value=False,
-                    interactive=bool(coding_value),
-                    info="Model for the coding agent",
-                )
                 verification_pref = gr.Dropdown(
                     label="Preferred Verification Agent",
                     choices=verification_choices,
                     value=verification_value,
                     allow_custom_value=False,
                 )
-            with gr.Row():
+                verification_model_pref = gr.Dropdown(
+                    label="Verification Model",
+                    choices=verification_model_choices,
+                    value=verification_model_value,
+                    allow_custom_value=True,
+                    visible=verification_model_visible,
+                    interactive=verification_model_interactive,
+                )
                 project_path_pref = gr.Textbox(
                     label="Default Project Path",
                     placeholder="/path/to/project",
                     value=prefs_dict.get("project_path", ""),
                 )
+            with gr.Row():
                 ui_mode_pref = gr.Dropdown(
                     label="UI Mode",
                     choices=["gradio", "cli"],
@@ -5512,7 +5518,6 @@ class ChadWebUI:
         retention_input.change(on_retention_change, inputs=[retention_input], outputs=[config_status])
 
         def on_coding_pref_change(account_name):
-            """Handle coding agent change - update role and refresh model dropdown."""
             if not account_name:
                 try:
                     # Find the current coding account and clear its role
@@ -5520,69 +5525,58 @@ class ChadWebUI:
                         if acc.role == "CODING":
                             self.api_client.set_account_role(acc.name, "")
                             break
-                    return (
-                        "🧹 Cleared preferred coding agent",
-                        gr.update(choices=["default"], value="default", interactive=False),
-                    )
+                    return "🧹 Cleared preferred coding agent"
                 except Exception as exc:
-                    return f"❌ {exc}", gr.update()
+                    return f"❌ {exc}"
             try:
                 self.api_client.set_account_role(account_name, "CODING")
-                # Get model choices for the new coding agent
-                model_choices = self.get_models_for_account(account_name) or ["default"]
-                try:
-                    acc = self.api_client.get_account(account_name)
-                    stored_model = acc.model or "default"
-                except Exception:
-                    stored_model = "default"
-                model_value = stored_model if stored_model in model_choices else (
-                    model_choices[0] if model_choices else "default"
-                )
-                return (
-                    f"✅ Preferred coding agent saved: {account_name}",
-                    gr.update(choices=model_choices, value=model_value, interactive=True),
-                )
-            except Exception as exc:
-                return f"❌ {exc}", gr.update()
-
-        coding_pref.change(
-            on_coding_pref_change,
-            inputs=[coding_pref],
-            outputs=[config_status, preferred_model],
-        )
-
-        def on_preferred_model_change(model, coding_agent):
-            """Save the preferred model for the coding agent."""
-            if not coding_agent or not model:
-                return ""  # No status message needed
-            try:
-                self.api_client.set_account_model(coding_agent, model)
-                return f"✅ Preferred model saved: {model}"
+                return f"✅ Preferred coding agent saved: {account_name}"
             except Exception as exc:
                 return f"❌ {exc}"
 
-        preferred_model.change(
-            on_preferred_model_change,
-            inputs=[preferred_model, coding_pref],
-            outputs=[config_status],
-        )
+        coding_pref.change(on_coding_pref_change, inputs=[coding_pref], outputs=[config_status])
 
         def on_verification_pref_change(account_name):
             if not account_name or account_name == self.SAME_AS_CODING:
                 try:
                     self.api_client.set_verification_agent(None)
-                    return "✅ Verification agent set to same as coding"
+                    status_msg = "✅ Verification agent set to same as coding"
                 except Exception as exc:
-                    return f"❌ {exc}"
-            try:
-                self.api_client.set_verification_agent(account_name)
-                return f"✅ Verification agent saved: {account_name}"
-            except Exception as exc:
-                return f"❌ {exc}"
+                    status_msg = f"❌ {exc}"
+            else:
+                try:
+                    self.api_client.set_verification_agent(account_name)
+                    status_msg = f"✅ Verification agent saved: {account_name}"
+                except Exception as exc:
+                    status_msg = f"❌ {exc}"
+
+            model_choices, model_value, visible, interactive = verification_model_state(account_name)
+            dropdown_update = gr.update(
+                choices=model_choices,
+                value=model_value,
+                visible=visible,
+                interactive=interactive,
+            )
+            return status_msg, dropdown_update
 
         verification_pref.change(
             on_verification_pref_change,
             inputs=[verification_pref],
+            outputs=[config_status, verification_model_pref],
+        )
+
+        def on_verification_model_change(model_name, account_name):
+            if not account_name or account_name == self.SAME_AS_CODING:
+                return "❌ Select a verification agent before setting a model"
+            try:
+                self.api_client.set_account_model(account_name, model_name)
+                return f"✅ Verification model saved for {account_name}"
+            except Exception as exc:
+                return f"❌ {exc}"
+
+        verification_model_pref.change(
+            on_verification_model_change,
+            inputs=[verification_model_pref, verification_pref],
             outputs=[config_status],
         )
 

@@ -273,19 +273,21 @@ class TestTerminalLayoutForDisplay:
     horizontal scrolling or garbled layout.
     """
 
-    def test_default_terminal_width_fits_typical_ui_panel(self):
-        """Default TERMINAL_COLS should be ≤80 to fit in typical UI panels.
+    def test_default_terminal_width_allows_css_wrapping(self):
+        """Default TERMINAL_COLS should be very wide to let CSS handle wrapping.
 
-        A 120-column terminal requires ~960px at 8px per character, which
-        is too wide for many UI layouts. 80 columns (~640px) fits better.
+        We use a very wide terminal so CLI tools don't artificially break lines.
+        The CSS on the live stream panel uses pre-wrap to naturally wrap content
+        at the actual panel edge. This allows responsive behavior - content wraps
+        based on the actual UI width, not a hardcoded column count.
         """
         from chad.ui.terminal_emulator import TERMINAL_COLS
-        assert TERMINAL_COLS <= 80, (
-            f"TERMINAL_COLS={TERMINAL_COLS} is too wide for typical UI panels. "
-            "Should be ≤80 to avoid horizontal scrolling and garbled layout."
+        assert TERMINAL_COLS >= 200, (
+            f"TERMINAL_COLS={TERMINAL_COLS} should be very wide (>=200) so that "
+            "CLI tools don't artificially break lines. CSS handles responsive wrapping."
         )
 
-    def test_tui_box_renders_without_excessive_width(self):
+    def test_tui_box_renders_within_terminal_width(self):
         """TUI-style box drawing should render within terminal width.
 
         When a CLI tool draws a box (like status panel), the text should
@@ -295,8 +297,7 @@ class TestTerminalLayoutForDisplay:
         emu = TerminalEmulator(TERMINAL_COLS, TERMINAL_ROWS)
 
         # Simulate a TUI box being drawn (like codex/claude status panels)
-        # Box at column 50 would be problematic if terminal is narrower
-        box_width = min(40, TERMINAL_COLS - 5)
+        box_width = 80  # Use a reasonable fixed width for the box
         emu.feed("─" * box_width + "\n")
         emu.feed("│ Status: Running" + " " * (box_width - 18) + "│\n")
         emu.feed("─" * box_width + "\n")
