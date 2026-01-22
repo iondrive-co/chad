@@ -5431,11 +5431,17 @@ class ChadWebUI:
                     break
             coding_value = coding_assignment if coding_assignment in account_choices else None
 
-            verification_value = self.api_client.get_verification_agent() or self.SAME_AS_CODING
-            if verification_value not in account_choices:
+            stored_verification = self.api_client.get_verification_agent()
+            if stored_verification == self.VERIFICATION_NONE:
+                verification_value = self.VERIFICATION_NONE
+            elif stored_verification and stored_verification in account_choices:
+                verification_value = stored_verification
+            else:
                 verification_value = self.SAME_AS_CODING
-            verification_choices = [(self.SAME_AS_CODING, self.SAME_AS_CODING)] + [
-                (name, name) for name in account_choices
+            verification_choices = [
+                (self.SAME_AS_CODING, self.SAME_AS_CODING),
+                (self.VERIFICATION_NONE_LABEL, self.VERIFICATION_NONE),
+                *[(name, name) for name in account_choices],
             ]
 
             def coding_model_state(selected_agent: str | None) -> tuple[list[str], str, bool]:
@@ -5454,7 +5460,7 @@ class ChadWebUI:
                 return (model_choices, model_value, True)
 
             def verification_model_state(selected_agent: str | None) -> tuple[list[str], str, bool, bool]:
-                if not selected_agent or selected_agent == self.SAME_AS_CODING:
+                if not selected_agent or selected_agent == self.SAME_AS_CODING or selected_agent == self.VERIFICATION_NONE:
                     return (["default"], "default", False, False)
                 model_choices = self.get_models_for_account(selected_agent) or ["default"]
                 try:
@@ -5622,6 +5628,12 @@ class ChadWebUI:
                 try:
                     self.api_client.set_verification_agent(None)
                     status_msg = "✅ Verification agent set to same as coding"
+                except Exception as exc:
+                    status_msg = f"❌ {exc}"
+            elif account_name == self.VERIFICATION_NONE:
+                try:
+                    self.api_client.set_verification_agent(self.VERIFICATION_NONE)
+                    status_msg = "✅ Verification disabled"
                 except Exception as exc:
                     status_msg = f"❌ {exc}"
             else:

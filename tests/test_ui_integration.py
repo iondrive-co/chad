@@ -484,6 +484,36 @@ class TestSetupTab:
 
         assert config.get("accounts", {}).get("claude-pro", {}).get("model") == "claude-opus-4-20250514"
 
+    def test_verification_agent_none_option_available(self, page: Page):
+        """Config panel 'Preferred Verification Agent' should include 'None' option."""
+        page.get_by_role("tab", name="⚙️ Setup").click()
+        config_toggle = page.get_by_role("button", name="Config")
+        config_toggle.click()
+
+        verification_dropdown = page.get_by_label("Preferred Verification Agent")
+        verification_dropdown.click()
+
+        # Should see the "None" option to disable verification
+        none_option = page.get_by_role("option", name="None")
+        expect(none_option).to_be_visible(timeout=3000)
+
+    def test_verification_agent_none_persists_to_config(self, page: Page, temp_env):
+        """Selecting 'None' for verification agent should persist to config file."""
+        page.get_by_role("tab", name="⚙️ Setup").click()
+        config_toggle = page.get_by_role("button", name="Config")
+        config_toggle.click()
+
+        verification_dropdown = page.get_by_label("Preferred Verification Agent")
+        verification_dropdown.click()
+        page.get_by_role("option", name="None").click()
+
+        page.wait_for_timeout(800)
+        with open(temp_env.config_path, encoding="utf-8") as f:
+            config = json.load(f)
+
+        # Should store the special marker "__verification_none__" to indicate no verification
+        assert config.get("verification_agent") == "__verification_none__"
+
 
 class TestSubtaskTabs:
     """Test subtask tab filtering (integration with mock provider)."""

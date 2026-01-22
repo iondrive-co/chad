@@ -505,6 +505,9 @@ class ConfigManager:
         config = self.load_config()
         return config.get("preferences")
 
+    # Special marker value indicating verification is disabled
+    VERIFICATION_NONE = "__verification_none__"
+
     def set_verification_agent(self, account_name: str | None) -> None:
         """Set the verification agent account.
 
@@ -512,13 +515,17 @@ class ConfigManager:
         explicitly set. Once set, it persists even if the coding agent changes.
 
         Args:
-            account_name: Account name to use for verification, or None to reset to default
+            account_name: Account name to use for verification, None to reset to default,
+                          or VERIFICATION_NONE ("__verification_none__") to disable verification
         """
         config = self.load_config()
         if account_name is None:
             # Remove the setting to revert to default behavior
             if "verification_agent" in config:
                 del config["verification_agent"]
+        elif account_name == self.VERIFICATION_NONE:
+            # Store special marker to disable verification
+            config["verification_agent"] = account_name
         else:
             if not self.has_account(account_name):
                 raise ValueError(f"Account '{account_name}' does not exist")
@@ -529,11 +536,14 @@ class ConfigManager:
         """Get the verification agent account.
 
         Returns:
-            Account name for verification agent, or None if not explicitly set
-            (meaning it should default to the coding agent's provider)
+            Account name for verification agent, VERIFICATION_NONE if verification is disabled,
+            or None if not explicitly set (meaning it should default to the coding agent's provider)
         """
         config = self.load_config()
         account = config.get("verification_agent")
+        # Return special marker value as-is
+        if account == self.VERIFICATION_NONE:
+            return account
         # Verify the account still exists
         if account and not self.has_account(account):
             return None
