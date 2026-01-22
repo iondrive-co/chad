@@ -16,9 +16,9 @@ import pyte
 
 
 # Terminal geometry constants - default values used when client doesn't provide dimensions.
-# 120 columns fits well in the typical chatbot panel width (~1000px at ~8px per char).
-# This prevents horizontal scrollbars while using most of the available space.
-TERMINAL_COLS = 120
+# 160 columns fits well in the live stream panel (~1280px at ~8px per char).
+# The live stream panel is typically full width, so we use more columns than the chatbot.
+TERMINAL_COLS = 160
 TERMINAL_ROWS = 40
 
 

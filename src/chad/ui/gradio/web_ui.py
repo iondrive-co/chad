@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 from chad.ui.client.stream_client import SyncStreamClient
 from chad.ui.terminal_emulator import TerminalEmulator, TERMINAL_COLS, TERMINAL_ROWS
+from chad.server.services.task_executor import ClaudeStreamJsonParser
 from chad.util.event_log import (
     EventLog,
     SessionStartedEvent,
@@ -2059,20 +2060,46 @@ class ChadWebUI:
         terminal = TerminalEmulator(cols=TERMINAL_COLS, rows=TERMINAL_ROWS)
         exit_code = 0
 
+        # Detect if this is anthropic provider (outputs stream-json that needs parsing)
+        json_parser = None
+        try:
+            accounts = self.api_client.list_accounts()
+            for acc in accounts:
+                if acc.name == coding_account and acc.provider == "anthropic":
+                    json_parser = ClaudeStreamJsonParser()
+                    break
+        except Exception:
+            pass  # Fall back to raw output if we can't determine provider
+
         try:
             for event in stream_client.stream_events(server_session_id, include_terminal=True):
                 if event.event_type == "terminal":
                     # Feed terminal data (base64 for live PTY, plain text for logs)
                     raw_data = event.data.get("data", "")
                     if event.data.get("text"):
-                        terminal.feed(raw_data or "")
-                        text_chunk = raw_data or ""
+                        raw_bytes = (raw_data or "").encode("utf-8")
                     else:
-                        terminal.feed_base64(raw_data)
-                        text_chunk = base64.b64decode(raw_data or "").decode("utf-8", errors="replace")
-                    # Render and post to message queue for real-time display
-                    html_output = terminal.render_html()
-                    message_queue.put(("stream", text_chunk, html_output))
+                        try:
+                            raw_bytes = base64.b64decode(raw_data or "")
+                        except Exception:
+                            raw_bytes = b""
+
+                    # For anthropic, parse stream-json and convert to readable text
+                    if json_parser:
+                        text_chunks = json_parser.feed(raw_bytes)
+                        if text_chunks:
+                            # Join parsed text and feed to terminal
+                            readable_text = "\n".join(text_chunks) + "\n"
+                            terminal.feed(readable_text)
+                            html_output = terminal.render_html()
+                            message_queue.put(("stream", readable_text, html_output))
+                        # If no complete lines yet, don't emit anything
+                    else:
+                        # Non-anthropic: pass through raw PTY output
+                        terminal.feed(raw_bytes)
+                        text_chunk = raw_bytes.decode("utf-8", errors="replace")
+                        html_output = terminal.render_html()
+                        message_queue.put(("stream", text_chunk, html_output))
 
                 elif event.event_type == "complete":
                     exit_code = event.data.get("exit_code", 0)

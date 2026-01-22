@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 from pathlib import Path
 
 from chad.ui.gradio.web_ui import ChadWebUI, Session
+from chad.ui.client.api_client import Account
 
 
 class TestCancelTask:
@@ -16,7 +17,8 @@ class TestCancelTask:
         """Create ChadWebUI instance."""
         api_client = MagicMock()
         api_client.list_accounts.return_value = [
-            {"name": "test-account", "provider": "anthropic", "role": "CODING"}
+            Account(name="test-account", provider="anthropic", model=None,
+                    reasoning=None, role="CODING", ready=True)
         ]
         api_client.list_providers.return_value = ["anthropic"]
         return ChadWebUI(api_client)

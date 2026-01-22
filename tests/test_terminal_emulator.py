@@ -273,17 +273,17 @@ class TestTerminalLayoutForDisplay:
     horizontal scrolling or garbled layout.
     """
 
-    def test_default_terminal_width_fits_chatbot_panel(self):
-        """Default TERMINAL_COLS should fit the chatbot panel without scrollbar.
+    def test_default_terminal_width_fits_live_stream_panel(self):
+        """Default TERMINAL_COLS should fit the live stream panel well.
 
-        120 columns at ~8px per character = ~960px, which fits well in the
-        typical chatbot panel width (~1000px). This prevents horizontal
-        scrollbars while using most of the available space.
+        160 columns at ~8px per character = ~1280px, which fits well in the
+        live stream panel which spans full width. This provides good width
+        utilization while allowing horizontal scroll on smaller screens.
         """
         from chad.ui.terminal_emulator import TERMINAL_COLS
-        assert 100 <= TERMINAL_COLS <= 140, (
-            f"TERMINAL_COLS={TERMINAL_COLS} should be 100-140 to fit the chatbot "
-            "panel without causing horizontal scrollbars."
+        assert 140 <= TERMINAL_COLS <= 180, (
+            f"TERMINAL_COLS={TERMINAL_COLS} should be 140-180 to utilize the "
+            "live stream panel width effectively."
         )
 
     def test_tui_box_renders_within_terminal_width(self):
