@@ -2,10 +2,22 @@
 
 import threading
 import pytest
+from dataclasses import dataclass
 from unittest.mock import MagicMock
 from pathlib import Path
 
 from chad.ui.gradio.web_ui import ChadWebUI, Session
+
+
+@dataclass
+class MockAccount:
+    """Mock account for tests."""
+
+    name: str
+    provider: str
+    model: str | None = "default"
+    reasoning: str | None = "default"
+    role: str | None = None
 
 
 class TestCancelTask:
@@ -16,7 +28,7 @@ class TestCancelTask:
         """Create ChadWebUI instance."""
         api_client = MagicMock()
         api_client.list_accounts.return_value = [
-            {"name": "test-account", "provider": "anthropic", "role": "CODING"}
+            MockAccount(name="test-account", provider="anthropic", role="CODING")
         ]
         api_client.list_providers.return_value = ["anthropic"]
         return ChadWebUI(api_client)
