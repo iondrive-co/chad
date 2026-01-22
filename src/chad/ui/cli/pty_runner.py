@@ -121,7 +121,7 @@ def build_agent_command(
     if provider == "anthropic":
         # Claude Code CLI
         config_dir = Path.home() / ".chad" / "claude-configs" / account_name
-        cmd = ["claude", "-p", "--permission-mode", "bypassPermissions"]
+        cmd = ["claude", "--permission-mode", "bypassPermissions"]
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
 
     elif provider == "openai":

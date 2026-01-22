@@ -152,7 +152,29 @@ class EventMultiplexer:
         Yields:
             MuxEvent objects in sequence order
         """
-        pty_session = pty_service.get_session_by_session_id(self.session_id)
+        pty_session = None
+
+        # If terminal output is requested, keep polling for the PTY session while
+        # still streaming EventLog and ping events. This avoids the previous
+        # race where we fell back permanently after a fixed wait.
+        if include_terminal:
+            while True:
+                pty_session = pty_service.get_session_by_session_id(self.session_id)
+                if pty_session:
+                    break
+
+                # Stream any available EventLog events while waiting
+                if include_events or include_terminal:
+                    events = self._drain_event_log(skip_terminal=not include_terminal)
+                    for event in events:
+                        yield event
+                        if event.data.get("type") in ("session_ended",):
+                            return
+
+                if self._should_ping():
+                    yield self._create_ping()
+
+                await asyncio.sleep(0.1)
 
         if pty_session and include_terminal:
             # Primary path: Stream PTY events with interspersed EventLog events

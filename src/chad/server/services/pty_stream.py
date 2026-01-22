@@ -9,6 +9,7 @@ import os
 import select
 import signal
 import struct
+import subprocess
 import termios
 import threading
 import uuid
@@ -34,6 +35,9 @@ class PTYSession:
     cwd: Path
     env: dict[str, str]
 
+    # Subprocess object (when using subprocess.Popen instead of pty.fork)
+    _proc: subprocess.Popen | None = None
+
     # State
     active: bool = True
     exit_code: int | None = None
@@ -41,6 +45,10 @@ class PTYSession:
     # Subscribers receive events via asyncio queues
     _subscribers: list[asyncio.Queue] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    # Buffer of recent events for replay to late subscribers
+    # This handles the race condition where subscribers connect after events have been dispatched
+    _event_buffer: list["PTYEvent"] = field(default_factory=list)
 
     # Logging callback - called synchronously for every event before broadcast
     # This is a dedicated path for logging that doesn't compete with client queues
@@ -81,6 +89,9 @@ class PTYStreamService:
     ) -> str:
         """Start a PTY process.
 
+        Uses subprocess.Popen with pty.openpty() instead of pty.fork() to avoid
+        deadlock issues in multi-threaded processes (like FastAPI/uvicorn).
+
         Args:
             session_id: The session this PTY belongs to
             cmd: Command and arguments to run
@@ -108,47 +119,65 @@ class PTYStreamService:
         full_env["LINES"] = str(rows)
         full_env["COLUMNS"] = str(cols)
 
-        # Fork with PTY
-        pid, master_fd = pty.fork()
+        # Create PTY pair - avoids pty.fork() which can deadlock in multi-threaded processes
+        master_fd, slave_fd = pty.openpty()
 
-        if pid == 0:
-            # Child process
-            os.chdir(cwd)
-            os.execvpe(cmd[0], cmd, full_env)
-        else:
-            # Parent process
-            # Set terminal size
-            self._set_winsize(master_fd, rows, cols)
+        # Set terminal size on the master
+        self._set_winsize(master_fd, rows, cols)
 
-            # Make master_fd non-blocking
-            flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
-            fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        # Create preexec function that sets up the controlling terminal
+        _slave_fd = slave_fd
 
-            # Create session
-            session = PTYSession(
-                stream_id=stream_id,
-                session_id=session_id,
-                pid=pid,
-                master_fd=master_fd,
-                cmd=cmd,
-                cwd=cwd,
-                env=full_env,
-                _log_callback=log_callback,
-            )
+        def setup_child():
+            # Create new session (become session leader)
+            os.setsid()
+            # Set the slave as the controlling terminal
+            fcntl.ioctl(_slave_fd, termios.TIOCSCTTY, 0)
 
-            with self._lock:
-                self._sessions[stream_id] = session
+        # Start the process with the slave PTY as stdin/stdout/stderr
+        proc = subprocess.Popen(
+            cmd,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            cwd=str(cwd),
+            env=full_env,
+            preexec_fn=setup_child,
+            close_fds=True,
+            pass_fds=(slave_fd,),
+        )
 
-            # Start output reading thread
-            thread = threading.Thread(
-                target=self._read_output_loop,
-                args=(session,),
-                daemon=True,
-            )
-            session._output_thread = thread
-            thread.start()
+        # Close the slave FD in the parent - the child has its own copy
+        os.close(slave_fd)
 
-            return stream_id
+        # Make master_fd non-blocking
+        flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+        fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+        # Create session
+        session = PTYSession(
+            stream_id=stream_id,
+            session_id=session_id,
+            pid=proc.pid,
+            master_fd=master_fd,
+            cmd=cmd,
+            cwd=cwd,
+            env=full_env,
+            _proc=proc,
+            _log_callback=log_callback,
+        )
+
+        with self._lock:
+            self._sessions[stream_id] = session
+        # Start output reading thread
+        thread = threading.Thread(
+            target=self._read_output_loop,
+            args=(session,),
+            daemon=True,
+        )
+        session._output_thread = thread
+        thread.start()
+        return stream_id
 
     def _set_winsize(self, fd: int, rows: int, cols: int) -> None:
         """Set terminal window size."""
@@ -192,16 +221,24 @@ class PTYStreamService:
                 break
 
         # Process exited - get exit code
-        try:
-            _, status = os.waitpid(session.pid, os.WNOHANG)
-            if os.WIFEXITED(status):
-                session.exit_code = os.WEXITSTATUS(status)
-            elif os.WIFSIGNALED(status):
-                session.exit_code = -os.WTERMSIG(status)
-            else:
+        if session._proc is not None:
+            try:
+                session._proc.wait(timeout=1.0)
+                session.exit_code = session._proc.returncode
+            except subprocess.TimeoutExpired:
                 session.exit_code = -1
-        except ChildProcessError:
-            session.exit_code = 0
+        else:
+            # Legacy pty.fork() path
+            try:
+                _, status = os.waitpid(session.pid, os.WNOHANG)
+                if os.WIFEXITED(status):
+                    session.exit_code = os.WEXITSTATUS(status)
+                elif os.WIFSIGNALED(status):
+                    session.exit_code = -os.WTERMSIG(status)
+                else:
+                    session.exit_code = -1
+            except ChildProcessError:
+                session.exit_code = 0
 
         session.active = False
 
@@ -225,6 +262,9 @@ class PTYStreamService:
         The logging callback is called first (synchronously) before broadcasting
         to subscriber queues. This ensures logging never misses events due to
         queue contention.
+
+        Events are also buffered for replay to late subscribers who connect
+        after events have been dispatched.
         """
         # Call logging callback first - this is synchronous and never drops events
         if session._log_callback:
@@ -233,8 +273,13 @@ class PTYStreamService:
             except Exception:
                 pass  # Don't let logging errors affect PTY streaming
 
-        # Then broadcast to subscriber queues
+        # Buffer event for late subscribers (keep last 1000 events)
         with session._lock:
+            session._event_buffer.append(event)
+            if len(session._event_buffer) > 1000:
+                session._event_buffer = session._event_buffer[-1000:]
+
+            # Then broadcast to subscriber queues
             for q in session._subscribers:
                 try:
                     q.put_nowait(event)
@@ -292,6 +337,10 @@ class PTYStreamService:
     async def subscribe(self, stream_id: str) -> AsyncIterator[PTYEvent]:
         """Subscribe to PTY output events.
 
+        Late subscribers receive buffered events first, then live events.
+        This handles the race condition where subscribers connect after
+        events have been dispatched.
+
         Args:
             stream_id: The PTY stream ID
 
@@ -307,8 +356,20 @@ class PTYStreamService:
         # Create queue for this subscriber
         q: asyncio.Queue[PTYEvent] = asyncio.Queue(maxsize=1000)
 
+        # Atomically: add subscriber and get buffered events to replay
         with session._lock:
             session._subscribers.append(q)
+            buffered_events = list(session._event_buffer)
+
+        # Replay buffered events first (handles late subscriber race condition)
+        for event in buffered_events:
+            yield event
+            if event.type == "exit":
+                # Session already ended - no need to wait for more events
+                with session._lock:
+                    if q in session._subscribers:
+                        session._subscribers.remove(q)
+                return
 
         try:
             while True:
@@ -348,19 +409,34 @@ class PTYStreamService:
         session.active = False
 
         # Kill the process
-        try:
-            os.killpg(os.getpgid(session.pid), signal.SIGTERM)
-        except (OSError, ProcessLookupError):
-            pass
-
-        # Force kill after short delay
-        def force_kill():
+        if session._proc is not None:
             try:
-                os.killpg(os.getpgid(session.pid), signal.SIGKILL)
+                session._proc.terminate()
+            except OSError:
+                pass
+
+            # Force kill after short delay
+            def force_kill():
+                try:
+                    session._proc.kill()
+                except OSError:
+                    pass
+
+            threading.Timer(2.0, force_kill).start()
+        else:
+            # Legacy pty.fork() path
+            try:
+                os.killpg(os.getpgid(session.pid), signal.SIGTERM)
             except (OSError, ProcessLookupError):
                 pass
 
-        threading.Timer(2.0, force_kill).start()
+            def force_kill():
+                try:
+                    os.killpg(os.getpgid(session.pid), signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    pass
+
+            threading.Timer(2.0, force_kill).start()
 
         return True
 
@@ -397,10 +473,18 @@ class PTYStreamService:
     def get_session_by_session_id(self, session_id: str) -> PTYSession | None:
         """Get a PTY session by the parent session ID."""
         with self._lock:
-            for session in self._sessions.values():
-                if session.session_id == session_id:
-                    return session
-        return None
+            matching = [s for s in self._sessions.values() if s.session_id == session_id]
+
+        if not matching:
+            return None
+
+        # Prefer the most recent active session (dict preserves insertion order)
+        for session in reversed(matching):
+            if session.active:
+                return session
+
+        # Fall back to the most recent inactive session
+        return matching[-1]
 
     def list_sessions(self) -> list[str]:
         """List all active PTY stream IDs."""

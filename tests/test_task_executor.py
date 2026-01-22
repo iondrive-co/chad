@@ -12,17 +12,16 @@ class TestBuildAgentCommand:
     """Tests for build_agent_command function."""
 
     def test_anthropic_includes_task_as_cli_arg(self, tmp_path):
-        """Anthropic provider passes task description as CLI argument, not stdin."""
+        """Anthropic provider sends task via stdin, not argv."""
         cmd, env, initial_input = build_agent_command(
             "anthropic", "test-account", tmp_path, "Fix the bug"
         )
 
-        # Task should be in command (wrapped in full prompt), not initial_input
         assert "claude" in Path(cmd[0]).name
-        assert "-p" in cmd
-        # The task is now wrapped in a full prompt with instructions
-        assert any("Fix the bug" in arg for arg in cmd)
-        assert initial_input is None
+        assert "--permission-mode" in cmd
+        # The task should go to stdin, not argv
+        assert initial_input and "Fix the bug" in initial_input
+        assert "-p" not in cmd
 
     def test_anthropic_without_task(self, tmp_path):
         """Anthropic provider works without task description."""
@@ -31,8 +30,8 @@ class TestBuildAgentCommand:
         )
 
         assert "claude" in Path(cmd[0]).name
-        assert "-p" in cmd
-        assert len(cmd) == 4  # claude, -p, --permission-mode, bypassPermissions
+        assert "--permission-mode" in cmd
+        assert len(cmd) == 3  # claude, --permission-mode, bypassPermissions
         assert initial_input is None
 
     def test_mock_provider_produces_output(self, tmp_path):
