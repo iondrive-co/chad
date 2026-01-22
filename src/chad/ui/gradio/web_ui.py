@@ -5686,7 +5686,7 @@ class ChadWebUI:
         )
 
         def on_verification_model_change(model_name, account_name):
-            if not account_name or account_name == self.SAME_AS_CODING:
+            if not account_name or account_name == self.SAME_AS_CODING or account_name == self.VERIFICATION_NONE:
                 return "❌ Select a verification agent before setting a model"
             try:
                 self.api_client.set_account_model(account_name, model_name)
