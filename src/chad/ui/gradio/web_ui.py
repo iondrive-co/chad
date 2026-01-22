@@ -1132,6 +1132,7 @@ body, .gradio-container, .gradio-container * {
   margin: 2px 0;
   white-space: pre-wrap;
   word-break: break-all;
+  color: #e5e9f0;
 }
 
 .conflict-original {
@@ -4297,7 +4298,7 @@ class ChadWebUI:
             "original_header": "color: #bf616a;",
             "incoming_header": "color: #a3be8c;",
             "content": "color: #e5e9f0;",
-            "pre": "margin: 2px 0; white-space: pre-wrap; word-break: break-all;",
+            "pre": "margin: 2px 0; white-space: pre-wrap; word-break: break-all; color: #e5e9f0;",
         }
 
         html_parts = [f'<div class="conflict-viewer" style="{styles["viewer"]}">']
