@@ -4,8 +4,79 @@ from pathlib import Path
 
 from chad.server.services.session_manager import SessionManager
 from chad.server.services.pty_stream import get_pty_stream_service
-from chad.server.services.task_executor import TaskExecutor, TaskState, build_agent_command
+from chad.server.services.task_executor import (
+    TaskExecutor,
+    TaskState,
+    build_agent_command,
+    ClaudeStreamJsonParser,
+)
 from chad.util.config_manager import ConfigManager
+
+
+class TestClaudeStreamJsonParser:
+    """Tests for ClaudeStreamJsonParser."""
+
+    def test_parses_assistant_text_message(self):
+        """Parser extracts text from assistant messages."""
+        parser = ClaudeStreamJsonParser()
+        data = b'{"type":"assistant","message":{"content":[{"type":"text","text":"Hello world"}]}}\n'
+        results = parser.feed(data)
+        assert results == ["Hello world"]
+
+    def test_parses_tool_use_read(self):
+        """Parser formats Read tool use."""
+        parser = ClaudeStreamJsonParser()
+        data = b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/src/main.py"}}]}}\n'
+        results = parser.feed(data)
+        assert results == ["• Reading /src/main.py"]
+
+    def test_parses_tool_use_bash(self):
+        """Parser formats Bash tool use with command truncation."""
+        parser = ClaudeStreamJsonParser()
+        data = b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"python -m pytest tests/"}}]}}\n'
+        results = parser.feed(data)
+        assert results == ["• Running: python -m pytest tests/"]
+
+    def test_ignores_system_init(self):
+        """Parser skips system init messages."""
+        parser = ClaudeStreamJsonParser()
+        data = b'{"type":"system","subtype":"init","cwd":"/test"}\n'
+        results = parser.feed(data)
+        assert results == []
+
+    def test_ignores_result(self):
+        """Parser skips result messages."""
+        parser = ClaudeStreamJsonParser()
+        data = b'{"type":"result","result":"Done"}\n'
+        results = parser.feed(data)
+        assert results == []
+
+    def test_handles_incomplete_lines(self):
+        """Parser buffers incomplete JSON lines."""
+        parser = ClaudeStreamJsonParser()
+        # Send partial line
+        results = parser.feed(b'{"type":"assistant","message":')
+        assert results == []
+        # Complete the line
+        results = parser.feed(b'{"content":[{"type":"text","text":"Hi"}]}}\n')
+        assert results == ["Hi"]
+
+    def test_handles_multiple_lines(self):
+        """Parser handles multiple JSON lines in one chunk."""
+        parser = ClaudeStreamJsonParser()
+        data = (
+            b'{"type":"assistant","message":{"content":[{"type":"text","text":"Line 1"}]}}\n'
+            b'{"type":"assistant","message":{"content":[{"type":"text","text":"Line 2"}]}}\n'
+        )
+        results = parser.feed(data)
+        assert results == ["Line 1", "Line 2"]
+
+    def test_passes_through_non_json(self):
+        """Parser passes through non-JSON lines as-is."""
+        parser = ClaudeStreamJsonParser()
+        data = b"Plain text output\n"
+        results = parser.feed(data)
+        assert results == ["Plain text output"]
 
 
 class TestBuildAgentCommand:

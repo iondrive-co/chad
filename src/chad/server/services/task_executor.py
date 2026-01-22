@@ -1,6 +1,7 @@
 """Task execution service for orchestrating AI coding tasks via PTY."""
 
 import base64
+import json
 import os
 import queue
 import threading
@@ -27,6 +28,155 @@ from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS, TerminalEmul
 
 
 _CLI_INSTALLER = AIToolInstaller()
+
+
+class ClaudeStreamJsonParser:
+    """Parses Claude Code stream-json output and converts to human-readable text.
+
+    Claude's stream-json format outputs one JSON object per line with types:
+    - system/init: Session initialization (ignored for display)
+    - assistant: Contains message content (text and tool_use)
+    - result: Final result summary
+
+    This parser buffers incoming bytes, extracts complete JSON lines,
+    and yields human-readable text suitable for terminal display.
+    """
+
+    def __init__(self):
+        self._buffer = bytearray()
+
+    def feed(self, data: bytes) -> list[str]:
+        """Feed raw bytes and return list of human-readable text chunks.
+
+        Args:
+            data: Raw bytes from PTY output
+
+        Returns:
+            List of text strings to display (may be empty if no complete lines)
+        """
+        self._buffer.extend(data)
+        results = []
+
+        # Process complete lines (JSON objects are newline-delimited)
+        while b"\n" in self._buffer:
+            line_end = self._buffer.index(b"\n")
+            line = self._buffer[:line_end]
+            self._buffer = self._buffer[line_end + 1:]
+
+            if not line.strip():
+                continue
+
+            try:
+                obj = json.loads(line.decode("utf-8", errors="replace"))
+                text = self._format_json_event(obj)
+                if text:
+                    results.append(text)
+            except json.JSONDecodeError:
+                # Not JSON, pass through as-is
+                results.append(line.decode("utf-8", errors="replace"))
+
+        return results
+
+    def _format_json_event(self, obj: dict) -> str | None:
+        """Convert a stream-json event to human-readable text.
+
+        Args:
+            obj: Parsed JSON object
+
+        Returns:
+            Human-readable text or None if event should be hidden
+        """
+        event_type = obj.get("type", "")
+
+        if event_type == "system":
+            # System init - don't display raw, just note session started
+            subtype = obj.get("subtype", "")
+            if subtype == "init":
+                return None  # Skip init, already shown in UI
+            return None
+
+        elif event_type == "assistant":
+            # Extract content from assistant message
+            message = obj.get("message", {})
+            content = message.get("content", [])
+            parts = []
+
+            for item in content:
+                item_type = item.get("type", "")
+
+                if item_type == "text":
+                    text = item.get("text", "")
+                    if text:
+                        parts.append(text)
+
+                elif item_type == "tool_use":
+                    tool_name = item.get("name", "unknown")
+                    tool_input = item.get("input", {})
+                    tool_desc = self._format_tool_use(tool_name, tool_input)
+                    if tool_desc:
+                        parts.append(tool_desc)
+
+            return "\n".join(parts) if parts else None
+
+        elif event_type == "result":
+            # Final result - could show summary but usually redundant
+            return None
+
+        # Unknown event type - skip
+        return None
+
+    def _format_tool_use(self, name: str, input_data: dict) -> str:
+        """Format a tool_use event for display.
+
+        Args:
+            name: Tool name
+            input_data: Tool input parameters
+
+        Returns:
+            Formatted string describing the tool use
+        """
+        if name == "Read":
+            path = input_data.get("file_path", "")
+            return f"• Reading {path}"
+
+        elif name == "Write":
+            path = input_data.get("file_path", "")
+            return f"• Writing {path}"
+
+        elif name == "Edit":
+            path = input_data.get("file_path", "")
+            return f"• Editing {path}"
+
+        elif name == "Bash":
+            cmd = input_data.get("command", "")
+            # Truncate long commands
+            if len(cmd) > 80:
+                cmd = cmd[:77] + "..."
+            return f"• Running: {cmd}"
+
+        elif name == "Glob":
+            pattern = input_data.get("pattern", "")
+            return f"• Searching for {pattern}"
+
+        elif name == "Grep":
+            pattern = input_data.get("pattern", "")
+            return f"• Grep: {pattern}"
+
+        elif name == "Task":
+            desc = input_data.get("description", "")
+            return f"• Task: {desc}"
+
+        elif name == "WebSearch":
+            query = input_data.get("query", "")
+            return f"• Web search: {query}"
+
+        elif name == "WebFetch":
+            url = input_data.get("url", "")
+            return f"• Fetching: {url}"
+
+        else:
+            # Generic tool display
+            return f"• {name}"
 
 
 def _read_project_docs(project_path: Path) -> str | None:
@@ -468,6 +618,9 @@ class TaskExecutor:
                 task_description,
             )
 
+            # Create JSON parser for anthropic (stream-json output)
+            json_parser = ClaudeStreamJsonParser() if coding_provider == "anthropic" else None
+
             # Set up logging callback for EventLog persistence
             # This callback is called synchronously for every PTY event
             # and doesn't compete with client subscriber queues
@@ -475,13 +628,28 @@ class TaskExecutor:
                 nonlocal last_output_time
                 if event.type == "output":
                     last_output_time = time.time()
-                    emit("stream", chunk=event.data)
+
                     try:
                         chunk_bytes = base64.b64decode(event.data)
                     except Exception:
                         chunk_bytes = b""
-                    with terminal_lock:
-                        terminal_buffer.extend(chunk_bytes)
+
+                    # For anthropic, parse stream-json and convert to readable text
+                    if json_parser:
+                        text_chunks = json_parser.feed(chunk_bytes)
+                        if text_chunks:
+                            # Join parsed text and encode for streaming
+                            readable_text = "\n".join(text_chunks)
+                            encoded = base64.b64encode(readable_text.encode()).decode()
+                            emit("stream", chunk=encoded)
+                            with terminal_lock:
+                                terminal_buffer.extend(readable_text.encode())
+                        # If no complete lines yet, don't emit anything
+                    else:
+                        # Non-anthropic: pass through raw PTY output
+                        emit("stream", chunk=event.data)
+                        with terminal_lock:
+                            terminal_buffer.extend(chunk_bytes)
 
             # Start PTY session with logging callback
             # Use the same geometry as the terminal emulator for consistent rendering
