@@ -211,6 +211,7 @@ class TestProviderCommandGeneration:
         cmd, env = build_agent_command("anthropic", "test", Path("/tmp"))
 
         assert "claude" in cmd
+        assert "-p" in cmd
         assert "--permission-mode" in cmd
         assert "bypassPermissions" in cmd
 
