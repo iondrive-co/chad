@@ -2,11 +2,23 @@
 
 import threading
 import pytest
+from dataclasses import dataclass
 from unittest.mock import MagicMock
 from pathlib import Path
 
 from chad.ui.gradio.web_ui import ChadWebUI, Session
 from chad.ui.client.api_client import Account
+
+
+@dataclass
+class MockAccount:
+    """Mock account for tests."""
+
+    name: str
+    provider: str
+    model: str | None = "default"
+    reasoning: str | None = "default"
+    role: str | None = None
 
 
 class TestCancelTask:
