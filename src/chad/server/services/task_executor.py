@@ -143,11 +143,11 @@ def build_agent_command(
     if provider == "anthropic":
         # Claude Code CLI
         config_dir = Path.home() / ".chad" / "claude-configs" / account_name
-        cmd = [resolve_tool("claude"), "-p", "--permission-mode", "bypassPermissions"]
+        cmd = [resolve_tool("claude"), "--permission-mode", "bypassPermissions"]
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
-        # Pass full prompt as CLI argument (like codex) - stdin mode fails with timing issues
+        # Pass prompt via stdin - large prompts as CLI args cause silent failures
         if full_prompt:
-            cmd.append(full_prompt)
+            initial_input = full_prompt + "\n"
 
     elif provider == "openai":
         # Codex CLI with isolated home
@@ -387,6 +387,8 @@ class TaskExecutor:
         # Terminal emulator for extracting meaningful text from PTY output
         log_emulator = TerminalEmulator(cols=cols, rows=rows)
         last_logged_text = ""
+        stream_id: str | None = None
+        pty_service = get_pty_stream_service()
 
         def flush_terminal_buffer():
             nonlocal last_log_flush, last_logged_text
@@ -474,7 +476,6 @@ class TaskExecutor:
 
             # Start PTY session with logging callback
             # Use the same geometry as the terminal emulator for consistent rendering
-            pty_service = get_pty_stream_service()
             stream_id = pty_service.start_pty_session(
                 session_id=task.session_id,
                 cmd=cmd,
@@ -603,6 +604,16 @@ class TaskExecutor:
                     success=False,
                     reason=f"error: {e}",
                 ))
+        finally:
+            try:
+                flush_terminal_buffer()
+            except Exception:
+                pass
+            try:
+                if task.stream_id:
+                    pty_service.cleanup_session(task.stream_id)
+            except Exception:
+                pass
 
     def get_task(self, task_id: str) -> Task | None:
         """Get a task by ID."""
