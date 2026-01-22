@@ -143,11 +143,20 @@ def build_agent_command(
     if provider == "anthropic":
         # Claude Code CLI
         config_dir = Path.home() / ".chad" / "claude-configs" / account_name
-        cmd = [resolve_tool("claude"), "--permission-mode", "bypassPermissions"]
+        cmd = [
+            resolve_tool("claude"),
+            "-p",  # non-interactive print mode
+            "--verbose",
+            "--output-format",
+            "stream-json",
+            "--permission-mode",
+            "bypassPermissions",
+        ]
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
-        # Pass prompt via stdin - large prompts as CLI args cause silent failures
+        # Provide prompt as positional argument (required with -p when stdin is a TTY)
         if full_prompt:
-            initial_input = full_prompt + "\n"
+            cmd.append(full_prompt)
+            initial_input = None
 
     elif provider == "openai":
         # Codex CLI with isolated home

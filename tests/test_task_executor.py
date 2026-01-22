@@ -11,17 +11,19 @@ from chad.util.config_manager import ConfigManager
 class TestBuildAgentCommand:
     """Tests for build_agent_command function."""
 
-    def test_anthropic_includes_task_as_cli_arg(self, tmp_path):
-        """Anthropic provider sends task via stdin, not argv."""
+    def test_anthropic_uses_stream_json_and_stdin_prompt(self, tmp_path):
+        """Anthropic provider sends task via stdin in stream-json mode."""
         cmd, env, initial_input = build_agent_command(
             "anthropic", "test-account", tmp_path, "Fix the bug"
         )
 
         assert "claude" in Path(cmd[0]).name
+        assert "-p" in cmd
+        assert "--output-format" in cmd and "stream-json" in cmd
         assert "--permission-mode" in cmd
-        # The task should go to stdin, not argv
-        assert initial_input and "Fix the bug" in initial_input
-        assert "-p" not in cmd
+        # The task must be in argv (stdin is TTY with -p)
+        assert any("Fix the bug" in arg for arg in cmd)
+        assert initial_input is None
 
     def test_anthropic_without_task(self, tmp_path):
         """Anthropic provider works without task description."""
@@ -30,8 +32,11 @@ class TestBuildAgentCommand:
         )
 
         assert "claude" in Path(cmd[0]).name
+        assert "-p" in cmd
+        assert "--verbose" in cmd
+        assert "--output-format" in cmd and "stream-json" in cmd
         assert "--permission-mode" in cmd
-        assert len(cmd) == 3  # claude, --permission-mode, bypassPermissions
+        assert len(cmd) == 7  # claude, -p, --verbose, --output-format, stream-json, --permission-mode, bypassPermissions
         assert initial_input is None
 
     def test_mock_provider_produces_output(self, tmp_path):
