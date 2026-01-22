@@ -1423,6 +1423,91 @@ class TestEventMultiplexer:
         assert events[0].type == "terminal"
         assert events[0].seq == 2
 
+    @pytest.mark.asyncio
+    async def test_mux_attaches_when_pty_starts_late(self, tmp_path):
+        """Multiplexer should switch from fallback polling to the PTY once it appears."""
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import get_pty_stream_service, reset_pty_stream_service
+
+        reset_pty_stream_service()
+        pty_service = get_pty_stream_service()
+        session_id = "mux-late"
+        mux = EventMultiplexer(session_id)
+
+        async def collect_terminal():
+            outputs = []
+            async for event in mux.stream_events(pty_service):
+                if event.type == "terminal":
+                    payload = event.data.get("data", "")
+                    if event.data.get("text"):
+                        outputs.append(payload)
+                    else:
+                        outputs.append(base64.b64decode(payload or b"").decode("utf-8", errors="replace"))
+                if event.type == "complete":
+                    break
+            return outputs
+
+        async def start_late():
+            await anyio.sleep(0.3)
+            pty_service.start_pty_session(
+                session_id=session_id,
+                cmd=["bash", "-c", "echo hello-from-late"],
+                cwd=tmp_path,
+            )
+
+        async with anyio.create_task_group() as tg:
+            outputs_holder = {}
+
+            async def runner():
+                outputs_holder["data"] = await collect_terminal()
+
+            tg.start_soon(runner)
+            tg.start_soon(start_late)
+
+        outputs = outputs_holder.get("data", [])
+        assert any("hello-from-late" in out for out in outputs)
+
+        reset_pty_stream_service()
+
+    @pytest.mark.asyncio
+    async def test_mux_prefers_latest_active_session(self, tmp_path):
+        """Multiplexer should attach to the newest active PTY for a session ID."""
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import get_pty_stream_service, reset_pty_stream_service
+
+        reset_pty_stream_service()
+        pty_service = get_pty_stream_service()
+        session_id = "mux-duplicate"
+
+        first_stream = pty_service.start_pty_session(
+            session_id=session_id,
+            cmd=["bash", "-c", "echo old"],
+            cwd=tmp_path,
+        )
+
+        # Let the first session exit but leave it registered
+        await anyio.sleep(0.3)
+
+        second_stream = pty_service.start_pty_session(
+            session_id=session_id,
+            cmd=["bash", "-c", "echo new"],
+            cwd=tmp_path,
+        )
+
+        outputs = []
+        mux = EventMultiplexer(session_id)
+        async for event in mux.stream_events(pty_service):
+            if event.type == "terminal":
+                outputs.append(base64.b64decode(event.data["data"]).decode("utf-8", errors="replace"))
+            if event.type == "complete":
+                break
+
+        assert any("new" in out for out in outputs), f"Expected output from newest PTY session, got {outputs}"
+
+        pty_service.cleanup_session(first_stream)
+        pty_service.cleanup_session(second_stream)
+        reset_pty_stream_service()
+
     def test_format_sse_event(self):
         """format_sse_event produces valid SSE format."""
         from chad.server.services.event_mux import MuxEvent, format_sse_event

@@ -480,10 +480,11 @@ class TestChadWebUI:
 
         result = web_ui.cancel_task(session.id)
 
-        # Handle gr.update dict
-        result_value = result.get("value", "") if isinstance(result, dict) else result
-        assert "🛑" in result_value
-        assert "cancelled" in result_value.lower()
+        # Result is a tuple of gr.update dicts - live_stream is at index 1
+        assert isinstance(result, tuple)
+        live_stream_update = result[1]
+        assert "🛑" in live_stream_update.get("value", "")
+        assert "cancelled" in live_stream_update.get("value", "").lower()
         assert session.cancel_requested is True
         mock_provider.stop_session.assert_called_once()
 
@@ -492,9 +493,10 @@ class TestChadWebUI:
         session = web_ui.create_session("test")
         result = web_ui.cancel_task(session.id)
 
-        # Handle gr.update dict
-        result_value = result.get("value", "") if isinstance(result, dict) else result
-        assert "🛑" in result_value
+        # Result is a tuple of gr.update dicts - live_stream is at index 1
+        assert isinstance(result, tuple)
+        live_stream_update = result[1]
+        assert "🛑" in live_stream_update.get("value", "")
         assert session.cancel_requested is True
 
     def test_cancel_preserves_live_stream(self, monkeypatch, web_ui, git_repo):

@@ -2475,8 +2475,13 @@ class ChadWebUI:
     def delete_provider(self, account_name: str, confirmed: bool = False):
         return self.provider_ui.delete_provider(account_name, confirmed, self.provider_card_count)
 
-    def cancel_task(self, session_id: str) -> str:
-        """Cancel the running task for a specific session."""
+    def cancel_task(self, session_id: str) -> tuple:
+        """Cancel the running task for a specific session.
+
+        Returns a tuple of UI component updates matching the cancel_btn.click outputs:
+        (chatbot, live_stream, task_status, project_path, task_description,
+         start_btn, cancel_btn, followup_row, merge_section_group)
+        """
         session = self.get_session(session_id)
         session.cancel_requested = True
         session.active = False  # Mark session as inactive to allow restart
@@ -2501,7 +2506,18 @@ class ChadWebUI:
             session.worktree_path = None
             session.worktree_base_commit = None
 
-        return gr.update(value="🛑 Task cancelled")
+        no_change = gr.update()
+        return (
+            no_change,  # chatbot - keep existing chat history
+            gr.update(value="🛑 Task cancelled"),  # live_stream
+            no_change,  # task_status
+            no_change,  # project_path - keep so user can restart
+            no_change,  # task_description - keep so user can modify and restart
+            gr.update(interactive=True),  # start_btn - re-enable to allow new task
+            gr.update(interactive=False),  # cancel_btn - disable since nothing to cancel
+            gr.update(visible=False),  # followup_row - hide follow-up section
+            gr.update(visible=False),  # merge_section_group - hide merge section
+        )
 
     def _resolve_verification_preferences(
         self,
@@ -5035,7 +5051,20 @@ class ChadWebUI:
             ],
         )
 
-        cancel_btn.click(cancel_wrapper, outputs=[live_stream])
+        cancel_btn.click(
+            cancel_wrapper,
+            outputs=[
+                chatbot,
+                live_stream,
+                task_status,
+                project_path,
+                task_description,
+                start_btn,
+                cancel_btn,
+                followup_row,
+                merge_section_group,
+            ],
+        )
 
         send_followup_btn.click(
             followup_wrapper,
