@@ -48,9 +48,9 @@ class TestCancelTask:
 
         result = web_ui.cancel_task("test-session")
 
-        # Result is a tuple, live_stream is at index 1
+        # Result is a tuple, live_stream is at index 0
         assert isinstance(result, tuple), "cancel_task should return tuple of UI updates"
-        live_stream_update = result[1]
+        live_stream_update = result[0]
         assert "cancelled" in live_stream_update.get("value", "").lower()
         assert session.cancel_requested is True
         assert session.active is False
@@ -98,12 +98,12 @@ class TestCancelTask:
         # Should be a tuple of UI component updates, not just live_stream
         assert isinstance(result, tuple), "cancel_task should return tuple of UI updates"
         # Tuple should have 9 elements matching cancel_btn.click outputs:
-        # (chatbot, live_stream, task_status, project_path, task_description,
+        # (live_stream, chatbot, task_status, project_path, task_description,
         #  start_btn, cancel_btn, followup_row, merge_section_group)
         assert len(result) == 9, f"Expected 9 UI updates, got {len(result)}"
 
-        # Check live_stream shows cancellation message (index 1)
-        live_stream_update = result[1]
+        # Check live_stream shows cancellation message (index 0)
+        live_stream_update = result[0]
         assert isinstance(live_stream_update, dict), "live_stream update should be a dict"
         assert "cancelled" in live_stream_update.get("value", "").lower()
 

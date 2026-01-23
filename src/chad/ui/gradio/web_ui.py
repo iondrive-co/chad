@@ -2559,8 +2559,8 @@ class ChadWebUI:
 
         no_change = gr.update()
         return (
-            no_change,  # chatbot - keep existing chat history
             gr.update(value="🛑 Task cancelled"),  # live_stream
+            no_change,  # chatbot - keep existing chat history
             no_change,  # task_status
             no_change,  # project_path - keep so user can restart
             no_change,  # task_description - keep so user can modify and restart
@@ -2778,8 +2778,8 @@ class ChadWebUI:
             else:
                 patch_html = ""
             return (
-                display_history,
-                gr.update(value=display_stream),  # Use gr.update for proper streaming to Markdown
+                gr.update(value=display_stream),  # live_stream - Use gr.update for proper streaming to Markdown
+                display_history,  # chatbot
                 # Task status - always visible in DOM, CSS :empty hides when blank
                 gr.update(value=status if is_error else ""),
                 gr.update(value=project_path, interactive=interactive),
@@ -3678,8 +3678,8 @@ class ChadWebUI:
             else:
                 patch_html = ""
             return (
-                history,
-                live_stream,
+                live_stream,  # live_stream component
+                history,  # chatbot
                 gr.update(value="" if not working else followup_message),  # Clear input when not working
                 gr.update(visible=show_followup),  # Follow-up row visibility
                 gr.update(interactive=not working),  # Send button interactivity
@@ -4900,6 +4900,14 @@ class ChadWebUI:
                     elem_classes=["start-task-btn"],
                 )
 
+            # Live stream kept in DOM (visible=True) but hidden via CSS for visual tests
+            live_stream = gr.Markdown(
+                "",
+                visible=True,
+                elem_id="live-stream-box" if is_first else None,
+                elem_classes=["live-stream-box"],
+            )
+
             chatbot = gr.Chatbot(
                 height=400,
                 key=f"chatbot-{session_id}",
@@ -4908,14 +4916,6 @@ class ChadWebUI:
                 sanitize_html=False,  # Required for inline screenshots - content is internally generated
                 type="messages",  # Use OpenAI-style dicts with 'role' and 'content' keys
             )
-
-        # Live stream kept in DOM (visible=True) but hidden via CSS for visual tests
-        live_stream = gr.Markdown(
-            "",
-            visible=True,
-            elem_id="live-stream-box" if is_first else None,
-            elem_classes=["live-stream-box"],
-        )
 
         # Hidden state for dynamic terminal dimensions (calculated from container width)
         # JavaScript updates this when the live-stream-box is resized
@@ -5109,8 +5109,8 @@ class ChadWebUI:
                 terminal_cols_state,
             ],
             outputs=[
-                chatbot,
                 live_stream,
+                chatbot,
                 task_status,
                 project_path,
                 task_description,
@@ -5133,8 +5133,8 @@ class ChadWebUI:
         cancel_btn.click(
             cancel_wrapper,
             outputs=[
-                chatbot,
                 live_stream,
+                chatbot,
                 task_status,
                 project_path,
                 task_description,
@@ -5158,8 +5158,8 @@ class ChadWebUI:
                 verification_reasoning,
             ],
             outputs=[
-                chatbot,
                 live_stream,
+                chatbot,
                 followup_input,
                 followup_row,
                 send_followup_btn,
@@ -5976,7 +5976,7 @@ function initializeLiveStreamScrollTracking() {
             window._liveStreamScrollState[parentId] = {
                 userScrolledUp: false,
                 savedScrollTop: null,
-                ignoreNextScroll: false
+                lastScrollHeight: 0
             };
         }
         return window._liveStreamScrollState[parentId];
@@ -5996,9 +5996,9 @@ function initializeLiveStreamScrollTracking() {
         parent.addEventListener('scroll', (e) => {
             const content = e.target.closest('.live-output-content');
             if (!content) return;
-            if (state.ignoreNextScroll) return;
 
-            const isAtBottom = content.scrollTop + content.clientHeight >= content.scrollHeight - 5;
+            // Use larger threshold for "at bottom" detection (10px)
+            const isAtBottom = content.scrollTop + content.clientHeight >= content.scrollHeight - 10;
 
             if (isAtBottom) {
                 state.userScrolledUp = false;
@@ -6014,12 +6014,21 @@ function initializeLiveStreamScrollTracking() {
             const content = parent.querySelector('.live-output-content');
             if (!content) return;
 
+            // Double requestAnimationFrame ensures Gradio DOM reconciliation is complete
             requestAnimationFrame(() => {
-                state.ignoreNextScroll = true;
-                if (state.userScrolledUp && state.savedScrollTop !== null) {
-                    content.scrollTop = state.savedScrollTop;
-                }
-                setTimeout(() => { state.ignoreNextScroll = false; }, 50);
+                requestAnimationFrame(() => {
+                    const newScrollHeight = content.scrollHeight;
+                    const contentGrew = newScrollHeight > state.lastScrollHeight;
+                    state.lastScrollHeight = newScrollHeight;
+
+                    if (state.userScrolledUp && state.savedScrollTop !== null) {
+                        // Restore saved position when user has scrolled up
+                        content.scrollTop = state.savedScrollTop;
+                    } else if (contentGrew) {
+                        // Auto-scroll to bottom when at bottom and content grew
+                        content.scrollTop = newScrollHeight;
+                    }
+                });
             });
         });
 
