@@ -4,7 +4,6 @@ import threading
 import pytest
 from dataclasses import dataclass
 from unittest.mock import MagicMock
-from pathlib import Path
 
 from chad.ui.gradio.web_ui import ChadWebUI, Session
 from chad.ui.client.api_client import Account
@@ -145,7 +144,7 @@ class TestCancelTask:
         stream_ready = threading.Event()
 
         def fake_run_task_via_api(session_id, project_path, task_description,
-                                   coding_account, message_queue, **kwargs):
+                                  coding_account, message_queue, **kwargs):
             message_queue.put(("ai_switch", "CODING AI"))
             message_queue.put(("message_start", "CODING AI"))
             message_queue.put(("stream", "working"))

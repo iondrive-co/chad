@@ -4782,8 +4782,9 @@ class ChadWebUI:
                             elem_id="role-status-row" if is_first else None,
                             elem_classes=["role-status-row"],
                         ):
+                            wt_path = str(session.worktree_path) if session.worktree_path else None
                             role_status = gr.Markdown(
-                                self.format_role_status(),
+                                self.format_role_status(worktree_path=wt_path),
                                 key=f"role-status-{session_id}",
                                 elem_id="role-config-status" if is_first else None,
                                 elem_classes=["role-config-status"],
@@ -5234,6 +5235,7 @@ class ChadWebUI:
         # Handler for coding agent selection change
         def on_coding_agent_change(selected_account, verification_value, current_verif_model, current_verif_reasoning):
             """Update role assignment, status, and dropdowns when coding agent changes."""
+            wt_path = str(session.worktree_path) if session.worktree_path else None
             if not selected_account:
                 verif_model_update, verif_reasoning_update = verification_dropdown_updates(
                     None,
@@ -5244,7 +5246,7 @@ class ChadWebUI:
                     current_verif_reasoning,
                 )
                 return (
-                    gr.update(value=self.format_role_status()),
+                    gr.update(value=self.format_role_status(worktree_path=wt_path)),
                     gr.update(interactive=False),
                     gr.update(choices=["default"], value="default", interactive=False),
                     gr.update(choices=["default"], value="default", interactive=False),
@@ -5259,8 +5261,8 @@ class ChadWebUI:
                 pass
 
             # Get updated status
-            is_ready, _ = self.get_role_config_status()
-            status_text = self.format_role_status()
+            is_ready, _ = self.get_role_config_status(worktree_path=wt_path)
+            status_text = self.format_role_status(worktree_path=wt_path)
 
             # Get model choices for the selected account
             model_choices = self.get_models_for_account(selected_account)

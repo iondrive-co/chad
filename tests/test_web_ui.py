@@ -597,7 +597,7 @@ class TestClaudeJsonParsingIntegration:
         """run_task_via_api should parse Claude stream-json output for anthropic accounts."""
         import base64
         import queue
-        from unittest.mock import Mock, MagicMock
+        from unittest.mock import Mock
         from chad.ui.client.api_client import Account
 
         # Configure mock to return anthropic account
@@ -1724,6 +1724,23 @@ class TestDynamicStatusLine:
         assert "Ready" in status
         assert "Coding" in status
         assert "claude-main" in status
+
+    def test_ready_status_shows_worktree_path(self):
+        """Ready status should show worktree path when provided."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def list_accounts(self):
+                return [MockAccount(name="claude-main", provider="anthropic", model="sonnet-4", role="CODING")]
+
+        ui = ProviderUIManager(MockAPIClient())
+        ready, status = ui.get_role_config_status(worktree_path="/home/user/.chad-worktrees/abc123")
+        assert ready is True
+        assert "Ready" in status
+        assert "Coding" in status
+        assert "claude-main" in status
+        assert "Worktree" in status
+        assert "abc123" in status  # Last component of worktree path
 
     def test_running_status_shows_worktree_path(self):
         """Running state should show worktree path instead of model."""
