@@ -480,9 +480,9 @@ class TestChadWebUI:
 
         result = web_ui.cancel_task(session.id)
 
-        # Result is a tuple of gr.update dicts - live_stream is at index 1
+        # Result is a tuple of gr.update dicts - live_stream is at index 0
         assert isinstance(result, tuple)
-        live_stream_update = result[1]
+        live_stream_update = result[0]
         assert "🛑" in live_stream_update.get("value", "")
         assert "cancelled" in live_stream_update.get("value", "").lower()
         assert session.cancel_requested is True
@@ -493,9 +493,9 @@ class TestChadWebUI:
         session = web_ui.create_session("test")
         result = web_ui.cancel_task(session.id)
 
-        # Result is a tuple of gr.update dicts - live_stream is at index 1
+        # Result is a tuple of gr.update dicts - live_stream is at index 0
         assert isinstance(result, tuple)
-        live_stream_update = result[1]
+        live_stream_update = result[0]
         assert "🛑" in live_stream_update.get("value", "")
         assert session.cancel_requested is True
 
@@ -530,7 +530,7 @@ class TestChadWebUI:
         for update in web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
             updates.append(update)
 
-        final_live_stream = updates[-1][1]
+        final_live_stream = updates[-1][0]  # live_stream is at index 0
         # Handle both plain string and gr.update dict
         if isinstance(final_live_stream, dict):
             final_live_stream = final_live_stream.get("value", "")
@@ -566,7 +566,7 @@ class TestChadWebUI:
         for update in web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
             updates.append(update)
 
-        final_live_stream = updates[-1][1]
+        final_live_stream = updates[-1][0]  # live_stream is at index 0
         # Handle both plain string and gr.update dict
         if isinstance(final_live_stream, dict):
             final_live_stream = final_live_stream.get("value", "")
