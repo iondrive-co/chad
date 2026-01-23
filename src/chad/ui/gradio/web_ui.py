@@ -2003,6 +2003,7 @@ class ChadWebUI:
         coding_model: str | None = None,
         coding_reasoning: str | None = None,
         server_session_id: str | None = None,
+        terminal_cols: int | None = None,
     ) -> tuple[bool, str, str | None]:
         """Run a task via the API and post events to the message queue.
 
@@ -2017,6 +2018,7 @@ class ChadWebUI:
             message_queue: Queue to post events to (for UI integration)
             coding_model: Optional model override
             coding_reasoning: Optional reasoning level
+            terminal_cols: Terminal width in columns (calculated from panel width)
 
         Returns:
             Tuple of (success, final_output_text, server_session_id)
@@ -2036,6 +2038,9 @@ class ChadWebUI:
         if server_session_id:
             message_queue.put(("session_id", server_session_id))
 
+        # Use provided terminal_cols or fall back to default
+        effective_cols = terminal_cols if terminal_cols else TERMINAL_COLS
+
         # Start the task via API using the server session ID
         try:
             self.api_client.start_task(
@@ -2046,7 +2051,7 @@ class ChadWebUI:
                 coding_model=coding_model,
                 coding_reasoning=coding_reasoning,
                 terminal_rows=TERMINAL_ROWS,
-                terminal_cols=TERMINAL_COLS,
+                terminal_cols=effective_cols,
             )
         except Exception as e:
             message_queue.put(("status", f"❌ Failed to start task: {e}"))
@@ -2056,9 +2061,8 @@ class ChadWebUI:
         message_queue.put(("ai_switch", "CODING AI"))
         message_queue.put(("message_start", "CODING AI"))
 
-        # Stream output via SSE using server session ID with pyte terminal emulation
+        # Stream output via SSE using server session ID
         stream_client = self._get_stream_client()
-        terminal = TerminalEmulator(cols=TERMINAL_COLS, rows=TERMINAL_ROWS)
         exit_code = 0
 
         # Detect if this is anthropic provider (outputs stream-json that needs parsing)
@@ -2071,6 +2075,11 @@ class ChadWebUI:
                     break
         except Exception:
             pass  # Fall back to raw output if we can't determine provider
+
+        # For anthropic: accumulate parsed text directly (no terminal width constraints)
+        # For others: use pyte terminal emulation for proper ANSI/cursor handling
+        accumulated_text: list[str] = []
+        terminal = None if json_parser else TerminalEmulator(cols=effective_cols, rows=TERMINAL_ROWS)
 
         try:
             for event in stream_client.stream_events(server_session_id, include_terminal=True):
@@ -2085,18 +2094,20 @@ class ChadWebUI:
                         except Exception:
                             raw_bytes = b""
 
-                    # For anthropic, parse stream-json and convert to readable text
+                    # For anthropic, parse stream-json and render directly (no terminal emulation)
                     if json_parser:
                         text_chunks = json_parser.feed(raw_bytes)
                         if text_chunks:
-                            # Join parsed text and feed to terminal
+                            # Accumulate parsed text and render as HTML directly
+                            accumulated_text.extend(text_chunks)
                             readable_text = "\n".join(text_chunks) + "\n"
-                            terminal.feed(readable_text)
-                            html_output = terminal.render_html()
+                            # Escape HTML and preserve newlines
+                            all_text = "\n".join(accumulated_text)
+                            html_output = html.escape(all_text)
                             message_queue.put(("stream", readable_text, html_output))
                         # If no complete lines yet, don't emit anything
                     else:
-                        # Non-anthropic: pass through raw PTY output
+                        # Non-anthropic: pass through raw PTY output with terminal emulation
                         terminal.feed(raw_bytes)
                         text_chunk = raw_bytes.decode("utf-8", errors="replace")
                         html_output = terminal.render_html()
@@ -2129,8 +2140,12 @@ class ChadWebUI:
             message_queue.put(("status", f"❌ Stream error: {e}"))
             return False, str(e), server_session_id
 
-        # Get plain text from terminal for final output
-        final_output = terminal.get_text()
+        # Get plain text for final output
+        if terminal:
+            final_output = terminal.get_text()
+        else:
+            # For anthropic JSON parsing, use accumulated text
+            final_output = "\n".join(accumulated_text)
 
         # Emit completion
         if exit_code == 0:
@@ -2478,11 +2493,19 @@ class ChadWebUI:
     def _unassign_account_roles(self, account_name: str) -> None:
         self.provider_ui._unassign_account_roles(account_name)
 
-    def get_role_config_status(self) -> tuple[bool, str]:
-        return self.provider_ui.get_role_config_status()
+    def get_role_config_status(
+        self,
+        task_state: str | None = None,
+        worktree_path: str | None = None,
+    ) -> tuple[bool, str]:
+        return self.provider_ui.get_role_config_status(task_state, worktree_path)
 
-    def format_role_status(self) -> str:
-        return self.provider_ui.format_role_status()
+    def format_role_status(
+        self,
+        task_state: str | None = None,
+        worktree_path: str | None = None,
+    ) -> str:
+        return self.provider_ui.format_role_status(task_state, worktree_path)
 
     def assign_role(self, account_name: str, role: str):
         return self.provider_ui.assign_role(account_name, role, self.provider_card_count)
@@ -2677,6 +2700,7 @@ class ChadWebUI:
         coding_reasoning: str | None = None,
         verification_model: str | None = None,
         verification_reasoning: str | None = None,
+        terminal_cols: int | None = None,
     ) -> Iterator[
         tuple[
             list,
@@ -2711,6 +2735,7 @@ class ChadWebUI:
             branch_choices: list[str] | None = None,
             diff_full: str = "",
             live_patch: tuple[str, str] | None = None,
+            task_state: str | None = None,
         ):
             """Format output tuple for Gradio with current UI state.
 
@@ -2719,10 +2744,14 @@ class ChadWebUI:
                            When provided, JavaScript will patch the container with
                            data-live-id=live_id using the inner_html content,
                            preserving scroll position and text selection.
+                task_state: Optional task state (running, verifying, completed, failed)
+                           for dynamic status display.
             """
             display_stream = live_stream
             is_error = "❌" in status
-            display_role_status = self.format_role_status()
+            # Get worktree path for status display
+            wt_path = str(session.worktree_path) if session.worktree_path else None
+            display_role_status = self.format_role_status(task_state, wt_path)
             log_btn_update = gr.update(
                 label=f"📄 {session.log_path.name}" if session.log_path else "Session Log",
                 value=str(session.log_path) if session.log_path else None,
@@ -2869,7 +2898,7 @@ class ChadWebUI:
             session.event_log.log(UserMessageEvent(content=task_description))
 
             initial_status = f"{status_prefix}⏳ Initializing session..."
-            yield make_yield(chat_history, initial_status, summary=initial_status, interactive=False)
+            yield make_yield(chat_history, initial_status, summary=initial_status, interactive=False, task_state="running")
 
             # Use the streaming API to run the task
             # This ensures both CLI and Gradio UI use the same PTY-based execution path
@@ -2889,6 +2918,7 @@ class ChadWebUI:
                         message_queue=message_queue,
                         coding_model=selected_model if selected_model != "default" else None,
                         coding_reasoning=selected_reasoning if selected_reasoning != "default" else None,
+                        terminal_cols=terminal_cols,
                     )
                     task_success[0] = success
                     coding_final_output[0] = output
@@ -2922,7 +2952,7 @@ class ChadWebUI:
             relay_thread.start()
 
             status_msg = f"{status_prefix}✓ Task started via API\n\n⏳ Processing task..."
-            yield make_yield([], status_msg, summary=status_msg, interactive=False)
+            yield make_yield([], status_msg, summary=status_msg, interactive=False, task_state="running")
 
             current_status = f"{status_prefix}⏳ Coding AI is working..."
             current_ai = "CODING AI"
@@ -2934,6 +2964,7 @@ class ChadWebUI:
                 current_live_stream,
                 summary=current_status,
                 interactive=False,
+                task_state="running",
             )
 
             import time as time_module
@@ -2964,7 +2995,7 @@ class ChadWebUI:
                         current_live_stream = ""
                         latest_pyte_html = ""
                         render_state.reset()
-                        yield make_yield(chat_history, current_status, current_live_stream)
+                        yield make_yield(chat_history, current_status, current_live_stream, task_state="running")
                         last_yield_time = time_module.time()
 
                     elif msg_type == "message_start":
@@ -2978,7 +3009,7 @@ class ChadWebUI:
                         latest_pyte_html = ""
                         render_state.reset()
                         current_ai = speaker
-                        yield make_yield(chat_history, current_status, current_live_stream)
+                        yield make_yield(chat_history, current_status, current_live_stream, task_state="running")
                         last_yield_time = time_module.time()
 
                     elif msg_type == "message_complete":
@@ -2999,7 +3030,7 @@ class ChadWebUI:
                             session.event_log.log(AssistantMessageEvent(
                                 blocks=[{"kind": "text", "content": content[:1000]}]
                             ))
-                        yield make_yield(chat_history, current_status, current_live_stream)
+                        yield make_yield(chat_history, current_status, current_live_stream, task_state="running")
                         last_yield_time = time_module.time()
 
                     elif msg_type == "status":
@@ -3014,6 +3045,7 @@ class ChadWebUI:
                             current_status,
                             current_live_stream,
                             summary=summary_text,
+                            task_state="running",
                         )
                         last_yield_time = time_module.time()
 
@@ -3023,6 +3055,7 @@ class ChadWebUI:
                             chat_history,
                             current_status,
                             current_live_stream,
+                            task_state="running",
                             summary=current_status,
                         )
                         last_yield_time = time_module.time()
@@ -3063,7 +3096,7 @@ class ChadWebUI:
                                         render_state.reset()
                                     else:
                                         chat_history.append(progress_msg)
-                                    yield make_yield(chat_history, current_status, "")
+                                    yield make_yield(chat_history, current_status, "", task_state="running")
                                     last_yield_time = time_module.time()
 
                         # Track current live stream content for the dedicated panel
@@ -3080,7 +3113,7 @@ class ChadWebUI:
                             # Don't update chat_history to avoid constant DOM replacement
                             # which breaks scroll position and text selection
                             if current_live_stream:
-                                yield make_yield(chat_history, current_status, current_live_stream)
+                                yield make_yield(chat_history, current_status, current_live_stream, task_state="running")
                                 last_yield_time = now
 
                     elif msg_type == "activity":
@@ -3097,7 +3130,7 @@ class ChadWebUI:
                                 activity_stream = build_live_stream_html(content, current_ai)
                             if activity_stream:
                                 last_live_stream = activity_stream
-                                yield make_yield(chat_history, current_status, activity_stream)
+                                yield make_yield(chat_history, current_status, activity_stream, task_state="running")
                                 last_yield_time = now
 
                 except queue.Empty:
@@ -3110,7 +3143,7 @@ class ChadWebUI:
                         if not display:
                             # Show waiting placeholder so user knows task is running
                             display = build_live_stream_html("⏳ Waiting for agent output...", current_ai)
-                        yield make_yield(chat_history, current_status, display)
+                        yield make_yield(chat_history, current_status, display, task_state="running")
                         last_yield_time = now
 
                     # Periodically update session log with streaming history
@@ -3159,6 +3192,7 @@ class ChadWebUI:
                     cancel_live_stream,
                     summary="🛑 Task cancelled",
                     show_followup=True,  # Always show follow-up after task starts
+                    task_state="failed",
                 )
             else:
                 while True:
@@ -3176,7 +3210,7 @@ class ChadWebUI:
                                 session.event_log.log(AssistantMessageEvent(
                                     blocks=[{"kind": "text", "content": content[:1000]}]
                                 ))
-                            yield make_yield(chat_history, current_status, "")
+                            yield make_yield(chat_history, current_status, "", task_state="running")
                     except queue.Empty:
                         break
 
@@ -3248,7 +3282,7 @@ class ChadWebUI:
                         f"{status_prefix}🔍 Running verification "
                         f"(attempt {verification_attempt}/{max_verification_attempts})..."
                     )
-                    yield make_yield(chat_history, verify_status, "")
+                    yield make_yield(chat_history, verify_status, "", task_state="verifying")
 
                     # Run verification in a thread so we can stream output to live view
                     def verification_activity(activity_type: str, detail: str):
@@ -3368,7 +3402,7 @@ class ChadWebUI:
                             if session.event_log:
                                 session.event_log.log(UserMessageEvent(content="Revision requested"))
                             revision_status = f"{status_prefix}🔄 Sending revision request to coding agent..."
-                            yield make_yield(chat_history, revision_status, "")
+                            yield make_yield(chat_history, revision_status, "", task_state="running")
 
                             # Send feedback to coding agent via session continuation
                             revision_request = (
@@ -3384,7 +3418,7 @@ class ChadWebUI:
                             revision_status_msg = f"{status_prefix}⏳ Coding agent working on revisions..."
                             # Show live stream placeholder during revision setup
                             revision_placeholder = build_live_stream_html("⏳ Preparing revision...", "CODING AI")
-                            yield make_yield(chat_history, revision_status_msg, revision_placeholder)
+                            yield make_yield(chat_history, revision_status_msg, revision_placeholder, task_state="running")
 
                             # Run revision in a thread so we can stream output to live view
                             revision_result: list = [None, None]  # [response, error]
@@ -3419,7 +3453,7 @@ class ChadWebUI:
                                                 rendered = build_live_stream_html(
                                                     rev_display_buffer.content, "CODING AI"
                                                 )
-                                                yield make_yield(chat_history, revision_status_msg, rendered)
+                                                yield make_yield(chat_history, revision_status_msg, rendered, task_state="running")
                                                 rev_last_yield = now
                                 except queue.Empty:
                                     pass
@@ -3458,6 +3492,7 @@ class ChadWebUI:
                                 chat_history,
                                 f"{status_prefix}✓ Revision complete, re-verifying...",
                                 "",
+                                task_state="verifying",
                             )
                         else:
                             # Can't continue - session not active or max attempts reached
@@ -3552,6 +3587,7 @@ class ChadWebUI:
                     branches = ["main"]
 
             final_live_stream = last_live_stream if session.cancel_requested else ""
+            final_task_state = "completed" if overall_success else "failed"
             yield make_yield(
                 chat_history,
                 final_summary,
@@ -3563,6 +3599,7 @@ class ChadWebUI:
                 merge_summary=merge_summary_text if show_merge else "",
                 branch_choices=branches if show_merge else None,
                 diff_full=diff_html,
+                task_state=final_task_state,
             )
 
         except Exception as e:  # pragma: no cover - defensive
@@ -3580,6 +3617,7 @@ class ChadWebUI:
                 show_followup=True,  # Always show follow-up after task starts
                 show_merge=False,
                 merge_summary="",
+                task_state="failed",
             )
 
     def send_followup(  # noqa: C901
@@ -4878,6 +4916,15 @@ class ChadWebUI:
             elem_classes=["live-stream-box"],
         )
 
+        # Hidden state for dynamic terminal dimensions (calculated from container width)
+        # JavaScript updates this when the live-stream-box is resized
+        terminal_cols_state = gr.Number(
+            value=TERMINAL_COLS,  # Default to constant
+            visible=False,
+            elem_id="terminal-cols-state" if is_first else None,
+            elem_classes=["terminal-cols-state"],
+        )
+
         # Hidden HTML element for JS live content patching
         # When this element's content changes, JS reads the data-live-patch attribute
         # and patches the corresponding container's innerHTML in-place
@@ -4987,6 +5034,7 @@ class ChadWebUI:
             c_reason,
             v_model,
             v_reason,
+            term_cols,
         ):
             yield from self.start_chad_task(
                 session_id,
@@ -4998,6 +5046,7 @@ class ChadWebUI:
                 c_reason,
                 v_model,
                 v_reason,
+                terminal_cols=int(term_cols) if term_cols else None,
             )
 
         def cancel_wrapper():
@@ -5056,6 +5105,7 @@ class ChadWebUI:
                 coding_reasoning,
                 verification_model,
                 verification_reasoning,
+                terminal_cols_state,
             ],
             outputs=[
                 chatbot,
@@ -5992,6 +6042,81 @@ function initializeLiveStreamScrollTracking() {
 }
 
 initializeLiveStreamScrollTracking();
+
+// Dynamic terminal column calculation based on live-stream-box width
+function initializeTerminalColumnTracking() {
+    const CHAR_WIDTH = 8;  // Approximate width per character at 13px monospace font
+    const PADDING = 24;    // Total horizontal padding (12px * 2)
+    const SCROLLBAR = 20;  // Reserved for scrollbar
+    const MIN_COLS = 80;
+    const MAX_COLS = 300;
+
+    function getRoot() {
+        const app = document.querySelector('gradio-app');
+        return (app && app.shadowRoot) ? app.shadowRoot : document;
+    }
+
+    function calculateCols(width) {
+        const usableWidth = width - PADDING - SCROLLBAR;
+        const cols = Math.floor(usableWidth / CHAR_WIDTH);
+        return Math.min(MAX_COLS, Math.max(MIN_COLS, cols));
+    }
+
+    function updateTerminalCols(cols) {
+        const root = getRoot();
+        // Find the hidden number input for terminal columns
+        const inputs = [
+            root.querySelector('#terminal-cols-state input[type="number"]'),
+            ...root.querySelectorAll('.terminal-cols-state input[type="number"]')
+        ].filter(Boolean);
+
+        inputs.forEach(input => {
+            if (input && parseInt(input.value) !== cols) {
+                input.value = cols;
+                // Trigger input event so Gradio picks up the change
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        });
+    }
+
+    function setupResizeObserver(element) {
+        if (element._terminalResizeSetup) return;
+        element._terminalResizeSetup = true;
+
+        const resizeObserver = new ResizeObserver(entries => {
+            for (const entry of entries) {
+                const width = entry.contentRect.width;
+                if (width > 0) {
+                    const cols = calculateCols(width);
+                    updateTerminalCols(cols);
+                }
+            }
+        });
+
+        resizeObserver.observe(element);
+
+        // Initial calculation
+        const width = element.getBoundingClientRect().width;
+        if (width > 0) {
+            updateTerminalCols(calculateCols(width));
+        }
+    }
+
+    function findAndSetupContainers() {
+        const root = getRoot();
+        const containers = [
+            root.querySelector('#live-stream-box'),
+            ...root.querySelectorAll('.live-stream-box')
+        ].filter(Boolean);
+
+        containers.forEach(setupResizeObserver);
+    }
+
+    setInterval(findAndSetupContainers, 500);
+    setTimeout(findAndSetupContainers, 100);
+}
+
+initializeTerminalColumnTracking();
 </script>
 """
             )

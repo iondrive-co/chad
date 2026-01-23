@@ -573,6 +573,143 @@ class TestChadWebUI:
         assert "MOCK LIVE OUTPUT FROM TEXT" in final_live_stream
 
 
+class TestClaudeJsonParsingIntegration:
+    """Tests for Claude stream-json parsing in the web UI."""
+
+    @pytest.fixture
+    def mock_api_client(self):
+        """Create a mock API client."""
+        client = Mock()
+        client.list_accounts.return_value = []
+        client.list_role_assignments.return_value = {}
+        client.list_providers.return_value = ["anthropic", "openai"]
+        return client
+
+    @pytest.fixture
+    def web_ui(self, mock_api_client):
+        """Create a ChadWebUI instance with mocked dependencies."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        ui = ChadWebUI(mock_api_client)
+        return ui
+
+    def test_run_task_parses_claude_json_for_anthropic_provider(self, web_ui, mock_api_client, git_repo):
+        """run_task_via_api should parse Claude stream-json output for anthropic accounts."""
+        import base64
+        import queue
+        from unittest.mock import Mock, MagicMock
+        from chad.ui.client.api_client import Account
+
+        # Configure mock to return anthropic account
+        mock_api_client.list_accounts.return_value = [
+            Account(name="claude", provider="anthropic", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        # Mock create_session
+        mock_session = Mock()
+        mock_session.id = "server-sess-123"
+        mock_api_client.create_session.return_value = mock_session
+
+        # Simulate Claude stream-json output
+        claude_json_lines = (
+            b'{"type":"system","subtype":"init","cwd":"/test"}' + b'\n'
+            b'{"type":"assistant","message":{"content":[{"type":"text","text":"Hello from Claude!"}]}}' + b'\n'
+            b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/src/main.py"}}]}}' + b'\n'
+            b'{"type":"result","result":"done"}' + b'\n'
+        )
+
+        # Mock stream client to return terminal events with Claude JSON
+        mock_stream_event = Mock()
+        mock_stream_event.event_type = "terminal"
+        mock_stream_event.data = {"data": base64.b64encode(claude_json_lines).decode()}
+
+        mock_complete_event = Mock()
+        mock_complete_event.event_type = "complete"
+        mock_complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        # Run the task
+        message_queue = queue.Queue()
+        success, output, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="claude",
+            message_queue=message_queue,
+        )
+
+        # Collect stream messages
+        stream_messages = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "stream":
+                stream_messages.append(msg[1])
+
+        # Verify JSON was parsed to human-readable text
+        combined = "\n".join(stream_messages)
+        assert "Hello from Claude!" in combined, "Assistant text should be extracted"
+        assert "Reading /src/main.py" in combined, "Tool use should be formatted"
+        assert '{"type":"system"' not in combined, "Raw JSON should not appear"
+        assert '{"type":"result"' not in combined, "Result events should be filtered"
+
+    def test_run_task_passes_through_raw_for_non_anthropic(self, web_ui, mock_api_client, git_repo):
+        """run_task_via_api should pass through raw output for non-anthropic providers."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        # Configure mock to return non-anthropic account
+        mock_api_client.list_accounts.return_value = [
+            Account(name="codex", provider="openai", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        # Mock create_session
+        mock_session = Mock()
+        mock_session.id = "server-sess-456"
+        mock_api_client.create_session.return_value = mock_session
+
+        # Raw terminal output (not JSON)
+        raw_output = b"Working on task...\nDone!"
+
+        mock_stream_event = Mock()
+        mock_stream_event.event_type = "terminal"
+        mock_stream_event.data = {"data": base64.b64encode(raw_output).decode()}
+
+        mock_complete_event = Mock()
+        mock_complete_event.event_type = "complete"
+        mock_complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        # Run the task
+        message_queue = queue.Queue()
+        success, output, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="codex",
+            message_queue=message_queue,
+        )
+
+        # Collect stream messages
+        stream_messages = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "stream":
+                stream_messages.append(msg[1])
+
+        # Verify raw output was passed through
+        combined = "".join(stream_messages)
+        assert "Working on task" in combined
+        assert "Done!" in combined
+
+
 class TestLiveStreamPresentation:
     """Formatting and styling tests for the live activity stream."""
 
@@ -1488,6 +1625,183 @@ More details here...
         assert "data:image/png;base64," in summary_part
 
 
+class TestProgressUpdateExtraction:
+    """Test progress update extraction with placeholder filtering."""
+
+    def test_extract_progress_update_from_json_block(self):
+        """Extract progress from code-fenced JSON."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+Some thinking text...
+
+```json
+{"type": "progress", "summary": "Fixing authentication bug in login flow", "location": "src/auth.py:45"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert result.summary == "Fixing authentication bug in login flow"
+        assert result.location == "src/auth.py:45"
+
+    def test_extract_progress_update_filters_placeholder_text(self):
+        """Progress with placeholder text should be filtered out."""
+        from chad.util.prompts import extract_progress_update
+
+        # Test the exact placeholder from the old prompt
+        content = '''
+```json
+{"type": "progress", "summary": "One line describing the issue/feature", "location": "src/file.py:123"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is None
+
+    def test_extract_progress_update_filters_brief_description_placeholder(self):
+        """Progress with 'brief description of' should be filtered."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+```json
+{"type": "progress", "summary": "Brief description of what needs to change", "location": "src/foo.py:1"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is None
+
+    def test_extract_progress_update_filters_example_path(self):
+        """Progress containing example path patterns should be filtered."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+```json
+{"type": "progress", "summary": "Working on src/file.py:123 changes", "location": "src/foo.py:1"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is None
+
+    def test_extract_progress_update_allows_real_summaries(self):
+        """Real task descriptions should pass through."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+```json
+{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert result.summary == "Adding retry logic to handle API rate limits"
+
+    def test_extract_progress_update_filters_empty_summary(self):
+        """Empty summary should be filtered."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+```json
+{"type": "progress", "summary": "", "location": "src/foo.py:1"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is None
+
+
+class TestDynamicStatusLine:
+    """Test dynamic status line with task state and worktree path."""
+
+    def test_idle_status_shows_ready_with_model(self):
+        """Idle status should show Ready with coding model info."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def list_accounts(self):
+                return [MockAccount(name="claude-main", provider="anthropic", model="sonnet-4", role="CODING")]
+
+        ui = ProviderUIManager(MockAPIClient())
+        ready, status = ui.get_role_config_status()
+        assert ready is True
+        assert "Ready" in status
+        assert "Coding" in status
+        assert "claude-main" in status
+
+    def test_running_status_shows_worktree_path(self):
+        """Running state should show worktree path instead of model."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def list_accounts(self):
+                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
+
+        ui = ProviderUIManager(MockAPIClient())
+        ready, status = ui.get_role_config_status(task_state="running", worktree_path="/tmp/worktree-abc123")
+        assert ready is True
+        assert "Running" in status
+        assert "Worktree" in status
+        assert "/tmp/worktree-abc123" in status
+        assert "Ready" not in status
+
+    def test_verifying_status_shows_worktree_path(self):
+        """Verifying state should show worktree path."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def list_accounts(self):
+                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
+
+        ui = ProviderUIManager(MockAPIClient())
+        ready, status = ui.get_role_config_status(task_state="verifying", worktree_path="/tmp/worktree-abc123")
+        assert ready is True
+        assert "Verifying" in status
+        assert "Worktree" in status
+        assert "/tmp/worktree-abc123" in status
+
+    def test_completed_status_shows_agent_name(self):
+        """Completed state should show agent name (not worktree)."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def list_accounts(self):
+                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
+
+        ui = ProviderUIManager(MockAPIClient())
+        ready, status = ui.get_role_config_status(task_state="completed", worktree_path="/tmp/worktree-abc123")
+        assert ready is True
+        assert "Completed" in status
+        assert "Agent" in status
+        assert "claude-main" in status
+        # Worktree path not shown for completed/failed states
+        assert "Worktree" not in status
+
+    def test_failed_status_shows_agent_name(self):
+        """Failed state should show agent name (not worktree)."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def list_accounts(self):
+                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
+
+        ui = ProviderUIManager(MockAPIClient())
+        ready, status = ui.get_role_config_status(task_state="failed", worktree_path="/tmp/worktree-abc123")
+        assert ready is True
+        assert "Failed" in status
+        assert "Agent" in status
+        assert "claude-main" in status
+
+    def test_format_role_status_passes_parameters(self):
+        """format_role_status should pass task state and worktree path through."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def list_accounts(self):
+                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
+
+        ui = ProviderUIManager(MockAPIClient())
+        status = ui.format_role_status(task_state="running", worktree_path="/tmp/wt")
+        assert "Running" in status
+        assert "Worktree" in status
+
+
 class TestVerificationPrompt:
     """Ensure verification prompts include task context and summaries."""
 
@@ -1599,6 +1913,54 @@ class TestVerificationPrompt:
         assert "Verification failed" in feedback
         assert "Flake8 errors" in feedback
         assert "E123 line 5" in feedback
+
+    def test_parse_verification_response_handles_timeout_error(self):
+        """Timeout errors should be converted to structured failure, not raise exception."""
+        from chad.util.prompts import parse_verification_response
+
+        # Test Qwen-style timeout error
+        response = "Error: Qwen execution timed out (30 minutes)"
+        passed, summary, issues = parse_verification_response(response)
+        assert passed is False
+        assert "timed out" in summary.lower()
+        assert len(issues) == 1
+
+    def test_parse_verification_response_handles_stall_error(self):
+        """Stall errors should be converted to structured failure."""
+        from chad.util.prompts import parse_verification_response
+
+        response = "Error: Qwen execution stalled (no output for 1800s)"
+        passed, summary, issues = parse_verification_response(response)
+        assert passed is False
+        assert "stalled" in summary.lower()
+
+    def test_parse_verification_response_handles_cli_not_found(self):
+        """CLI not found errors should be converted to structured failure."""
+        from chad.util.prompts import parse_verification_response
+
+        response = "Failed to run Qwen Code: command not found"
+        passed, summary, issues = parse_verification_response(response)
+        assert passed is False
+        assert "not installed" in summary.lower()
+
+    def test_parse_verification_response_handles_no_response(self):
+        """No response errors should be converted to structured failure."""
+        from chad.util.prompts import parse_verification_response
+
+        response = "No response from Qwen Code"
+        passed, summary, issues = parse_verification_response(response)
+        assert passed is False
+        assert "no response" in summary.lower()
+
+    def test_parse_verification_response_still_parses_json(self):
+        """Valid JSON should still be parsed normally."""
+        from chad.util.prompts import parse_verification_response
+
+        response = '```json\n{"passed": true, "summary": "All good!"}\n```'
+        passed, summary, issues = parse_verification_response(response)
+        assert passed is True
+        assert summary == "All good!"
+        assert issues == []
 
 
 class TestAnsiToHtml:

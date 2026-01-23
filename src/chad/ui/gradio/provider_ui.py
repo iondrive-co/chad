@@ -1550,8 +1550,21 @@ class ProviderUIManager:
         except Exception:
             pass
 
-    def get_role_config_status(self) -> tuple[bool, str]:
-        """Check if roles are properly configured for running tasks."""
+    def get_role_config_status(
+        self,
+        task_state: str | None = None,
+        worktree_path: str | None = None,
+    ) -> tuple[bool, str]:
+        """Check if roles are properly configured for running tasks.
+
+        Args:
+            task_state: Optional task state (running, verifying, completed, failed).
+                       When provided, shows dynamic status instead of static "Ready".
+            worktree_path: Optional worktree path to display during active tasks.
+
+        Returns:
+            Tuple of (is_ready, status_text)
+        """
         accounts = self.api_client.list_accounts()
         if not accounts:
             return False, "⚠️ Add a provider to start tasks."
@@ -1566,8 +1579,25 @@ class ProviderUIManager:
         if not coding_account:
             return False, "⚠️ Please select a Coding Agent in the Run Task tab."
 
-        coding_model_str = coding_account.model if coding_account.model else ""
+        # Build dynamic status based on task state
+        if task_state:
+            state_icon = {
+                "running": "⚡",
+                "verifying": "🔍",
+                "completed": "✓",
+                "failed": "❌",
+            }.get(task_state, "⏳")
+            state_label = task_state.capitalize()
 
+            # Show worktree path during active tasks, agent name when idle
+            if worktree_path and task_state in ("running", "verifying"):
+                return True, f"{state_icon} {state_label} — **Worktree:** `{worktree_path}`"
+            else:
+                agent_info = f"{coding_account.name} ({coding_account.provider})"
+                return True, f"{state_icon} {state_label} — **Agent:** {agent_info}"
+
+        # Static "Ready" status when no task is active
+        coding_model_str = coding_account.model if coding_account.model else ""
         coding_info = f"{coding_account.name} ({coding_account.provider}"
         if coding_model_str:
             coding_info += f", {coding_model_str}"
@@ -1575,9 +1605,21 @@ class ProviderUIManager:
 
         return True, f"✓ Ready — **Coding:** {coding_info}"
 
-    def format_role_status(self) -> str:
-        """Return role status text."""
-        _, status = self.get_role_config_status()
+    def format_role_status(
+        self,
+        task_state: str | None = None,
+        worktree_path: str | None = None,
+    ) -> str:
+        """Return role status text.
+
+        Args:
+            task_state: Optional task state for dynamic status.
+            worktree_path: Optional worktree path to display.
+
+        Returns:
+            Formatted status string.
+        """
+        _, status = self.get_role_config_status(task_state, worktree_path)
         return status
 
     def assign_role(self, account_name: str, role: str, card_slots: int):
