@@ -514,6 +514,38 @@ class TestSetupTab:
         # Should store the special marker "__verification_none__" to indicate no verification
         assert config.get("verification_agent") == "__verification_none__"
 
+    def test_verification_agent_none_survives_page_reload(self, page: Page, temp_env):
+        """After page reload, 'None' verification agent should still be selected."""
+        # Ensure config has the VERIFICATION_NONE marker (from previous test or set directly)
+        with open(temp_env.config_path, encoding="utf-8") as f:
+            config = json.load(f)
+        if config.get("verification_agent") != "__verification_none__":
+            config["verification_agent"] = "__verification_none__"
+            with open(temp_env.config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f)
+
+        # Reload the page (simulating restart)
+        page.reload()
+        page.wait_for_timeout(2000)  # Wait for page to stabilize
+
+        # Navigate to the config panel
+        page.get_by_role("tab", name="⚙️ Setup").click()
+        config_toggle = page.get_by_role("button", name="Config")
+        config_toggle.click()
+
+        # The dropdown should show "None" (not "Same as Coding Agent")
+        verification_dropdown = page.get_by_label("Preferred Verification Agent")
+        expect(verification_dropdown).to_be_visible(timeout=5000)
+
+        # Get the dropdown's current text content
+        dropdown_text = verification_dropdown.input_value()
+
+        # Should be the "None" value, not "Same as Coding Agent"
+        assert dropdown_text == "__verification_none__", (
+            f"Expected dropdown value '__verification_none__' but got '{dropdown_text}'. "
+            "Bug: Verification agent 'None' reverted to default after page reload."
+        )
+
 
 class TestSubtaskTabs:
     """Test subtask tab filtering (integration with mock provider)."""

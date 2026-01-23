@@ -5593,6 +5593,9 @@ class ChadWebUI:
                     value=verification_value,
                     allow_custom_value=False,
                 )
+                # Store reference for load-time refresh
+                self._config_verification_pref = verification_pref
+                self._config_verification_choices_fn = lambda: verification_choices
                 verification_model_pref = gr.Dropdown(
                     label="Preferred Verification Model",
                     choices=verification_model_choices,
