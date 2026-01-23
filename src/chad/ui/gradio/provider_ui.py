@@ -1603,6 +1603,13 @@ class ProviderUIManager:
             coding_info += f", {coding_model_str}"
         coding_info += ")"
 
+        # Show worktree path in Ready status if available
+        if worktree_path:
+            # Extract last component for display
+            from pathlib import Path
+            worktree_name = Path(worktree_path).name
+            return True, f"✓ Ready — **Coding:** {coding_info} · **Worktree:** `{worktree_name}`"
+
         return True, f"✓ Ready — **Coding:** {coding_info}"
 
     def format_role_status(
