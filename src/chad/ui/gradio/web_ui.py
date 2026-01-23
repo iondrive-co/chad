@@ -5978,8 +5978,9 @@ function initializeLiveStreamScrollTracking() {
         if (!window._liveStreamScrollState[parentId]) {
             window._liveStreamScrollState[parentId] = {
                 userScrolledUp: false,
-                savedScrollTop: null,
-                lastScrollHeight: 0
+                savedScrollTop: 0,
+                lastScrollHeight: 0,
+                settingScroll: false  // Flag to ignore programmatic scroll events
             };
         }
         return window._liveStreamScrollState[parentId];
@@ -6000,16 +6001,26 @@ function initializeLiveStreamScrollTracking() {
             const content = e.target.closest('.live-output-content');
             if (!content) return;
 
-            // Use larger threshold for "at bottom" detection (10px)
-            const isAtBottom = content.scrollTop + content.clientHeight >= content.scrollHeight - 10;
+            // Ignore scroll events triggered by our programmatic scrolling
+            if (state.settingScroll) return;
 
-            if (isAtBottom) {
+            const scrollTop = content.scrollTop;
+            const previousScrollTop = state.savedScrollTop;
+            const isAtBottom = scrollTop + content.clientHeight >= content.scrollHeight - 10;
+            const scrolledDown = scrollTop > previousScrollTop;
+
+            // Always save current position
+            state.savedScrollTop = scrollTop;
+
+            // Only exit "scrolled up" mode if user actively scrolled DOWN to bottom
+            // (not if they just happen to be at bottom due to content shrinking)
+            if (isAtBottom && scrolledDown) {
                 state.userScrolledUp = false;
-                state.savedScrollTop = null;
-            } else {
+            } else if (!isAtBottom) {
+                // User is not at bottom - they've scrolled up
                 state.userScrolledUp = true;
-                state.savedScrollTop = content.scrollTop;
             }
+            // If isAtBottom but !scrolledDown (content shrank), keep current state
         }, true);
 
         // Watch for DOM changes (content replacement)
@@ -6024,13 +6035,21 @@ function initializeLiveStreamScrollTracking() {
                     const contentGrew = newScrollHeight > state.lastScrollHeight;
                     state.lastScrollHeight = newScrollHeight;
 
-                    if (state.userScrolledUp && state.savedScrollTop !== null) {
+                    // Set flag to ignore the scroll event from our programmatic scroll
+                    state.settingScroll = true;
+
+                    if (state.userScrolledUp) {
                         // Restore saved position when user has scrolled up
                         content.scrollTop = state.savedScrollTop;
                     } else if (contentGrew) {
                         // Auto-scroll to bottom when at bottom and content grew
                         content.scrollTop = newScrollHeight;
                     }
+
+                    // Clear flag after a brief delay to allow scroll event to fire
+                    requestAnimationFrame(() => {
+                        state.settingScroll = false;
+                    });
                 });
             });
         });
