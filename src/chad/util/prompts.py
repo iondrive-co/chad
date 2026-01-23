@@ -26,7 +26,7 @@ Use the following sequence to complete the task:
 1. Explore the code to understand the task.
 2. Once you understand what needs to be done, you MUST output a progress update so the user can see what you found:
 ```json
-{{"type": "progress", "summary": "One line describing the issue/feature", "location": "src/file.py:123 - where changes will be made", "before_screenshot": "/path/to/before.png (optional, include if you took one)", "before_description": "Brief description of what the screenshot shows (optional, include if you took a screenshot)"}}
+{{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45 - request() method", "before_screenshot": "/path/to/before.png (optional, include if you took one)", "before_description": "Brief description of what the screenshot shows (optional, include if you took a screenshot)"}}
 ```
 For UI tasks: take a "before" screenshot first and include the path. For non-UI tasks: omit before_screenshot.
 3. Write test(s) that should fail until the fix/feature is implemented.
@@ -181,6 +181,16 @@ class ProgressUpdate:
     before_description: str | None = None
 
 
+# Error patterns that indicate a provider failure rather than a parse issue
+_PROVIDER_ERROR_PATTERNS = [
+    (r"Error:\s*.*execution stalled", "Verification agent stalled (no output)"),
+    (r"Error:\s*.*execution timed out", "Verification agent timed out"),
+    (r"Failed to run.*command not found", "Verification agent CLI not installed"),
+    (r"No response from", "Verification agent returned no response"),
+    (r"Failed to run.*:", "Verification agent execution error"),
+]
+
+
 def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
     """Parse the JSON response from the verification agent.
 
@@ -195,6 +205,12 @@ def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
     """
     import json
     import re
+
+    # Check for known provider error patterns before parsing
+    # These indicate execution failures that should fail verification gracefully
+    for pattern, error_msg in _PROVIDER_ERROR_PATTERNS:
+        if re.search(pattern, response, re.IGNORECASE):
+            return False, error_msg, [response.strip()[:500]]
 
     # Strip thinking/reasoning prefixes that some models add before JSON
     # e.g., "*Thinking: **Ensuring valid JSON output***\n\n{..."
@@ -294,6 +310,23 @@ def extract_coding_summary(response: str) -> CodingSummary | None:
     return None
 
 
+# Placeholder patterns that indicate the agent copied the example verbatim
+_PLACEHOLDER_PATTERNS = [
+    "one line describing",
+    "brief description of",
+    "src/file.py:123",
+    "/path/to/before.png",
+]
+
+
+def _is_placeholder_text(summary: str) -> bool:
+    """Check if summary looks like placeholder text from the prompt example."""
+    if not summary:
+        return True
+    lower = summary.lower()
+    return any(pattern in lower for pattern in _PLACEHOLDER_PATTERNS)
+
+
 def extract_progress_update(response: str) -> ProgressUpdate | None:
     """Extract a progress update from coding agent streaming output.
 
@@ -301,7 +334,8 @@ def extract_progress_update(response: str) -> ProgressUpdate | None:
         response: Raw response chunk from the coding agent
 
     Returns:
-        ProgressUpdate if found, None otherwise
+        ProgressUpdate if found, None otherwise. Returns None if the summary
+        appears to be placeholder text copied from the prompt example.
     """
     import json
     import re
@@ -312,8 +346,12 @@ def extract_progress_update(response: str) -> ProgressUpdate | None:
         try:
             data = json.loads(json_match.group(1))
             if data.get("type") == "progress":
+                summary = data.get("summary", "")
+                # Filter out placeholder text
+                if _is_placeholder_text(summary):
+                    return None
                 return ProgressUpdate(
-                    summary=data.get("summary", ""),
+                    summary=summary,
                     location=data.get("location", ""),
                     before_screenshot=data.get("before_screenshot"),
                     before_description=data.get("before_description"),
@@ -327,8 +365,12 @@ def extract_progress_update(response: str) -> ProgressUpdate | None:
         try:
             data = json.loads(raw_match.group(0))
             if data.get("type") == "progress":
+                summary = data.get("summary", "")
+                # Filter out placeholder text
+                if _is_placeholder_text(summary):
+                    return None
                 return ProgressUpdate(
-                    summary=data.get("summary", ""),
+                    summary=summary,
                     location=data.get("location", ""),
                     before_screenshot=data.get("before_screenshot"),
                     before_description=data.get("before_description"),
