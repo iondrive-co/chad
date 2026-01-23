@@ -159,6 +159,55 @@ class TestConfigEndpoints:
         assert "enabled" in data
         assert "auto_run" in data
 
+    def test_get_verification_agent_default(self, client):
+        """Returns None when no verification agent is set."""
+        response = client.get("/api/v1/config/verification-agent")
+        assert response.status_code == 200
+        data = response.json()
+        assert "account_name" in data
+        # Default is None (same as coding agent)
+        assert data["account_name"] is None
+
+    def test_set_verification_agent_none_marker(self, client):
+        """Setting verification agent to VERIFICATION_NONE marker persists correctly."""
+        # Set to the special marker value
+        response = client.put(
+            "/api/v1/config/verification-agent",
+            json={"account_name": "__verification_none__"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["account_name"] == "__verification_none__"
+
+        # Verify it persists when we get it back
+        get_response = client.get("/api/v1/config/verification-agent")
+        assert get_response.status_code == 200
+        get_data = get_response.json()
+        assert get_data["account_name"] == "__verification_none__"
+
+    def test_set_verification_agent_none_clears(self, client):
+        """Setting verification agent to None clears the setting."""
+        # First set to the marker
+        client.put(
+            "/api/v1/config/verification-agent",
+            json={"account_name": "__verification_none__"},
+        )
+
+        # Then clear by setting to None
+        response = client.put(
+            "/api/v1/config/verification-agent",
+            json={"account_name": None},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["account_name"] is None
+
+        # Verify it's cleared
+        get_response = client.get("/api/v1/config/verification-agent")
+        assert get_response.status_code == 200
+        get_data = get_response.json()
+        assert get_data["account_name"] is None
+
 
 class TestWorktreeEndpoints:
     """Tests for worktree endpoints (require valid session)."""

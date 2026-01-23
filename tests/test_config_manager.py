@@ -554,3 +554,67 @@ class TestConfigManager:
         config = {"password_hash": "hash", "unexpected": True}
         with pytest.raises(ValueError):
             validate_config_keys(config)
+
+
+class TestVerificationAgent:
+    """Tests for verification agent configuration."""
+
+    def test_set_verification_agent_none_marker(self, tmp_path):
+        """Setting verification agent to VERIFICATION_NONE stores the marker."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # Set the verification agent to the VERIFICATION_NONE marker
+        mgr.set_verification_agent(mgr.VERIFICATION_NONE)
+
+        # Verify the marker is stored in the config
+        config = mgr.load_config()
+        assert config.get("verification_agent") == "__verification_none__"
+
+    def test_get_verification_agent_returns_none_marker(self, tmp_path):
+        """Getting verification agent returns VERIFICATION_NONE marker when stored."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # Set the verification agent to the VERIFICATION_NONE marker
+        mgr.set_verification_agent(mgr.VERIFICATION_NONE)
+
+        # Verify get returns the marker (not None, not empty string)
+        result = mgr.get_verification_agent()
+        assert result == mgr.VERIFICATION_NONE
+        assert result == "__verification_none__"
+
+    def test_verification_agent_none_marker_persists_across_instances(self, tmp_path):
+        """VERIFICATION_NONE marker persists and can be retrieved by a new ConfigManager."""
+        config_path = tmp_path / "test.conf"
+
+        # Set verification agent with first instance
+        mgr1 = ConfigManager(config_path)
+        mgr1.set_verification_agent(mgr1.VERIFICATION_NONE)
+
+        # Create a new instance (simulating restart) and verify
+        mgr2 = ConfigManager(config_path)
+        result = mgr2.get_verification_agent()
+
+        assert result == mgr2.VERIFICATION_NONE
+        assert result == "__verification_none__"
+
+    def test_set_verification_agent_to_none_clears_setting(self, tmp_path):
+        """Setting verification agent to None (not the marker) clears the setting."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # First set to the VERIFICATION_NONE marker
+        mgr.set_verification_agent(mgr.VERIFICATION_NONE)
+        assert mgr.get_verification_agent() == mgr.VERIFICATION_NONE
+
+        # Then clear by setting to None
+        mgr.set_verification_agent(None)
+
+        # Should return None (not the marker)
+        result = mgr.get_verification_agent()
+        assert result is None
+
+        # Config should not have the key
+        config = mgr.load_config()
+        assert "verification_agent" not in config
