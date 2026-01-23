@@ -273,17 +273,17 @@ class TestTerminalLayoutForDisplay:
     horizontal scrolling or garbled layout.
     """
 
-    def test_default_terminal_width_fits_live_stream_panel(self):
-        """Default TERMINAL_COLS should fit the live stream panel well.
+    def test_default_terminal_width_is_reasonable_fallback(self):
+        """Default TERMINAL_COLS should be a reasonable fallback.
 
-        160 columns at ~8px per character = ~1280px, which fits well in the
-        live stream panel which spans full width. This provides good width
-        utilization while allowing horizontal scroll on smaller screens.
+        The actual terminal width is dynamically calculated from the container
+        width using JavaScript in web_ui.py. This constant is just a fallback
+        when dynamic calculation is unavailable. 120 columns is safe for most screens.
         """
         from chad.ui.terminal_emulator import TERMINAL_COLS
-        assert 140 <= TERMINAL_COLS <= 180, (
-            f"TERMINAL_COLS={TERMINAL_COLS} should be 140-180 to utilize the "
-            "live stream panel width effectively."
+        assert 80 <= TERMINAL_COLS <= 160, (
+            f"TERMINAL_COLS={TERMINAL_COLS} should be 80-160 as a reasonable "
+            "fallback when dynamic width calculation is unavailable."
         )
 
     def test_tui_box_renders_within_terminal_width(self):
