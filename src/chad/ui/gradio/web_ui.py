@@ -3494,8 +3494,117 @@ class ChadWebUI:
                                 "",
                                 task_state="verifying",
                             )
+                        elif (
+                            session.server_session_id
+                            and verification_attempt < max_verification_attempts
+                            and not session.cancel_requested
+                        ):
+                            # API-based revision: re-run task via API with revision feedback
+                            revision_content = (
+                                "───────────── 🔄 REVISION REQUESTED ─────────────\n\n"
+                                "*Re-running coding agent with verification feedback...*"
+                            )
+                            chat_history.append({"role": "user", "content": revision_content})
+                            if session.event_log:
+                                session.event_log.log(UserMessageEvent(content="Revision requested (API)"))
+                            revision_status = f"{status_prefix}🔄 Re-running coding agent with feedback..."
+                            yield make_yield(chat_history, revision_status, "", task_state="running")
+
+                            # Build revision task description
+                            revision_task = (
+                                f"REVISION REQUEST: The previous attempt had verification issues.\n\n"
+                                f"Original task: {task_description}\n\n"
+                                f"Verification feedback:\n{verification_feedback}\n\n"
+                                f"Please fix these issues."
+                            )
+
+                            # Track where the revision message will be inserted
+                            revision_pending_idx = len(chat_history)
+                            revision_status_msg = f"{status_prefix}⏳ Coding agent working on revisions..."
+                            revision_placeholder = build_live_stream_html("⏳ Preparing revision...", "CODING AI")
+                            yield make_yield(chat_history, revision_status_msg, revision_placeholder, task_state="running")
+
+                            # Run revision via API in a thread
+                            revision_result: list = [None, None, None]  # [success, output, error]
+                            revision_complete = threading.Event()
+
+                            def run_api_revision_thread():
+                                try:
+                                    success, output, _ = self.run_task_via_api(
+                                        session_id=session.id,
+                                        project_path=str(path_obj),
+                                        task_description=revision_task,
+                                        coding_account=coding_account,
+                                        message_queue=message_queue,
+                                        coding_model=selected_model if selected_model != "default" else None,
+                                        coding_reasoning=selected_reasoning if selected_reasoning != "default" else None,
+                                        server_session_id=session.server_session_id,
+                                        terminal_cols=terminal_cols,
+                                    )
+                                    revision_result[0] = success
+                                    revision_result[1] = output
+                                except Exception as exc:
+                                    revision_result[2] = exc
+                                finally:
+                                    revision_complete.set()
+
+                            revision_thread = threading.Thread(target=run_api_revision_thread, daemon=True)
+                            revision_thread.start()
+
+                            # Poll message queue while revision runs
+                            rev_display_buffer = LiveStreamDisplayBuffer()
+                            rev_last_yield = 0.0
+                            while not revision_complete.is_set() and not session.cancel_requested:
+                                try:
+                                    msg = message_queue.get(timeout=0.05)
+                                    if msg[0] == "stream":
+                                        chunk = msg[1]
+                                        if chunk.strip():
+                                            rev_display_buffer.append(chunk)
+                                            now = time_module.time()
+                                            if now - rev_last_yield >= min_yield_interval:
+                                                rendered = build_live_stream_html(
+                                                    rev_display_buffer.content, "CODING AI"
+                                                )
+                                                yield make_yield(chat_history, revision_status_msg, rendered, task_state="running")
+                                                rev_last_yield = now
+                                except queue.Empty:
+                                    pass
+
+                            revision_thread.join(timeout=1.0)
+                            revision_success = revision_result[0]
+                            revision_output = revision_result[1]
+                            revision_error = revision_result[2]
+
+                            if revision_error:
+                                chat_history.insert(revision_pending_idx, {
+                                    "role": "assistant",
+                                    "content": f"**CODING AI**\n\n❌ *Revision error: {revision_error}*",
+                                })
+                                break
+
+                            if revision_success and revision_output:
+                                chat_history.insert(revision_pending_idx, make_chat_message("CODING AI", revision_output))
+                                last_coding_output = revision_output
+                                if session.event_log:
+                                    session.event_log.log(AssistantMessageEvent(
+                                        blocks=[{"kind": "text", "content": revision_output[:1000]}]
+                                    ))
+                            else:
+                                chat_history.insert(revision_pending_idx, {
+                                    "role": "assistant",
+                                    "content": "**CODING AI**\n\n❌ *Revision task did not complete successfully*",
+                                })
+                                break
+
+                            yield make_yield(
+                                chat_history,
+                                f"{status_prefix}✓ Revision complete, re-verifying...",
+                                "",
+                                task_state="verifying",
+                            )
                         else:
-                            # Can't continue - session not active or max attempts reached
+                            # Can't continue - max attempts reached or cancelled
                             break
 
                 if verified is True:
@@ -4731,7 +4840,12 @@ class ChadWebUI:
             *[(account, account) for account in account_choices],
         ]
         stored_verification = self.api_client.get_verification_agent()
-        initial_verification = stored_verification if stored_verification in account_choices else self.SAME_AS_CODING
+        if stored_verification == self.VERIFICATION_NONE:
+            initial_verification = self.VERIFICATION_NONE
+        elif stored_verification in account_choices:
+            initial_verification = stored_verification
+        else:
+            initial_verification = self.SAME_AS_CODING
 
         # Get initial model/reasoning choices for coding agent
         coding_model_choices = self.get_models_for_account(initial_coding) if initial_coding else ["default"]
@@ -6509,6 +6623,36 @@ initializeTerminalColumnTracking();
                         fn=refresh_dropdowns_after_delete,
                         outputs=all_dropdown_outputs,
                     )
+
+            # Load handler to refresh config panel dropdown values on page load
+            def refresh_config_dropdown_on_load():
+                """Refresh the config panel verification dropdown from current config."""
+                try:
+                    accounts = self.api_client.list_accounts()
+                    account_choices = [acc.name for acc in accounts]
+                    stored_verification = self.api_client.get_verification_agent()
+
+                    if stored_verification == self.VERIFICATION_NONE:
+                        verification_value = self.VERIFICATION_NONE
+                    elif stored_verification and stored_verification in account_choices:
+                        verification_value = stored_verification
+                    else:
+                        verification_value = self.SAME_AS_CODING
+
+                    verification_choices = [
+                        (self.SAME_AS_CODING, self.SAME_AS_CODING),
+                        (self.VERIFICATION_NONE_LABEL, self.VERIFICATION_NONE),
+                        *[(name, name) for name in account_choices],
+                    ]
+                    return gr.update(choices=verification_choices, value=verification_value)
+                except Exception:
+                    return gr.update()
+
+            if hasattr(self, "_config_verification_pref") and self._config_verification_pref:
+                interface.load(
+                    fn=refresh_config_dropdown_on_load,
+                    outputs=[self._config_verification_pref],
+                )
 
             return interface
 
