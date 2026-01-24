@@ -106,12 +106,27 @@ class ModelCatalog:
     def _stored_model(self, provider: str, account_name: str | None) -> set[str]:
         if not account_name or not self.api_client:
             return set()
+
+        models: set[str] = set()
+
+        # Primary: model stored on the account object (used throughout the UI)
         try:
             account = self.api_client.get_account(account_name)
-            model = account.model
+            model = getattr(account, "model", None)
+            if model:
+                models.add(str(model))
         except Exception:
-            return set()
-        return {str(model)} if model else set()
+            pass
+
+        # Legacy/compat: some API clients expose get_account_model instead
+        try:
+            model = self.api_client.get_account_model(account_name)
+            if model:
+                models.add(str(model))
+        except Exception:
+            pass
+
+        return models
 
     def _codex_config_models(self, account_name: str | None) -> set[str]:
         if tomllib is None:
