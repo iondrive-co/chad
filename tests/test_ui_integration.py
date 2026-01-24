@@ -540,9 +540,10 @@ class TestSetupTab:
         # Get the dropdown's current text content
         dropdown_text = verification_dropdown.input_value()
 
-        # Should be the "None" value, not "Same as Coding Agent"
-        assert dropdown_text == "__verification_none__", (
-            f"Expected dropdown value '__verification_none__' but got '{dropdown_text}'. "
+        # Should be "None" (label) or "__verification_none__" (value), not "Same as Coding Agent"
+        # Gradio returns the display label from input_value() for dropdowns
+        assert dropdown_text in ("None", "__verification_none__"), (
+            f"Expected dropdown to show 'None' but got '{dropdown_text}'. "
             "Bug: Verification agent 'None' reverted to default after page reload."
         )
 
