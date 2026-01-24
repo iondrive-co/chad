@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 
 def test_ensure_playwright_browsers_skips_when_cache_present(monkeypatch, tmp_path):
-    from chad.verification import ui_playwright_runner as upr
+    from chad.ui.gradio.verification import ui_playwright_runner as upr
 
     browsers_path = tmp_path / "ms-playwright"
     chromium_dir = browsers_path / "chromium-1234" / "chrome-linux"
@@ -24,7 +24,7 @@ def test_ensure_playwright_browsers_skips_when_cache_present(monkeypatch, tmp_pa
 
 
 def test_ensure_playwright_browsers_installs_when_missing(monkeypatch, tmp_path):
-    from chad.verification import ui_playwright_runner as upr
+    from chad.ui.gradio.verification import ui_playwright_runner as upr
 
     browsers_path = tmp_path / "ms-playwright"
     monkeypatch.setattr(upr, "SHARED_BROWSERS_PATH", browsers_path)
@@ -54,7 +54,7 @@ def test_ensure_playwright_browsers_installs_when_missing(monkeypatch, tmp_path)
 
 
 def test_run_screenshot_subprocess_builds_output(monkeypatch, tmp_path):
-    from chad.verification import ui_playwright_runner as upr
+    from chad.ui.gradio.verification import ui_playwright_runner as upr
 
     class DummyResult:
         def __init__(self):
@@ -100,7 +100,7 @@ class TestProcessCleanup:
 
     def test_registry_created_on_first_call(self, monkeypatch, tmp_path):
         """_get_test_registry should create a registry on first call."""
-        from chad.verification import ui_playwright_runner as upr
+        from chad.ui.gradio.verification import ui_playwright_runner as upr
 
         # Reset the module-level registry
         upr._test_server_registry = None
@@ -118,8 +118,8 @@ class TestProcessCleanup:
 
     def test_start_chad_registers_process(self, monkeypatch, tmp_path):
         """start_chad should register the spawned process in the registry."""
-        from chad.verification import ui_playwright_runner as upr
-        from chad.process_registry import ProcessRegistry
+        from chad.ui.gradio.verification import ui_playwright_runner as upr
+        from chad.util.process_registry import ProcessRegistry
 
         # Create a test registry with temp pidfile
         test_pidfile = tmp_path / "test_servers.pids"
@@ -147,8 +147,8 @@ class TestProcessCleanup:
 
     def test_stop_chad_terminates_via_registry(self, monkeypatch, tmp_path):
         """stop_chad should use registry.terminate to clean up."""
-        from chad.verification import ui_playwright_runner as upr
-        from chad.process_registry import ProcessRegistry
+        from chad.ui.gradio.verification import ui_playwright_runner as upr
+        from chad.util.process_registry import ProcessRegistry
 
         # Create a test registry
         test_pidfile = tmp_path / "test_servers.pids"
@@ -178,8 +178,8 @@ class TestProcessCleanup:
 
     def test_start_chad_passes_parent_pid(self, monkeypatch, tmp_path):
         """start_chad should set CHAD_PARENT_PID in environment."""
-        from chad.verification import ui_playwright_runner as upr
-        from chad.process_registry import ProcessRegistry
+        from chad.ui.gradio.verification import ui_playwright_runner as upr
+        from chad.util.process_registry import ProcessRegistry
 
         # Create a test registry
         test_pidfile = tmp_path / "test_servers.pids"
@@ -211,8 +211,8 @@ class TestProcessCleanup:
 
     def test_cleanup_all_test_servers_calls_registry(self, monkeypatch, tmp_path):
         """cleanup_all_test_servers should use registry methods."""
-        from chad.verification import ui_playwright_runner as upr
-        from chad.process_registry import ProcessRegistry
+        from chad.ui.gradio.verification import ui_playwright_runner as upr
+        from chad.util.process_registry import ProcessRegistry
 
         # Create a test registry
         test_pidfile = tmp_path / "test_servers.pids"
@@ -247,7 +247,7 @@ class TestProcessRegistry:
 
     def test_register_adds_to_memory_and_pidfile(self, tmp_path):
         """register should track process in both memory and pidfile."""
-        from chad.process_registry import ProcessRegistry
+        from chad.util.process_registry import ProcessRegistry
 
         pidfile = tmp_path / "test.pids"
         registry = ProcessRegistry(pidfile=pidfile)
@@ -268,7 +268,7 @@ class TestProcessRegistry:
 
     def test_unregister_removes_from_both(self, tmp_path):
         """unregister should remove from both memory and pidfile."""
-        from chad.process_registry import ProcessRegistry
+        from chad.util.process_registry import ProcessRegistry
 
         pidfile = tmp_path / "test.pids"
         registry = ProcessRegistry(pidfile=pidfile)
@@ -291,7 +291,7 @@ class TestProcessRegistry:
 
     def test_cleanup_stale_kills_old_processes(self, monkeypatch, tmp_path):
         """cleanup_stale should kill processes older than max_age."""
-        from chad.process_registry import ProcessRegistry
+        from chad.util.process_registry import ProcessRegistry
 
         pidfile = tmp_path / "test.pids"
         registry = ProcessRegistry(pidfile=pidfile, max_age_seconds=1.0)
@@ -319,7 +319,7 @@ class TestProcessRegistry:
 
     def test_verify_cleanup_returns_running_processes(self, monkeypatch, tmp_path):
         """verify_cleanup should return PIDs that are still running."""
-        from chad.process_registry import ProcessRegistry
+        from chad.util.process_registry import ProcessRegistry
 
         pidfile = tmp_path / "test.pids"
         registry = ProcessRegistry(pidfile=pidfile)
@@ -338,7 +338,7 @@ class TestProcessRegistry:
 
     def test_file_locking_prevents_corruption(self, tmp_path):
         """Multiple registry instances should use file locking."""
-        from chad.process_registry import ProcessRegistry
+        from chad.util.process_registry import ProcessRegistry
 
         pidfile = tmp_path / "shared.pids"
 

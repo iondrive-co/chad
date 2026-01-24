@@ -3,7 +3,7 @@
 from unittest.mock import patch
 import os
 import pytest
-from chad.config_manager import ConfigManager
+from chad.util.config_manager import CONFIG_BASE_KEYS, ConfigManager, validate_config_keys
 
 
 class TestConfigManager:
@@ -543,3 +543,160 @@ class TestConfigManager:
         assert accounts["work-anthropic"] == "anthropic"
         assert accounts["personal-openai"] == "openai"
         assert len(accounts) == 2  # No duplicates
+
+    def test_validate_config_keys_accepts_known_keys(self):
+        """validate_config_keys should allow all base keys."""
+        config = {key: "value" for key in CONFIG_BASE_KEYS}
+        validate_config_keys(config)  # Should not raise
+
+    def test_validate_config_keys_rejects_unknown(self):
+        """validate_config_keys should force panel updates for new keys."""
+        config = {"password_hash": "hash", "unexpected": True}
+        with pytest.raises(ValueError):
+            validate_config_keys(config)
+
+
+class TestVerificationAgent:
+    """Tests for verification agent configuration."""
+
+    def test_set_verification_agent_none_marker(self, tmp_path):
+        """Setting verification agent to VERIFICATION_NONE stores the marker."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # Set the verification agent to the VERIFICATION_NONE marker
+        mgr.set_verification_agent(mgr.VERIFICATION_NONE)
+
+        # Verify the marker is stored in the config
+        config = mgr.load_config()
+        assert config.get("verification_agent") == "__verification_none__"
+
+    def test_get_verification_agent_returns_none_marker(self, tmp_path):
+        """Getting verification agent returns VERIFICATION_NONE marker when stored."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # Set the verification agent to the VERIFICATION_NONE marker
+        mgr.set_verification_agent(mgr.VERIFICATION_NONE)
+
+        # Verify get returns the marker (not None, not empty string)
+        result = mgr.get_verification_agent()
+        assert result == mgr.VERIFICATION_NONE
+        assert result == "__verification_none__"
+
+    def test_verification_agent_none_marker_persists_across_instances(self, tmp_path):
+        """VERIFICATION_NONE marker persists and can be retrieved by a new ConfigManager."""
+        config_path = tmp_path / "test.conf"
+
+        # Set verification agent with first instance
+        mgr1 = ConfigManager(config_path)
+        mgr1.set_verification_agent(mgr1.VERIFICATION_NONE)
+
+        # Create a new instance (simulating restart) and verify
+        mgr2 = ConfigManager(config_path)
+        result = mgr2.get_verification_agent()
+
+        assert result == mgr2.VERIFICATION_NONE
+        assert result == "__verification_none__"
+
+    def test_set_verification_agent_to_none_clears_setting(self, tmp_path):
+        """Setting verification agent to None (not the marker) clears the setting."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # First set to the VERIFICATION_NONE marker
+        mgr.set_verification_agent(mgr.VERIFICATION_NONE)
+        assert mgr.get_verification_agent() == mgr.VERIFICATION_NONE
+
+        # Then clear by setting to None
+        mgr.set_verification_agent(None)
+
+        # Should return None (not the marker)
+        result = mgr.get_verification_agent()
+        assert result is None
+
+        # Config should not have the key
+        config = mgr.load_config()
+        assert "verification_agent" not in config
+
+
+class TestPreferredVerificationModel:
+    """Tests for preferred verification model configuration."""
+
+    def test_set_and_get_preferred_verification_model(self, tmp_path):
+        """Test setting and getting preferred verification model."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # Initially should return None
+        assert mgr.get_preferred_verification_model() is None
+
+        # Set a model
+        mgr.set_preferred_verification_model("claude-3-5-sonnet-20241022")
+
+        # Should return the set value
+        result = mgr.get_preferred_verification_model()
+        assert result == "claude-3-5-sonnet-20241022"
+
+        # Verify it's stored in config
+        config = mgr.load_config()
+        assert config.get("preferred_verification_model") == "claude-3-5-sonnet-20241022"
+
+    def test_set_preferred_verification_model_to_none_clears_setting(self, tmp_path):
+        """Setting preferred verification model to None clears the setting."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # First set a model
+        mgr.set_preferred_verification_model("gpt-4o")
+        assert mgr.get_preferred_verification_model() == "gpt-4o"
+
+        # Clear by setting to None
+        mgr.set_preferred_verification_model(None)
+
+        # Should return None
+        result = mgr.get_preferred_verification_model()
+        assert result is None
+
+        # Config should not have the key
+        config = mgr.load_config()
+        assert "preferred_verification_model" not in config
+
+    def test_preferred_verification_model_persists_across_instances(self, tmp_path):
+        """Preferred verification model persists and can be retrieved by a new ConfigManager."""
+        config_path = tmp_path / "test.conf"
+
+        # Set model with first instance
+        mgr1 = ConfigManager(config_path)
+        mgr1.set_preferred_verification_model("gemini-2.0-flash-exp")
+
+        # Create a new instance (simulating restart) and verify
+        mgr2 = ConfigManager(config_path)
+        result = mgr2.get_preferred_verification_model()
+
+        assert result == "gemini-2.0-flash-exp"
+
+    def test_preferred_verification_model_independent_of_account_model(self, tmp_path):
+        """Preferred verification model is stored separately from account model."""
+        import base64
+        import bcrypt
+
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # Setup account with password
+        password = "testpassword"
+        password_hash = mgr.hash_password(password)
+        salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
+        mgr.save_config({"password_hash": password_hash, "encryption_salt": salt})
+
+        # Store account with a model
+        mgr.store_account("test-account", "anthropic", "key", password, "claude-opus-4-20250514")
+        mgr.set_verification_agent("test-account")
+
+        # Set a different preferred verification model
+        mgr.set_preferred_verification_model("claude-3-5-sonnet-20241022")
+
+        # They should be independent
+        assert mgr.get_account_model("test-account") == "claude-opus-4-20250514"
+        assert mgr.get_preferred_verification_model() == "claude-3-5-sonnet-20241022"

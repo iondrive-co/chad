@@ -1,16 +1,29 @@
 """Tests for web UI module."""
 
-import json
 import os
 import re
 import socket
 import subprocess
+import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 import pytest
 
-from chad.git_worktree import GitWorktreeManager
-from chad.providers import ModelConfig, MockProvider
+from chad.util.git_worktree import GitWorktreeManager
+from chad.util.providers import ModelConfig, MockProvider
+
+
+@dataclass
+class MockAccount:
+    """Mock account for tests."""
+
+    name: str
+    provider: str
+    model: str | None = "default"
+    reasoning: str | None = "default"
+    role: str | None = None
 
 
 @pytest.fixture
@@ -59,28 +72,34 @@ class TestChadWebUI:
     """Test cases for ChadWebUI class."""
 
     @pytest.fixture
-    def mock_security_mgr(self):
-        """Create a mock security manager."""
-        mgr = Mock()
-        mgr.list_accounts.return_value = {"claude": "anthropic", "gpt": "openai"}
-        mgr.list_role_assignments.return_value = {"CODING": "claude"}
-        mgr.get_account_model.return_value = "default"
-        mgr.get_account_reasoning.return_value = "default"
-        return mgr
+    def mock_api_client(self):
+        """Create a mock API client."""
+        client = Mock()
+        # Default accounts
+        claude_account = MockAccount(name="claude", provider="anthropic", role="CODING")
+        gpt_account = MockAccount(name="gpt", provider="openai")
+        client.list_accounts.return_value = [claude_account, gpt_account]
+        client.get_account.side_effect = lambda name: {
+            "claude": claude_account,
+            "gpt": gpt_account,
+        }.get(name, Mock(name=name, provider="unknown", model="default", reasoning="default", role=None))
+        client.get_verification_agent.return_value = None
+        client.get_preferences.return_value = Mock(last_project_path=None, dark_mode=True, ui_mode="gradio")
+        client.get_cleanup_settings.return_value = Mock(retention_days=7, auto_cleanup=True)
+        return client
 
     @pytest.fixture
-    def web_ui(self, mock_security_mgr):
+    def web_ui(self, mock_api_client):
         """Create a ChadWebUI instance with mocked dependencies."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
-        ui = ChadWebUI(mock_security_mgr, "test-password")
+        ui = ChadWebUI(mock_api_client)
         ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/codex"))
         return ui
 
-    def test_init(self, web_ui, mock_security_mgr):
+    def test_init(self, web_ui, mock_api_client):
         """Test ChadWebUI initialization."""
-        assert web_ui.security_mgr == mock_security_mgr
-        assert web_ui.main_password == "test-password"
+        assert web_ui.api_client == mock_api_client
 
     def test_progress_bar_helper(self, web_ui):
         """Progress bar helper should clamp values and preserve width."""
@@ -92,9 +111,9 @@ class TestChadWebUI:
         assert full_bar == "█" * 20
 
     @patch("subprocess.run")
-    def test_add_provider_success(self, mock_run, web_ui, mock_security_mgr, tmp_path):
+    def test_add_provider_success(self, mock_run, web_ui, mock_api_client, tmp_path):
         """Test adding a new provider successfully (OpenAI/Codex)."""
-        mock_security_mgr.list_accounts.return_value = {}
+        mock_api_client.list_accounts.return_value = []
         mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
         with (
@@ -105,12 +124,12 @@ class TestChadWebUI:
 
         assert "✅" in result or "✓" in result
         assert "my-codex" in result
-        mock_security_mgr.store_account.assert_called_once_with("my-codex", "openai", "", "test-password")
+        mock_api_client.create_account.assert_called_once_with("my-codex", "openai")
 
     @patch("subprocess.run")
-    def test_add_provider_auto_name(self, mock_run, web_ui, mock_security_mgr, tmp_path):
+    def test_add_provider_auto_name(self, mock_run, web_ui, mock_api_client, tmp_path):
         """Test adding provider with auto-generated name."""
-        mock_security_mgr.list_accounts.return_value = {}
+        mock_api_client.list_accounts.return_value = []
         mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
         with (
@@ -121,12 +140,12 @@ class TestChadWebUI:
 
         assert "✓" in result or "Provider" in result
         assert "openai" in result
-        mock_security_mgr.store_account.assert_called_once_with("openai", "openai", "", "test-password")
+        mock_api_client.create_account.assert_called_once_with("openai", "openai")
 
     @patch("subprocess.run")
-    def test_add_provider_duplicate_name(self, mock_run, web_ui, mock_security_mgr, tmp_path):
+    def test_add_provider_duplicate_name(self, mock_run, web_ui, mock_api_client, tmp_path):
         """Test adding provider when name already exists (OpenAI/Codex)."""
-        mock_security_mgr.list_accounts.return_value = {"openai": "openai"}
+        mock_api_client.list_accounts.return_value = [MockAccount(name="openai", provider="openai")]
         mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
         with (
@@ -137,12 +156,12 @@ class TestChadWebUI:
 
         # Should create openai-1
         assert "✅" in result or "✓" in result
-        mock_security_mgr.store_account.assert_called_once_with("openai-1", "openai", "", "test-password")
+        mock_api_client.create_account.assert_called_once_with("openai-1", "openai")
 
     @patch("subprocess.run")
-    def test_add_provider_error(self, mock_run, web_ui, mock_security_mgr, tmp_path):
+    def test_add_provider_error(self, mock_run, web_ui, mock_api_client, tmp_path):
         """Test adding provider when login fails (OpenAI/Codex)."""
-        mock_security_mgr.list_accounts.return_value = {}
+        mock_api_client.list_accounts.return_value = []
         # Mock Codex login to fail
         mock_run.return_value = Mock(returncode=1, stderr="Login cancelled", stdout="")
 
@@ -155,67 +174,69 @@ class TestChadWebUI:
         assert "❌" in result
         assert "Login failed" in result or "cancelled" in result.lower()
 
-    def test_assign_role_success(self, web_ui, mock_security_mgr):
+    def test_assign_role_success(self, web_ui, mock_api_client):
         """Test assigning a role successfully."""
-        result = web_ui.assign_role("claude", "CODING")[0]
+        # Use gpt account which doesn't have a role yet
+        result = web_ui.assign_role("gpt", "CODING")[0]
 
         assert "✓" in result
         assert "CODING" in result
-        mock_security_mgr.assign_role.assert_called_once_with("claude", "CODING")
+        mock_api_client.set_account_role.assert_called_once_with("gpt", "CODING")
 
-    def test_assign_role_not_found(self, web_ui, mock_security_mgr):
+    def test_assign_role_not_found(self, web_ui, mock_api_client):
         """Test assigning role to non-existent provider."""
         result = web_ui.assign_role("nonexistent", "CODING")[0]
 
         assert "❌" in result
         assert "not found" in result
 
-    def test_assign_role_lowercase_converted(self, web_ui, mock_security_mgr):
+    def test_assign_role_lowercase_converted(self, web_ui, mock_api_client):
         """Test that lowercase role names are converted to uppercase."""
-        web_ui.assign_role("claude", "coding")
+        # Use gpt account which doesn't have an existing role
+        web_ui.assign_role("gpt", "coding")
 
-        mock_security_mgr.assign_role.assert_called_once_with("claude", "CODING")
+        mock_api_client.set_account_role.assert_called_once_with("gpt", "CODING")
 
-    def test_assign_role_missing_account(self, web_ui, mock_security_mgr):
+    def test_assign_role_missing_account(self, web_ui, mock_api_client):
         """Test assigning role without selecting account."""
         result = web_ui.assign_role("", "CODING")[0]
 
         assert "❌" in result
         assert "select an account" in result
 
-    def test_assign_role_missing_role(self, web_ui, mock_security_mgr):
+    def test_assign_role_missing_role(self, web_ui, mock_api_client):
         """Test assigning role without selecting role."""
         result = web_ui.assign_role("claude", "")[0]
 
         assert "❌" in result
         assert "select a role" in result
 
-    def test_delete_provider_success(self, web_ui, mock_security_mgr):
+    def test_delete_provider_success(self, web_ui, mock_api_client):
         """Test deleting a provider successfully."""
         result = web_ui.delete_provider("claude", True)[0]
 
         assert "✓" in result
         assert "deleted" in result
-        mock_security_mgr.delete_account.assert_called_once_with("claude")
+        mock_api_client.delete_account.assert_called_once_with("claude")
 
-    def test_delete_provider_requires_confirmation(self, web_ui, mock_security_mgr):
+    def test_delete_provider_requires_confirmation(self, web_ui, mock_api_client):
         """Test that deletion requires confirmation."""
         result = web_ui.delete_provider("claude", False)[0]
 
         # When not confirmed, deletion is cancelled
         assert "cancelled" in result.lower()
-        mock_security_mgr.delete_account.assert_not_called()
+        mock_api_client.delete_account.assert_not_called()
 
-    def test_delete_provider_error(self, web_ui, mock_security_mgr):
+    def test_delete_provider_error(self, web_ui, mock_api_client):
         """Test deleting provider when error occurs."""
-        mock_security_mgr.delete_account.side_effect = Exception("Delete error")
+        mock_api_client.delete_account.side_effect = Exception("Delete error")
 
         result = web_ui.delete_provider("claude", True)[0]
 
         assert "❌" in result
         assert "Error" in result
 
-    def test_delete_provider_missing_account(self, web_ui, mock_security_mgr):
+    def test_delete_provider_missing_account(self, web_ui, mock_api_client):
         """Test deleting provider without selecting account."""
         result = web_ui.delete_provider("", False)[0]
 
@@ -413,45 +434,45 @@ class TestChadWebUI:
             "Error" in msg.get("content", "") for msg in session.chat_history if msg.get("role") == "assistant"
         ), "Follow-up response should not include errors"
 
-    def test_set_reasoning_success(self, web_ui, mock_security_mgr):
+    def test_set_reasoning_success(self, web_ui, mock_api_client):
         """Test setting reasoning level for an account."""
         result = web_ui.set_reasoning("claude", "high")[0]
 
         assert "✓" in result
         assert "high" in result
-        mock_security_mgr.set_account_reasoning.assert_called_once_with("claude", "high")
+        mock_api_client.set_account_reasoning.assert_called_once_with("claude", "high")
 
-    def test_add_provider_install_failure(self, web_ui, mock_security_mgr):
+    def test_add_provider_install_failure(self, web_ui, mock_api_client):
         """Installer failures should surface to the user."""
         web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(False, "Node missing"))
-        mock_security_mgr.list_accounts.return_value = {}
+        mock_api_client.list_accounts.return_value = []
 
         result = web_ui.add_provider("", "openai")[0]
 
         assert "❌" in result
         assert "Node missing" in result
-        mock_security_mgr.store_account.assert_not_called()
+        mock_api_client.create_account.assert_not_called()
 
-    def test_get_models_includes_stored_model(self, web_ui, mock_security_mgr, tmp_path):
+    def test_get_models_includes_stored_model(self, web_ui, mock_api_client, tmp_path):
         """Stored models should always be present in dropdown choices."""
-        mock_security_mgr.list_accounts.return_value = {"gpt": "openai"}
-        mock_security_mgr.get_account_model.return_value = "gpt-5.1-codex-max"
-        from chad.model_catalog import ModelCatalog
+        mock_api_client.list_accounts.return_value = [MockAccount(name="gpt", provider="openai")]
+        mock_api_client.get_account_model.return_value = "gpt-5.1-codex-max"
+        from chad.util.model_catalog import ModelCatalog
 
-        web_ui.model_catalog = ModelCatalog(security_mgr=mock_security_mgr, home_dir=tmp_path, cache_ttl=0)
+        web_ui.model_catalog = ModelCatalog(api_client=mock_api_client, home_dir=tmp_path, cache_ttl=0)
         models = web_ui.get_models_for_account("gpt")
 
         assert "gpt-5.1-codex-max" in models
         assert "default" in models
 
-    def test_get_account_choices(self, web_ui, mock_security_mgr):
+    def test_get_account_choices(self, web_ui, mock_api_client):
         """Test getting account choices for dropdowns."""
         choices = web_ui.get_account_choices()
 
         assert "claude" in choices
         assert "gpt" in choices
 
-    def test_cancel_task(self, web_ui, mock_security_mgr):
+    def test_cancel_task(self, web_ui, mock_api_client):
         """Test cancelling a running task."""
         session = web_ui.create_session("test")
         mock_provider = Mock()
@@ -459,18 +480,283 @@ class TestChadWebUI:
 
         result = web_ui.cancel_task(session.id)
 
-        assert "🛑" in result
-        assert "cancelled" in result.lower()
+        # Result is a tuple of gr.update dicts
+        # Order: live_stream, chatbot, task_status, project_path, task_description,
+        #        start_btn, cancel_btn, followup_row, merge_section_group
+        assert isinstance(result, tuple)
+        live_stream_update = result[0]
+        assert "🛑" in live_stream_update.get("value", "")
+        assert "cancelled" in live_stream_update.get("value", "").lower()
         assert session.cancel_requested is True
         mock_provider.stop_session.assert_called_once()
+        # Verify button states - start should be enabled, cancel should be disabled
+        start_btn_update = result[5]
+        cancel_btn_update = result[6]
+        assert start_btn_update.get("interactive") is True, "Start button should be enabled after cancel"
+        assert cancel_btn_update.get("interactive") is False, "Cancel button should be disabled after cancel"
 
-    def test_cancel_task_no_session(self, web_ui, mock_security_mgr):
+    def test_cancel_task_no_session(self, web_ui, mock_api_client):
         """Test cancelling when no session is running."""
         session = web_ui.create_session("test")
         result = web_ui.cancel_task(session.id)
 
-        assert "🛑" in result
+        # Result is a tuple of gr.update dicts - live_stream is at index 0
+        assert isinstance(result, tuple)
+        live_stream_update = result[0]
+        assert "🛑" in live_stream_update.get("value", "")
         assert session.cancel_requested is True
+
+    def test_cancel_preserves_live_stream(self, monkeypatch, web_ui, git_repo):
+        """Cancelling should not clear the live output panel."""
+
+        live_html = "<pre>MOCK LIVE OUTPUT</pre>"
+        cancel_gate = threading.Event()
+        stream_ready = threading.Event()
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", "working", live_html))
+            stream_ready.set()
+            cancel_gate.wait(timeout=1.0)
+            return False, "stopped", "server-session"
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("test")
+        updates = []
+
+        def trigger_cancel():
+            stream_ready.wait(timeout=1.0)
+            time.sleep(0.05)
+            session.cancel_requested = True
+            cancel_gate.set()
+
+        threading.Thread(target=trigger_cancel, daemon=True).start()
+
+        for update in web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
+            updates.append(update)
+
+        final_live_stream = updates[-1][0]  # live_stream is at index 0
+        # Handle both plain string and gr.update dict
+        if isinstance(final_live_stream, dict):
+            final_live_stream = final_live_stream.get("value", "")
+        assert "MOCK LIVE OUTPUT" in final_live_stream
+
+    def test_cancel_preserves_plain_live_stream(self, monkeypatch, web_ui, git_repo):
+        """Cancelling should keep plain text live output when no HTML chunk is provided."""
+
+        live_text = "MOCK LIVE OUTPUT FROM TEXT"
+        cancel_gate = threading.Event()
+        stream_ready = threading.Event()
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", live_text))
+            stream_ready.set()
+            cancel_gate.wait(timeout=1.0)
+            return False, "stopped", "server-session"
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("test")
+        updates = []
+
+        def trigger_cancel():
+            stream_ready.wait(timeout=1.0)
+            time.sleep(0.05)
+            session.cancel_requested = True
+            cancel_gate.set()
+
+        threading.Thread(target=trigger_cancel, daemon=True).start()
+
+        for update in web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
+            updates.append(update)
+
+        final_live_stream = updates[-1][0]  # live_stream is at index 0
+        # Handle both plain string and gr.update dict
+        if isinstance(final_live_stream, dict):
+            final_live_stream = final_live_stream.get("value", "")
+        assert "MOCK LIVE OUTPUT FROM TEXT" in final_live_stream
+
+    def test_cancel_enables_start_button_in_final_yield(self, monkeypatch, web_ui, git_repo):
+        """After cancel, start_task's final yield should enable start button and disable cancel."""
+        cancel_gate = threading.Event()
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", "working"))
+            cancel_gate.wait(timeout=1.0)
+            return False, "cancelled", "server-session"
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("test")
+        updates = []
+
+        def trigger_cancel():
+            time.sleep(0.05)
+            session.cancel_requested = True
+            cancel_gate.set()
+
+        threading.Thread(target=trigger_cancel, daemon=True).start()
+
+        for update in web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
+            updates.append(update)
+
+        # Final yield's button states (indices: 5=start_btn, 6=cancel_btn)
+        final_update = updates[-1]
+        start_btn_update = final_update[5]
+        cancel_btn_update = final_update[6]
+
+        # Extract interactive value - handle both dict and gr.update
+        def get_interactive(update):
+            if isinstance(update, dict):
+                return update.get("interactive")
+            return getattr(update, "interactive", None) if hasattr(update, "interactive") else None
+
+        start_interactive = get_interactive(start_btn_update)
+        cancel_interactive = get_interactive(cancel_btn_update)
+
+        assert start_interactive is True, f"Start button should be enabled after cancel, got {start_btn_update}"
+        assert cancel_interactive is False, f"Cancel button should be disabled after cancel, got {cancel_btn_update}"
+
+
+class TestClaudeJsonParsingIntegration:
+    """Tests for Claude stream-json parsing in the web UI."""
+
+    @pytest.fixture
+    def mock_api_client(self):
+        """Create a mock API client."""
+        client = Mock()
+        client.list_accounts.return_value = []
+        client.list_role_assignments.return_value = {}
+        client.list_providers.return_value = ["anthropic", "openai"]
+        return client
+
+    @pytest.fixture
+    def web_ui(self, mock_api_client):
+        """Create a ChadWebUI instance with mocked dependencies."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        ui = ChadWebUI(mock_api_client)
+        return ui
+
+    def test_run_task_parses_claude_json_for_anthropic_provider(self, web_ui, mock_api_client, git_repo):
+        """run_task_via_api should parse Claude stream-json output for anthropic accounts."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        # Configure mock to return anthropic account
+        mock_api_client.list_accounts.return_value = [
+            Account(name="claude", provider="anthropic", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        # Mock create_session
+        mock_session = Mock()
+        mock_session.id = "server-sess-123"
+        mock_api_client.create_session.return_value = mock_session
+
+        # Simulate Claude stream-json output
+        claude_json_lines = (
+            b'{"type":"system","subtype":"init","cwd":"/test"}' + b'\n'
+            b'{"type":"assistant","message":{"content":[{"type":"text","text":"Hello from Claude!"}]}}' + b'\n'
+            b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/src/main.py"}}]}}' + b'\n'
+            b'{"type":"result","result":"done"}' + b'\n'
+        )
+
+        # Mock stream client to return terminal events with Claude JSON
+        mock_stream_event = Mock()
+        mock_stream_event.event_type = "terminal"
+        mock_stream_event.data = {"data": base64.b64encode(claude_json_lines).decode()}
+
+        mock_complete_event = Mock()
+        mock_complete_event.event_type = "complete"
+        mock_complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        # Run the task
+        message_queue = queue.Queue()
+        success, output, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="claude",
+            message_queue=message_queue,
+        )
+
+        # Collect stream messages
+        stream_messages = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "stream":
+                stream_messages.append(msg[1])
+
+        # Verify JSON was parsed to human-readable text
+        combined = "\n".join(stream_messages)
+        assert "Hello from Claude!" in combined, "Assistant text should be extracted"
+        assert "Reading /src/main.py" in combined, "Tool use should be formatted"
+        assert '{"type":"system"' not in combined, "Raw JSON should not appear"
+        assert '{"type":"result"' not in combined, "Result events should be filtered"
+
+    def test_run_task_passes_through_raw_for_non_anthropic(self, web_ui, mock_api_client, git_repo):
+        """run_task_via_api should pass through raw output for non-anthropic providers."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        # Configure mock to return non-anthropic account
+        mock_api_client.list_accounts.return_value = [
+            Account(name="codex", provider="openai", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        # Mock create_session
+        mock_session = Mock()
+        mock_session.id = "server-sess-456"
+        mock_api_client.create_session.return_value = mock_session
+
+        # Raw terminal output (not JSON)
+        raw_output = b"Working on task...\nDone!"
+
+        mock_stream_event = Mock()
+        mock_stream_event.event_type = "terminal"
+        mock_stream_event.data = {"data": base64.b64encode(raw_output).decode()}
+
+        mock_complete_event = Mock()
+        mock_complete_event.event_type = "complete"
+        mock_complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        # Run the task
+        message_queue = queue.Queue()
+        success, output, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="codex",
+            message_queue=message_queue,
+        )
+
+        # Collect stream messages
+        stream_messages = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "stream":
+                stream_messages.append(msg[1])
+
+        # Verify raw output was passed through
+        combined = "".join(stream_messages)
+        assert "Working on task" in combined
+        assert "Done!" in combined
 
 
 class TestLiveStreamPresentation:
@@ -478,7 +764,7 @@ class TestLiveStreamPresentation:
 
     def test_live_stream_spacing_removes_all_blank_lines(self):
         """Live stream should remove all blank lines for compact display."""
-        from chad import web_ui
+        from chad.ui.gradio import web_ui
 
         raw = "first line\n\n\nsecond block\n\n\n\nthird"
         normalized = web_ui.normalize_live_stream_spacing(raw)
@@ -504,7 +790,7 @@ class TestPortResolution:
 
     def test_resolve_port_keeps_requested_when_free(self):
         """Requested port should be used when it is available."""
-        from chad.web_ui import _resolve_port
+        from chad.ui.gradio.web_ui import _resolve_port
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
@@ -518,7 +804,7 @@ class TestPortResolution:
 
     def test_resolve_port_returns_ephemeral_when_in_use(self):
         """If the requested port is busy, fall back to an ephemeral choice."""
-        from chad.web_ui import _resolve_port
+        from chad.ui.gradio.web_ui import _resolve_port
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
@@ -533,7 +819,7 @@ class TestPortResolution:
 
     def test_resolve_port_supports_explicit_ephemeral(self):
         """Port zero should always yield an ephemeral assignment."""
-        from chad.web_ui import _resolve_port
+        from chad.ui.gradio.web_ui import _resolve_port
 
         port, ephemeral, conflicted = _resolve_port(0)
 
@@ -543,7 +829,7 @@ class TestPortResolution:
 
     def test_live_stream_inline_code_is_color_only(self):
         """Inline code should be colored text without a background box."""
-        from chad import web_ui
+        from chad.ui.gradio import web_ui
 
         code_css_match = re.search(
             r"#live-stream-box\s+code[^}]*\{([^}]*)\}",
@@ -557,7 +843,7 @@ class TestPortResolution:
 
     def test_live_stream_box_visibility_not_forced_globally(self):
         """Live stream box should not be forced visible in normal UI CSS."""
-        from chad import web_ui
+        from chad.ui.gradio import web_ui
 
         css = web_ui.PROVIDER_PANEL_CSS
         start_idx = css.find("#live-stream-box")
@@ -573,7 +859,7 @@ class TestPortResolution:
 
 def test_live_stream_display_buffer_trims_to_tail():
     """Live stream display buffer should keep only the most recent content."""
-    from chad.web_ui import LiveStreamDisplayBuffer
+    from chad.ui.gradio.web_ui import LiveStreamDisplayBuffer
 
     buffer = LiveStreamDisplayBuffer(max_chars=100)
     buffer.append("a" * 60)
@@ -585,7 +871,7 @@ def test_live_stream_display_buffer_trims_to_tail():
 
 def test_live_stream_render_state_resets_for_rerender():
     """Resetting render state should allow re-rendering the same output."""
-    from chad.web_ui import LiveStreamRenderState
+    from chad.ui.gradio.web_ui import LiveStreamRenderState
 
     state = LiveStreamRenderState()
     rendered = "<div>output</div>"
@@ -598,675 +884,32 @@ def test_live_stream_render_state_resets_for_rerender():
     assert state.should_render(rendered) is True
 
 
-class TestChadWebUITaskExecution:
-    """Test cases for task execution in ChadWebUI."""
-
-    @pytest.fixture
-    def mock_security_mgr(self):
-        """Create a mock security manager."""
-        mgr = Mock()
-        mgr.list_accounts.return_value = {"claude": "anthropic"}
-        mgr.list_role_assignments.return_value = {"CODING": "claude"}
-        mgr.get_account_model.return_value = "default"
-        mgr.get_account_reasoning.return_value = "default"
-        return mgr
-
-    @pytest.fixture
-    def web_ui(self, mock_security_mgr):
-        """Create a ChadWebUI instance."""
-        from chad.web_ui import ChadWebUI
-
-        return ChadWebUI(mock_security_mgr, "test-password")
-
-    def test_claude_remaining_usage_wrapper_requires_account(self, web_ui):
-        """Public wrapper should pass account name through to provider UI."""
-        with patch.object(web_ui.provider_ui, "_get_claude_remaining_usage", return_value=0.5) as mock_call:
-            assert web_ui._get_claude_remaining_usage("claude-1") == 0.5
-            mock_call.assert_called_once_with("claude-1")
-
-    def test_start_task_missing_project(self, web_ui):
-        """Test starting task without project path."""
-        session = web_ui.create_session("test")
-        results = list(web_ui.start_chad_task(session.id, "", "do something", "test-coding"))
-
-        assert len(results) > 0
-        last_result = results[-1]
-        # Error is in status header (position 2), not live stream box
-        status_header = last_result[2]
-        status_value = status_header.get("value", "") if isinstance(status_header, dict) else str(status_header)
-        assert "❌" in status_value
-        assert "project path" in status_value.lower() or "task description" in status_value.lower()
-
-    def test_start_task_missing_description(self, web_ui):
-        """Test starting task without task description."""
-        session = web_ui.create_session("test")
-        results = list(web_ui.start_chad_task(session.id, "/tmp", "", "test-coding"))
-
-        assert len(results) > 0
-        last_result = results[-1]
-        # Error is in status header (position 2), not live stream box
-        status_header = last_result[2]
-        status_value = status_header.get("value", "") if isinstance(status_header, dict) else str(status_header)
-        assert "❌" in status_value
-
-    def test_start_task_invalid_path(self, web_ui):
-        """Test starting task with invalid project path."""
-        session = web_ui.create_session("test")
-        results = list(web_ui.start_chad_task(session.id, "/nonexistent/path/xyz", "do something", "test-coding"))
-
-        assert len(results) > 0
-        last_result = results[-1]
-        # Error is in status header (position 2), not live stream box
-        status_header = last_result[2]
-        status_value = status_header.get("value", "") if isinstance(status_header, dict) else str(status_header)
-        assert "❌" in status_value
-        assert "Invalid project path" in status_value
-
-    def test_start_task_missing_agents(self, mock_security_mgr):
-        """Test starting task when agents are not selected."""
-        from chad.web_ui import ChadWebUI
-
-        mock_security_mgr.list_role_assignments.return_value = {}
-
-        web_ui = ChadWebUI(mock_security_mgr, "test-password")
-        session = web_ui.create_session("test")
-        results = list(web_ui.start_chad_task(session.id, "/tmp", "do something", ""))
-
-        assert len(results) > 0
-        last_result = results[-1]
-        # Error is in status header (position 2), not live stream box
-        status_header = last_result[2]
-        status_value = status_header.get("value", "") if isinstance(status_header, dict) else str(status_header)
-        assert "❌" in status_value
-        assert "Coding Agent" in status_value
-
-    def test_verification_preferences_use_verification_agent(self, monkeypatch, tmp_path, git_repo):
-        """Verification dropdowns should apply to verification agent without mutating coding prefs."""
-        from chad import web_ui
-
-        security_mgr = Mock()
-        security_mgr.list_accounts.return_value = {"coder": "anthropic", "verifier": "openai"}
-        security_mgr.list_role_assignments.return_value = {"CODING": "coder"}
-        security_mgr.get_account_model.side_effect = lambda acct: {"coder": "claude-3", "verifier": "gpt-4"}[acct]
-        security_mgr.get_account_reasoning.side_effect = lambda acct: {"coder": "medium", "verifier": "high"}[acct]
-        security_mgr.assign_role = Mock()
-        security_mgr.set_account_model = Mock()
-        security_mgr.set_account_reasoning = Mock()
-
-        captured = {}
-
-        class StubProvider:
-            def __init__(self, config):
-                self.config = config
-                self.stopped = False
-
-            def set_activity_callback(self, cb):
-                self.cb = cb
-
-            def start_session(self, project_path, context):
-                return True
-
-            def send_message(self, message):
-                return None
-
-            def get_response(self, timeout=None):
-                return "codex\nok"
-
-            def stop_session(self):
-                self.stopped = True
-
-            def supports_multi_turn(self):
-                return True
-
-            def is_alive(self):
-                return not self.stopped
-
-        def fake_create_provider(config):
-            return StubProvider(config)
-
-        def fake_run_verification(
-            project_path,
-            coding_output,
-            task_description,
-            verification_account,
-            on_activity=None,
-            timeout=300.0,
-            verification_model=None,
-            verification_reasoning=None,
-        ):
-            captured["account"] = verification_account
-            captured["model"] = verification_model
-            captured["reasoning"] = verification_reasoning
-            return True, "ok"
-
-        monkeypatch.setattr(web_ui, "create_provider", fake_create_provider)
-        ui = web_ui.ChadWebUI(security_mgr, "test-password")
-        ui.session_logger.base_dir = tmp_path
-        monkeypatch.setattr(ui, "_run_verification", fake_run_verification)
-
-        session = ui.create_session("test")
-        list(
-            ui.start_chad_task(
-                session.id,
-                str(git_repo),
-                "do something",
-                "coder",
-                "verifier",
-                "claude-3-opus",
-                "medium",
-                "gpt-4o",
-                "max",
-            )
-        )
-
-        assert captured["account"] == "verifier"
-        assert captured["model"] == "gpt-4o"
-        assert captured["reasoning"] == "max"
-
-        model_calls = [call.args for call in security_mgr.set_account_model.call_args_list]
-        assert ("coder", "gpt-4o") not in model_calls
-        assert ("verifier", "gpt-4o") in model_calls
-        reasoning_calls = [call.args for call in security_mgr.set_account_reasoning.call_args_list]
-        assert ("coder", "max") not in reasoning_calls
-        assert ("verifier", "max") in reasoning_calls
-
-    def test_same_as_coding_uses_coding_preferences(self, mock_security_mgr):
-        """Verification prefs must mirror coding selections when using same agent."""
-        from chad import web_ui
-
-        mock_security_mgr.list_accounts.return_value = {"claude": "anthropic", "gpt": "openai"}
-        ui = web_ui.ChadWebUI(mock_security_mgr, "test-password")
-
-        verification_agent = ui.SAME_AS_CODING
-        account, model, reasoning = ui._resolve_verification_preferences(
-            "claude",
-            "claude-3-opus",
-            "high",
-            verification_agent,
-            "gpt-5.1-codex-max",
-            "max",
-        )
-
-        assert account == "claude"
-        assert model == "claude-3-opus"
-        assert reasoning == "high"
-
-    def test_verification_none_disables_verification(self, monkeypatch, tmp_path, git_repo):
-        """Selecting None for verification should skip verification runs."""
-        from chad import web_ui
-
-        security_mgr = Mock()
-        security_mgr.list_accounts.return_value = {"coder": "anthropic"}
-        security_mgr.list_role_assignments.return_value = {"CODING": "coder"}
-        security_mgr.get_account_model.return_value = "claude-3"
-        security_mgr.get_account_reasoning.return_value = "medium"
-        security_mgr.assign_role = Mock()
-        security_mgr.set_account_model = Mock()
-        security_mgr.set_account_reasoning = Mock()
-
-        class StubProvider:
-            def __init__(self, config):
-                self.config = config
-                self.stopped = False
-
-            def set_activity_callback(self, cb):
-                self.cb = cb
-
-            def start_session(self, project_path, context):
-                return True
-
-            def send_message(self, message):
-                return None
-
-            def get_response(self, timeout=None):
-                return "codex\nok"
-
-            def stop_session(self):
-                self.stopped = True
-
-            def supports_multi_turn(self):
-                return True
-
-            def is_alive(self):
-                return not self.stopped
-
-        monkeypatch.setattr(web_ui, "create_provider", lambda config: StubProvider(config))
-
-        verification_called = {"called": False}
-
-        def fake_run_verification(*args, **kwargs):
-            verification_called["called"] = True
-            return True, "ok"
-
-        ui = web_ui.ChadWebUI(security_mgr, "test-password")
-        ui.session_logger.base_dir = tmp_path
-        monkeypatch.setattr(ui, "_run_verification", fake_run_verification)
-
-        session = ui.create_session("test")
-        list(
-            ui.start_chad_task(
-                session.id,
-                str(git_repo),
-                "do something",
-                "coder",
-                ui.VERIFICATION_NONE,
-                "claude-3",
-                "medium",
-                None,
-                None,
-            )
-        )
-
-        assert verification_called["called"] is False
-
-    def test_start_task_revision_runtime_error_handled(self, monkeypatch, tmp_path, git_repo):
-        """Runtime errors during revision should be surfaced without crashing."""
-        from chad import web_ui
-
-        security_mgr = Mock()
-        security_mgr.list_accounts.return_value = {"claude": "anthropic"}
-        security_mgr.list_role_assignments.return_value = {"CODING": "claude"}
-        security_mgr.get_account_model.return_value = "default"
-        security_mgr.get_account_reasoning.return_value = "default"
-        security_mgr.assign_role = Mock()
-        security_mgr.set_account_model = Mock()
-        security_mgr.set_account_reasoning = Mock()
-
-        class StubProvider:
-            def __init__(self, config):
-                self.config = config
-                self.calls = 0
-                self.stopped = False
-
-            def set_activity_callback(self, cb):
-                self.cb = cb
-
-            def start_session(self, project_path, context):
-                return True
-
-            def send_message(self, message):
-                return None
-
-            def get_response(self, timeout=None):
-                self.calls += 1
-                if self.calls == 1:
-                    return "codex\nok"
-                raise RuntimeError("timeout during revision")
-
-            def stop_session(self):
-                self.stopped = True
-
-            def supports_multi_turn(self):
-                return True
-
-            def is_alive(self):
-                return not self.stopped
-
-        monkeypatch.setattr(web_ui, "create_provider", lambda config: StubProvider(config))
-        ui = web_ui.ChadWebUI(security_mgr, "test-password")
-        ui.session_logger.base_dir = tmp_path
-        monkeypatch.setattr(ui, "_run_verification", lambda *args, **kwargs: (False, "issues"))
-
-        session = ui.create_session("test")
-        results = list(ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
-        last_history = results[-1][0]
-        assert any("Error:" in msg.get("content", "") for msg in last_history)
-
-    def test_verification_banner_yields_before_result(self, monkeypatch, tmp_path, git_repo):
-        """Verification banner should render immediately before verification finishes."""
-        from chad import web_ui
-
-        security_mgr = Mock()
-        security_mgr.list_accounts.return_value = {"claude": "anthropic"}
-        security_mgr.list_role_assignments.return_value = {"CODING": "claude"}
-        security_mgr.get_account_model.return_value = "default"
-        security_mgr.get_account_reasoning.return_value = "default"
-
-        class StubProvider:
-            def __init__(self):
-                self.stopped = False
-
-            def set_activity_callback(self, cb):
-                self.cb = cb
-
-            def start_session(self, project_path, context):
-                return True
-
-            def send_message(self, message):
-                return None
-
-            def get_response(self, timeout=None):
-                return "codex\nok"
-
-            def stop_session(self):
-                self.stopped = True
-
-            def supports_multi_turn(self):
-                return True
-
-            def is_alive(self):
-                return not self.stopped
-
-        monkeypatch.setattr(web_ui, "create_provider", lambda config: StubProvider())
-        monkeypatch.setattr(web_ui.ChadWebUI, "_run_verification", lambda *args, **kwargs: (True, "verified"))
-
-        ui = web_ui.ChadWebUI(security_mgr, "test-password")
-        ui.session_logger.base_dir = tmp_path
-
-        session = ui.create_session("test")
-        updates = []
-        for update in ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
-            history_snapshot = [msg.copy() if isinstance(msg, dict) else msg for msg in update[0]]
-            updates.append((history_snapshot, *update[1:]))
-
-        def find_first(predicate):
-            for idx, update in enumerate(updates):
-                history = update[0]
-                contents = [msg.get("content", "") for msg in history if isinstance(msg, dict)]
-                if any(predicate(content) for content in contents):
-                    return idx
-            return None
-
-        def find_banner_without_result():
-            for idx, update in enumerate(updates):
-                history = update[0]
-                contents = [msg.get("content", "") for msg in history if isinstance(msg, dict)]
-                if any("VERIFICATION (Attempt 1)" in content for content in contents) and not any(
-                    marker in content
-                    for content in contents
-                    for marker in ("VERIFICATION AI", "VERIFICATION PASSED", "VERIFICATION ERROR")
-                ):
-                    return idx
-            return None
-
-        banner_only_idx = find_banner_without_result()
-        result_idx = find_first(lambda content: "VERIFICATION AI" in content or "VERIFICATION PASSED" in content)
-
-        assert banner_only_idx is not None
-        assert result_idx is not None
-        assert banner_only_idx < result_idx
-
-    def test_followup_revision_runtime_error_handled(self, monkeypatch, tmp_path):
-        """Follow-up revisions should surface RuntimeError without crashing."""
-        from chad import web_ui
-        from chad.providers import ModelConfig
-
-        security_mgr = Mock()
-        security_mgr.list_accounts.return_value = {"claude": "anthropic"}
-        security_mgr.list_role_assignments.return_value = {"CODING": "claude"}
-        security_mgr.get_account_model.return_value = "default"
-        security_mgr.get_account_reasoning.return_value = "default"
-        security_mgr.assign_role = Mock()
-        security_mgr.set_account_model = Mock()
-        security_mgr.set_account_reasoning = Mock()
-
-        class StubProvider:
-            def __init__(self):
-                self.calls = 0
-                self.stopped = False
-
-            def set_activity_callback(self, cb):
-                self.cb = cb
-
-            def send_message(self, message):
-                return None
-
-            def get_response(self, timeout=None):
-                self.calls += 1
-                if self.calls == 1:
-                    return "codex\nok"
-                raise RuntimeError("timeout during revision")
-
-            def is_alive(self):
-                return not self.stopped
-
-        ui = web_ui.ChadWebUI(security_mgr, "test-password")
-        ui.session_logger.base_dir = tmp_path
-        session = ui.create_session("test")
-        session.active = True
-        session.provider = StubProvider()
-        session.config = ModelConfig(
-            provider="anthropic", model_name="default", account_name="claude", reasoning_effort=None
-        )
-        session.coding_account = "claude"
-        session.project_path = str(tmp_path)
-        session.chat_history = []
-        monkeypatch.setattr(ui, "_run_verification", lambda *args, **kwargs: (False, "issues"))
-
-        results = list(ui.send_followup(session.id, "follow up", [], "claude", web_ui.ChadWebUI.SAME_AS_CODING))
-        last_history = results[-1][0]
-        assert any("Error:" in msg.get("content", "") for msg in last_history)
-
-    def test_followup_verification_banner_yields_before_result(self, monkeypatch, tmp_path, git_repo):
-        """Follow-up verification banner should appear before results stream back."""
-        from chad import web_ui
-        from chad.providers import ModelConfig
-
-        security_mgr = Mock()
-        security_mgr.list_accounts.return_value = {"claude": "anthropic"}
-        security_mgr.list_role_assignments.return_value = {"CODING": "claude"}
-        security_mgr.get_account_model.return_value = "default"
-        security_mgr.get_account_reasoning.return_value = "default"
-
-        class StubProvider:
-            def __init__(self):
-                self.stopped = False
-
-            def set_activity_callback(self, cb):
-                self.cb = cb
-
-            def send_message(self, message):
-                return None
-
-            def get_response(self, timeout=None):
-                return "codex\nok"
-
-            def stop_session(self):
-                self.stopped = True
-
-            def supports_multi_turn(self):
-                return True
-
-            def is_alive(self):
-                return not self.stopped
-
-        monkeypatch.setattr(web_ui.ChadWebUI, "_run_verification", lambda *args, **kwargs: (True, "verified"))
-
-        ui = web_ui.ChadWebUI(security_mgr, "test-password")
-        ui.session_logger.base_dir = tmp_path
-
-        session = ui.create_session("test")
-        session.active = True
-        session.provider = StubProvider()
-        session.config = ModelConfig(
-            provider="anthropic", model_name="default", account_name="claude", reasoning_effort=None
-        )
-        session.coding_account = "claude"
-        session.project_path = str(git_repo)
-        session.chat_history = []
-
-        updates = []
-        for update in ui.send_followup(
-            session.id,
-            "follow up",
-            session.chat_history,
-            coding_agent="claude",
-            verification_agent=ui.SAME_AS_CODING,
-        ):
-            history_snapshot = [msg.copy() if isinstance(msg, dict) else msg for msg in update[0]]
-            updates.append((history_snapshot, *update[1:]))
-
-        def find_first(predicate):
-            for idx, update in enumerate(updates):
-                history = update[0]
-                contents = [msg.get("content", "") for msg in history if isinstance(msg, dict)]
-                if any(predicate(content) for content in contents):
-                    return idx
-            return None
-
-        def find_banner_without_result():
-            for idx, update in enumerate(updates):
-                history = update[0]
-                contents = [msg.get("content", "") for msg in history if isinstance(msg, dict)]
-                if any("VERIFICATION (Attempt 1)" in content for content in contents) and not any(
-                    marker in content
-                    for content in contents
-                    for marker in ("VERIFICATION AI", "VERIFICATION PASSED", "VERIFICATION ERROR")
-                ):
-                    return idx
-            return None
-
-        banner_only_idx = find_banner_without_result()
-        result_idx = find_first(lambda content: "VERIFICATION AI" in content or "VERIFICATION PASSED" in content)
-
-        assert banner_only_idx is not None
-        assert result_idx is not None
-        assert banner_only_idx < result_idx
-
-    def test_followup_restarts_with_updated_preferences(self, tmp_path, monkeypatch, git_repo):
-        """Follow-up should honor updated model/reasoning after task completion."""
-        from chad import web_ui
-
-        security_mgr = Mock()
-        security_mgr.list_accounts.return_value = {"claude": "anthropic"}
-        security_mgr.list_role_assignments.return_value = {"CODING": "claude"}
-        security_mgr.get_account_model.return_value = "claude-3"
-        security_mgr.get_account_reasoning.return_value = "medium"
-        security_mgr.assign_role = Mock()
-        security_mgr.set_account_model = Mock()
-        security_mgr.set_account_reasoning = Mock()
-        security_mgr.set_verification_agent = Mock()
-        security_mgr.clear_role = Mock()
-
-        created_configs = []
-
-        class StubProvider:
-            def __init__(self, config):
-                self.config = config
-                self.stopped = False
-
-            def set_activity_callback(self, cb):
-                self.cb = cb
-
-            def start_session(self, project_path, context):
-                return True
-
-            def send_message(self, message):
-                return None
-
-            def get_response(self, timeout=None):
-                return "codex\nok"
-
-            def stop_session(self):
-                self.stopped = True
-
-            def supports_multi_turn(self):
-                return True
-
-            def is_alive(self):
-                return not self.stopped
-
-        def fake_create_provider(config):
-            created_configs.append(config)
-            return StubProvider(config)
-
-        monkeypatch.setattr(web_ui, "create_provider", fake_create_provider)
-        monkeypatch.setattr(web_ui.ChadWebUI, "_run_verification", lambda *args, **kwargs: (True, "ok"))
-
-        ui = web_ui.ChadWebUI(security_mgr, "test-password")
-        ui.session_logger.base_dir = tmp_path
-
-        session = ui.create_session("test")
-        list(ui.start_chad_task(session.id, str(git_repo), "do something", "claude", ""))
-
-        security_mgr.get_account_model.return_value = "claude-latest"
-        security_mgr.get_account_reasoning.return_value = "high"
-
-        list(
-            ui.send_followup(
-                session.id,
-                "continue",
-                session.chat_history,
-                coding_agent="claude",
-                verification_agent="",
-                coding_model="claude-latest",
-                coding_reasoning="high",
-            )
-        )
-
-        assert len(created_configs) == 2
-        assert created_configs[-1].model_name == "claude-latest"
-        assert created_configs[-1].reasoning_effort == "high"
-
-    def test_verification_dropdown_rejects_invalid_models_for_provider(self):
-        """When verification is 'Same as Coding Agent', switching coding agents must validate model/reasoning."""
-        from chad.web_ui import ChadWebUI
-
-        security_mgr = Mock()
-        security_mgr.list_accounts.return_value = {"codex-work": "openai", "claude-pro": "anthropic"}
-
-        web_ui = ChadWebUI(security_mgr, "test-password")
-
-        # Mock get_models_for_account to return provider-specific models
-        def mock_get_models(account):
-            if account == "codex-work":
-                return ["o3", "o3-mini", "gpt-4.1"]
-            elif account == "claude-pro":
-                return ["claude-sonnet-4-202", "claude-opus-4", "claude-haiku-4"]
-            return ["default"]
-
-        # Mock get_reasoning_choices to return provider-specific reasoning
-        def mock_get_reasoning(provider_type, account):
-            if provider_type == "openai":
-                return ["low", "medium", "high"]
-            elif provider_type == "anthropic":
-                return ["default", "extended"]
-            return ["default"]
-
-        web_ui.get_models_for_account = mock_get_models
-        web_ui.get_reasoning_choices = mock_get_reasoning
-
-        # Scenario: User has codex selected with gpt-4.1 and high reasoning
-        # Then switches to claude with verification still set to "Same as Coding Agent"
-        state = web_ui._build_verification_dropdown_state(
-            coding_agent="claude-pro",
-            verification_agent=web_ui.SAME_AS_CODING,
-            coding_model_value="gpt-4.1",  # Invalid for claude!
-            coding_reasoning_value="high",  # Invalid for claude!
-        )
-
-        # BUG: Currently this test will FAIL because the code accepts invalid values
-        # The model should be a valid claude model, not gpt-4.1
-        assert state.model_value in mock_get_models(
-            "claude-pro"
-        ), f"Expected valid claude model, got {state.model_value}"
-        assert state.reasoning_value in mock_get_reasoning(
-            "anthropic", "claude-pro"
-        ), f"Expected valid claude reasoning, got {state.reasoning_value}"
-
-
 class TestChadWebUIInterface:
     """Test cases for Gradio interface creation."""
 
     @pytest.fixture
-    def mock_security_mgr(self):
+    def mock_api_client(self):
         """Create a mock security manager."""
         mgr = Mock()
-        mgr.list_accounts.return_value = {}
+        mgr.list_accounts.return_value = []
         mgr.list_role_assignments.return_value = {}
+        mgr.load_config.return_value = {}
+        mgr.load_preferences.return_value = {}
+        mgr.get_cleanup_days.return_value = 3
+        mgr.get_verification_agent.return_value = None
         return mgr
 
-    @patch("chad.web_ui.gr")
-    def test_create_interface(self, mock_gr, mock_security_mgr):
+    @patch("chad.ui.gradio.web_ui.gr")
+    def test_create_interface(self, mock_gr, mock_api_client):
         """Test that create_interface creates a Gradio Blocks interface."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
         # Mock the Gradio components
         mock_blocks = MagicMock()
         mock_gr.Blocks.return_value.__enter__ = Mock(return_value=mock_blocks)
         mock_gr.Blocks.return_value.__exit__ = Mock(return_value=None)
 
-        web_ui = ChadWebUI(mock_security_mgr, "test-password")
+        web_ui = ChadWebUI(mock_api_client)
         web_ui.create_interface()
 
         # Verify Blocks was called
@@ -1276,17 +919,15 @@ class TestChadWebUIInterface:
 class TestLaunchWebUI:
     """Test cases for launch_web_ui function."""
 
-    @patch("chad.web_ui._resolve_port", return_value=(7860, False, False))
-    @patch("chad.web_ui.ChadWebUI")
-    @patch("chad.web_ui.ConfigManager")
-    def test_launch_with_existing_password(self, mock_security_class, mock_webui_class, mock_resolve_port):
-        """Test launching with existing user and provided password (trusted)."""
-        from chad.web_ui import launch_web_ui
+    @patch("chad.ui.gradio.web_ui._resolve_port", return_value=(7860, False, False))
+    @patch("chad.ui.gradio.web_ui.ChadWebUI")
+    @patch("chad.ui.client.APIClient")
+    def test_launch_creates_api_client(self, mock_api_client_class, mock_webui_class, mock_resolve_port):
+        """Test launch_web_ui creates an API client and ChadWebUI."""
+        from chad.ui.gradio.web_ui import launch_web_ui
 
-        mock_security = Mock()
-        mock_security.is_first_run.return_value = False
-        mock_security.load_config.return_value = {"password_hash": "hash"}
-        mock_security_class.return_value = mock_security
+        mock_api_client = Mock()
+        mock_api_client_class.return_value = mock_api_client
 
         mock_server = Mock()
         mock_server.server_port = 7860
@@ -1296,81 +937,22 @@ class TestLaunchWebUI:
         mock_webui.create_interface.return_value = mock_app
         mock_webui_class.return_value = mock_webui
 
-        result = launch_web_ui("test-password")
+        result = launch_web_ui(api_base_url="http://localhost:8000")
 
-        # When password is provided, verify_main_password should NOT be called
-        mock_security.verify_main_password.assert_not_called()
-        mock_webui_class.assert_called_once_with(mock_security, "test-password", dev_mode=False)
+        mock_api_client_class.assert_called_once_with("http://localhost:8000")
+        mock_webui_class.assert_called_once_with(mock_api_client, dev_mode=False)
         mock_app.launch.assert_called_once()
-        mock_resolve_port.assert_called_once_with(7860)
         assert result == (None, 7860)
 
-    @patch("chad.web_ui._resolve_port", return_value=(7860, False, False))
-    @patch("chad.web_ui.ChadWebUI")
-    @patch("chad.web_ui.ConfigManager")
-    def test_launch_without_password_verifies(self, mock_security_class, mock_webui_class, mock_resolve_port):
-        """Test launching without password triggers verification."""
-        from chad.web_ui import launch_web_ui
-
-        mock_security = Mock()
-        mock_security.is_first_run.return_value = False
-        mock_security.load_config.return_value = {"password_hash": "hash"}
-        mock_security.verify_main_password.return_value = "verified-password"
-        mock_security_class.return_value = mock_security
-
-        mock_server = Mock()
-        mock_server.server_port = 7860
-        mock_app = Mock()
-        mock_app.launch.return_value = (mock_server, "http://127.0.0.1:7860", None)
-        mock_webui = Mock()
-        mock_webui.create_interface.return_value = mock_app
-        mock_webui_class.return_value = mock_webui
-
-        result = launch_web_ui(None)
-
-        mock_security.verify_main_password.assert_called_once()
-        mock_webui_class.assert_called_once_with(mock_security, "verified-password", dev_mode=False)
-        mock_resolve_port.assert_called_once_with(7860)
-        assert result == (None, 7860)
-
-    @patch("chad.web_ui._resolve_port", return_value=(7860, False, False))
-    @patch("chad.web_ui.ChadWebUI")
-    @patch("chad.web_ui.ConfigManager")
-    def test_launch_first_run_with_password(self, mock_security_class, mock_webui_class, mock_resolve_port):
-        """Test launching on first run with password provided."""
-        from chad.web_ui import launch_web_ui
-
-        mock_security = Mock()
-        mock_security.is_first_run.return_value = True
-        mock_security.hash_password.return_value = "hashed"
-        mock_security_class.return_value = mock_security
-
-        mock_server = Mock()
-        mock_server.server_port = 7860
-        mock_app = Mock()
-        mock_app.launch.return_value = (mock_server, "http://127.0.0.1:7860", None)
-        mock_webui = Mock()
-        mock_webui.create_interface.return_value = mock_app
-        mock_webui_class.return_value = mock_webui
-
-        result = launch_web_ui("new-password")
-
-        mock_security.hash_password.assert_called_once_with("new-password")
-        mock_security.save_config.assert_called_once()
-        mock_app.launch.assert_called_once()
-        mock_resolve_port.assert_called_once_with(7860)
-        assert result == (None, 7860)
-
-    @patch("chad.web_ui._resolve_port", return_value=(43210, True, True))
-    @patch("chad.web_ui.ChadWebUI")
-    @patch("chad.web_ui.ConfigManager")
-    def test_launch_falls_back_when_port_busy(self, mock_security_class, mock_webui_class, mock_resolve_port):
+    @patch("chad.ui.gradio.web_ui._resolve_port", return_value=(43210, True, True))
+    @patch("chad.ui.gradio.web_ui.ChadWebUI")
+    @patch("chad.ui.client.APIClient")
+    def test_launch_falls_back_when_port_busy(self, mock_api_client_class, mock_webui_class, mock_resolve_port):
         """New launches should fall back to an ephemeral port if the default is in use."""
-        from chad.web_ui import launch_web_ui
+        from chad.ui.gradio.web_ui import launch_web_ui
 
-        mock_security = Mock()
-        mock_security.is_first_run.return_value = False
-        mock_security_class.return_value = mock_security
+        mock_api_client = Mock()
+        mock_api_client_class.return_value = mock_api_client
 
         mock_app = Mock()
         mock_app.launch.return_value = (Mock(server_port=43210), "http://127.0.0.1:43210", None)
@@ -1378,37 +960,54 @@ class TestLaunchWebUI:
         mock_webui.create_interface.return_value = mock_app
         mock_webui_class.return_value = mock_webui
 
-        result = launch_web_ui("test-password")
+        result = launch_web_ui(api_base_url="http://localhost:8000", port=7860)
 
         mock_resolve_port.assert_called_once_with(7860)
-        mock_app.launch.assert_called_once_with(
-            server_name="127.0.0.1",
-            server_port=43210,
-            share=False,
-            inbrowser=True,
-            quiet=False,
-        )
+        mock_app.launch.assert_called_once()
         assert result == (None, 43210)
+
+    @patch("chad.ui.gradio.web_ui._resolve_port", return_value=(7860, False, False))
+    @patch("chad.ui.gradio.web_ui.ChadWebUI")
+    @patch("chad.ui.client.APIClient")
+    def test_launch_dev_mode(self, mock_api_client_class, mock_webui_class, mock_resolve_port):
+        """Test launch_web_ui passes dev_mode parameter."""
+        from chad.ui.gradio.web_ui import launch_web_ui
+
+        mock_api_client = Mock()
+        mock_api_client_class.return_value = mock_api_client
+
+        mock_server = Mock()
+        mock_server.server_port = 7860
+        mock_app = Mock()
+        mock_app.launch.return_value = (mock_server, "http://127.0.0.1:7860", None)
+        mock_webui = Mock()
+        mock_webui.create_interface.return_value = mock_app
+        mock_webui_class.return_value = mock_webui
+
+        result = launch_web_ui(api_base_url="http://localhost:8000", dev_mode=True)
+
+        mock_webui_class.assert_called_once_with(mock_api_client, dev_mode=True)
+        assert result == (None, 7860)
 
 
 class TestGeminiUsage:
     """Test cases for Gemini usage stats parsing."""
 
     @pytest.fixture
-    def mock_security_mgr(self):
+    def mock_api_client(self):
         """Create a mock security manager."""
         mgr = Mock()
-        mgr.list_accounts.return_value = {"gemini": "gemini"}
+        mgr.list_accounts.return_value = [MockAccount(name="gemini", provider="gemini")]
         mgr.list_role_assignments.return_value = {}
         mgr.get_account_model.return_value = "default"
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_security_mgr):
+    def web_ui(self, mock_api_client):
         """Create a ChadWebUI instance."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
-        return ChadWebUI(mock_security_mgr, "test-password")
+        return ChadWebUI(mock_api_client)
 
     @patch("pathlib.Path.home")
     def test_gemini_not_logged_in(self, mock_home, web_ui, tmp_path):
@@ -1477,67 +1076,85 @@ class TestModelSelection:
     """Test cases for model selection functionality."""
 
     @pytest.fixture
-    def mock_security_mgr(self):
+    def mock_api_client(self):
         """Create a mock security manager."""
         mgr = Mock()
-        mgr.list_accounts.return_value = {"claude": "anthropic", "gpt": "openai"}
+        mgr.list_accounts.return_value = [MockAccount(name="claude", provider="anthropic", role="CODING"), MockAccount(name="gpt", provider="openai")]
         mgr.list_role_assignments.return_value = {}
         mgr.get_account_model.return_value = "default"
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_security_mgr):
+    def web_ui(self, mock_api_client):
         """Create a ChadWebUI instance."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
-        return ChadWebUI(mock_security_mgr, "test-password")
+        return ChadWebUI(mock_api_client)
 
-    def test_set_model_success(self, web_ui, mock_security_mgr):
+    def test_set_model_success(self, web_ui, mock_api_client):
         """Test setting model successfully."""
         result = web_ui.set_model("claude", "claude-opus-4-20250514")[0]
 
         assert "✓" in result
         assert "claude-opus-4-20250514" in result
-        mock_security_mgr.set_account_model.assert_called_once_with("claude", "claude-opus-4-20250514")
+        mock_api_client.set_account_model.assert_called_once_with("claude", "claude-opus-4-20250514")
 
-    def test_set_model_missing_account(self, web_ui, mock_security_mgr):
+    def test_set_model_missing_account(self, web_ui, mock_api_client):
         """Test setting model without selecting account."""
         result = web_ui.set_model("", "some-model")[0]
 
         assert "❌" in result
         assert "select an account" in result
 
-    def test_set_model_missing_model(self, web_ui, mock_security_mgr):
+    def test_set_model_missing_model(self, web_ui, mock_api_client):
         """Test setting model without selecting model."""
         result = web_ui.set_model("claude", "")[0]
 
         assert "❌" in result
         assert "select a model" in result
 
-    def test_set_model_account_not_found(self, web_ui, mock_security_mgr):
+    def test_set_model_account_not_found(self, web_ui, mock_api_client):
         """Test setting model for non-existent account."""
         result = web_ui.set_model("nonexistent", "some-model")[0]
 
         assert "❌" in result
         assert "not found" in result
 
-    def test_get_models_for_anthropic(self, web_ui):
+    def test_get_models_for_anthropic(self, web_ui, mock_api_client, monkeypatch):
         """Test getting models for anthropic provider."""
+        # Mock the model catalog to return expected models
+        mock_api_client.get_account.return_value = MockAccount(name="claude", provider="anthropic", model="default")
+        monkeypatch.setattr(
+            web_ui.model_catalog, "get_models",
+            lambda provider, acct=None: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "default"]
+        )
+
         models = web_ui.get_models_for_account("claude")
 
         assert "claude-sonnet-4-20250514" in models
         assert "claude-opus-4-20250514" in models
         assert "default" in models
 
-    def test_get_models_for_openai(self, web_ui):
+    def test_get_models_for_openai(self, web_ui, mock_api_client, monkeypatch):
         """Test getting models for openai provider."""
+        mock_api_client.get_account.return_value = MockAccount(name="gpt", provider="openai", model="default")
+        monkeypatch.setattr(
+            web_ui.model_catalog, "get_models",
+            lambda provider, acct=None: ["default"]
+        )
+
         models = web_ui.get_models_for_account("gpt")
 
         # Only 'default' is guaranteed - other models come from user's config/sessions
         assert "default" in models
 
-    def test_get_models_for_unknown_account(self, web_ui):
+    def test_get_models_for_unknown_account(self, web_ui, monkeypatch):
         """Test getting models for unknown account returns default."""
+        monkeypatch.setattr(
+            web_ui.model_catalog, "get_models",
+            lambda provider, acct=None: ["default"]
+        )
+
         models = web_ui.get_models_for_account("unknown")
 
         assert models == ["default"]
@@ -1550,7 +1167,7 @@ class TestModelSelection:
 
     def test_provider_models_constant(self, web_ui):
         """Test that PROVIDER_MODELS includes expected providers."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
         assert "anthropic" in ChadWebUI.SUPPORTED_PROVIDERS
         assert "openai" in ChadWebUI.SUPPORTED_PROVIDERS
@@ -1565,20 +1182,32 @@ class TestRemainingUsage:
     """Test cases for remaining_usage calculation and sorting."""
 
     @pytest.fixture
-    def mock_security_mgr(self):
+    def mock_api_client(self):
         """Create a mock security manager."""
         mgr = Mock()
-        mgr.list_accounts.return_value = {"claude": "anthropic", "codex": "openai", "gemini": "gemini"}
+        accounts = {
+            "claude": MockAccount(name="claude", provider="anthropic", role="CODING"),
+            "codex": MockAccount(name="codex", provider="openai"),
+            "gemini": MockAccount(name="gemini", provider="gemini"),
+        }
+        mgr.list_accounts.return_value = list(accounts.values())
         mgr.list_role_assignments.return_value = {}
         mgr.get_account_model.return_value = "default"
+
+        def get_account(name):
+            if name in accounts:
+                return accounts[name]
+            raise ValueError(f"Account {name} not found")
+
+        mgr.get_account.side_effect = get_account
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_security_mgr):
+    def web_ui(self, mock_api_client):
         """Create a ChadWebUI instance."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
-        return ChadWebUI(mock_security_mgr, "test-password")
+        return ChadWebUI(mock_api_client)
 
     def test_remaining_usage_unknown_account(self, web_ui):
         """Unknown account returns 0.0."""
@@ -1667,21 +1296,21 @@ class TestClaudeMultiAccount:
     """Test cases for Claude multi-account support."""
 
     @pytest.fixture
-    def mock_security_mgr(self):
+    def mock_api_client(self):
         """Create a mock security manager."""
         mgr = Mock()
-        mgr.list_accounts.return_value = {"claude-1": "anthropic", "claude-2": "anthropic"}
+        mgr.list_accounts.return_value = [MockAccount(name="claude-1", provider="anthropic"), MockAccount(name="claude-2", provider="anthropic")]
         mgr.list_role_assignments.return_value = {}
         mgr.get_account_model.return_value = "default"
         mgr.get_account_reasoning.return_value = "default"
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_security_mgr):
+    def web_ui(self, mock_api_client):
         """Create a ChadWebUI instance with mocked dependencies."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
-        ui = ChadWebUI(mock_security_mgr, "test-password")
+        ui = ChadWebUI(mock_api_client)
         ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "claude"))
         return ui
 
@@ -1773,27 +1402,33 @@ class TestClaudeMultiAccount:
         assert logged_in_1 is True
         assert logged_in_2 is False
 
-    @patch("pathlib.Path.home")
-    def test_delete_provider_cleans_up_claude_config(self, mock_home, web_ui, mock_security_mgr, tmp_path):
+    def test_delete_provider_cleans_up_claude_config(self, mock_api_client, tmp_path):
         """Deleting Claude provider removes its config directory."""
-        mock_home.return_value = tmp_path
+        from chad.ui.gradio.web_ui import ChadWebUI
 
-        # Setup config directory for claude-1
+        # Setup mock to return the correct provider
+        mock_api_client.get_account.return_value = MockAccount(name="claude-1", provider="anthropic")
+
+        # Setup config directory for claude-1 before creating UI
         config_dir = tmp_path / ".chad" / "claude-configs" / "claude-1"
         config_dir.mkdir(parents=True)
         (config_dir / ".credentials.json").write_text("{}")
 
-        # Delete the provider
-        web_ui.provider_ui.delete_provider("claude-1", confirmed=True, card_slots=4)
+        with patch("chad.ui.gradio.provider_ui.safe_home", return_value=tmp_path):
+            ui = ChadWebUI(mock_api_client)
+            ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "claude"))
+
+            # Delete the provider
+            ui.provider_ui.delete_provider("claude-1", confirmed=True, card_slots=4)
 
         # Config directory should be removed
         assert not config_dir.exists()
 
     @patch("pathlib.Path.home")
-    def test_add_provider_claude_login_timeout(self, mock_home, web_ui, mock_security_mgr, tmp_path):
+    def test_add_provider_claude_login_timeout(self, mock_home, web_ui, mock_api_client, tmp_path):
         """Adding Claude provider times out if OAuth not completed."""
         mock_home.return_value = tmp_path
-        mock_security_mgr.list_accounts.return_value = {}
+        mock_api_client.list_accounts.return_value = []
 
         # Mock pexpect to simulate timeout (no credentials created)
         mock_child = Mock()
@@ -1817,7 +1452,7 @@ class TestClaudeMultiAccount:
                         result = web_ui.add_provider("my-claude", "anthropic")[0]
 
         # Provider should NOT be stored (login timed out)
-        mock_security_mgr.store_account.assert_not_called()
+        mock_api_client.create_account.assert_not_called()
 
         # Should show timeout error
         assert "❌" in result
@@ -1828,12 +1463,12 @@ class TestClaudeMultiAccount:
         assert not config_dir.exists()
 
     @patch("pathlib.Path.home")
-    def test_add_provider_claude_login_success(self, mock_home, web_ui, mock_security_mgr, tmp_path):
+    def test_add_provider_claude_login_success(self, mock_home, web_ui, mock_api_client, tmp_path):
         """Adding Claude provider succeeds when OAuth completes."""
         import json
 
         mock_home.return_value = tmp_path
-        mock_security_mgr.list_accounts.return_value = {}
+        mock_api_client.list_accounts.return_value = []
 
         # Create the config directory and credentials file to simulate successful OAuth
         config_dir = tmp_path / ".chad" / "claude-configs" / "my-claude"
@@ -1846,7 +1481,7 @@ class TestClaudeMultiAccount:
         result = web_ui.add_provider("my-claude", "anthropic")[0]
 
         # Provider should be stored
-        mock_security_mgr.store_account.assert_called_once_with("my-claude", "anthropic", "", "test-password")
+        mock_api_client.create_account.assert_called_once_with("my-claude", "anthropic")
 
         # Should show success
         assert "✅" in result
@@ -1854,12 +1489,12 @@ class TestClaudeMultiAccount:
 
     @patch("pathlib.Path.home")
     @patch("requests.get")
-    def test_add_provider_claude_already_logged_in(self, mock_get, mock_home, web_ui, mock_security_mgr, tmp_path):
+    def test_add_provider_claude_already_logged_in(self, mock_get, mock_home, web_ui, mock_api_client, tmp_path):
         """Adding Claude provider when already logged in shows success."""
         import json
 
         mock_home.return_value = tmp_path
-        mock_security_mgr.list_accounts.return_value = {}
+        mock_api_client.list_accounts.return_value = []
 
         # Pre-create credentials file (user already logged in)
         config_dir = tmp_path / ".chad" / "claude-configs" / "my-claude"
@@ -1878,283 +1513,7 @@ class TestClaudeMultiAccount:
         # Should show logged in status
         assert "✅" in result
         assert "logged in" in result.lower()
-        mock_security_mgr.store_account.assert_called_once()
-
-
-class TestSessionLogging:
-    """Test cases for session log saving."""
-
-    @pytest.fixture
-    def mock_security_mgr(self):
-        """Create a mock security manager."""
-        mgr = Mock()
-        mgr.list_accounts.return_value = {"claude": "anthropic"}
-        mgr.list_role_assignments.return_value = {}
-        mgr.get_account_model.return_value = "default"
-        return mgr
-
-    @pytest.fixture
-    def web_ui(self, mock_security_mgr):
-        """Create a ChadWebUI instance."""
-        from chad.web_ui import ChadWebUI
-
-        return ChadWebUI(mock_security_mgr, "test-password")
-
-    def test_session_log_lifecycle(self, web_ui):
-        """Session log should be created, updated, and finalized correctly."""
-        import json
-        import tempfile
-        from pathlib import Path
-
-        # Create initial session log
-        log_path = web_ui.session_logger.create_log(
-            task_description="Test task",
-            project_path="/tmp/test-project",
-            coding_account="claude",
-            coding_provider="anthropic",
-        )
-
-        assert log_path is not None
-        assert log_path.exists()
-        assert str(log_path).startswith(tempfile.gettempdir())
-        assert "chad" in str(log_path)  # In /tmp/chad/ directory
-        assert "chad_session_" in str(log_path)
-        assert str(log_path).endswith(".json")
-
-        # Verify initial content
-        with open(log_path) as f:
-            data = json.load(f)
-
-        assert data["task_description"] == "Test task"
-        assert data["project_path"] == "/tmp/test-project"
-        assert data["status"] == "running"
-        assert data["success"] is None
-        assert "managed_mode" not in data
-        assert len(data["conversation"]) == 0
-
-        # Update with conversation
-        chat_history = [
-            {"role": "user", "content": "**Task:** Plan the work"},
-            {"role": "assistant", "content": "**CODING:** Done!"},
-        ]
-        web_ui.session_logger.update_log(log_path, chat_history)
-
-        with open(log_path) as f:
-            data = json.load(f)
-        assert len(data["conversation"]) == 2
-        assert data["status"] == "running"
-
-        # Final update with completion
-        web_ui.session_logger.update_log(
-            log_path, chat_history, success=True, completion_reason="Task completed successfully", status="completed"
-        )
-
-        with open(log_path) as f:
-            data = json.load(f)
-        assert data["success"] is True
-        assert data["completion_reason"] == "Task completed successfully"
-        assert data["status"] == "completed"
-        assert data["coding"]["account"] == "claude"
-        assert data["coding"]["provider"] == "anthropic"
-
-        # Cleanup
-        log_path.unlink()
-        # Also clean up the chad directory if empty
-        chad_dir = Path(tempfile.gettempdir()) / "chad"
-        if chad_dir.exists() and not any(chad_dir.iterdir()):
-            chad_dir.rmdir()
-
-
-def test_session_logger_preserves_streaming_history_with_agent_names():
-    """Session logger should preserve structured streaming history with agent names."""
-    from chad.session_logger import SessionLogger
-
-    logger = SessionLogger()
-    log_path = logger.create_log(
-        task_description="Test task",
-        project_path="/tmp/test",
-        coding_account="test",
-        coding_provider="anthropic",
-    )
-
-    streaming_history = [
-        ("CODING AI", "Processing request\n"),
-        ("CODING AI", "Making changes...\n"),
-        ("VERIFICATION AI", "Checking work...\n"),
-    ]
-
-    logger.update_log(
-        log_path,
-        [],
-        streaming_history=streaming_history,
-        status="completed",
-    )
-
-    with open(log_path) as f:
-        data = json.load(f)
-
-    # Verify structured history is preserved
-    assert "streaming_history" in data
-    assert len(data["streaming_history"]) == 3
-    first = data["streaming_history"][0]
-    last = data["streaming_history"][2]
-    assert first["agent"] == "CODING AI"
-    assert first["content"] == "Processing request\n"
-    assert "timestamp" in first
-    assert last["agent"] == "VERIFICATION AI"
-    assert last["content"] == "Checking work...\n"
-    assert "timestamp" in last
-
-    # Verify flat transcript is also created for backward compatibility
-    assert "streaming_transcript" in data
-    assert "Processing request" in data["streaming_transcript"]
-    assert "Checking work" in data["streaming_transcript"]
-
-    # Cleanup
-    log_path.unlink()
-
-
-class TestSessionLogIncludesTask:
-    """Test that session log conversation includes the task description."""
-
-    @pytest.fixture
-    def mock_security_mgr(self):
-        """Create a mock security manager with roles assigned."""
-        mgr = Mock()
-        mgr.list_accounts.return_value = {"coding-ai": "mock"}
-        mgr.list_role_assignments.return_value = {"CODING": "coding-ai"}
-        mgr.get_account_model.return_value = "default"
-        mgr.get_account_reasoning.return_value = "default"
-        return mgr
-
-    @pytest.fixture
-    def web_ui(self, mock_security_mgr):
-        """Create a ChadWebUI instance."""
-        from chad.web_ui import ChadWebUI
-
-        return ChadWebUI(mock_security_mgr, "test-password")
-
-    @patch("chad.web_ui.create_provider")
-    def test_session_log_starts_with_task(self, mock_create_provider, web_ui, tmp_path, git_repo):
-        """Session log should include task description as first message."""
-        import json
-
-        # Setup mock provider
-        mock_provider = Mock()
-        mock_provider.start_session.return_value = True
-        mock_provider.get_response.return_value = "Task completed successfully"
-        mock_provider.stop_session.return_value = None
-        mock_provider.is_alive.return_value = False
-        mock_provider.last_event_info = None  # Prevent MagicMock from breaking JSON serialization
-        mock_create_provider.return_value = mock_provider
-
-        task_description = "Fix the login bug"
-
-        # Create a session and run task (verification disabled for speed)
-        session = web_ui.create_session("test")
-        session.log_path = web_ui.session_logger.precreate_log()
-        list(web_ui.start_chad_task(
-            session.id, str(git_repo), task_description, "coding-ai", "__verification_none__"
-        ))
-
-        # Get the session log path
-        session_log_path = session.log_path
-        assert session_log_path is not None
-        assert session_log_path.exists()
-
-        # Read and verify the log contains the task description in conversation
-        with open(session_log_path) as f:
-            data = json.load(f)
-
-        # Conversation should include the task description
-        assert len(data["conversation"]) >= 1
-        first_message = data["conversation"][0]
-        assert "Task" in first_message.get("content", "")
-        assert task_description in first_message.get("content", "")
-
-        # Cleanup
-        session_log_path.unlink(missing_ok=True)
-
-
-class TestSessionLogFailureVisibility:
-    """Ensure failure details are recorded clearly in session logs."""
-
-    @pytest.fixture
-    def mock_security_mgr(self):
-        mgr = Mock()
-        mgr.list_accounts.return_value = {"claude": "anthropic"}
-        mgr.list_role_assignments.return_value = {"CODING": "claude"}
-        mgr.get_account_model.return_value = "default"
-        mgr.get_account_reasoning.return_value = "default"
-        return mgr
-
-    @pytest.fixture
-    def web_ui(self, mock_security_mgr):
-        from chad.web_ui import ChadWebUI
-
-        ui = ChadWebUI(mock_security_mgr, "test-password")
-        return ui
-
-    class _FailingProvider:
-        def __init__(self):
-            self._callback = None
-
-        def set_activity_callback(self, cb):
-            self._callback = cb
-
-        def start_session(self, *_):
-            return True
-
-        def send_message(self, *_):
-            pass
-
-        def get_response(self, timeout: float = 0.0):
-            raise RuntimeError("Simulated timeout")
-
-        def stop_session(self):
-            pass
-
-        def supports_multi_turn(self):
-            return False
-
-        def is_alive(self):
-            return False
-
-    @patch("chad.web_ui.create_provider")
-    def test_failure_status_written_to_transcript(self, mock_create_provider, web_ui, tmp_path, git_repo):
-        """Timeout failures should be visible in streaming transcript within the session log."""
-        mock_create_provider.return_value = self._FailingProvider()
-        web_ui.session_logger.base_dir = tmp_path
-
-        session = web_ui.create_session("fail-log")
-        list(web_ui.start_chad_task(session.id, str(git_repo), "cause timeout", "claude"))
-
-        log_path = session.log_path
-        assert log_path is not None and log_path.exists()
-
-        with open(log_path) as f:
-            data = json.load(f)
-
-        assert data["completion_reason"] == "Simulated timeout"
-        transcript = data.get("streaming_transcript", "")
-        assert "Simulated timeout" in transcript
-
-    @patch("chad.web_ui.create_provider")
-    def test_merge_section_shown_after_failure_if_changes_exist(
-        self, mock_create_provider, web_ui, tmp_path, git_repo, monkeypatch
-    ):
-        """Changes-ready UI should show when worktree has changes, even if task fails."""
-        mock_create_provider.return_value = self._FailingProvider()
-        web_ui.session_logger.base_dir = tmp_path
-        monkeypatch.setattr(web_ui, "check_worktree_changes", lambda *_: (True, "dirty worktree"))
-
-        session = web_ui.create_session("show-merge")
-        outputs = list(web_ui.start_chad_task(session.id, str(git_repo), "broken task", "claude"))
-        final_output = outputs[-1]
-
-        # Merge section should be visible if there are changes, regardless of task success
-        merge_section_update = final_output[12]
-        assert merge_section_update.get("visible") is True
+        mock_api_client.create_account.assert_called_once()
 
 
 class TestCodingSummaryExtraction:
@@ -2162,7 +1521,7 @@ class TestCodingSummaryExtraction:
 
     def test_extract_coding_summary_from_json_block(self):
         """Extract summary from a ```json code block."""
-        from chad.prompts import extract_coding_summary
+        from chad.util.prompts import extract_coding_summary
 
         content = """Some thinking text here...
 
@@ -2176,7 +1535,7 @@ class TestCodingSummaryExtraction:
 
     def test_extract_coding_summary_from_raw_json(self):
         """Extract summary from raw JSON without code block."""
-        from chad.prompts import extract_coding_summary
+        from chad.util.prompts import extract_coding_summary
 
         content = 'Done! {"change_summary": "Added new feature"}'
         result = extract_coding_summary(content)
@@ -2185,7 +1544,7 @@ class TestCodingSummaryExtraction:
 
     def test_extract_coding_summary_with_all_fields(self):
         """Extract summary with hypothesis and screenshots."""
-        from chad.prompts import extract_coding_summary
+        from chad.util.prompts import extract_coding_summary
 
         content = '''Done with the fix.
 
@@ -2207,7 +1566,7 @@ class TestCodingSummaryExtraction:
 
     def test_extract_coding_summary_partial_fields(self):
         """Extract summary with only some optional fields."""
-        from chad.prompts import extract_coding_summary
+        from chad.util.prompts import extract_coding_summary
 
         content = '''```json
 {"change_summary": "Added feature", "hypothesis": "User needs this"}
@@ -2221,7 +1580,7 @@ class TestCodingSummaryExtraction:
 
     def test_extract_coding_summary_returns_none_when_missing(self):
         """Return None when no change_summary found."""
-        from chad.prompts import extract_coding_summary
+        from chad.util.prompts import extract_coding_summary
 
         content = "Just some regular text without any JSON."
         result = extract_coding_summary(content)
@@ -2229,7 +1588,7 @@ class TestCodingSummaryExtraction:
 
     def test_make_chat_message_uses_extracted_summary(self):
         """make_chat_message should prefer extracted JSON summary over heuristics."""
-        from chad.web_ui import make_chat_message
+        from chad.ui.gradio.web_ui import make_chat_message
 
         # Content needs to be > 300 chars to trigger collapsible mode
         content = """I'm thinking about this task...
@@ -2253,7 +1612,7 @@ Here's some more filler text to ensure we hit that threshold.
 
     def test_make_chat_message_falls_back_to_heuristic(self):
         """make_chat_message should use heuristics when no JSON summary."""
-        from chad.web_ui import make_chat_message
+        from chad.ui.gradio.web_ui import make_chat_message
 
         content = (
             """Some thinking text...
@@ -2270,7 +1629,7 @@ More details here...
 
     def test_make_chat_message_displays_hypothesis_and_screenshots(self, tmp_path):
         """make_chat_message should show hypothesis and inline screenshot images."""
-        from chad.web_ui import make_chat_message
+        from chad.ui.gradio.web_ui import make_chat_message
 
         # Create minimal PNG files for testing
         before_png = tmp_path / "before.png"
@@ -2315,12 +1674,206 @@ More details here...
         assert "data:image/png;base64," in summary_part
 
 
+class TestProgressUpdateExtraction:
+    """Test progress update extraction with placeholder filtering."""
+
+    def test_extract_progress_update_from_json_block(self):
+        """Extract progress from code-fenced JSON."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+Some thinking text...
+
+```json
+{"type": "progress", "summary": "Fixing authentication bug in login flow", "location": "src/auth.py:45"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert result.summary == "Fixing authentication bug in login flow"
+        assert result.location == "src/auth.py:45"
+
+    def test_extract_progress_update_filters_placeholder_text(self):
+        """Progress with placeholder text should be filtered out."""
+        from chad.util.prompts import extract_progress_update
+
+        # Test the exact placeholder from the old prompt
+        content = '''
+```json
+{"type": "progress", "summary": "One line describing the issue/feature", "location": "src/file.py:123"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is None
+
+    def test_extract_progress_update_filters_brief_description_placeholder(self):
+        """Progress with 'brief description of' should be filtered."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+```json
+{"type": "progress", "summary": "Brief description of what needs to change", "location": "src/foo.py:1"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is None
+
+    def test_extract_progress_update_filters_example_path(self):
+        """Progress containing example path patterns should be filtered."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+```json
+{"type": "progress", "summary": "Working on src/file.py:123 changes", "location": "src/foo.py:1"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is None
+
+    def test_extract_progress_update_allows_real_summaries(self):
+        """Real task descriptions should pass through."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+```json
+{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert result.summary == "Adding retry logic to handle API rate limits"
+
+    def test_extract_progress_update_filters_empty_summary(self):
+        """Empty summary should be filtered."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+```json
+{"type": "progress", "summary": "", "location": "src/foo.py:1"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is None
+
+
+class TestDynamicStatusLine:
+    """Test dynamic status line with task state and worktree path."""
+
+    def test_idle_status_shows_ready_with_model(self):
+        """Idle status should show Ready with coding model info."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def list_accounts(self):
+                return [MockAccount(name="claude-main", provider="anthropic", model="sonnet-4", role="CODING")]
+
+        ui = ProviderUIManager(MockAPIClient())
+        ready, status = ui.get_role_config_status()
+        assert ready is True
+        assert "Ready" in status
+        assert "Coding" in status
+        assert "claude-main" in status
+
+    def test_ready_status_shows_worktree_path(self):
+        """Ready status should show worktree path when provided."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def list_accounts(self):
+                return [MockAccount(name="claude-main", provider="anthropic", model="sonnet-4", role="CODING")]
+
+        ui = ProviderUIManager(MockAPIClient())
+        ready, status = ui.get_role_config_status(worktree_path="/home/user/.chad-worktrees/abc123")
+        assert ready is True
+        assert "Ready" in status
+        assert "Coding" in status
+        assert "claude-main" in status
+        assert "Worktree" in status
+        assert "abc123" in status  # Last component of worktree path
+
+    def test_running_status_shows_worktree_path(self):
+        """Running state should show worktree path instead of model."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def list_accounts(self):
+                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
+
+        ui = ProviderUIManager(MockAPIClient())
+        ready, status = ui.get_role_config_status(task_state="running", worktree_path="/tmp/worktree-abc123")
+        assert ready is True
+        assert "Running" in status
+        assert "Worktree" in status
+        assert "/tmp/worktree-abc123" in status
+        assert "Ready" not in status
+
+    def test_verifying_status_shows_worktree_path(self):
+        """Verifying state should show worktree path."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def list_accounts(self):
+                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
+
+        ui = ProviderUIManager(MockAPIClient())
+        ready, status = ui.get_role_config_status(task_state="verifying", worktree_path="/tmp/worktree-abc123")
+        assert ready is True
+        assert "Verifying" in status
+        assert "Worktree" in status
+        assert "/tmp/worktree-abc123" in status
+
+    def test_completed_status_shows_agent_name(self):
+        """Completed state should show agent name (not worktree)."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def list_accounts(self):
+                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
+
+        ui = ProviderUIManager(MockAPIClient())
+        ready, status = ui.get_role_config_status(task_state="completed", worktree_path="/tmp/worktree-abc123")
+        assert ready is True
+        assert "Completed" in status
+        assert "Agent" in status
+        assert "claude-main" in status
+        # Worktree path not shown for completed/failed states
+        assert "Worktree" not in status
+
+    def test_failed_status_shows_agent_name(self):
+        """Failed state should show agent name (not worktree)."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def list_accounts(self):
+                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
+
+        ui = ProviderUIManager(MockAPIClient())
+        ready, status = ui.get_role_config_status(task_state="failed", worktree_path="/tmp/worktree-abc123")
+        assert ready is True
+        assert "Failed" in status
+        assert "Agent" in status
+        assert "claude-main" in status
+
+    def test_format_role_status_passes_parameters(self):
+        """format_role_status should pass task state and worktree path through."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def list_accounts(self):
+                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
+
+        ui = ProviderUIManager(MockAPIClient())
+        status = ui.format_role_status(task_state="running", worktree_path="/tmp/wt")
+        assert "Running" in status
+        assert "Worktree" in status
+
+
 class TestVerificationPrompt:
     """Ensure verification prompts include task context and summaries."""
 
     def test_get_verification_prompt_includes_task_and_summary(self):
         """Task and change summary should be prefixed for the verifier."""
-        from chad.prompts import get_verification_prompt
+        from chad.util.prompts import get_verification_prompt
 
         prompt = get_verification_prompt("Full response content", "Do the thing", "Did the thing")
         assert "Do the thing" in prompt
@@ -2330,7 +1883,7 @@ class TestVerificationPrompt:
 
     def test_truncation_keeps_indicator_and_fits_limit(self):
         """Verification payloads should be compact and annotated when truncated."""
-        from chad.web_ui import _truncate_verification_output, MAX_VERIFICATION_PROMPT_CHARS
+        from chad.ui.gradio.web_ui import _truncate_verification_output, MAX_VERIFICATION_PROMPT_CHARS
 
         long_text = "a" * (MAX_VERIFICATION_PROMPT_CHARS + 500)
         truncated = _truncate_verification_output(long_text)
@@ -2339,25 +1892,25 @@ class TestVerificationPrompt:
 
     def test_run_verification_aborts_without_required_inputs(self, monkeypatch, tmp_path):
         """Verification should abort before contacting providers when inputs are missing."""
-        from chad.web_ui import ChadWebUI
+        from chad.ui.gradio.web_ui import ChadWebUI
 
-        class DummySecurityMgr:
+        class DummyAPIClient:
             def list_accounts(self):
-                return {"verifier": "anthropic"}
+                return [MockAccount(name="verifier", provider="anthropic")]
 
-            def get_account_model(self, _):
-                return "default"
+            def get_account(self, name):
+                return MockAccount(name=name, provider="anthropic")
 
-            def get_account_reasoning(self, _):
-                return "default"
+            def get_verification_agent(self):
+                return None
 
         # Fail fast if provider creation is attempted
         def _fail_if_called(*_args, **_kwargs):
             raise AssertionError("create_provider should not be called when inputs are missing")
 
-        monkeypatch.setattr("chad.web_ui.create_provider", _fail_if_called)
+        monkeypatch.setattr("chad.ui.gradio.web_ui.create_provider", _fail_if_called)
 
-        web_ui = ChadWebUI(DummySecurityMgr(), "test-password")
+        web_ui = ChadWebUI(DummyAPIClient())
 
         verified, feedback = web_ui._run_verification(
             str(tmp_path), "output present", "", "verifier"
@@ -2373,20 +1926,20 @@ class TestVerificationPrompt:
 
     def test_run_verification_returns_rich_feedback(self, monkeypatch, tmp_path):
         """Verification failures should include lint details (tests no longer run)."""
-        from chad.web_ui import ChadWebUI
-        import chad.web_ui as web_ui
-        import chad.verification.tools as verification_tools
+        from chad.ui.gradio.web_ui import ChadWebUI
+        import chad.ui.gradio.web_ui as web_ui
+        import chad.ui.gradio.verification.tools as verification_tools
 
-        class DummySecurityMgr:
+        class DummyAPIClient:
             def list_accounts(self):
                 # Use anthropic (non-mock) to trigger automated verification
-                return {"verifier": "anthropic"}
+                return [MockAccount(name="verifier", provider="anthropic")]
 
-            def get_account_model(self, _):
-                return "default"
+            def get_account(self, name):
+                return MockAccount(name=name, provider="anthropic")
 
-            def get_account_reasoning(self, _):
-                return "default"
+            def get_verification_agent(self):
+                return None
 
         # Patch verification tool to avoid running real lint
         # Note: verification now only runs lint (lint_only=True)
@@ -2419,7 +1972,7 @@ class TestVerificationPrompt:
         monkeypatch.setattr(web_ui, "check_verification_mentioned", lambda *_args, **_kwargs: False)
         monkeypatch.setattr(verification_tools, "verify", fake_verify)
 
-        web_ui = ChadWebUI(DummySecurityMgr(), "test-password")
+        web_ui = ChadWebUI(DummyAPIClient())
         verified, feedback = web_ui._run_verification(str(tmp_path), "output", "Task", "verifier")
 
         assert verified is False
@@ -2427,13 +1980,61 @@ class TestVerificationPrompt:
         assert "Flake8 errors" in feedback
         assert "E123 line 5" in feedback
 
+    def test_parse_verification_response_handles_timeout_error(self):
+        """Timeout errors should be converted to structured failure, not raise exception."""
+        from chad.util.prompts import parse_verification_response
+
+        # Test Qwen-style timeout error
+        response = "Error: Qwen execution timed out (30 minutes)"
+        passed, summary, issues = parse_verification_response(response)
+        assert passed is False
+        assert "timed out" in summary.lower()
+        assert len(issues) == 1
+
+    def test_parse_verification_response_handles_stall_error(self):
+        """Stall errors should be converted to structured failure."""
+        from chad.util.prompts import parse_verification_response
+
+        response = "Error: Qwen execution stalled (no output for 1800s)"
+        passed, summary, issues = parse_verification_response(response)
+        assert passed is False
+        assert "stalled" in summary.lower()
+
+    def test_parse_verification_response_handles_cli_not_found(self):
+        """CLI not found errors should be converted to structured failure."""
+        from chad.util.prompts import parse_verification_response
+
+        response = "Failed to run Qwen Code: command not found"
+        passed, summary, issues = parse_verification_response(response)
+        assert passed is False
+        assert "not installed" in summary.lower()
+
+    def test_parse_verification_response_handles_no_response(self):
+        """No response errors should be converted to structured failure."""
+        from chad.util.prompts import parse_verification_response
+
+        response = "No response from Qwen Code"
+        passed, summary, issues = parse_verification_response(response)
+        assert passed is False
+        assert "no response" in summary.lower()
+
+    def test_parse_verification_response_still_parses_json(self):
+        """Valid JSON should still be parsed normally."""
+        from chad.util.prompts import parse_verification_response
+
+        response = '```json\n{"passed": true, "summary": "All good!"}\n```'
+        passed, summary, issues = parse_verification_response(response)
+        assert passed is True
+        assert summary == "All good!"
+        assert issues == []
+
 
 class TestAnsiToHtml:
     """Test that ANSI escape codes are properly converted to HTML spans."""
 
     def test_converts_basic_color_codes_to_html(self):
         """Basic SGR color codes should be converted to HTML spans."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         # Purple/magenta color code
         text = "\x1b[35mPurple text\x1b[0m"
@@ -2445,7 +2046,7 @@ class TestAnsiToHtml:
 
     def test_converts_256_color_codes(self):
         """256-color codes should be converted to HTML spans."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         # 256-color purple
         text = "\x1b[38;5;141mColored\x1b[0m"
@@ -2455,7 +2056,7 @@ class TestAnsiToHtml:
 
     def test_converts_rgb_color_codes(self):
         """RGB true-color codes should be converted to HTML spans."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         # RGB purple
         text = "\x1b[38;2;198;120;221mRGB color\x1b[0m"
@@ -2465,7 +2066,7 @@ class TestAnsiToHtml:
 
     def test_strips_cursor_codes(self):
         """Cursor control sequences with ? should be stripped."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         # Show/hide cursor - these use different ending chars, should be skipped
         text = "\x1b[?25hVisible\x1b[?25l"
@@ -2474,7 +2075,7 @@ class TestAnsiToHtml:
 
     def test_strips_osc_sequences(self):
         """OSC sequences (like terminal title) should be stripped."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         # Set terminal title - uses different format, should be skipped
         text = "\x1b]0;My Title\x07Content here"
@@ -2483,7 +2084,7 @@ class TestAnsiToHtml:
 
     def test_preserves_newlines(self):
         """Newlines should be preserved."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         text = "Line 1\n\nLine 3"
         result = ansi_to_html(text)
@@ -2491,7 +2092,7 @@ class TestAnsiToHtml:
 
     def test_escapes_html_entities(self):
         """HTML entities should be escaped."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         text = "<script>alert('xss')</script>"
         result = ansi_to_html(text)
@@ -2500,7 +2101,7 @@ class TestAnsiToHtml:
 
     def test_converts_unclosed_color_codes(self):
         """Unclosed color codes should generate HTML span that closes at end."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         # Color without reset
         text = "\x1b[35mPurple start\n\nText after blank line"
@@ -2514,7 +2115,7 @@ class TestAnsiToHtml:
 
     def test_handles_stray_escape_characters(self):
         """Stray escape characters in non-m sequences should be handled."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         # Stray escape that doesn't match known patterns - skipped
         text = "Before\x1b[999zAfter"
@@ -2525,7 +2126,7 @@ class TestAnsiToHtml:
 
     def test_strips_background_colors(self):
         """Background colors (40-47) should be stripped to prevent white-on-dark issues."""
-        from chad.web_ui import ansi_to_html
+        from chad.ui.gradio.web_ui import ansi_to_html
 
         # White background (47) - would make text unreadable on dark theme
         text = "\x1b[47mWhite bg text\x1b[0m"
@@ -2547,57 +2148,103 @@ class TestAnsiToHtml:
         assert "background" not in result
 
 
-class TestBuildInlineLiveHtml:
-    """Tests for build_inline_live_html function - critical for live view streaming."""
+class TestPreferredVerificationModel:
+    """Tests for preferred verification model functionality."""
 
-    def test_empty_content_creates_container_with_live_id(self):
-        """Empty content must still create a container with data-live-id.
+    @pytest.fixture
+    def mock_api_client(self):
+        """Create a mock API client with verification model support."""
+        client = Mock()
+        client.list_accounts.return_value = [
+            MockAccount(name="claude", provider="anthropic", role="CODING", model="claude-sonnet-4-20250514"),
+            MockAccount(name="claude-verifier", provider="anthropic", role="VERIFICATION", model="default"),
+        ]
+        client.get_account.return_value = MockAccount(
+            name="claude-verifier", provider="anthropic", model="default", reasoning="default"
+        )
+        client.list_role_assignments.return_value = {}
+        client.get_preferred_verification_model.return_value = None
+        client.set_preferred_verification_model.return_value = None
+        return client
 
-        This is critical: without the data-live-id container, JS patching
-        can't find the element to update, and live view never works.
-        This was the root cause of the live view regression.
-        """
-        from chad.web_ui import build_inline_live_html
+    @pytest.fixture
+    def web_ui(self, mock_api_client):
+        """Create a ChadWebUI instance."""
+        from chad.ui.gradio.web_ui import ChadWebUI
 
-        result = build_inline_live_html("", "CODING AI", live_id="test-123")
+        return ChadWebUI(mock_api_client)
 
-        # Must contain data-live-id for JS to find and patch
-        assert 'data-live-id="test-123"' in result
-        # Must have the live content container
-        assert 'class="inline-live-content"' in result
-        # Must have the header
-        assert 'inline-live-header' in result
-        assert "CODING AI (Live)" in result
-        # Should show working placeholder
-        assert "Working" in result
+    def test_build_verification_dropdown_uses_stored_model(self, web_ui, mock_api_client, monkeypatch):
+        """Test that _build_verification_dropdown_state uses the stored preferred model."""
+        # Mock model catalog to return model choices
+        monkeypatch.setattr(
+            web_ui.model_catalog, "get_models",
+            lambda provider, acct=None: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "default"]
+        )
 
-    def test_content_creates_container_with_live_id(self):
-        """Content should create a container with data-live-id."""
-        from chad.web_ui import build_inline_live_html
+        # Build dropdown state with a stored preferred model
+        state = web_ui._build_verification_dropdown_state(
+            coding_agent="claude",
+            verification_agent="claude-verifier",
+            coding_model_value="claude-sonnet-4-20250514",
+            coding_reasoning_value="default",
+            current_verification_model="claude-opus-4-20250514",
+        )
 
-        result = build_inline_live_html("Test output", "CODING AI", live_id="abc-456")
+        # The model value should be the stored preferred model
+        assert state.model_value == "claude-opus-4-20250514"
 
-        assert 'data-live-id="abc-456"' in result
-        assert 'class="inline-live-content"' in result
-        assert "Test output" in result
+    def test_build_verification_dropdown_falls_back_to_account_model(self, web_ui, mock_api_client, monkeypatch):
+        """Test fallback to account model when no preferred model is stored."""
+        # Set a specific model on the account
+        mock_api_client.get_account.return_value = MockAccount(
+            name="claude-verifier", provider="anthropic", model="claude-sonnet-4-20250514", reasoning="default"
+        )
+        monkeypatch.setattr(
+            web_ui.model_catalog, "get_models",
+            lambda provider, acct=None: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "default"]
+        )
 
-    def test_no_live_id_still_creates_container(self):
-        """Without live_id, container should still be created (just without data attribute)."""
-        from chad.web_ui import build_inline_live_html
+        # Build dropdown state without a preferred model
+        state = web_ui._build_verification_dropdown_state(
+            coding_agent="claude",
+            verification_agent="claude-verifier",
+            coding_model_value="claude-sonnet-4-20250514",
+            coding_reasoning_value="default",
+            current_verification_model=None,
+        )
 
-        result = build_inline_live_html("Some output", "CODING AI", live_id=None)
+        # Should fall back to the account's stored model
+        assert state.model_value == "claude-sonnet-4-20250514"
 
-        assert 'class="inline-live-content"' in result
-        assert "data-live-id" not in result
-        assert "Some output" in result
+    def test_resolve_verification_preferences_persists_model(self, web_ui, mock_api_client):
+        """Test that _resolve_verification_preferences persists the verification model to config."""
+        # Call with an explicit verification model
+        web_ui._resolve_verification_preferences(
+            coding_account="claude",
+            coding_model="claude-sonnet-4-20250514",
+            coding_reasoning="default",
+            verification_agent="claude-verifier",
+            verification_model="claude-opus-4-20250514",
+            verification_reasoning="default",
+        )
 
-    def test_empty_content_without_live_id_still_creates_structure(self):
-        """Even empty content without live_id should create proper HTML structure."""
-        from chad.web_ui import build_inline_live_html
+        # Should persist to both account and global config
+        mock_api_client.set_account_model.assert_called_once_with("claude-verifier", "claude-opus-4-20250514")
+        mock_api_client.set_preferred_verification_model.assert_called_once_with("claude-opus-4-20250514")
 
-        result = build_inline_live_html("", "TEST AI", live_id=None)
+    def test_resolve_verification_preferences_skips_same_as_coding(self, web_ui, mock_api_client):
+        """Test that SAME_AS_CODING model value doesn't persist to config."""
+        # Call with SAME_AS_CODING as the model value
+        web_ui._resolve_verification_preferences(
+            coding_account="claude",
+            coding_model="claude-sonnet-4-20250514",
+            coding_reasoning="default",
+            verification_agent="claude-verifier",
+            verification_model=web_ui.SAME_AS_CODING,
+            verification_reasoning="default",
+        )
 
-        assert 'class="inline-live-content"' in result
-        assert 'inline-live-header' in result
-        assert "TEST AI (Live)" in result
-        assert "Working" in result
+        # Should not persist to account or global config
+        mock_api_client.set_account_model.assert_not_called()
+        mock_api_client.set_preferred_verification_model.assert_not_called()
