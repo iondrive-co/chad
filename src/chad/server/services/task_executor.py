@@ -328,10 +328,13 @@ def build_agent_command(
             initial_input = full_prompt + "\n"
 
     elif provider == "qwen":
-        # Qwen Code CLI
-        cmd = [resolve_tool("qwen"), "-y"]
+        # Qwen Code CLI - pass prompt directly to -p to trigger non-interactive mode
+        # Using stdin doesn't work reliably because qwen checks stdin at startup
+        # before we can send data via PTY. With subprocess.Popen(shell=False),
+        # there's no shell escaping issues, just OS argv limits (~128KB on Linux).
+        cmd = [resolve_tool("qwen"), "-y", "--output-format", "stream-json"]
         if full_prompt:
-            initial_input = full_prompt + "\n"
+            cmd.extend(["-p", full_prompt])
 
     elif provider == "mistral":
         # Vibe CLI (Mistral)

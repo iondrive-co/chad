@@ -1613,8 +1613,8 @@ class GeminiCodeAssistProvider(AIProvider):
 class QwenCodeProvider(AIProvider):
     """Provider for Qwen Code CLI with multi-turn support.
 
-    Uses the `qwen` command-line interface in headless mode (-p)
-    with stream-json output for real-time streaming.
+    Uses the `qwen` command-line interface with positional prompt argument
+    and stream-json output for real-time streaming.
     Supports multi-turn via `--resume <session_id>`.
 
     Qwen Code is a fork of Gemini CLI, optimized for Qwen3-Coder models.
@@ -1655,25 +1655,26 @@ class QwenCodeProvider(AIProvider):
 
         qwen_cli = getattr(self, "cli_path", None) or find_cli_executable("qwen")
 
-        # Build command - use resume if we have a session_id (multi-turn)
+        # Build command - use -p "" to trigger non-interactive mode
+        # The prompt is passed via stdin to handle long prompts with special chars
+        # -p "" (empty) triggers non-interactive mode while stdin provides the actual prompt
         if self.session_id:
             cmd = [
                 qwen_cli,
-                "-p",
-                self.current_message,
                 "--output-format",
                 "stream-json",
+                "--yolo",  # Auto-approve all tool calls (required for non-interactive)
+                "-p", "",  # Empty -p triggers non-interactive mode, stdin has real prompt
                 "--resume",
                 self.session_id,
             ]
         else:
             cmd = [
                 qwen_cli,
-                "-p",
-                self.current_message,
                 "--output-format",
                 "stream-json",
                 "--yolo",  # Auto-approve all tool calls
+                "-p", "",  # Empty -p triggers non-interactive mode, stdin has real prompt
             ]
             if self.config.model_name and self.config.model_name != "default":
                 cmd.extend(["-m", self.config.model_name])
@@ -1684,6 +1685,8 @@ class QwenCodeProvider(AIProvider):
 
             json_events = []
             response_parts = []
+
+            final_result = [None]  # Store final result from result event
 
             def handle_chunk(decoded: str) -> None:
                 # Stream raw output for live display
@@ -1699,7 +1702,7 @@ class QwenCodeProvider(AIProvider):
                             continue
                         json_events.append(event)
                         # Extract session_id from system/init event
-                        if event.get("type") in ("system", "init") and "session_id" in event:
+                        if event.get("type") == "system" and "session_id" in event:
                             self.session_id = event["session_id"]
                         # Collect response content from assistant messages
                         if event.get("type") == "message" and event.get("role") == "assistant":
@@ -1707,7 +1710,7 @@ class QwenCodeProvider(AIProvider):
                             if content:
                                 response_parts.append(content)
                                 self._notify_activity("text", content[:80])
-                        # Also handle assistant type directly (Gemini CLI format)
+                        # Handle assistant type directly (Qwen CLI format)
                         if event.get("type") == "assistant":
                             message = event.get("message", {})
                             content_blocks = message.get("content", [])
@@ -1717,6 +1720,9 @@ class QwenCodeProvider(AIProvider):
                                     if text:
                                         response_parts.append(text)
                                         self._notify_activity("text", text[:80])
+                        # Capture final result from result event
+                        if event.get("type") == "result" and "result" in event:
+                            final_result[0] = event["result"]
                     except json.JSONDecodeError:
                         # Non-JSON line (warnings, etc.) - just notify
                         if line and len(line) > 10:
@@ -1724,7 +1730,10 @@ class QwenCodeProvider(AIProvider):
 
             self.process, self.master_fd = _start_pty_process(cmd, cwd=self.project_path, env=env)
 
+            # Pass prompt via stdin to handle long prompts and special characters
             if self.process.stdin:
+                self.process.stdin.write(self.current_message.encode("utf-8"))
+                self.process.stdin.flush()
                 self.process.stdin.close()
 
             output, timed_out, idle_stalled = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
@@ -1737,6 +1746,10 @@ class QwenCodeProvider(AIProvider):
                 return f"Error: Qwen execution stalled (no output for {int(timeout)}s)"
             if timed_out:
                 return f"Error: Qwen execution timed out ({int(timeout / 60)} minutes)"
+
+            # Prefer final result from result event (most reliable)
+            if final_result[0]:
+                return str(final_result[0]).strip()
 
             # Return collected response parts if any
             if response_parts:
