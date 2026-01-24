@@ -621,8 +621,9 @@ class TaskExecutor:
                 task_description,
             )
 
-            # Create JSON parser for anthropic (stream-json output)
-            json_parser = ClaudeStreamJsonParser() if coding_provider == "anthropic" else None
+            # Create JSON parser for providers that use stream-json output
+            # Both Claude and Qwen use similar JSON formats
+            json_parser = ClaudeStreamJsonParser() if coding_provider in ("anthropic", "qwen") else None
 
             # Set up logging callback for EventLog persistence
             # This callback is called synchronously for every PTY event
