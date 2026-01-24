@@ -2065,18 +2065,19 @@ class ChadWebUI:
         stream_client = self._get_stream_client()
         exit_code = 0
 
-        # Detect if this is anthropic provider (outputs stream-json that needs parsing)
+        # Detect if this is a provider that outputs stream-json (needs parsing)
+        # Both anthropic (Claude) and qwen use similar JSON formats
         json_parser = None
         try:
             accounts = self.api_client.list_accounts()
             for acc in accounts:
-                if acc.name == coding_account and acc.provider == "anthropic":
+                if acc.name == coding_account and acc.provider in ("anthropic", "qwen"):
                     json_parser = ClaudeStreamJsonParser()
                     break
         except Exception:
             pass  # Fall back to raw output if we can't determine provider
 
-        # For anthropic: accumulate parsed text directly (no terminal width constraints)
+        # For stream-json providers: accumulate parsed text directly (no terminal width constraints)
         # For others: use pyte terminal emulation for proper ANSI/cursor handling
         accumulated_text: list[str] = []
         terminal = None if json_parser else TerminalEmulator(cols=effective_cols, rows=TERMINAL_ROWS)
@@ -5673,11 +5674,14 @@ class ChadWebUI:
                 if not selected_agent or selected_agent == self.SAME_AS_CODING or selected_agent == self.VERIFICATION_NONE:
                     return (["default"], "default", False, False)
                 model_choices = self.get_models_for_account(selected_agent) or ["default"]
+                # Check preferred verification model from config first, then fall back to account model
+                preferred_model = self.api_client.get_preferred_verification_model()
                 try:
                     acc = self.api_client.get_account(selected_agent)
-                    stored_model = (acc.model if acc else None) or "default"
+                    account_model = (acc.model if acc else None) or "default"
                 except Exception:
-                    stored_model = "default"
+                    account_model = "default"
+                stored_model = preferred_model or account_model
                 if stored_model not in model_choices:
                     model_choices = [*model_choices, stored_model]
                 model_value = stored_model if stored_model else model_choices[0]
@@ -5875,6 +5879,8 @@ class ChadWebUI:
                 return "❌ Select a verification agent before setting a model"
             try:
                 self.api_client.set_account_model(account_name, model_name)
+                # Also persist to global preferred verification model config
+                self.api_client.set_preferred_verification_model(model_name)
                 return f"✅ Preferred verification model saved for {account_name}"
             except Exception as exc:
                 return f"❌ {exc}"
@@ -6083,8 +6089,10 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
 
 // Live view scroll tracking to prevent auto-scroll when user has scrolled up
 // State is stored by parent container ID since .live-output-content gets recreated on updates
+// NOTE: scroll events don't bubble, so we must attach listeners directly to the scrollable element
 window._liveStreamScrollState = window._liveStreamScrollState || {};
 window._liveStreamTrackedParents = window._liveStreamTrackedParents || new WeakSet();
+window._liveStreamTrackedContents = window._liveStreamTrackedContents || new WeakSet();
 
 function initializeLiveStreamScrollTracking() {
     const getRoot = () => {
@@ -6095,7 +6103,6 @@ function initializeLiveStreamScrollTracking() {
     // Generate a stable ID for a parent container
     function getParentId(parent) {
         if (parent.id) return parent.id;
-        // Generate and assign an ID if none exists
         if (!parent.dataset.scrollTrackId) {
             parent.dataset.scrollTrackId = 'scroll-' + Math.random().toString(36).substr(2, 9);
         }
@@ -6109,10 +6116,33 @@ function initializeLiveStreamScrollTracking() {
                 userScrolledUp: false,
                 savedScrollTop: 0,
                 lastScrollHeight: 0,
-                settingScroll: false  // Flag to ignore programmatic scroll events
+                settingScroll: false
             };
         }
         return window._liveStreamScrollState[parentId];
+    }
+
+    // Attach scroll listener directly to a content element
+    function attachScrollListener(content, state) {
+        if (window._liveStreamTrackedContents.has(content)) return;
+        window._liveStreamTrackedContents.add(content);
+
+        content.addEventListener('scroll', () => {
+            if (state.settingScroll) return;
+
+            const scrollTop = content.scrollTop;
+            const previousScrollTop = state.savedScrollTop;
+            const isAtBottom = scrollTop + content.clientHeight >= content.scrollHeight - 10;
+            const scrolledDown = scrollTop > previousScrollTop;
+
+            state.savedScrollTop = scrollTop;
+
+            if (isAtBottom && scrolledDown) {
+                state.userScrolledUp = false;
+            } else if (!isAtBottom) {
+                state.userScrolledUp = true;
+            }
+        });
     }
 
     // Setup scroll tracking on a parent container (stable element)
@@ -6125,37 +6155,20 @@ function initializeLiveStreamScrollTracking() {
         const parentId = getParentId(parent);
         const state = getState(parentId);
 
-        // Use event delegation for scroll events on .live-output-content
-        parent.addEventListener('scroll', (e) => {
-            const content = e.target.closest('.live-output-content');
-            if (!content) return;
-
-            // Ignore scroll events triggered by our programmatic scrolling
-            if (state.settingScroll) return;
-
-            const scrollTop = content.scrollTop;
-            const previousScrollTop = state.savedScrollTop;
-            const isAtBottom = scrollTop + content.clientHeight >= content.scrollHeight - 10;
-            const scrolledDown = scrollTop > previousScrollTop;
-
-            // Always save current position
-            state.savedScrollTop = scrollTop;
-
-            // Only exit "scrolled up" mode if user actively scrolled DOWN to bottom
-            // (not if they just happen to be at bottom due to content shrinking)
-            if (isAtBottom && scrolledDown) {
-                state.userScrolledUp = false;
-            } else if (!isAtBottom) {
-                // User is not at bottom - they've scrolled up
-                state.userScrolledUp = true;
-            }
-            // If isAtBottom but !scrolledDown (content shrank), keep current state
-        }, true);
+        // Initial attachment if content exists
+        const initialContent = parent.querySelector('.live-output-content');
+        if (initialContent) {
+            attachScrollListener(initialContent, state);
+            state.lastScrollHeight = initialContent.scrollHeight;
+        }
 
         // Watch for DOM changes (content replacement)
         const observer = new MutationObserver(() => {
             const content = parent.querySelector('.live-output-content');
             if (!content) return;
+
+            // Attach scroll listener to new content element
+            attachScrollListener(content, state);
 
             // Double requestAnimationFrame ensures Gradio DOM reconciliation is complete
             requestAnimationFrame(() => {
@@ -6164,7 +6177,6 @@ function initializeLiveStreamScrollTracking() {
                     const contentGrew = newScrollHeight > state.lastScrollHeight;
                     state.lastScrollHeight = newScrollHeight;
 
-                    // Set flag to ignore the scroll event from our programmatic scroll
                     state.settingScroll = true;
 
                     if (state.userScrolledUp) {
@@ -6175,7 +6187,6 @@ function initializeLiveStreamScrollTracking() {
                         content.scrollTop = newScrollHeight;
                     }
 
-                    // Clear flag after a brief delay to allow scroll event to fire
                     requestAnimationFrame(() => {
                         state.settingScroll = false;
                     });
