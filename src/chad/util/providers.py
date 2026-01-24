@@ -1655,8 +1655,8 @@ class QwenCodeProvider(AIProvider):
 
         qwen_cli = getattr(self, "cli_path", None) or find_cli_executable("qwen")
 
-        # Build command - use resume if we have a session_id (multi-turn)
-        # Note: prompt is positional and must come last (after all flags)
+        # Build command - prompt is passed via stdin to handle long prompts with special chars
+        # The CLI reads from stdin when no positional prompt is given
         if self.session_id:
             cmd = [
                 qwen_cli,
@@ -1665,7 +1665,6 @@ class QwenCodeProvider(AIProvider):
                 "--yolo",  # Auto-approve all tool calls (required for non-interactive)
                 "--resume",
                 self.session_id,
-                self.current_message,  # Positional prompt at end
             ]
         else:
             cmd = [
@@ -1676,7 +1675,6 @@ class QwenCodeProvider(AIProvider):
             ]
             if self.config.model_name and self.config.model_name != "default":
                 cmd.extend(["-m", self.config.model_name])
-            cmd.append(self.current_message)  # Positional prompt at end
 
         try:
             env = os.environ.copy()
@@ -1729,7 +1727,10 @@ class QwenCodeProvider(AIProvider):
 
             self.process, self.master_fd = _start_pty_process(cmd, cwd=self.project_path, env=env)
 
+            # Pass prompt via stdin to handle long prompts and special characters
             if self.process.stdin:
+                self.process.stdin.write(self.current_message.encode("utf-8"))
+                self.process.stdin.flush()
                 self.process.stdin.close()
 
             output, timed_out, idle_stalled = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
