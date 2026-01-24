@@ -2736,6 +2736,7 @@ class ChadWebUI:
             diff_full: str = "",
             live_patch: tuple[str, str] | None = None,
             task_state: str | None = None,
+            task_ended: bool = False,
         ):
             """Format output tuple for Gradio with current UI state.
 
@@ -2746,6 +2747,8 @@ class ChadWebUI:
                            preserving scroll position and text selection.
                 task_state: Optional task state (running, verifying, completed, failed)
                            for dynamic status display.
+                task_ended: When True, task has completed/failed/cancelled and buttons
+                           should allow starting a new task (start enabled, cancel disabled).
             """
             display_stream = live_stream
             is_error = "❌" in status
@@ -2777,6 +2780,10 @@ class ChadWebUI:
                 patch_html = f'<div data-live-patch="{live_id}" style="display:none">{escaped_html}</div>'
             else:
                 patch_html = ""
+            # When task ends, enable start button and disable cancel button
+            # regardless of the `interactive` flag (which controls input fields)
+            start_btn_interactive = True if task_ended else interactive
+            cancel_btn_interactive = False if task_ended else not interactive
             return (
                 gr.update(value=display_stream),  # live_stream - Use gr.update for proper streaming to Markdown
                 display_history,  # chatbot
@@ -2784,8 +2791,8 @@ class ChadWebUI:
                 gr.update(value=status if is_error else ""),
                 gr.update(value=project_path, interactive=interactive),
                 gr.update(value=task_description, interactive=interactive),
-                gr.update(interactive=interactive),
-                gr.update(interactive=not interactive),
+                gr.update(interactive=start_btn_interactive),
+                gr.update(interactive=cancel_btn_interactive),
                 gr.update(value=display_role_status),
                 log_btn_update,
                 gr.update(value=""),  # Clear followup input
@@ -3193,6 +3200,7 @@ class ChadWebUI:
                     summary="🛑 Task cancelled",
                     show_followup=True,  # Always show follow-up after task starts
                     task_state="failed",
+                    task_ended=True,
                 )
             else:
                 while True:
@@ -3709,6 +3717,7 @@ class ChadWebUI:
                 branch_choices=branches if show_merge else None,
                 diff_full=diff_html,
                 task_state=final_task_state,
+                task_ended=True,
             )
 
         except Exception as e:  # pragma: no cover - defensive
@@ -3727,6 +3736,7 @@ class ChadWebUI:
                 show_merge=False,
                 merge_summary="",
                 task_state="failed",
+                task_ended=True,
             )
 
     def send_followup(  # noqa: C901

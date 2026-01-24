@@ -480,13 +480,20 @@ class TestChadWebUI:
 
         result = web_ui.cancel_task(session.id)
 
-        # Result is a tuple of gr.update dicts - live_stream is at index 0
+        # Result is a tuple of gr.update dicts
+        # Order: live_stream, chatbot, task_status, project_path, task_description,
+        #        start_btn, cancel_btn, followup_row, merge_section_group
         assert isinstance(result, tuple)
         live_stream_update = result[0]
         assert "🛑" in live_stream_update.get("value", "")
         assert "cancelled" in live_stream_update.get("value", "").lower()
         assert session.cancel_requested is True
         mock_provider.stop_session.assert_called_once()
+        # Verify button states - start should be enabled, cancel should be disabled
+        start_btn_update = result[5]
+        cancel_btn_update = result[6]
+        assert start_btn_update.get("interactive") is True, "Start button should be enabled after cancel"
+        assert cancel_btn_update.get("interactive") is False, "Cancel button should be disabled after cancel"
 
     def test_cancel_task_no_session(self, web_ui, mock_api_client):
         """Test cancelling when no session is running."""
@@ -571,6 +578,48 @@ class TestChadWebUI:
         if isinstance(final_live_stream, dict):
             final_live_stream = final_live_stream.get("value", "")
         assert "MOCK LIVE OUTPUT FROM TEXT" in final_live_stream
+
+    def test_cancel_enables_start_button_in_final_yield(self, monkeypatch, web_ui, git_repo):
+        """After cancel, start_task's final yield should enable start button and disable cancel."""
+        cancel_gate = threading.Event()
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", "working"))
+            cancel_gate.wait(timeout=1.0)
+            return False, "cancelled", "server-session"
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("test")
+        updates = []
+
+        def trigger_cancel():
+            time.sleep(0.05)
+            session.cancel_requested = True
+            cancel_gate.set()
+
+        threading.Thread(target=trigger_cancel, daemon=True).start()
+
+        for update in web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
+            updates.append(update)
+
+        # Final yield's button states (indices: 5=start_btn, 6=cancel_btn)
+        final_update = updates[-1]
+        start_btn_update = final_update[5]
+        cancel_btn_update = final_update[6]
+
+        # Extract interactive value - handle both dict and gr.update
+        def get_interactive(update):
+            if isinstance(update, dict):
+                return update.get("interactive")
+            return getattr(update, "interactive", None) if hasattr(update, "interactive") else None
+
+        start_interactive = get_interactive(start_btn_update)
+        cancel_interactive = get_interactive(cancel_btn_update)
+
+        assert start_interactive is True, f"Start button should be enabled after cancel, got {start_btn_update}"
+        assert cancel_interactive is False, f"Cancel button should be disabled after cancel, got {cancel_btn_update}"
 
 
 class TestClaudeJsonParsingIntegration:
