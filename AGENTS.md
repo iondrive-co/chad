@@ -134,6 +134,10 @@ All endpoints are prefixed with `/api/v1`. Keep this section up to date when add
 | PUT | `/config/cleanup` | Update cleanup settings |
 | GET | `/config/preferences` | Get user preferences |
 | PUT | `/config/preferences` | Update user preferences |
+| GET | `/config/verification-agent` | Get verification agent account |
+| PUT | `/config/verification-agent` | Set verification agent account |
+| GET | `/config/preferred-verification-model` | Get preferred verification model |
+| PUT | `/config/preferred-verification-model` | Set preferred verification model |
 
 ### Streaming API
 

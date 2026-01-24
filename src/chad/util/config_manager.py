@@ -20,6 +20,7 @@ CONFIG_BASE_KEYS: set[str] = {
     "role_assignments",
     "preferences",
     "verification_agent",
+    "preferred_verification_model",
     "cleanup_days",
     "ui_mode",
 }
@@ -548,6 +549,32 @@ class ConfigManager:
         if account and not self.has_account(account):
             return None
         return account
+
+    def set_preferred_verification_model(self, model: str | None) -> None:
+        """Set the preferred model for verification.
+
+        This is stored separately from the verification agent's account model,
+        allowing a different model to be used for verification than for coding.
+
+        Args:
+            model: Model name to use for verification, or None to clear
+        """
+        config = self.load_config()
+        if model is None:
+            if "preferred_verification_model" in config:
+                del config["preferred_verification_model"]
+        else:
+            config["preferred_verification_model"] = model
+        self.save_config(config)
+
+    def get_preferred_verification_model(self) -> str | None:
+        """Get the preferred model for verification.
+
+        Returns:
+            Model name for verification, or None if not explicitly set
+        """
+        config = self.load_config()
+        return config.get("preferred_verification_model")
 
     def get_cleanup_days(self) -> int:
         """Get the number of days after which to clean up old files.

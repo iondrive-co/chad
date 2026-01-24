@@ -2146,3 +2146,105 @@ class TestAnsiToHtml:
         result = ansi_to_html(text)
         assert "RGB white bg" in result
         assert "background" not in result
+
+
+class TestPreferredVerificationModel:
+    """Tests for preferred verification model functionality."""
+
+    @pytest.fixture
+    def mock_api_client(self):
+        """Create a mock API client with verification model support."""
+        client = Mock()
+        client.list_accounts.return_value = [
+            MockAccount(name="claude", provider="anthropic", role="CODING", model="claude-sonnet-4-20250514"),
+            MockAccount(name="claude-verifier", provider="anthropic", role="VERIFICATION", model="default"),
+        ]
+        client.get_account.return_value = MockAccount(
+            name="claude-verifier", provider="anthropic", model="default", reasoning="default"
+        )
+        client.list_role_assignments.return_value = {}
+        client.get_preferred_verification_model.return_value = None
+        client.set_preferred_verification_model.return_value = None
+        return client
+
+    @pytest.fixture
+    def web_ui(self, mock_api_client):
+        """Create a ChadWebUI instance."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        return ChadWebUI(mock_api_client)
+
+    def test_build_verification_dropdown_uses_stored_model(self, web_ui, mock_api_client, monkeypatch):
+        """Test that _build_verification_dropdown_state uses the stored preferred model."""
+        # Mock model catalog to return model choices
+        monkeypatch.setattr(
+            web_ui.model_catalog, "get_models",
+            lambda provider, acct=None: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "default"]
+        )
+
+        # Build dropdown state with a stored preferred model
+        state = web_ui._build_verification_dropdown_state(
+            coding_agent="claude",
+            verification_agent="claude-verifier",
+            coding_model_value="claude-sonnet-4-20250514",
+            coding_reasoning_value="default",
+            current_verification_model="claude-opus-4-20250514",
+        )
+
+        # The model value should be the stored preferred model
+        assert state.model_value == "claude-opus-4-20250514"
+
+    def test_build_verification_dropdown_falls_back_to_account_model(self, web_ui, mock_api_client, monkeypatch):
+        """Test fallback to account model when no preferred model is stored."""
+        # Set a specific model on the account
+        mock_api_client.get_account.return_value = MockAccount(
+            name="claude-verifier", provider="anthropic", model="claude-sonnet-4-20250514", reasoning="default"
+        )
+        monkeypatch.setattr(
+            web_ui.model_catalog, "get_models",
+            lambda provider, acct=None: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "default"]
+        )
+
+        # Build dropdown state without a preferred model
+        state = web_ui._build_verification_dropdown_state(
+            coding_agent="claude",
+            verification_agent="claude-verifier",
+            coding_model_value="claude-sonnet-4-20250514",
+            coding_reasoning_value="default",
+            current_verification_model=None,
+        )
+
+        # Should fall back to the account's stored model
+        assert state.model_value == "claude-sonnet-4-20250514"
+
+    def test_resolve_verification_preferences_persists_model(self, web_ui, mock_api_client):
+        """Test that _resolve_verification_preferences persists the verification model to config."""
+        # Call with an explicit verification model
+        web_ui._resolve_verification_preferences(
+            coding_account="claude",
+            coding_model="claude-sonnet-4-20250514",
+            coding_reasoning="default",
+            verification_agent="claude-verifier",
+            verification_model="claude-opus-4-20250514",
+            verification_reasoning="default",
+        )
+
+        # Should persist to both account and global config
+        mock_api_client.set_account_model.assert_called_once_with("claude-verifier", "claude-opus-4-20250514")
+        mock_api_client.set_preferred_verification_model.assert_called_once_with("claude-opus-4-20250514")
+
+    def test_resolve_verification_preferences_skips_same_as_coding(self, web_ui, mock_api_client):
+        """Test that SAME_AS_CODING model value doesn't persist to config."""
+        # Call with SAME_AS_CODING as the model value
+        web_ui._resolve_verification_preferences(
+            coding_account="claude",
+            coding_model="claude-sonnet-4-20250514",
+            coding_reasoning="default",
+            verification_agent="claude-verifier",
+            verification_model=web_ui.SAME_AS_CODING,
+            verification_reasoning="default",
+        )
+
+        # Should not persist to account or global config
+        mock_api_client.set_account_model.assert_not_called()
+        mock_api_client.set_preferred_verification_model.assert_not_called()

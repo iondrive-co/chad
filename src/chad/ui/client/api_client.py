@@ -526,3 +526,25 @@ class APIClient:
         )
         resp.raise_for_status()
         return resp.json().get("account_name")
+
+    def get_preferred_verification_model(self) -> str | None:
+        """Get the preferred model for verification."""
+        resp = self._client.get(self._url("/config/preferred-verification-model"))
+        resp.raise_for_status()
+        return resp.json().get("model")
+
+    def set_preferred_verification_model(self, model: str | None) -> str | None:
+        """Set or clear the preferred verification model.
+
+        Args:
+            model: Model name to set, or None to clear
+
+        Returns:
+            The model that was set (or None if cleared)
+        """
+        resp = self._client.put(
+            self._url("/config/preferred-verification-model"),
+            json={"model": model},
+        )
+        resp.raise_for_status()
+        return resp.json().get("model")

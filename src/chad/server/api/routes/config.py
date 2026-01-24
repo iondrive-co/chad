@@ -25,6 +25,18 @@ class VerificationAgentUpdate(BaseModel):
     account_name: str | None = Field(description="Account name to set as verification agent, or null to clear")
 
 
+class PreferredVerificationModelResponse(BaseModel):
+    """Response for preferred verification model endpoint."""
+
+    model: str | None = Field(description="Preferred model for verification")
+
+
+class PreferredVerificationModelUpdate(BaseModel):
+    """Request to set preferred verification model."""
+
+    model: str | None = Field(description="Model name to set, or null to clear")
+
+
 @router.get("/verification", response_model=VerificationSettings)
 async def get_verification_settings() -> VerificationSettings:
     """Get verification agent settings."""
@@ -129,3 +141,23 @@ async def set_verification_agent(request: VerificationAgentUpdate) -> Verificati
         config_mgr.set_verification_agent(None)
 
     return VerificationAgentResponse(account_name=request.account_name)
+
+
+@router.get("/preferred-verification-model", response_model=PreferredVerificationModelResponse)
+async def get_preferred_verification_model() -> PreferredVerificationModelResponse:
+    """Get the preferred model for verification."""
+    config_mgr = get_config_manager()
+    model = config_mgr.get_preferred_verification_model()
+
+    return PreferredVerificationModelResponse(model=model)
+
+
+@router.put("/preferred-verification-model", response_model=PreferredVerificationModelResponse)
+async def set_preferred_verification_model(
+    request: PreferredVerificationModelUpdate,
+) -> PreferredVerificationModelResponse:
+    """Set or clear the preferred verification model."""
+    config_mgr = get_config_manager()
+    config_mgr.set_preferred_verification_model(request.model)
+
+    return PreferredVerificationModelResponse(model=request.model)
