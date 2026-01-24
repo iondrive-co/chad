@@ -5690,20 +5690,12 @@ class ChadWebUI:
                 elem_classes=["config-panel__intro"],
             )
             with gr.Row():
-                retention_input = gr.Number(
-                    label="Retention Days",
-                    value=retention_days,
-                    minimum=1,
-                    precision=0,
-                    step=1,
-                )
                 coding_pref = gr.Dropdown(
                     label="Preferred Coding Agent",
                     choices=account_choices,
                     value=coding_value,
                     allow_custom_value=False,
                 )
-            with gr.Row():
                 coding_model_pref = gr.Dropdown(
                     label="Preferred Coding Model",
                     choices=coding_model_choices,
@@ -5728,12 +5720,19 @@ class ChadWebUI:
                     visible=verification_model_visible,
                     interactive=verification_model_interactive,
                 )
+            with gr.Row():
+                retention_input = gr.Number(
+                    label="Retention Days",
+                    value=retention_days,
+                    minimum=1,
+                    precision=0,
+                    step=1,
+                )
                 project_path_pref = gr.Textbox(
                     label="Default Project Path",
                     placeholder="/path/to/project",
                     value=prefs_dict.get("project_path", ""),
                 )
-            with gr.Row():
                 ui_mode_pref = gr.Dropdown(
                     label="UI Mode",
                     choices=["gradio", "cli"],
