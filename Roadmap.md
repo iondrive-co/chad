@@ -1,11 +1,3 @@
-v0.8 Paper Maximiser
-
-Split ui code from core
-API allows for live stream from agent (rather than json)
-New text only ui for testing
-Simplify tests after split
-Structured log format 
-
 v0.9 Token Effort
 
 Setup stage for each project, where the commands for verifying changes are established and checked to be true then

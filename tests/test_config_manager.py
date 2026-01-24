@@ -618,3 +618,85 @@ class TestVerificationAgent:
         # Config should not have the key
         config = mgr.load_config()
         assert "verification_agent" not in config
+
+
+class TestPreferredVerificationModel:
+    """Tests for preferred verification model configuration."""
+
+    def test_set_and_get_preferred_verification_model(self, tmp_path):
+        """Test setting and getting preferred verification model."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # Initially should return None
+        assert mgr.get_preferred_verification_model() is None
+
+        # Set a model
+        mgr.set_preferred_verification_model("claude-3-5-sonnet-20241022")
+
+        # Should return the set value
+        result = mgr.get_preferred_verification_model()
+        assert result == "claude-3-5-sonnet-20241022"
+
+        # Verify it's stored in config
+        config = mgr.load_config()
+        assert config.get("preferred_verification_model") == "claude-3-5-sonnet-20241022"
+
+    def test_set_preferred_verification_model_to_none_clears_setting(self, tmp_path):
+        """Setting preferred verification model to None clears the setting."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # First set a model
+        mgr.set_preferred_verification_model("gpt-4o")
+        assert mgr.get_preferred_verification_model() == "gpt-4o"
+
+        # Clear by setting to None
+        mgr.set_preferred_verification_model(None)
+
+        # Should return None
+        result = mgr.get_preferred_verification_model()
+        assert result is None
+
+        # Config should not have the key
+        config = mgr.load_config()
+        assert "preferred_verification_model" not in config
+
+    def test_preferred_verification_model_persists_across_instances(self, tmp_path):
+        """Preferred verification model persists and can be retrieved by a new ConfigManager."""
+        config_path = tmp_path / "test.conf"
+
+        # Set model with first instance
+        mgr1 = ConfigManager(config_path)
+        mgr1.set_preferred_verification_model("gemini-2.0-flash-exp")
+
+        # Create a new instance (simulating restart) and verify
+        mgr2 = ConfigManager(config_path)
+        result = mgr2.get_preferred_verification_model()
+
+        assert result == "gemini-2.0-flash-exp"
+
+    def test_preferred_verification_model_independent_of_account_model(self, tmp_path):
+        """Preferred verification model is stored separately from account model."""
+        import base64
+        import bcrypt
+
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # Setup account with password
+        password = "testpassword"
+        password_hash = mgr.hash_password(password)
+        salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
+        mgr.save_config({"password_hash": password_hash, "encryption_salt": salt})
+
+        # Store account with a model
+        mgr.store_account("test-account", "anthropic", "key", password, "claude-opus-4-20250514")
+        mgr.set_verification_agent("test-account")
+
+        # Set a different preferred verification model
+        mgr.set_preferred_verification_model("claude-3-5-sonnet-20241022")
+
+        # They should be independent
+        assert mgr.get_account_model("test-account") == "claude-opus-4-20250514"
+        assert mgr.get_preferred_verification_model() == "claude-3-5-sonnet-20241022"
