@@ -45,7 +45,7 @@ except Exception:
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 try:
-    from chad.verification.ui_playwright_runner import (
+    from chad.ui.gradio.verification.ui_playwright_runner import (
         ChadLaunchError,
         PlaywrightUnavailable,
         create_temp_env,
@@ -56,7 +56,7 @@ try:
         start_chad,
         stop_chad,
     )
-    from chad.verification.screenshot_fixtures import (
+    from chad.ui.gradio.verification.screenshot_fixtures import (
         LIVE_VIEW_CONTENT,
         create_sample_screenshots,
         get_chat_history_with_screenshots,
@@ -120,7 +120,11 @@ def main():
         "--output", "-o", type=Path, default=DEFAULT_OUTPUT, help=f"Output path (default: {DEFAULT_OUTPUT})"
     )
     parser.add_argument(
-        "--tab", "-t", choices=["run", "providers"], default=None, help="Tab to screenshot (default: run)"
+        "--tab",
+        "-t",
+        choices=["run", "providers", "setup"],
+        default=None,
+        help="Tab to screenshot (default: run; 'setup' targets the former providers tab)",
     )
     parser.add_argument(
         "--selector",

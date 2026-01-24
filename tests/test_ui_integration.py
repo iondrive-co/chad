@@ -1,5 +1,6 @@
 """UI integration tests using Playwright to verify UI behavior with mock providers."""
 
+import json
 import time
 
 import pytest
@@ -9,7 +10,7 @@ try:
 except Exception:  # pragma: no cover - handled by pytest skip
     pytest.skip("playwright not available", allow_module_level=True)
 
-from chad.verification.ui_playwright_runner import (
+from chad.ui.gradio.verification.ui_playwright_runner import (
     ChadLaunchError,
     check_live_stream_colors,
     create_temp_env,
@@ -17,6 +18,8 @@ from chad.verification.ui_playwright_runner import (
     get_card_visibility_debug,
     get_provider_names,
     inject_live_stream_content,
+    inject_merge_diff_content,
+    measure_diff_scrollbars,
     measure_add_provider_accordion,
     measure_provider_delete_button,
     open_playwright_page,
@@ -80,9 +83,9 @@ class TestUIElements:
         task3_tab = page.get_by_role("tab", name="Task 3")
         expect(task3_tab).to_be_hidden()
 
-    def test_providers_tab_visible(self, page: Page):
-        """Providers tab should be visible."""
-        tab = page.get_by_role("tab", name="⚙️ Providers")
+    def test_setup_tab_visible(self, page: Page):
+        """Setup tab should be visible."""
+        tab = page.get_by_role("tab", name="⚙️ Setup")
         expect(tab).to_be_visible()
 
     def test_project_path_field(self, page: Page):
@@ -189,15 +192,15 @@ class TestCodingAgentLayout:
         assert status_box["width"] <= available_width
 
     def test_run_top_controls_stack_with_matching_widths(self, page: Page):
-        """Preferred/Reasoning controls should stack under matching agent selectors with aligned widths."""
+        """Model/Reasoning controls should stack under matching agent selectors with aligned widths."""
         project_path = page.get_by_label("Project Path")
         status = page.locator("#role-config-status")
         session_log = page.locator("#session-log-btn")
         coding_agent = page.get_by_label("Coding Agent")
-        coding_model = page.get_by_label("Preferred Model", exact=True)
+        coding_model = page.get_by_label("Model", exact=True)
         coding_reasoning = page.get_by_label("Reasoning Effort", exact=True)
         verification_agent = page.get_by_label("Verification Agent")
-        verification_model = page.get_by_label("Verification Preferred Model")
+        verification_model = page.get_by_label("Verification Model")
         verification_reasoning = page.get_by_label("Verification Reasoning Effort")
 
         expect(project_path).to_be_visible()
@@ -241,16 +244,16 @@ class TestCodingAgentLayout:
 
         assert (
             model_box["y"] >= coding_box["y"] + coding_box["height"] - 2
-        ), "Preferred Model should stack beneath Coding Agent"
+        ), "Model should stack beneath Coding Agent"
         assert (
             coding_reasoning_box["y"] >= model_box["y"] + model_box["height"] - 2
-        ), "Coding Reasoning should stack beneath Preferred Model"
+        ), "Coding Reasoning should stack beneath Model"
         assert (
             verification_model_box["y"] >= verification_box["y"] + verification_box["height"] - 2
-        ), "Verification Preferred Model should stack beneath Verification Agent"
+        ), "Verification Model should stack beneath Verification Agent"
         assert (
             verification_reasoning_box["y"] >= verification_model_box["y"] + verification_model_box["height"] - 2
-        ), "Verification Reasoning should stack beneath Verification Preferred Model"
+        ), "Verification Reasoning should stack beneath Verification Model"
 
         assert abs(model_box["x"] - coding_box["x"]) <= 4
         assert abs(model_box["width"] - coding_box["width"]) <= 4
@@ -345,8 +348,8 @@ class TestModelReasoningDropdowns:
     """
 
     def test_coding_model_dropdown_visible(self, page: Page):
-        """Coding agent 'Preferred Model' dropdown must be visible."""
-        dropdown = page.get_by_label("Preferred Model", exact=True)
+        """Coding agent 'Model' dropdown must be visible."""
+        dropdown = page.get_by_label("Model", exact=True)
         expect(dropdown).to_be_visible()
 
     def test_coding_reasoning_dropdown_visible(self, page: Page):
@@ -355,8 +358,8 @@ class TestModelReasoningDropdowns:
         expect(dropdown).to_be_visible()
 
     def test_verification_model_dropdown_visible(self, page: Page):
-        """Verification agent 'Verification Preferred Model' dropdown must be visible."""
-        dropdown = page.get_by_label("Verification Preferred Model")
+        """Verification agent 'Verification Model' dropdown must be visible."""
+        dropdown = page.get_by_label("Verification Model")
         expect(dropdown).to_be_visible()
 
     def test_verification_reasoning_dropdown_visible(self, page: Page):
@@ -371,9 +374,9 @@ class TestModelReasoningDropdowns:
         the UI refactoring has broken essential functionality.
         """
         # Get all four dropdowns
-        coding_model = page.get_by_label("Preferred Model", exact=True)
+        coding_model = page.get_by_label("Model", exact=True)
         coding_reasoning = page.get_by_label("Reasoning Effort", exact=True)
-        verif_model = page.get_by_label("Verification Preferred Model")
+        verif_model = page.get_by_label("Verification Model")
         verif_reasoning = page.get_by_label("Verification Reasoning Effort")
 
         # All must be visible
@@ -386,16 +389,16 @@ class TestModelReasoningDropdowns:
         # Just checking visibility is sufficient for regression prevention
 
 
-class TestProvidersTab:
-    """Test the Providers tab functionality."""
+class TestSetupTab:
+    """Test the Setup tab functionality."""
 
     def test_can_switch_to_providers_tab(self, page: Page):
-        """Should be able to switch to Providers tab."""
-        page.get_by_role("tab", name="⚙️ Providers").click()
+        """Should be able to switch to Setup tab."""
+        page.get_by_role("tab", name="⚙️ Setup").click()
         time.sleep(0.5)
 
-        # Should see provider heading
-        expect(page.get_by_role("heading", name="Providers")).to_be_visible()
+        # Should see setup heading
+        expect(page.get_by_role("heading", name="Setup")).to_be_visible()
 
     def test_provider_delete_button_fills_header(self, page: Page):
         """Delete button should fill the header height."""
@@ -421,12 +424,128 @@ class TestProvidersTab:
 
     def test_provider_usage_visible(self, page: Page):
         """Provider usage boxes should render with content."""
-        page.get_by_role("tab", name="⚙️ Providers").click()
+        page.get_by_role("tab", name="⚙️ Setup").click()
         usage = page.locator(".provider-usage").first
         expect(usage).to_be_visible(timeout=5000)
 
         text = usage.text_content() or ""
         assert text.strip(), "Usage text should not be empty"
+
+    def test_config_panel_persists_settings(self, page: Page, temp_env):
+        """Config panel should save changes immediately to config file."""
+        page.get_by_role("tab", name="⚙️ Setup").click()
+        config_toggle = page.get_by_role("button", name="Config")
+        config_toggle.click()
+
+        retention = page.get_by_label("Retention Days")
+        retention.fill("9")
+        retention.press("Enter")
+
+        coding_dropdown = page.get_by_label("Preferred Coding Agent")
+        coding_dropdown.click()
+        page.get_by_role("option", name="codex-work").click()
+
+        page.wait_for_timeout(800)
+        with open(temp_env.config_path, encoding="utf-8") as f:
+            config = json.load(f)
+
+        assert config.get("cleanup_days") == 9
+        assert config.get("role_assignments", {}).get("CODING") == "codex-work"
+
+    def test_verification_model_config_shows_when_agent_selected(self, page: Page):
+        """Verification model dropdown should appear once a verifier is chosen."""
+        page.get_by_role("tab", name="⚙️ Setup").click()
+        config_toggle = page.get_by_role("button", name="Config")
+        config_toggle.click()
+
+        verification_dropdown = page.get_by_label("Preferred Verification Agent")
+        verification_dropdown.click()
+        page.get_by_role("option", name="codex-work").click()
+
+        config_panel = page.locator("#config-panel")
+        model_dropdown = config_panel.get_by_label("Preferred Verification Model")
+        expect(model_dropdown).to_be_visible(timeout=5000)
+
+    def test_coding_model_config_shows_and_saves(self, page: Page, temp_env):
+        """Coding model dropdown should be visible and persist the selected value."""
+        page.get_by_role("tab", name="⚙️ Setup").click()
+        config_toggle = page.get_by_role("button", name="Config")
+        config_toggle.click()
+
+        coding_model_dropdown = page.get_by_label("Preferred Coding Model")
+        expect(coding_model_dropdown).to_be_visible(timeout=5000)
+
+        coding_model_dropdown.click()
+        page.get_by_role("option", name="claude-opus-4-20250514").click()
+
+        page.wait_for_timeout(800)
+        with open(temp_env.config_path, encoding="utf-8") as f:
+            config = json.load(f)
+
+        assert config.get("accounts", {}).get("claude-pro", {}).get("model") == "claude-opus-4-20250514"
+
+    def test_verification_agent_none_option_available(self, page: Page):
+        """Config panel 'Preferred Verification Agent' should include 'None' option."""
+        page.get_by_role("tab", name="⚙️ Setup").click()
+        config_toggle = page.get_by_role("button", name="Config")
+        config_toggle.click()
+
+        verification_dropdown = page.get_by_label("Preferred Verification Agent")
+        verification_dropdown.click()
+
+        # Should see the "None" option to disable verification
+        none_option = page.get_by_role("option", name="None")
+        expect(none_option).to_be_visible(timeout=3000)
+
+    def test_verification_agent_none_persists_to_config(self, page: Page, temp_env):
+        """Selecting 'None' for verification agent should persist to config file."""
+        page.get_by_role("tab", name="⚙️ Setup").click()
+        config_toggle = page.get_by_role("button", name="Config")
+        config_toggle.click()
+
+        verification_dropdown = page.get_by_label("Preferred Verification Agent")
+        verification_dropdown.click()
+        page.get_by_role("option", name="None").click()
+
+        page.wait_for_timeout(800)
+        with open(temp_env.config_path, encoding="utf-8") as f:
+            config = json.load(f)
+
+        # Should store the special marker "__verification_none__" to indicate no verification
+        assert config.get("verification_agent") == "__verification_none__"
+
+    def test_verification_agent_none_survives_page_reload(self, page: Page, temp_env):
+        """After page reload, 'None' verification agent should still be selected."""
+        # Ensure config has the VERIFICATION_NONE marker (from previous test or set directly)
+        with open(temp_env.config_path, encoding="utf-8") as f:
+            config = json.load(f)
+        if config.get("verification_agent") != "__verification_none__":
+            config["verification_agent"] = "__verification_none__"
+            with open(temp_env.config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f)
+
+        # Reload the page (simulating restart)
+        page.reload()
+        page.wait_for_timeout(2000)  # Wait for page to stabilize
+
+        # Navigate to the config panel
+        page.get_by_role("tab", name="⚙️ Setup").click()
+        config_toggle = page.get_by_role("button", name="Config")
+        config_toggle.click()
+
+        # The dropdown should show "None" (not "Same as Coding Agent")
+        verification_dropdown = page.get_by_label("Preferred Verification Agent")
+        expect(verification_dropdown).to_be_visible(timeout=5000)
+
+        # Get the dropdown's current text content
+        dropdown_text = verification_dropdown.input_value()
+
+        # Should be "None" (label) or "__verification_none__" (value), not "Same as Coding Agent"
+        # Gradio returns the display label from input_value() for dropdowns
+        assert dropdown_text in ("None", "__verification_none__"), (
+            f"Expected dropdown to show 'None' but got '{dropdown_text}'. "
+            "Bug: Verification agent 'None' reverted to default after page reload."
+        )
 
 
 class TestSubtaskTabs:
@@ -850,6 +969,124 @@ Line 4: Fourth line"""
         )
         assert content_count == 0, "Inject helper should not create live-output-content in non-live containers"
 
+    def test_no_inline_live_in_chatbot_when_dedicated_panel_active(self, page: Page):
+        """Chatbot should NOT have inline-live elements when dedicated live stream panel has content.
+
+        This test verifies the fix for the duplicate live view issue where both:
+        1. An inline "CODING AI (Live)" placeholder in the chatbot, AND
+        2. The dedicated live stream panel below
+
+        were visible simultaneously during streaming. The fix removes the inline
+        placeholder entirely, using only the dedicated panel for live output.
+        """
+        # Inject content into the dedicated live stream panel
+        inject_live_stream_content(page, "<p>Active streaming content</p>")
+
+        # Verify dedicated panel has content and is visible
+        dedicated_visible = page.evaluate(
+            """
+() => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    if (!box) return { found: false };
+    const content = box.querySelector('.live-output-content');
+    if (!content) return { found: true, hasContent: false };
+    return {
+        found: true,
+        hasContent: content.innerHTML.includes('Active streaming'),
+        visible: content.offsetParent !== null
+    };
+}
+"""
+        )
+        assert dedicated_visible.get("found"), "Dedicated live stream box should exist"
+        assert dedicated_visible.get("hasContent"), "Dedicated panel should have injected content"
+
+        # Verify chatbot does NOT have inline-live elements
+        inline_live_in_chatbot = page.evaluate(
+            """
+() => {
+    const chatbot = document.querySelector('#agent-chatbot');
+    if (!chatbot) return { chatbotFound: false };
+    const inlineLive = chatbot.querySelectorAll('.inline-live-content, .inline-live-header');
+    return {
+        chatbotFound: true,
+        inlineLiveCount: inlineLive.length,
+        inlineLiveTexts: [...inlineLive].map(el => el.textContent.substring(0, 50))
+    };
+}
+"""
+        )
+        assert inline_live_in_chatbot.get("chatbotFound"), "Chatbot should exist"
+        assert inline_live_in_chatbot.get("inlineLiveCount", 0) == 0, (
+            f"Chatbot should NOT have inline-live elements during streaming. "
+            f"Found {inline_live_in_chatbot.get('inlineLiveCount')} elements: "
+            f"{inline_live_in_chatbot.get('inlineLiveTexts')}"
+        )
+
+
+class TestTUIContentRendering:
+    """Test that TUI-style content (boxes, cursor positioning) renders correctly.
+
+    These tests verify that agent CLI output with box drawing characters and
+    status panels doesn't get garbled when displayed in the live stream panel.
+    """
+
+    # Simulated TUI content with box drawing - typical of codex/claude status panels
+    TUI_BOX_HTML = """
+<p>┌────────────────────────────────────────────────────────────────────────┐</p>
+<p>│ <span style="color: rgb(97, 175, 239);">OpenAI Codex</span>                                                           │</p>
+<p>├────────────────────────────────────────────────────────────────────────┤</p>
+<p>│ model: gpt-5.1-code    100% context left • ? for shortcuts             │</p>
+<p>│ directory: /home/user/project                                          │</p>
+<p>└────────────────────────────────────────────────────────────────────────┘</p>
+<p></p>
+<p><span style="color: rgb(229, 192, 123);">Tip:</span> NEW! Try shell snapshotting to make your Codex faster.</p>
+<p></p>
+<p><span style="color: rgb(152, 195, 121);">></span> Long lines in the output view should wrap or scroll properly, not</p>
+<p>  cause garbled layout with text scattered across the screen.</p>
+"""
+
+    def test_tui_box_content_readable(self, page: Page):
+        """TUI box content should be readable without horizontal scrolling."""
+        inject_live_stream_content(page, self.TUI_BOX_HTML)
+        time.sleep(0.2)
+
+        # Check that box drawing characters are visible
+        result = verify_all_text_visible(page)
+        assert result.get("allVisible", False), f"TUI content not fully visible: {result}"
+
+    def test_tui_content_no_excessive_horizontal_scroll(self, page: Page):
+        """TUI content should not require excessive horizontal scrolling."""
+        inject_live_stream_content(page, self.TUI_BOX_HTML)
+        time.sleep(0.2)
+
+        # Check scroll width vs client width
+        scroll_info = page.evaluate(
+            """
+() => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    if (!box) return { error: 'no live-stream-box' };
+    const content = box.querySelector('.live-output-content');
+    if (!content) return { error: 'no live-output-content' };
+    return {
+        scrollWidth: content.scrollWidth,
+        clientWidth: content.clientWidth,
+        overflowRatio: content.scrollWidth / content.clientWidth
+    };
+}
+"""
+        )
+
+        assert "error" not in scroll_info, f"Error: {scroll_info.get('error')}"
+
+        # Allow some horizontal scroll but not excessive (>1.5x would be garbled)
+        overflow_ratio = scroll_info.get("overflowRatio", 1.0)
+        assert overflow_ratio < 1.5, (
+            f"TUI content requires too much horizontal scrolling: "
+            f"scrollWidth={scroll_info['scrollWidth']}, clientWidth={scroll_info['clientWidth']}, "
+            f"ratio={overflow_ratio:.2f}"
+        )
+
 
 class TestRealisticLiveContent:
     """Test live view with realistic CLI-like content to verify all text is visible."""
@@ -916,11 +1153,11 @@ class TestScreenshots:
         assert output.exists()
         print(f"Screenshot saved: {output}")
 
-    def test_screenshot_providers_tab(self, page: Page, tmp_path):
-        """Take screenshot of Providers tab."""
-        page.get_by_role("tab", name="⚙️ Providers").click()
+    def test_screenshot_setup_tab(self, page: Page, tmp_path):
+        """Take screenshot of Setup tab."""
+        page.get_by_role("tab", name="⚙️ Setup").click()
         time.sleep(0.5)
-        output = tmp_path / "providers.png"
+        output = tmp_path / "setup.png"
         page.screenshot(path=str(output))
         assert output.exists()
         print(f"Screenshot saved: {output}")
@@ -1035,6 +1272,27 @@ class TestMergeDiscardReset:
         # Header and summary should be empty
         assert merge_status["headerText"] == "", f"Header should be empty but got: '{merge_status['headerText']}'"
         assert merge_status["summaryText"] == "", f"Summary should be empty but got: '{merge_status['summaryText']}'"
+
+
+class TestMergeDiffScroll:
+    """Ensure merge diff uses a single horizontal scrollbar instead of per-column scrollbars."""
+
+    def test_merge_diff_uses_single_horizontal_scrollbar(self, page: Page):
+        """Long lines should scroll together via the container, not per side."""
+        injected = inject_merge_diff_content(page)
+        assert injected, "Failed to inject sample diff content"
+
+        metrics = measure_diff_scrollbars(page)
+        assert metrics.error is None, metrics.error
+
+        assert metrics.container_scrollable is True, "Diff container should be horizontally scrollable"
+        assert metrics.container_overflow_x in ("auto", "scroll"), "Container should manage horizontal overflow"
+
+        assert metrics.left_overflow_x not in ("auto", "scroll"), "Left pane should not have its own scrollbar"
+        assert metrics.right_overflow_x not in ("auto", "scroll"), "Right pane should not have its own scrollbar"
+
+        assert metrics.left_scrollable is False, "Left pane should not scroll independently"
+        assert metrics.right_scrollable is False, "Right pane should not scroll independently"
 
 
 class TestInlineScreenshots:

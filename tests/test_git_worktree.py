@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from chad.git_worktree import (
+from chad.util.git_worktree import (
     GitWorktreeManager,
     ConflictHunk,
     MergeConflict,
@@ -150,7 +150,7 @@ class TestGitWorktreeManager:
 
     def test_create_worktree_cleans_stale_pth_entries(self, git_repo):
         """Test that creating a worktree cleans up stale .pth entries from old worktrees."""
-        from chad.git_worktree import cleanup_stale_pth_entries
+        from chad.util.git_worktree import cleanup_stale_pth_entries
 
         # Create a venv with site-packages
         main_venv = git_repo / "venv"
@@ -177,7 +177,7 @@ class TestGitWorktreeManager:
 
     def test_cleanup_removes_conflicting_worktree_entries(self, git_repo):
         """Test that cleanup removes entries from other worktrees when current_worktree_id is specified."""
-        from chad.git_worktree import cleanup_stale_pth_entries
+        from chad.util.git_worktree import cleanup_stale_pth_entries
 
         # Create a venv with site-packages
         main_venv = git_repo / "venv"
