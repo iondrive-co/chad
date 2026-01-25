@@ -43,12 +43,13 @@ If you find unused or redundant code or tests, you can remove them. Clean up the
 
 ## After making changes
 
-1. Take an after screenshot for gradio ui work
+1. Take an after screenshot for gradio ui work (see Screenshots section below)
 2. Run verification using the `verify()` function which handles Python detection automatically:
    ```python
    from chad.ui.gradio.verification.tools import verify
    result = verify()  # Runs flake8 + all tests
    # Or: verify(lint_only=True)  # Just flake8
+   # Or: verify(visual_only=True)  # Just visual tests
    ```
 3. **Run startup sanity checks** to catch import/runtime errors not covered by tests:
    ```bash
@@ -60,6 +61,50 @@ If you find unused or redundant code or tests, you can remove them. Clean up the
    This catches NameErrors, missing imports, and other issues that flake8 and tests may miss.
 4. Perform a critical self-review and note any outstanding issues
 5. All tests must pass even if you did not break them, never skip tests for any reason.
+
+## Screenshots
+
+For UI changes, take before/after screenshots to verify visual correctness:
+
+1. **Before starting**: Take a screenshot showing the current state
+2. **After changes**: Take a screenshot showing the result of your changes
+3. Include screenshot paths in your JSON summary:
+```json
+{
+  "change_summary": "Added dark mode toggle button",
+  "before_screenshot": "/path/to/before.png",
+  "before_description": "Settings panel without dark mode toggle",
+  "after_screenshot": "/path/to/after.png",
+  "after_description": "Settings panel with dark mode toggle visible"
+}
+```
+
+When working on Gradio UI components:
+- Check `src/chad/ui/gradio/verification/visual_test_map.py` for existing screenshot tests
+- If you add or change UI components, update `visual_test_map.py` so future runs pick the right visual tests
+- See `src/chad/ui/gradio/verification/screenshot_fixtures.py` for example fixture data to use in screenshots
+
+## Visual Test Targeting
+
+For efficient testing, run only the visual tests relevant to your changes:
+
+```bash
+# Get list of visual tests for changed files
+VTESTS=$(.venv/bin/python - <<'PY'
+import subprocess
+from chad.ui.gradio.verification.visual_test_map import tests_for_paths
+changed = subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines()
+print(" or ".join(tests_for_paths(changed)))
+PY
+)
+
+# Run only relevant visual tests
+if [ -n "$VTESTS" ]; then
+    .venv/bin/python -m pytest tests/test_ui_integration.py \
+        tests/test_ui_playwright_runner.py -v --tb=short \
+        -m "visual" -k "$VTESTS"
+fi
+```
 
 ## Providers
 
