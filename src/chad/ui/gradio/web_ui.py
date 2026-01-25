@@ -43,6 +43,15 @@ from chad.util.prompts import (
     ProgressUpdate,
     VerificationParseError,
 )
+from chad.util.project_setup import (
+    detect_project_type,
+    detect_verification_commands,
+    validate_command,
+    load_project_config,
+    save_project_config,
+    ProjectConfig,
+    VerificationConfig,
+)
 from chad.util.git_worktree import GitWorktreeManager, MergeConflict, FileDiff
 from .verification.ui_playwright_runner import cleanup_all_test_servers
 
@@ -70,6 +79,9 @@ class Session:
     worktree_base_commit: str | None = None  # Commit SHA worktree was created from
     has_worktree_changes: bool = False
     merge_conflicts: list[MergeConflict] | None = None
+    # Prompt tracking for display
+    last_coding_prompt: str | None = None
+    last_verification_prompt: str | None = None
 
     @property
     def log_path(self) -> Path | None:
@@ -5048,6 +5060,33 @@ class ChadWebUI:
                 type="messages",  # Use OpenAI-style dicts with 'role' and 'content' keys
             )
 
+            # Prompt display accordions (collapsed by default)
+            with gr.Accordion(
+                "Coding Agent Prompt",
+                open=False,
+                visible=False,
+                key=f"coding-prompt-accordion-{session_id}",
+                elem_classes=["prompt-accordion"],
+            ) as _coding_prompt_accordion:  # noqa: F841
+                _coding_prompt_display = gr.Markdown(  # noqa: F841
+                    "",
+                    key=f"coding-prompt-display-{session_id}",
+                    elem_classes=["prompt-display"],
+                )
+
+            with gr.Accordion(
+                "Verification Agent Prompt",
+                open=False,
+                visible=False,
+                key=f"verification-prompt-accordion-{session_id}",
+                elem_classes=["prompt-accordion"],
+            ) as _verification_prompt_accordion:  # noqa: F841
+                _verification_prompt_display = gr.Markdown(  # noqa: F841
+                    "",
+                    key=f"verification-prompt-display-{session_id}",
+                    elem_classes=["prompt-display"],
+                )
+
         # Hidden state for dynamic terminal dimensions (calculated from container width)
         # JavaScript updates this when the live-stream-box is resized
         terminal_cols_state = gr.Number(
@@ -5750,6 +5789,151 @@ class ChadWebUI:
                     allow_custom_value=False,
                     info="Gradio (web) or CLI (terminal) - applies on next launch",
                 )
+
+        # Project Setup accordion for per-project verification commands
+        with gr.Accordion(
+            "Project Setup",
+            open=False,
+            elem_id="project-setup-panel",
+            elem_classes=["project-setup-accordion"],
+        ):
+            project_setup_status = gr.Markdown("", elem_classes=["project-setup__status"])
+            gr.Markdown(
+                "Configure verification commands for a specific project. "
+                "These are saved in `.chad/project.json` within the project directory.",
+                elem_classes=["project-setup__intro"],
+            )
+            with gr.Row():
+                project_setup_path = gr.Textbox(
+                    label="Project Path",
+                    placeholder="/path/to/project",
+                    value=prefs_dict.get("project_path", ""),
+                )
+                project_setup_detect_btn = gr.Button("Detect", variant="secondary")
+
+            with gr.Row():
+                project_setup_type = gr.Markdown("**Detected type:** (none)")
+
+            with gr.Row():
+                lint_command = gr.Textbox(
+                    label="Lint Command",
+                    placeholder="e.g., python -m flake8 src/",
+                    value="",
+                )
+                lint_test_btn = gr.Button("Test", variant="secondary", size="sm")
+                lint_status = gr.Markdown("")
+
+            with gr.Row():
+                test_command = gr.Textbox(
+                    label="Test Command",
+                    placeholder="e.g., python -m pytest tests/ -v",
+                    value="",
+                )
+                test_test_btn = gr.Button("Test", variant="secondary", size="sm")
+                test_status = gr.Markdown("")
+
+            project_setup_save_btn = gr.Button("Save Configuration", variant="primary")
+
+            def on_project_detect(project_path_val):
+                if not project_path_val:
+                    return (
+                        "**Detected type:** (no path)",
+                        gr.update(value=""),
+                        gr.update(value=""),
+                        "",
+                        "",
+                    )
+                path_obj = Path(project_path_val).expanduser().resolve()
+                if not path_obj.exists():
+                    return (
+                        "**Detected type:** (path not found)",
+                        gr.update(value=""),
+                        gr.update(value=""),
+                        "",
+                        "",
+                    )
+
+                # Try loading existing config first
+                config = load_project_config(path_obj)
+                if config:
+                    return (
+                        f"**Detected type:** {config.project_type} (from saved config)",
+                        gr.update(value=config.verification.lint_command or ""),
+                        gr.update(value=config.verification.test_command or ""),
+                        "",
+                        "",
+                    )
+
+                # Auto-detect
+                detected = detect_verification_commands(path_obj)
+                return (
+                    f"**Detected type:** {detected['project_type']}",
+                    gr.update(value=detected.get("lint_command") or ""),
+                    gr.update(value=detected.get("test_command") or ""),
+                    "",
+                    "",
+                )
+
+            project_setup_detect_btn.click(
+                on_project_detect,
+                inputs=[project_setup_path],
+                outputs=[project_setup_type, lint_command, test_command, lint_status, test_status],
+            )
+
+            def on_lint_test(project_path_val, lint_cmd):
+                if not project_path_val or not lint_cmd:
+                    return "Please enter both project path and lint command"
+                path_obj = Path(project_path_val).expanduser().resolve()
+                success, output = validate_command(lint_cmd, path_obj, timeout=30)
+                if success:
+                    return "Lint passed"
+                return f"Failed: {output[:200]}"
+
+            lint_test_btn.click(
+                on_lint_test,
+                inputs=[project_setup_path, lint_command],
+                outputs=[lint_status],
+            )
+
+            def on_test_test(project_path_val, test_cmd):
+                if not project_path_val or not test_cmd:
+                    return "Please enter both project path and test command"
+                path_obj = Path(project_path_val).expanduser().resolve()
+                success, output = validate_command(test_cmd, path_obj, timeout=60)
+                if success:
+                    return "Tests passed"
+                return f"Failed: {output[:200]}"
+
+            test_test_btn.click(
+                on_test_test,
+                inputs=[project_setup_path, test_command],
+                outputs=[test_status],
+            )
+
+            def on_project_save(project_path_val, lint_cmd, test_cmd):
+                if not project_path_val:
+                    return "Please enter a project path"
+                path_obj = Path(project_path_val).expanduser().resolve()
+                if not path_obj.exists():
+                    return "Project path does not exist"
+
+                project_type = detect_project_type(path_obj)
+                config = ProjectConfig(
+                    project_type=project_type,
+                    verification=VerificationConfig(
+                        lint_command=lint_cmd or None,
+                        test_command=test_cmd or None,
+                        validated=True,
+                    ),
+                )
+                save_project_config(path_obj, config)
+                return "Configuration saved to .chad/project.json"
+
+            project_setup_save_btn.click(
+                on_project_save,
+                inputs=[project_setup_path, lint_command, test_command],
+                outputs=[project_setup_status],
+            )
 
         provider_outputs = [provider_feedback]
         for card in provider_cards:

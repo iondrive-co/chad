@@ -288,7 +288,7 @@ def build_agent_command(
     full_prompt: str | None = None
     if task_description:
         project_docs = _read_project_docs(project_path)
-        full_prompt = build_coding_prompt(task_description, project_docs)
+        full_prompt = build_coding_prompt(task_description, project_docs, project_path)
 
     if provider == "anthropic":
         # Claude Code CLI
