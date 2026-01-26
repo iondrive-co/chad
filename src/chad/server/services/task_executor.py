@@ -31,12 +31,18 @@ _CLI_INSTALLER = AIToolInstaller()
 
 
 class ClaudeStreamJsonParser:
-    """Parses Claude Code stream-json output and converts to human-readable text.
+    """Parses stream-json output from Claude Code and Qwen CLI.
 
-    Claude's stream-json format outputs one JSON object per line with types:
+    Supports multiple JSON formats:
+
+    Claude format:
     - system/init: Session initialization (ignored for display)
-    - assistant: Contains message content (text and tool_use)
+    - assistant: Contains message.content array with text and tool_use items
     - result: Final result summary
+
+    Qwen format (Gemini CLI fork):
+    - system: Session initialization with session_id
+    - message: Contains role ("assistant") and content (string)
 
     This parser buffers incoming bytes, extracts complete JSON lines,
     and yields human-readable text suitable for terminal display.
@@ -137,6 +143,15 @@ class ClaudeStreamJsonParser:
 
         elif event_type == "result":
             # Final result - could show summary but usually redundant
+            return None
+
+        elif event_type == "message":
+            # Qwen/Gemini CLI format: {type: "message", role: "assistant", content: "..."}
+            role = obj.get("role", "")
+            if role == "assistant":
+                content = obj.get("content", "")
+                if content:
+                    return content
             return None
 
         # Unknown event type - skip

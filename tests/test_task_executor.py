@@ -109,6 +109,28 @@ class TestClaudeStreamJsonParser:
         results = parser.feed(data)
         assert results == ["Plain text output"]
 
+    def test_parses_qwen_message_format(self):
+        """Parser handles Qwen/Gemini CLI message format."""
+        parser = ClaudeStreamJsonParser()
+        # Qwen uses {type: "message", role: "assistant", content: "..."}
+        data = b'{"type":"message","role":"assistant","content":"Hello from Qwen"}\n'
+        results = parser.feed(data)
+        assert results == ["Hello from Qwen"]
+
+    def test_ignores_qwen_user_message(self):
+        """Parser ignores user messages in Qwen format."""
+        parser = ClaudeStreamJsonParser()
+        data = b'{"type":"message","role":"user","content":"User input"}\n'
+        results = parser.feed(data)
+        assert results == []
+
+    def test_ignores_qwen_system_init(self):
+        """Parser ignores Qwen system init events."""
+        parser = ClaudeStreamJsonParser()
+        data = b'{"type":"system","session_id":"abc123"}\n'
+        results = parser.feed(data)
+        assert results == []
+
 
 class TestBuildAgentCommand:
     """Tests for build_agent_command function."""
