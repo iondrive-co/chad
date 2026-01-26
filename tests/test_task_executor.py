@@ -23,19 +23,50 @@ class TestClaudeStreamJsonParser:
         results = parser.feed(data)
         assert results == ["Hello world"]
 
-    def test_parses_tool_use_read(self):
-        """Parser formats Read tool use."""
+    def test_tool_use_accumulated_not_returned_immediately(self):
+        """Parser accumulates tool uses instead of returning them immediately."""
         parser = ClaudeStreamJsonParser()
         data = b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/src/main.py"}}]}}\n'
         results = parser.feed(data)
-        assert results == ["• Reading /src/main.py"]
+        # Tool uses are accumulated, not returned immediately
+        assert results == []
+        # But the tool is tracked
+        assert parser.has_pending_tools()
+        assert parser._tool_counts == {"Read": 1}
 
-    def test_parses_tool_use_bash(self):
-        """Parser formats Bash tool use with command truncation."""
+    def test_tool_summary_emitted_before_text(self):
+        """Parser emits tool summary when text content arrives."""
         parser = ClaudeStreamJsonParser()
-        data = b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"python -m pytest tests/"}}]}}\n'
-        results = parser.feed(data)
-        assert results == ["• Running: python -m pytest tests/"]
+        # First, a tool use
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/src/main.py"}}]}}\n')
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"pytest"}}]}}\n')
+        # Then text content arrives
+        results = parser.feed(b'{"type":"assistant","message":{"content":[{"type":"text","text":"Done!"}]}}\n')
+        # Summary is emitted before text
+        assert len(results) == 2
+        assert results[0] == "• 1 file read, 1 command"
+        assert results[1] == "Done!"
+        # Tool tracking is cleared
+        assert not parser.has_pending_tools()
+
+    def test_get_tool_summary_formats_correctly(self):
+        """Parser formats tool summary with correct grammar."""
+        parser = ClaudeStreamJsonParser()
+        # Add multiple tools
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}\n')
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}\n')
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}\n')
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Glob","input":{}}]}}\n')
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Grep","input":{}}]}}\n')
+        summary = parser.get_tool_summary()
+        assert summary == "• 3 files read, 2 searches"
+
+    def test_get_tool_details_returns_full_descriptions(self):
+        """Parser stores full tool descriptions for expansion."""
+        parser = ClaudeStreamJsonParser()
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/src/main.py"}}]}}\n')
+        details = parser.get_tool_details()
+        assert details == ["• Reading /src/main.py"]
 
     def test_ignores_system_init(self):
         """Parser skips system init messages."""
