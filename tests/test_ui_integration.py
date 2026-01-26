@@ -1079,6 +1079,75 @@ Line 4: Fourth line"""
         )
 
 
+class TestLiveStreamScrollPreservation:
+    """Ensure live view DOM patching preserves user scroll position."""
+
+    def test_live_patch_preserves_user_scroll(self, page: Page):
+        """Updating via live patch should not reset scroll when user is mid-scroll."""
+        live_id = "live-scroll-test"
+
+        trigger = page.locator(".live-patch-trigger")
+        trigger.first.wait_for(state="attached", timeout=5000)
+        assert trigger.count() >= 1, "Live patch trigger should be rendered in the DOM"
+
+        before = page.evaluate(
+            """
+({ liveId }) => {
+  const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+  const lines = Array.from({length: 200}, (_, i) => `Line ${i + 1}`).join('\\n');
+  box.innerHTML = `<div class="live-output-wrapper" data-live-id="${liveId}"><div class="live-output-header">▶ CODING AI (Live Stream)</div><div class="live-output-content" style="height:420px; overflow:auto; white-space:pre">${lines}</div></div>`;
+  const content = box.querySelector('.live-output-content');
+  content.scrollTop = 650;
+  return { top: content.scrollTop, height: content.scrollHeight };
+}
+""",
+            {"liveId": live_id},
+        )
+
+        page.evaluate(
+            """
+({ liveId }) => {
+  const trigger = document.querySelector('.live-patch-trigger');
+  if (!trigger) return false;
+  const newLines = Array.from({length: 220}, (_, i) => `Patched ${i + 1}`).join('\\n');
+  const newHtml = `<div class="live-output-wrapper" data-live-id="${liveId}"><div class="live-output-header">▶ CODING AI (Live Stream)</div><div class="live-output-content" style="height:420px; overflow:auto; white-space:pre">${newLines}</div></div>`;
+  const escapeHtml = (str) => str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  trigger.innerHTML = `<div data-live-patch="${liveId}" style="display:none">${escapeHtml(newHtml)}</div>`;
+  return true;
+}
+""",
+            {"liveId": live_id},
+        )
+
+        page.wait_for_timeout(400)
+
+        after = page.evaluate(
+            """
+({ liveId }) => {
+  const content = document.querySelector(`[data-live-id="${liveId}"] .live-output-content`);
+  if (!content) return null;
+  return {
+    top: content.scrollTop,
+    height: content.scrollHeight,
+    sample: content.innerText.slice(0, 30),
+  };
+}
+""",
+            {"liveId": live_id},
+        )
+
+        assert after is not None, "Live stream content should exist after patch"
+        assert after["sample"].startswith("Patched"), f"Patched content missing: {after['sample']}"
+        assert after["height"] > before["height"], "Patch should increase scrollable content height"
+        assert abs(after["top"] - before["top"]) <= 5, (
+            f"Scroll position should be preserved. Before={before['top']}, After={after['top']}"
+        )
+
+
 class TestTUIContentRendering:
     """Test that TUI-style content (boxes, cursor positioning) renders correctly.
 
