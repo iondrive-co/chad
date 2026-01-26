@@ -261,15 +261,6 @@ body, .gradio-container, .gradio-container * {
   font-size: 0.9rem;
 }
 
-.project-actions-row {
-  align-items: center !important;
-  gap: 12px !important;
-}
-
-.project-setup-status {
-  margin: 0 !important;
-}
-
 .project-save-btn button,
 .project-save-btn {
   min-height: 34px !important;
@@ -2955,7 +2946,7 @@ class ChadWebUI:
             wt_path = str(session.worktree_path) if session.worktree_path else None
             display_role_status = self.format_role_status(task_state, wt_path)
             log_btn_update = gr.update(
-                label=f"📄 {session.log_path.name}" if session.log_path else "Session Log",
+                label=session.log_path.name if session.log_path else "Session Log",
                 value=str(session.log_path) if session.log_path else None,
                 visible=session.log_path is not None,
             )
@@ -3501,12 +3492,24 @@ class ChadWebUI:
                         }
                     )
 
+                    # Build verification prompt for display before starting verification
+                    coding_summary = extract_coding_summary(last_coding_output)
+                    change_summary = coding_summary.change_summary if coding_summary else None
+                    trimmed_output = _truncate_verification_output(last_coding_output)
+                    display_verification_prompt = get_verification_prompt(
+                        trimmed_output, task_description, change_summary
+                    )
+                    session.last_verification_prompt = display_verification_prompt
+
                     # Show verification status
                     verify_status = (
                         f"{status_prefix}🔍 Running verification "
                         f"(attempt {verification_attempt}/{max_verification_attempts})..."
                     )
-                    yield make_yield(chat_history, verify_status, "", task_state="verifying")
+                    yield make_yield(
+                        chat_history, verify_status, "", task_state="verifying",
+                        verification_prompt=display_verification_prompt,
+                    )
 
                     # Run verification in a thread so we can stream output to live view
                     def verification_activity(activity_type: str, detail: str):
@@ -5186,23 +5189,6 @@ class ChadWebUI:
                                     key=f"test-status-{session_id}",
                                     elem_classes=["command-status", "test-command-status"],
                                 )
-                        with gr.Row(elem_classes=["project-actions-row"], equal_height=True):
-                            with gr.Column(scale=3):
-                                project_setup_status = gr.Markdown(
-                                    "",
-                                    key=f"project-setup-status-{session_id}",
-                                    elem_classes=["project-setup-status"],
-                                )
-                            with gr.Column(scale=0, min_width=120):
-                                project_save_btn = gr.Button(
-                                    "Save",
-                                    variant="primary",
-                                    size="sm",
-                                    key=f"project-save-{session_id}",
-                                    elem_classes=["project-save-btn"],
-                                    min_width=120,
-                                    scale=0,
-                                )
                         with gr.Row(
                             elem_id="role-status-row" if is_first else None,
                             elem_classes=["role-status-row"],
@@ -5214,9 +5200,18 @@ class ChadWebUI:
                                 elem_id="role-config-status" if is_first else None,
                                 elem_classes=["role-config-status"],
                             )
+                            project_save_btn = gr.Button(
+                                "Save",
+                                variant="primary",
+                                size="sm",
+                                key=f"project-save-{session_id}",
+                                elem_classes=["project-save-btn"],
+                                min_width=80,
+                                scale=0,
+                            )
                             log_path = session.log_path
                             session_log_btn = gr.DownloadButton(
-                                label="Session Log" if not log_path else f"📄 {log_path.name}",
+                                label="Session Log" if not log_path else log_path.name,
                                 value=str(log_path) if log_path else None,
                                 visible=log_path is not None,
                                 variant="secondary",
@@ -5581,7 +5576,7 @@ class ChadWebUI:
         project_save_btn.click(
             on_project_save,
             inputs=[project_path, lint_cmd_input, test_cmd_input],
-            outputs=[project_setup_status],
+            outputs=[role_status],
         )
 
         def start_task_wrapper(
