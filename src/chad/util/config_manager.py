@@ -23,6 +23,7 @@ CONFIG_BASE_KEYS: set[str] = {
     "preferred_verification_model",
     "cleanup_days",
     "ui_mode",
+    "projects",  # Per-project settings keyed by absolute project path
 }
 
 
@@ -620,6 +621,60 @@ class ConfigManager:
         config = self.load_config()
         config["ui_mode"] = mode
         self.save_config(config)
+
+    def _normalize_project_path(self, project_path: str | Path) -> str:
+        """Normalize a project path to an absolute path string for use as a key."""
+        return str(Path(project_path).resolve())
+
+    def get_project_config(self, project_path: str | Path) -> dict[str, Any] | None:
+        """Get configuration for a specific project.
+
+        Args:
+            project_path: Path to the project root
+
+        Returns:
+            Project configuration dict, or None if not configured
+        """
+        config = self.load_config()
+        projects = config.get("projects", {})
+        key = self._normalize_project_path(project_path)
+        return projects.get(key)
+
+    def set_project_config(self, project_path: str | Path, project_config: dict[str, Any]) -> None:
+        """Set configuration for a specific project.
+
+        Args:
+            project_path: Path to the project root
+            project_config: Configuration dict to save
+        """
+        config = self.load_config()
+        if "projects" not in config:
+            config["projects"] = {}
+        key = self._normalize_project_path(project_path)
+        config["projects"][key] = project_config
+        self.save_config(config)
+
+    def delete_project_config(self, project_path: str | Path) -> None:
+        """Delete configuration for a specific project.
+
+        Args:
+            project_path: Path to the project root
+        """
+        config = self.load_config()
+        projects = config.get("projects", {})
+        key = self._normalize_project_path(project_path)
+        if key in projects:
+            del projects[key]
+            self.save_config(config)
+
+    def list_project_configs(self) -> dict[str, dict[str, Any]]:
+        """List all project configurations.
+
+        Returns:
+            Dict mapping project paths to their configurations
+        """
+        config = self.load_config()
+        return config.get("projects", {})
 
 
 def validate_config_keys(config: dict[str, Any], *, allow: Iterable[str] | None = None) -> None:

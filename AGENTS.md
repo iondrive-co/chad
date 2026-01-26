@@ -30,6 +30,8 @@ of feature, and before making changes you will look at its screenshot, describe 
 matches the issue/lack of feature you were given to work on. See `src/chad/ui/gradio/verification/screenshot_fixtures.py` 
 for example data to use for screenshots.
 
+Tooling note: ripgrep (`rg`) is not installed here. Use `grep -R`, `find`, or language-aware tools instead—do not invoke `rg`.
+
 ## During changes
 
 For gradio UI changes add any new display functionality to `src/chad/ui/gradio/verification/visual_test_map.py`.

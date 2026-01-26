@@ -1,7 +1,7 @@
 """Project setup detection and configuration for Chad.
 
 This module handles detecting project type, verification commands,
-and persisting project-specific configuration in .chad/project.json.
+and persisting project-specific configuration in the main chad config file.
 """
 
 import json
@@ -33,7 +33,7 @@ class DocsConfig:
 
 @dataclass
 class ProjectConfig:
-    """Project configuration stored in .chad/project.json."""
+    """Project configuration stored in the main chad config file."""
 
     version: str = "1.0"
     detected_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -357,13 +357,8 @@ def validate_command(
         return False, str(e)
 
 
-def get_config_path(project_path: Path) -> Path:
-    """Get the path to the project config file."""
-    return Path(project_path) / ".chad" / "project.json"
-
-
 def load_project_config(project_path: Path) -> ProjectConfig | None:
-    """Load project configuration from .chad/project.json.
+    """Load project configuration from the main chad config file.
 
     Args:
         project_path: Path to the project root
@@ -371,34 +366,31 @@ def load_project_config(project_path: Path) -> ProjectConfig | None:
     Returns:
         ProjectConfig if config exists, None otherwise
     """
-    config_path = get_config_path(project_path)
+    from chad.util.config_manager import ConfigManager
 
-    if not config_path.exists():
+    config_manager = ConfigManager()
+    data = config_manager.get_project_config(project_path)
+
+    if data is None:
         return None
 
     try:
-        data = json.loads(config_path.read_text(encoding="utf-8"))
         return ProjectConfig.from_dict(data)
-    except (json.JSONDecodeError, OSError):
+    except (KeyError, TypeError):
         return None
 
 
 def save_project_config(project_path: Path, config: ProjectConfig) -> None:
-    """Save project configuration to .chad/project.json.
+    """Save project configuration to the main chad config file.
 
     Args:
         project_path: Path to the project root
         config: ProjectConfig to save
     """
-    config_path = get_config_path(project_path)
+    from chad.util.config_manager import ConfigManager
 
-    # Create .chad directory if needed
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-
-    config_path.write_text(
-        json.dumps(config.to_dict(), indent=2),
-        encoding="utf-8",
-    )
+    config_manager = ConfigManager()
+    config_manager.set_project_config(project_path, config.to_dict())
 
 
 def setup_project(project_path: Path, validate: bool = True) -> ProjectConfig:
@@ -487,7 +479,7 @@ def build_verification_instructions(project_path: Path) -> str:
     """Build verification instructions for the coding agent prompt.
 
     Returns verification instructions based on:
-    1. .chad/project.json if exists and validated
+    1. Saved project config if exists and validated
     2. Auto-detected commands if no config
     3. Generic fallback
 
