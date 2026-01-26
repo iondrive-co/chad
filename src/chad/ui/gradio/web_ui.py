@@ -35,6 +35,7 @@ from chad.util.event_log import (
 from chad.util.providers import ModelConfig, parse_codex_output, create_provider
 from chad.util.model_catalog import ModelCatalog
 from chad.util.prompts import (
+    build_coding_prompt,
     extract_coding_summary,
     extract_progress_update,
     check_verification_mentioned,
@@ -2754,6 +2755,47 @@ class ChadWebUI:
         session.cancel_requested = False
         session.config = None
 
+        # Check if there's already an active task on the server for this session
+        # This prevents accidental double-starts when generators get interrupted
+        if session.server_session_id:
+            try:
+                server_session = self.api_client.get_session(session.server_session_id)
+                if server_session and server_session.active:
+                    # Task is still running - cancel it first or warn user
+                    error_msg = (
+                        "⚠️ A task is already running on this session.\n\n"
+                        "Please wait for it to complete or cancel it before starting a new task."
+                    )
+                    # We need to define make_yield before using it, so just return early
+                    # with a simple error
+                    yield (
+                        [],  # chatbot
+                        error_msg,  # task_status
+                        gr.update(),  # live_stream
+                        gr.update(),  # project_path
+                        gr.update(),  # task_description
+                        gr.update(interactive=True),  # start_btn
+                        gr.update(interactive=False),  # cancel_btn
+                        gr.update(),  # role_status
+                        gr.update(),  # summary
+                        gr.update(),  # followup_row
+                        gr.update(),  # followup_btn
+                        gr.update(),  # merge_row
+                        gr.update(),  # merge_summary
+                        gr.update(),  # branch_dropdown
+                        gr.update(),  # diff_full_content
+                        gr.update(),  # merge_section_header
+                        gr.update(),  # live_patch_trigger
+                        gr.update(),  # coding_prompt_accordion
+                        gr.update(),  # coding_prompt_content
+                        gr.update(),  # verification_prompt_accordion
+                        gr.update(),  # verification_prompt_content
+                    )
+                    return
+            except Exception:
+                # Session might not exist on server yet, which is fine
+                pass
+
         # Stable live_id for DOM patching across the session
         live_stream_id = f"live-{session.id}"
 
@@ -2771,6 +2813,8 @@ class ChadWebUI:
             live_patch: tuple[str, str] | None = None,
             task_state: str | None = None,
             task_ended: bool = False,
+            coding_prompt: str | None = None,
+            verification_prompt: str | None = None,
         ):
             """Format output tuple for Gradio with current UI state.
 
@@ -2868,6 +2912,11 @@ class ChadWebUI:
                 gr.update(value=diff_full),  # Full diff content
                 header_text,  # merge_section_header - dynamic header
                 patch_html,  # live_patch_trigger - JS reads this to patch content
+                # Prompt accordions - show when prompts are provided
+                gr.update(visible=True) if coding_prompt else gr.update(),
+                gr.update(value=f"```\n{coding_prompt}\n```") if coding_prompt else gr.update(),
+                gr.update(visible=True) if verification_prompt else gr.update(),
+                gr.update(value=f"```\n{verification_prompt}\n```") if verification_prompt else gr.update(),
             )
 
         try:
@@ -2968,8 +3017,16 @@ class ChadWebUI:
             chat_history.append({"role": "user", "content": f"**Task**\n\n{task_description}"})
             session.event_log.log(UserMessageEvent(content=task_description))
 
+            # Build the coding prompt for display
+            project_docs = self._read_project_docs(path_obj)
+            display_coding_prompt = build_coding_prompt(task_description, project_docs, str(path_obj))
+            session.last_coding_prompt = display_coding_prompt
+
             initial_status = f"{status_prefix}⏳ Initializing session..."
-            yield make_yield(chat_history, initial_status, summary=initial_status, interactive=False, task_state="running")
+            yield make_yield(
+                chat_history, initial_status, summary=initial_status, interactive=False,
+                task_state="running", coding_prompt=display_coding_prompt,
+            )
 
             # Use the streaming API to run the task
             # This ensures both CLI and Gradio UI use the same PTY-based execution path
@@ -4973,6 +5030,52 @@ class ChadWebUI:
                             scale=3,
                             key=f"project-path-{session_id}",
                         )
+                        # Project Setup accordion - per-task verification config
+                        with gr.Accordion(
+                            "Project Setup",
+                            open=False,
+                            key=f"project-setup-{session_id}",
+                            elem_classes=["project-setup-accordion"],
+                        ):
+                            project_setup_status = gr.Markdown(
+                                "",
+                                key=f"project-setup-status-{session_id}",
+                            )
+                            project_setup_type = gr.Markdown(
+                                "**Type:** (enter path above)",
+                                key=f"project-type-{session_id}",
+                            )
+                            with gr.Row():
+                                lint_cmd_input = gr.Textbox(
+                                    label="Lint Command",
+                                    placeholder="e.g., python -m flake8 src/",
+                                    key=f"lint-cmd-{session_id}",
+                                )
+                                lint_test_btn = gr.Button(
+                                    "Test",
+                                    variant="secondary",
+                                    size="sm",
+                                    key=f"lint-test-{session_id}",
+                                )
+                            lint_status = gr.Markdown("", key=f"lint-status-{session_id}")
+                            with gr.Row():
+                                test_cmd_input = gr.Textbox(
+                                    label="Test Command",
+                                    placeholder="e.g., python -m pytest tests/",
+                                    key=f"test-cmd-{session_id}",
+                                )
+                                test_test_btn = gr.Button(
+                                    "Test",
+                                    variant="secondary",
+                                    size="sm",
+                                    key=f"test-test-{session_id}",
+                                )
+                            test_status = gr.Markdown("", key=f"test-status-{session_id}")
+                            project_save_btn = gr.Button(
+                                "Save",
+                                variant="primary",
+                                key=f"project-save-{session_id}",
+                            )
                         with gr.Row(
                             elem_id="role-status-row" if is_first else None,
                             elem_classes=["role-status-row"],
@@ -5114,16 +5217,16 @@ class ChadWebUI:
                 type="messages",  # Use OpenAI-style dicts with 'role' and 'content' keys
             )
 
-            # Prompt display accordions (collapsed by default)
+            # Prompt display accordions (collapsed by default, visible after task starts)
             with gr.Accordion(
                 "Coding Agent Prompt",
                 open=False,
-                visible=False,
+                visible=True,
                 key=f"coding-prompt-accordion-{session_id}",
                 elem_classes=["prompt-accordion"],
-            ) as _coding_prompt_accordion:  # noqa: F841
-                _coding_prompt_display = gr.Markdown(  # noqa: F841
-                    "",
+            ) as coding_prompt_accordion:
+                coding_prompt_display = gr.Markdown(
+                    "*Run a task to see the coding prompt*",
                     key=f"coding-prompt-display-{session_id}",
                     elem_classes=["prompt-display"],
                 )
@@ -5131,12 +5234,12 @@ class ChadWebUI:
             with gr.Accordion(
                 "Verification Agent Prompt",
                 open=False,
-                visible=False,
+                visible=True,
                 key=f"verification-prompt-accordion-{session_id}",
                 elem_classes=["prompt-accordion"],
-            ) as _verification_prompt_accordion:  # noqa: F841
-                _verification_prompt_display = gr.Markdown(  # noqa: F841
-                    "",
+            ) as verification_prompt_accordion:
+                verification_prompt_display = gr.Markdown(
+                    "*Run a task to see the verification prompt*",
                     key=f"verification-prompt-display-{session_id}",
                     elem_classes=["prompt-display"],
                 )
@@ -5250,6 +5353,106 @@ class ChadWebUI:
                 )
 
         # Event handlers - must be defined inside @gr.render
+
+        # Project setup handlers
+        def on_project_path_change(path_val):
+            """Auto-detect project type and commands when path changes."""
+            if not path_val:
+                return (
+                    "**Type:** (enter path above)",
+                    gr.update(value=""),
+                    gr.update(value=""),
+                    "",
+                    "",
+                )
+            path_obj = Path(path_val).expanduser().resolve()
+            if not path_obj.exists():
+                return (
+                    "**Type:** (path not found)",
+                    gr.update(value=""),
+                    gr.update(value=""),
+                    "",
+                    "",
+                )
+
+            # Try loading existing config first
+            config = load_project_config(path_obj)
+            if config:
+                return (
+                    f"**Type:** {config.project_type} (saved)",
+                    gr.update(value=config.verification.lint_command or ""),
+                    gr.update(value=config.verification.test_command or ""),
+                    "",
+                    "",
+                )
+
+            # Auto-detect
+            detected = detect_verification_commands(path_obj)
+            return (
+                f"**Type:** {detected['project_type']}",
+                gr.update(value=detected.get("lint_command") or ""),
+                gr.update(value=detected.get("test_command") or ""),
+                "",
+                "",
+            )
+
+        project_path.change(
+            on_project_path_change,
+            inputs=[project_path],
+            outputs=[project_setup_type, lint_cmd_input, test_cmd_input, lint_status, test_status],
+        )
+
+        def on_lint_test(path_val, lint_cmd):
+            if not path_val or not lint_cmd:
+                return "Enter both path and command"
+            path_obj = Path(path_val).expanduser().resolve()
+            success, output = validate_command(lint_cmd, path_obj, timeout=30)
+            return "Passed" if success else f"Failed: {output[:100]}"
+
+        lint_test_btn.click(
+            on_lint_test,
+            inputs=[project_path, lint_cmd_input],
+            outputs=[lint_status],
+        )
+
+        def on_test_test(path_val, test_cmd):
+            if not path_val or not test_cmd:
+                return "Enter both path and command"
+            path_obj = Path(path_val).expanduser().resolve()
+            success, output = validate_command(test_cmd, path_obj, timeout=60)
+            return "Passed" if success else f"Failed: {output[:100]}"
+
+        test_test_btn.click(
+            on_test_test,
+            inputs=[project_path, test_cmd_input],
+            outputs=[test_status],
+        )
+
+        def on_project_save(path_val, lint_cmd, test_cmd):
+            if not path_val:
+                return "Enter a project path"
+            path_obj = Path(path_val).expanduser().resolve()
+            if not path_obj.exists():
+                return "Path not found"
+
+            ptype = detect_project_type(path_obj)
+            config = ProjectConfig(
+                project_type=ptype,
+                verification=VerificationConfig(
+                    lint_command=lint_cmd or None,
+                    test_command=test_cmd or None,
+                    validated=True,
+                ),
+            )
+            save_project_config(path_obj, config)
+            return "Saved to .chad/project.json"
+
+        project_save_btn.click(
+            on_project_save,
+            inputs=[project_path, lint_cmd_input, test_cmd_input],
+            outputs=[project_setup_status],
+        )
+
         def start_task_wrapper(
             proj_path,
             task_desc,
@@ -5351,6 +5554,10 @@ class ChadWebUI:
                 diff_content,
                 merge_section_header,
                 live_patch_trigger,
+                coding_prompt_accordion,
+                coding_prompt_display,
+                verification_prompt_accordion,
+                verification_prompt_display,
             ],
         )
 
@@ -5843,151 +6050,6 @@ class ChadWebUI:
                     allow_custom_value=False,
                     info="Gradio (web) or CLI (terminal) - applies on next launch",
                 )
-
-        # Project Setup accordion for per-project verification commands
-        with gr.Accordion(
-            "Project Setup",
-            open=False,
-            elem_id="project-setup-panel",
-            elem_classes=["project-setup-accordion"],
-        ):
-            project_setup_status = gr.Markdown("", elem_classes=["project-setup__status"])
-            gr.Markdown(
-                "Configure verification commands for a specific project. "
-                "These are saved in `.chad/project.json` within the project directory.",
-                elem_classes=["project-setup__intro"],
-            )
-            with gr.Row():
-                project_setup_path = gr.Textbox(
-                    label="Project Path",
-                    placeholder="/path/to/project",
-                    value=prefs_dict.get("project_path", ""),
-                )
-                project_setup_detect_btn = gr.Button("Detect", variant="secondary")
-
-            with gr.Row():
-                project_setup_type = gr.Markdown("**Detected type:** (none)")
-
-            with gr.Row():
-                lint_command = gr.Textbox(
-                    label="Lint Command",
-                    placeholder="e.g., python -m flake8 src/",
-                    value="",
-                )
-                lint_test_btn = gr.Button("Test", variant="secondary", size="sm")
-                lint_status = gr.Markdown("")
-
-            with gr.Row():
-                test_command = gr.Textbox(
-                    label="Test Command",
-                    placeholder="e.g., python -m pytest tests/ -v",
-                    value="",
-                )
-                test_test_btn = gr.Button("Test", variant="secondary", size="sm")
-                test_status = gr.Markdown("")
-
-            project_setup_save_btn = gr.Button("Save Configuration", variant="primary")
-
-            def on_project_detect(project_path_val):
-                if not project_path_val:
-                    return (
-                        "**Detected type:** (no path)",
-                        gr.update(value=""),
-                        gr.update(value=""),
-                        "",
-                        "",
-                    )
-                path_obj = Path(project_path_val).expanduser().resolve()
-                if not path_obj.exists():
-                    return (
-                        "**Detected type:** (path not found)",
-                        gr.update(value=""),
-                        gr.update(value=""),
-                        "",
-                        "",
-                    )
-
-                # Try loading existing config first
-                config = load_project_config(path_obj)
-                if config:
-                    return (
-                        f"**Detected type:** {config.project_type} (from saved config)",
-                        gr.update(value=config.verification.lint_command or ""),
-                        gr.update(value=config.verification.test_command or ""),
-                        "",
-                        "",
-                    )
-
-                # Auto-detect
-                detected = detect_verification_commands(path_obj)
-                return (
-                    f"**Detected type:** {detected['project_type']}",
-                    gr.update(value=detected.get("lint_command") or ""),
-                    gr.update(value=detected.get("test_command") or ""),
-                    "",
-                    "",
-                )
-
-            project_setup_detect_btn.click(
-                on_project_detect,
-                inputs=[project_setup_path],
-                outputs=[project_setup_type, lint_command, test_command, lint_status, test_status],
-            )
-
-            def on_lint_test(project_path_val, lint_cmd):
-                if not project_path_val or not lint_cmd:
-                    return "Please enter both project path and lint command"
-                path_obj = Path(project_path_val).expanduser().resolve()
-                success, output = validate_command(lint_cmd, path_obj, timeout=30)
-                if success:
-                    return "Lint passed"
-                return f"Failed: {output[:200]}"
-
-            lint_test_btn.click(
-                on_lint_test,
-                inputs=[project_setup_path, lint_command],
-                outputs=[lint_status],
-            )
-
-            def on_test_test(project_path_val, test_cmd):
-                if not project_path_val or not test_cmd:
-                    return "Please enter both project path and test command"
-                path_obj = Path(project_path_val).expanduser().resolve()
-                success, output = validate_command(test_cmd, path_obj, timeout=60)
-                if success:
-                    return "Tests passed"
-                return f"Failed: {output[:200]}"
-
-            test_test_btn.click(
-                on_test_test,
-                inputs=[project_setup_path, test_command],
-                outputs=[test_status],
-            )
-
-            def on_project_save(project_path_val, lint_cmd, test_cmd):
-                if not project_path_val:
-                    return "Please enter a project path"
-                path_obj = Path(project_path_val).expanduser().resolve()
-                if not path_obj.exists():
-                    return "Project path does not exist"
-
-                project_type = detect_project_type(path_obj)
-                config = ProjectConfig(
-                    project_type=project_type,
-                    verification=VerificationConfig(
-                        lint_command=lint_cmd or None,
-                        test_command=test_cmd or None,
-                        validated=True,
-                    ),
-                )
-                save_project_config(path_obj, config)
-                return "Configuration saved to .chad/project.json"
-
-            project_setup_save_btn.click(
-                on_project_save,
-                inputs=[project_setup_path, lint_command, test_command],
-                outputs=[project_setup_status],
-            )
 
         provider_outputs = [provider_feedback]
         for card in provider_cards:
