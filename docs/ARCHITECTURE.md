@@ -1,306 +1,115 @@
 # Chad Architecture
 
 ## Overview
-Chad is a two-layer system: a FastAPI backend that orchestrates coding tasks and a set of UIs (Gradio web and CLI) that drive the backend through the same streaming API. Agents are external provider CLIs (Claude, Codex, Gemini, Qwen, etc.) launched as subprocesses.
+Chad pairs a FastAPI backend with shared streaming clients used by both the Gradio web UI and the CLI. Coding “agents” are external provider CLIs launched in PTYs; the backend streams their output to the UIs over SSE or WebSocket.
 
 ## Backend (FastAPI)
-- Entry point: `src/chad/server/main.py`
-- Routes: `src/chad/server/api/routes` expose REST + SSE + WebSocket endpoints under `/api/v1`.
-- Services: `src/chad/server/services/task_executor.py` manages PTY-based agent processes, event logging, and worktree handling.
-- Domain models: `src/chad/server/api/schemas` define request/response payloads; `src/chad/server/domain` re-exports helpers for the UIs.
-- Worktrees: `GitWorktreeManager` creates per-session branches for safe changes; merge helpers live in `src/chad/util/git_worktree.py`.
+- Entry point: `src/chad/server/main.py:create_app` — health lives at `GET /status`; all other endpoints are under `/api/v1`.
+- Routers (`src/chad/server/api/routes`): `health`, `sessions`, `providers`, `worktree`, `config`, `ws`.
+- Services:
+  - `task_executor.py` builds provider commands, creates per-task git worktrees, logs events, and drives PTY streaming.
+  - `pty_stream.py` manages PTY lifecycle and subscriber fan‑out.
+  - `event_mux.py` merges PTY output with EventLog entries into an ordered SSE/WS stream.
+  - `session_manager.py` holds in-memory session state; `state.py` exposes singletons (ConfigManager, ModelCatalog, uptime).
+- Domain exports: `src/chad/server/domain` re-exports utilities (providers, git_worktree, prompts, event_log, model_catalog, cleanup, process_registry) for UI consumption.
 
-## UI Layers
-- Gradio UI: `src/chad/ui/gradio/web_ui.py` builds the Run/Setup tabs and streams PTY output; visual tests use Playwright via `tests/test_ui_integration.py`.
-- CLI UI: `src/chad/ui/cli/app.py` is a thin TUI that streams from the backend.
-- Shared verification utilities for the UI live in `src/chad/ui/gradio/verification/`.
+## API Surface
+Base path `/api/v1` (except `/status`).
+
+**Status**
+- `GET /status` — health, version, uptime_seconds
+
+**Sessions**
+- `POST /sessions` — create session (optional `project_path`, `name`)
+- `GET /sessions` — list sessions
+- `GET /sessions/{id}` — session details
+- `DELETE /sessions/{id}` — delete session
+- `POST /sessions/{id}/cancel` — request cancel
+- `POST /sessions/{id}/tasks` — start task (coding_agent, optional model/reasoning, terminal_rows/cols)
+- `GET /sessions/{id}/tasks/{task_id}` — task status
+- `GET /sessions/{id}/stream` — SSE stream (query: `since_seq`, `include_terminal`, `include_events`)
+- `POST /sessions/{id}/input` — base64 `data` to PTY
+- `POST /sessions/{id}/resize` — resize PTY (`rows`, `cols`)
+- `GET /sessions/{id}/events` — fetch EventLog (query: `since_seq`, `event_types`)
+
+**Worktree**
+- `POST /sessions/{id}/worktree` — create worktree
+- `GET /sessions/{id}/worktree` — status
+- `GET /sessions/{id}/worktree/diff` — summary stats
+- `GET /sessions/{id}/worktree/diff/full` — parsed diff
+- `POST /sessions/{id}/worktree/merge` — merge to target branch (returns conflicts when present)
+- `POST /sessions/{id}/worktree/reset` — reset worktree to base commit
+- `DELETE /sessions/{id}/worktree` — delete worktree
+
+**Accounts & Providers**
+- `GET /providers` — supported provider types
+- `GET /accounts` — list accounts
+- `POST /accounts` — create account
+- `GET /accounts/{name}` — account detail
+- `DELETE /accounts/{name}` — delete
+- `PUT /accounts/{name}/model`
+- `PUT /accounts/{name}/reasoning`
+- `PUT /accounts/{name}/role`
+- `GET /accounts/{name}/models`
+- `GET /accounts/{name}/usage` — not implemented (501)
+
+**Configuration**
+- `GET/PUT /config/verification` — enabled/auto_run flags
+- `GET/PUT /config/cleanup` — `cleanup_days`, `auto_cleanup`
+- `GET/PUT /config/preferences` — `last_project_path`, `dark_mode`, `ui_mode`
+- `GET/PUT /config/verification-agent`
+- `GET/PUT /config/preferred-verification-model`
+
+**Streaming**
+- SSE: `GET /sessions/{id}/stream`
+- WebSocket: `GET /ws/{session_id}` (input, resize, cancel, ping; server sends terminal/event/complete/error)
 
 ## Provider Execution
-- Providers are configured accounts stored in `~/.chad.conf` (encrypted). Each account maps to a CLI binary resolved by `src/chad/util/providers.py`.
-- `task_executor.build_agent_command` constructs the subprocess command and environment, then streams output over PTY/SSE back to the UI.
+- Accounts are stored encrypted in `~/.chad.conf` via `ConfigManager`.
+- Supported providers: Anthropic (Claude Code), OpenAI (Codex), Google (Gemini), Alibaba (Qwen Code), Mistral (Vibe), Mock.
+- CLI resolution/installation lives in `chad.util.providers` + `chad.util.installer`; `task_executor.build_agent_command` assembles the command/env and builds the coding prompt (with doc references and verification instructions).
+- Claude/Qwen stream‑json is parsed by `ClaudeStreamJsonParser`; PTY output is streamed through EventLog and EventMultiplexer.
 
 ## Project Configuration
-- Per-project settings live in `.chad/project.json` (created via `setup_project` in `src/chad/util/project_setup.py`). It records lint/test commands and doc paths so agents know where to read instructions from disk.
+- Per-project settings (lint/test commands, doc paths) are stored in the main `~/.chad.conf` under the `projects` key, keyed by absolute project path. Managed by `ConfigManager.{get,set}_project_config()`.
+- `build_doc_reference_text` points agents to AGENTS.md and ARCHITECTURE.md on disk instead of inlining contents.
 
 ## Logging & Artifacts
-- Structured JSONL event logs are written to `~/.chad/logs/{session}.jsonl`; large outputs go to `~/.chad/logs/artifacts/{session}/`.
-- `src/chad/util/event_log.py` provides reading/writing helpers and is used by both backend and UI.
+- JSONL logs at `~/.chad/logs/{session}.jsonl`; large outputs under `~/.chad/logs/artifacts/{session}/`. Override with `CHAD_LOG_DIR`.
+- `chad.util.event_log.EventLog` manages sequences, artifacts, and typed events.
 
-## Testing & Verification
-- `verify()` wrapper (see `src/chad/ui/gradio/verification/tools.py`) runs flake8 + pytest; visual tests are Playwright-based.
-- Startup sanity checks import `chad.ui.gradio.launch_web_ui` and `chad.ui.cli.launch_cli_ui` to catch import-time errors quickly.
+## UI Layers
+- Gradio UI (`src/chad/ui/gradio/web_ui.py`) drives tasks via the API/SSE using `SyncStreamClient`, renders terminal output with `TerminalEmulator`, and uses provider management components in `provider_ui.py` plus shared state in `ui_state.py`. Visual tooling lives in `ui/gradio/verification/`.
+- CLI UI (`src/chad/ui/cli/app.py`) streams the same SSE feed via `SyncStreamClient`.
+- Shared clients: `src/chad/ui/client/api_client.py` (REST) and `stream_client.py` (SSE).
+- Terminal rendering: `src/chad/ui/terminal_emulator.py` shared by CLI and Gradio.
 
+## Worktrees & Git
+- `chad.util.git_worktree.GitWorktreeManager` creates per-session branches, detects changes, parses diffs, merges, resets, and deletes worktrees. TaskExecutor creates a worktree for each task before launching the provider.
 
-## Providers
+## Model Catalog & Cleanup
+- `chad.util.model_catalog.ModelCatalog` resolves available models per provider/account and is exposed via server state for the UIs.
+- Cleanup helpers in `chad.util.cleanup` prune old worktrees/logs/screenshots/temp files; `chad.util.process_registry` tracks spawned processes with PID files.
 
-### Anthropic (Claude Code)
-- OAuth token in `~/.claude/.credentials.json`
-- CLI: `claude -p --input-format stream-json --output-format stream-json --permission-mode bypassPermissions`
-
-### OpenAI (Codex)
-- Multi-account via isolated HOME dirs: `~/.chad/codex-homes/<account-name>/`
-- CLI: `codex exec --full-auto --skip-git-repo-check -C {path} {message}`
-
-### Google (Gemini)
-- OAuth creds in `~/.gemini/oauth_creds.json`
-- CLI: `gemini -y` (YOLO mode)
-
-## API Reference
-
-All endpoints are prefixed with `/api/v1`. Keep this section up to date when adding or modifying endpoints.
-
-### Status
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/status` | Server status - returns health, version, uptime |
-
-### Sessions
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/sessions` | Create a new session |
-| GET | `/sessions` | List all active sessions |
-| GET | `/sessions/{id}` | Get session details |
-| DELETE | `/sessions/{id}` | Delete session and clean up resources |
-| POST | `/sessions/{id}/cancel` | Cancel running task in session |
-| POST | `/sessions/{id}/tasks` | Start a new coding task |
-| GET | `/sessions/{id}/tasks/{task_id}` | Get task status |
-
-### Accounts & Providers
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/providers` | List supported provider types |
-| GET | `/accounts` | List configured accounts |
-| POST | `/accounts` | Add new account (requires OAuth - use UI) |
-| GET | `/accounts/{name}` | Get account details |
-| DELETE | `/accounts/{name}` | Delete an account |
-| PUT | `/accounts/{name}/model` | Set account's model |
-| PUT | `/accounts/{name}/reasoning` | Set account's reasoning level |
-| PUT | `/accounts/{name}/role` | Assign role (CODING/VERIFICATION) |
-| GET | `/accounts/{name}/models` | Get available models for account |
-| GET | `/accounts/{name}/usage` | Get usage stats (not implemented) |
-
-### Worktree Operations
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/sessions/{id}/worktree` | Create git worktree for session |
-| GET | `/sessions/{id}/worktree` | Get worktree status |
-| GET | `/sessions/{id}/worktree/diff` | Get diff summary |
-| GET | `/sessions/{id}/worktree/diff/full` | Get full diff with hunks |
-| POST | `/sessions/{id}/worktree/merge` | Merge changes to main branch |
-| POST | `/sessions/{id}/worktree/reset` | Reset worktree (discard changes) |
-| DELETE | `/sessions/{id}/worktree` | Delete worktree |
-
-### Configuration
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/config/verification` | Get verification settings |
-| PUT | `/config/verification` | Update verification settings |
-| GET | `/config/cleanup` | Get cleanup settings |
-| PUT | `/config/cleanup` | Update cleanup settings |
-| GET | `/config/preferences` | Get user preferences |
-| PUT | `/config/preferences` | Update user preferences |
-| GET | `/config/verification-agent` | Get verification agent account |
-| PUT | `/config/verification-agent` | Set verification agent account |
-| GET | `/config/preferred-verification-model` | Get preferred verification model |
-| PUT | `/config/preferred-verification-model` | Set preferred verification model |
-
-### Streaming API
-
-Both Gradio UI and CLI use the same PTY-based streaming API for real-time agent output.
-
-#### SSE Endpoint (Recommended)
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/sessions/{id}/stream` | Server-Sent Events for real-time updates |
-
-**Query Parameters:**
-- `since_seq`: Resume from sequence number (default: 0)
-- `include_terminal`: Include raw PTY output (default: true)
-
-**SSE Event Types:**
-
-| Event | Description | Data Fields |
-|-------|-------------|-------------|
-| `terminal` | Raw PTY output (base64) | `data`, `seq`, `has_ansi` |
-| `event` | Structured event | `type`, `seq`, event-specific fields |
-| `ping` | Keepalive (every 15s) | `ts` |
-| `complete` | PTY exited | `exit_code`, `seq` |
-| `error` | Error occurred | `error`, `seq` |
-
-#### Input Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/sessions/{id}/input` | Send input to PTY (base64 `data` field) |
-| POST | `/sessions/{id}/resize` | Resize terminal (`rows`, `cols` fields) |
-
-#### WebSocket (Alternative)
-
-| Endpoint | Description |
-|----------|-------------|
-| `/api/v1/ws/{session_id}` | Bidirectional WebSocket |
-
-**Client → Server:**
-- `input`: Send bytes to PTY (`{type: "input", data: "base64..."}`)
-- `resize`: Resize terminal (`{type: "resize", rows: 24, cols: 80}`)
-- `cancel`: Terminate PTY session
-- `ping`: Heartbeat (receives `pong`)
-
-**Server → Client:**
-- `terminal`: Raw PTY output (same as SSE)
-- `event`: Structured event
-- `complete`: PTY exited
-- `error`: Error occurred
-- `pong`: Response to ping
-
-## File Structure
-
-The readme file is `README.md` (all caps), not `Readme.md`.
-
+## File Structure (high level)
 ```
 src/chad/
-├── __init__.py           # Package init
-├── __main__.py           # Entry point
-├── util/                 # Domain logic and utilities
-│   ├── providers.py      # AI provider implementations
-│   ├── config_manager.py # Configuration management
-│   ├── git_worktree.py   # Git worktree management
-│   ├── model_catalog.py  # Model discovery per provider
-│   ├── event_log.py      # Structured JSONL event logging
-│   └── prompts.py        # Coding and verification prompts
-├── server/               # FastAPI backend
-│   ├── main.py           # Server entry point
-│   ├── api/routes/       # REST + WebSocket + SSE endpoints
-│   ├── api/schemas/      # Pydantic models (incl. events.py)
-│   └── services/         # Business logic services
-│       ├── task_executor.py  # PTY-based task execution
-│       └── pty_stream.py     # PTY streaming service
-└── ui/
-    ├── gradio/           # Gradio web interface
-    │   ├── web_ui.py     # Main UI implementation
-    │   └── verification/ # Visual testing tools
-    ├── client/           # API clients
-    │   ├── api_client.py     # REST API client
-    │   └── stream_client.py  # SSE streaming client
-    └── cli/              # Simple CLI interface
-        └── app.py        # Menu-driven CLI with API streaming
-
-.claude/skills/           # Claude Code skills (auto-activated)
-├── verifying/
-└── taking-screenshots/
-
-.codex/skills/            # OpenAI Codex skills (auto-activated)
-├── verifying/
-└── taking-screenshots/
+├── server/
+│   ├── main.py
+│   ├── state.py
+│   ├── api/routes/ {health.py, sessions.py, providers.py, worktree.py, config.py, ws.py}
+│   └── services/ {task_executor.py, pty_stream.py, event_mux.py, session_manager.py}
+├── ui/
+│   ├── gradio/ {web_ui.py, provider_ui.py, ui_state.py, verification/}
+│   ├── cli/app.py
+│   ├── client/ {api_client.py, stream_client.py}
+│   └── terminal_emulator.py
+└── util/ {providers.py, git_worktree.py, event_log.py, project_setup.py, model_catalog.py,
+           cleanup.py, process_registry.py, installer.py, prompts.py, config_manager.py}
 ```
 
 ## Session Event Logs
+Session logs are JSONL in `~/.chad/logs/{session_id}.jsonl`; artifacts for large outputs live in `~/.chad/logs/artifacts/{session_id}/`. Each event includes `event_id`, `ts`, `seq`, `session_id`, optional `turn_id`, and a type-specific payload. `CHAD_LOG_DIR` overrides the base directory.
 
-Session logs use JSONL format (one JSON event per line) for structured handover between agents.
-
-### Log File Structure
-
-```
-~/.chad/logs/
-├── {session_id}.jsonl           # Event log (one JSON object per line)
-└── artifacts/
-    └── {session_id}/            # Large outputs (>10KB)
-        ├── stdout_abc123.txt
-        └── stderr_def456.txt
-```
-
-Override with `CHAD_LOG_DIR` environment variable.
-
-### JSONL Format Example
-
-Each line is a complete JSON event:
-```jsonl
-{"event_id":"a1b2c3","ts":"2025-01-17T10:30:00Z","seq":1,"session_id":"sess_abc","type":"session_started","task_description":"Fix auth bug","project_path":"/home/user/myproject","coding_provider":"anthropic","coding_account":"claude-main"}
-{"event_id":"d4e5f6","ts":"2025-01-17T10:30:01Z","seq":2,"session_id":"sess_abc","turn_id":"turn_1","type":"user_message","content":"Fix the authentication bug in login.py"}
-{"event_id":"g7h8i9","ts":"2025-01-17T10:30:05Z","seq":3,"session_id":"sess_abc","turn_id":"turn_1","type":"tool_call_started","tool_call_id":"tc_xyz789","tool":"bash","cwd":"/home/user/myproject","command":"python -m pytest tests/test_auth.py"}
-{"event_id":"j0k1l2","ts":"2025-01-17T10:30:15Z","seq":4,"session_id":"sess_abc","turn_id":"turn_1","type":"tool_call_finished","tool_call_id":"tc_xyz789","exit_code":0,"duration_ms":10000,"llm_summary":"Tests passed: 5/5"}
-{"event_id":"m3n4o5","ts":"2025-01-17T10:30:20Z","seq":5,"session_id":"sess_abc","type":"session_ended","success":true,"reason":"completed","total_tool_calls":1,"total_turns":1}
-```
-
-### Common Event Fields
-
-All events include:
-| Field | Type | Description |
-|-------|------|-------------|
-| `event_id` | string | UUID for this event |
-| `ts` | string | ISO8601 timestamp (UTC) |
-| `seq` | int | Monotonically increasing sequence number |
-| `session_id` | string | Session identifier |
-| `turn_id` | string? | Conversation turn grouping |
-| `type` | string | Event type name |
-
-### Event Types Reference
-
-| Type | Description | Additional Fields |
-|------|-------------|-------------------|
-| `session_started` | Session begins | `task_description`, `project_path`, `coding_provider`, `coding_account`, `coding_model?` |
-| `model_selected` | Model chosen | `provider`, `model`, `reasoning_effort?` |
-| `provider_switched` | Provider change | `from_provider`, `to_provider`, `from_model`, `to_model`, `reason` |
-| `user_message` | User input | `content` |
-| `assistant_message` | AI response | `blocks: [{kind, content, tool?, tool_call_id?, args?}]` |
-| `tool_declared` | Tool available | `name`, `args_schema`, `version` |
-| `tool_call_started` | Tool invoked | `tool_call_id`, `tool`, `cwd?`, `command?`, `path?`, `file_bytes?`, `sha256?`, `before_sha256?`, `server?`, `tool_name?`, `args?`, `timeout_s?`, `env_redactions?` |
-| `tool_call_finished` | Tool completed | `tool_call_id`, `exit_code?`, `duration_ms`, `stdout_ref?`, `stderr_ref?`, `llm_summary`, `after_sha256?`, `patch_ref?` |
-| `verification_attempt` | Verification run | `attempt_number`, `tool_call_refs`, `passed`, `summary`, `issues` |
-| `context_condensed` | Context summary | `replaces_seq_range`, `summary_text`, `policy` |
-| `terminal_output` | Terminal screen content | `data` (human-readable text) |
-| `session_ended` | Session complete | `success`, `reason`, `total_tool_calls?`, `total_turns?` |
-
-### Artifact References
-
-Large outputs (>10KB) are stored as separate files with references:
-```json
-{
-  "stdout_ref": {
-    "path": "artifacts/sess_abc/stdout_abc123.txt",
-    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "size": 15234
-  }
-}
-```
-
-Artifacts are truncated at 10MB with a `[TRUNCATED]` marker.
-
-### Reading Logs Programmatically
-
-```python
-from chad.util.event_log import EventLog
-
-# Read events from a session
-log = EventLog("sess_abc")
-events = log.get_events()  # All events
-events = log.get_events(since_seq=5)  # Events after seq 5
-events = log.get_events(event_types=["tool_call_started", "tool_call_finished"])
-
-# Read artifact content
-for event in events:
-    if event.get("stdout_ref"):
-        content = log.get_artifact(event["stdout_ref"])
-        print(content.decode())
-
-# List all sessions with logs
-session_ids = EventLog.list_sessions()
-```
-
-### Tool Types
-
-The `tool` field in tool_call events uses these values:
-- `bash`: Shell command execution
-- `read`: File read operation
-- `write`: File creation
-- `edit`: File modification
-- `glob`: File pattern search
-- `grep`: Content search
-- `mcp`: MCP server tool (includes `server` and `tool_name` fields)
-
+## Tool Types in Event Logs
+`tool` values in tool_call events include: `bash`, `read`, `write`, `edit`, `mcp`, `glob`, `grep`, plus any provider-specific tool names.

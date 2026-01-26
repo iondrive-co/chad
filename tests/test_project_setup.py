@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from chad.util.project_setup import (
     detect_project_type,
     detect_verification_commands,
@@ -17,6 +19,14 @@ from chad.util.project_setup import (
     ProjectConfig,
     VerificationConfig,
 )
+
+
+@pytest.fixture
+def isolated_config(tmp_path, monkeypatch):
+    """Create an isolated config file for testing project settings."""
+    config_path = tmp_path / "chad_test.conf"
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+    return config_path
 
 
 class TestDetectProjectType:
@@ -149,8 +159,11 @@ class TestValidateCommand:
 class TestProjectConfig:
     """Test cases for ProjectConfig save/load."""
 
-    def test_save_and_load_config(self, tmp_path):
+    def test_save_and_load_config(self, tmp_path, isolated_config):
         """Test saving and loading project configuration."""
+        project_path = tmp_path / "my_project"
+        project_path.mkdir()
+
         config = ProjectConfig(
             project_type="python",
             verification=VerificationConfig(
@@ -160,21 +173,20 @@ class TestProjectConfig:
             ),
         )
 
-        save_project_config(tmp_path, config)
+        save_project_config(project_path, config)
 
-        # Verify file was created
-        config_path = tmp_path / ".chad" / "project.json"
-        assert config_path.exists()
+        # Verify config was saved to main config file
+        assert isolated_config.exists()
 
         # Load and verify
-        loaded = load_project_config(tmp_path)
+        loaded = load_project_config(project_path)
         assert loaded is not None
         assert loaded.project_type == "python"
         assert loaded.verification.lint_command == "flake8 ."
         assert loaded.verification.test_command == "pytest tests/"
         assert loaded.verification.validated is True
 
-    def test_load_nonexistent_config(self, tmp_path):
+    def test_load_nonexistent_config(self, tmp_path, isolated_config):
         """Test loading config when it doesn't exist."""
         result = load_project_config(tmp_path)
         assert result is None
@@ -217,7 +229,7 @@ class TestProjectConfig:
 class TestSetupProject:
     """Test cases for setup_project."""
 
-    def test_setup_new_project(self, tmp_path):
+    def test_setup_new_project(self, tmp_path, isolated_config):
         """Test setting up a new project with detection."""
         (tmp_path / "pyproject.toml").write_text("[project]\n")
         (tmp_path / "tests").mkdir()
@@ -229,7 +241,7 @@ class TestSetupProject:
         assert "flake8" in config.verification.lint_command
         assert "pytest" in config.verification.test_command
 
-    def test_setup_loads_existing_config(self, tmp_path):
+    def test_setup_loads_existing_config(self, tmp_path, isolated_config):
         """Test that setup loads existing validated config."""
         existing_config = ProjectConfig(
             project_type="custom",
@@ -249,7 +261,7 @@ class TestSetupProject:
 class TestBuildVerificationInstructions:
     """Test cases for build_verification_instructions."""
 
-    def test_instructions_with_validated_config(self, tmp_path):
+    def test_instructions_with_validated_config(self, tmp_path, isolated_config):
         """Test building instructions from validated config."""
         config = ProjectConfig(
             project_type="python",
@@ -265,7 +277,7 @@ class TestBuildVerificationInstructions:
         assert "flake8 src/" in instructions
         assert "pytest tests/" in instructions
 
-    def test_instructions_with_auto_detection(self, tmp_path):
+    def test_instructions_with_auto_detection(self, tmp_path, isolated_config):
         """Test building instructions via auto-detection."""
         (tmp_path / "pyproject.toml").write_text("[project]\n")
         (tmp_path / "tests").mkdir()
@@ -274,7 +286,7 @@ class TestBuildVerificationInstructions:
         assert "flake8" in instructions
         assert "pytest" in instructions
 
-    def test_instructions_unknown_project(self, tmp_path):
+    def test_instructions_unknown_project(self, tmp_path, isolated_config):
         """Test building instructions for unknown project type."""
         instructions = build_verification_instructions(tmp_path)
         assert "verification patterns" in instructions.lower()
@@ -294,8 +306,8 @@ class TestDocsConfig:
         assert docs.instructions_path == "AGENTS.md"
         assert docs.architecture_path == "docs/ARCHITECTURE.md"
 
-    def test_ensure_docs_config_persists_to_project_file(self, tmp_path):
-        """ensure_docs_config should save discovered paths into .chad/project.json."""
+    def test_ensure_docs_config_persists_to_config_file(self, tmp_path, isolated_config):
+        """ensure_docs_config should save discovered paths into main config file."""
         (tmp_path / "AGENTS.md").write_text("instructions", encoding="utf-8")
         docs = ensure_docs_config(tmp_path)
         assert docs.instructions_path == "AGENTS.md"
@@ -304,7 +316,7 @@ class TestDocsConfig:
         assert saved is not None
         assert saved.docs.instructions_path == "AGENTS.md"
 
-    def test_build_doc_reference_text_outputs_absolute_paths(self, tmp_path):
+    def test_build_doc_reference_text_outputs_absolute_paths(self, tmp_path, isolated_config):
         """Doc reference text should point to absolute file locations."""
         (tmp_path / "AGENTS.md").write_text("instructions", encoding="utf-8")
         ref_text = build_doc_reference_text(tmp_path)
