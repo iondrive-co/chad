@@ -1,0 +1,18 @@
+{
+  "version": "1.0",
+  "detected_at": "2026-01-26T06:54:30.883151+00:00",
+  "project_type": "python",
+  "verification": {
+    "lint_command": ".venv/bin/python -m flake8 .",
+    "test_command": ".venv/bin/python -m pytest tests/ -v",
+    "lint_timeout": 30,
+    "test_timeout": 120,
+    "validated": false,
+    "last_validated": null
+  },
+  "instructions": null,
+  "docs": {
+    "instructions_path": "AGENTS.md",
+    "architecture_path": "docs/ARCHITECTURE.md"
+  }
+}

@@ -280,27 +280,12 @@ class ClaudeStreamJsonParser:
 def _read_project_docs(project_path: Path) -> str | None:
     """Read project documentation if present.
 
-    Reads AGENTS.md, .claude/CLAUDE.md, or CLAUDE.md from the project.
-    Returns the first file found, or None if no documentation exists.
+    Returns a reference block pointing to on-disk docs instead of inlining
+    their contents.
     """
-    doc_files = [
-        project_path / "AGENTS.md",
-        project_path / ".claude" / "CLAUDE.md",
-        project_path / "CLAUDE.md",
-    ]
+    from chad.util.project_setup import build_doc_reference_text
 
-    for doc_file in doc_files:
-        if doc_file.exists():
-            try:
-                content = doc_file.read_text(encoding="utf-8")
-                # Limit content to avoid overwhelming the context
-                if len(content) > 8000:
-                    content = content[:8000] + "\n\n[...truncated...]"
-                return content
-            except (OSError, UnicodeDecodeError):
-                continue
-
-    return None
+    return build_doc_reference_text(project_path)
 
 
 class TaskState(str, Enum):
