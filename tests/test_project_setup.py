@@ -1,8 +1,6 @@
 """Tests for project_setup module."""
 
 import json
-import pytest
-from pathlib import Path
 
 from chad.util.project_setup import (
     detect_project_type,

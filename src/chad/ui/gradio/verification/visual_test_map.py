@@ -102,7 +102,15 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         component="project-path",
         tests=["TestCodingAgentLayout", "TestUIElements"],
         source_file="chad/web_ui.py",
-        keywords=["project path", "directory", "working directory"],
+        keywords=[
+            "project path",
+            "directory",
+            "working directory",
+            "project setup",
+            "lint command",
+            "test command",
+            "verification commands",
+        ],
     ),
     # --- Run Tab: Chat Interface ---
     "CHAT_INTERFACE": UIComponent(

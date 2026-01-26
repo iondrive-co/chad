@@ -5023,6 +5023,12 @@ class ChadWebUI:
             with gr.Column(scale=1):
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=3, min_width=260):
+                        # Auto-detect initial verification commands for default path
+                        initial_detected = detect_verification_commands(Path(default_path).expanduser().resolve())
+                        initial_lint = initial_detected.get("lint_command") or ""
+                        initial_test = initial_detected.get("test_command") or ""
+                        initial_type = initial_detected.get("project_type", "unknown")
+
                         project_path = gr.Textbox(
                             label="Project Path",
                             placeholder="/path/to/project",
@@ -5030,52 +5036,48 @@ class ChadWebUI:
                             scale=3,
                             key=f"project-path-{session_id}",
                         )
-                        # Project Setup accordion - per-task verification config
-                        with gr.Accordion(
-                            "Project Setup",
-                            open=False,
-                            key=f"project-setup-{session_id}",
-                            elem_classes=["project-setup-accordion"],
-                        ):
-                            project_setup_status = gr.Markdown(
-                                "",
-                                key=f"project-setup-status-{session_id}",
+                        # Project Setup - per-task verification config (always visible)
+                        project_setup_status = gr.Markdown(
+                            "",
+                            key=f"project-setup-status-{session_id}",
+                        )
+                        project_setup_type = gr.Markdown(
+                            f"**Type:** {initial_type}" if default_path else "**Type:** (enter path above)",
+                            key=f"project-type-{session_id}",
+                        )
+                        with gr.Row():
+                            lint_cmd_input = gr.Textbox(
+                                label="Lint Command",
+                                value=initial_lint,
+                                placeholder=".venv/bin/python -m flake8 .",
+                                key=f"lint-cmd-{session_id}",
                             )
-                            project_setup_type = gr.Markdown(
-                                "**Type:** (enter path above)",
-                                key=f"project-type-{session_id}",
+                            lint_test_btn = gr.Button(
+                                "Test",
+                                variant="secondary",
+                                size="sm",
+                                key=f"lint-test-{session_id}",
                             )
-                            with gr.Row():
-                                lint_cmd_input = gr.Textbox(
-                                    label="Lint Command",
-                                    placeholder="e.g., python -m flake8 src/",
-                                    key=f"lint-cmd-{session_id}",
-                                )
-                                lint_test_btn = gr.Button(
-                                    "Test",
-                                    variant="secondary",
-                                    size="sm",
-                                    key=f"lint-test-{session_id}",
-                                )
-                            lint_status = gr.Markdown("", key=f"lint-status-{session_id}")
-                            with gr.Row():
-                                test_cmd_input = gr.Textbox(
-                                    label="Test Command",
-                                    placeholder="e.g., python -m pytest tests/",
-                                    key=f"test-cmd-{session_id}",
-                                )
-                                test_test_btn = gr.Button(
-                                    "Test",
-                                    variant="secondary",
-                                    size="sm",
-                                    key=f"test-test-{session_id}",
-                                )
-                            test_status = gr.Markdown("", key=f"test-status-{session_id}")
-                            project_save_btn = gr.Button(
-                                "Save",
-                                variant="primary",
-                                key=f"project-save-{session_id}",
+                        lint_status = gr.Markdown("", key=f"lint-status-{session_id}")
+                        with gr.Row():
+                            test_cmd_input = gr.Textbox(
+                                label="Test Command",
+                                value=initial_test,
+                                placeholder=".venv/bin/python -m pytest tests/ -v",
+                                key=f"test-cmd-{session_id}",
                             )
+                            test_test_btn = gr.Button(
+                                "Test",
+                                variant="secondary",
+                                size="sm",
+                                key=f"test-test-{session_id}",
+                            )
+                        test_status = gr.Markdown("", key=f"test-status-{session_id}")
+                        project_save_btn = gr.Button(
+                            "Save",
+                            variant="primary",
+                            key=f"project-save-{session_id}",
+                        )
                         with gr.Row(
                             elem_id="role-status-row" if is_first else None,
                             elem_classes=["role-status-row"],
@@ -5403,8 +5405,10 @@ class ChadWebUI:
         )
 
         def on_lint_test(path_val, lint_cmd):
-            if not path_val or not lint_cmd:
-                return "Enter both path and command"
+            if not path_val:
+                return "Enter a project path first"
+            if not lint_cmd:
+                return "Enter a lint command"
             path_obj = Path(path_val).expanduser().resolve()
             success, output = validate_command(lint_cmd, path_obj, timeout=30)
             return "Passed" if success else f"Failed: {output[:100]}"
@@ -5416,8 +5420,10 @@ class ChadWebUI:
         )
 
         def on_test_test(path_val, test_cmd):
-            if not path_val or not test_cmd:
-                return "Enter both path and command"
+            if not path_val:
+                return "Enter a project path first"
+            if not test_cmd:
+                return "Enter a test command"
             path_obj = Path(path_val).expanduser().resolve()
             success, output = validate_command(test_cmd, path_obj, timeout=60)
             return "Passed" if success else f"Failed: {output[:100]}"
