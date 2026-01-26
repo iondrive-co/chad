@@ -109,6 +109,46 @@ class TestUIElements:
         accordion = page.locator(".project-setup-accordion")
         expect(accordion).to_have_count(0)
 
+    def test_project_type_shown_in_label(self, page: Page):
+        """Project type should sit inline with the project path label to save space."""
+        label = page.locator("#project-path-input label")
+        expect(label).to_be_visible()
+        text = label.text_content()
+        assert "Type:" in text
+
+    def test_project_commands_share_row(self, page: Page):
+        """Lint and test commands should sit on the same horizontal row."""
+        lint_cmd = page.get_by_label("Lint Command")
+        test_cmd = page.get_by_label("Test Command")
+        expect(lint_cmd).to_be_visible()
+        expect(test_cmd).to_be_visible()
+
+        lint_box = lint_cmd.bounding_box()
+        test_box = test_cmd.bounding_box()
+        assert lint_box and test_box
+        assert abs(lint_box["y"] - test_box["y"]) <= 24, "Commands should align horizontally"
+
+    def test_command_test_buttons_align_with_headers(self, page: Page):
+        """Test buttons should sit beside their corresponding command headers."""
+        lint_label = page.locator(".lint-command-label")
+        lint_btn = page.locator(".lint-test-btn")
+        test_label = page.locator(".test-command-label")
+        test_btn = page.locator(".test-command-btn")
+
+        for element in (lint_label, lint_btn, test_label, test_btn):
+            expect(element).to_be_visible()
+
+        lint_label_box = lint_label.bounding_box()
+        lint_btn_box = lint_btn.bounding_box()
+        test_label_box = test_label.bounding_box()
+        test_btn_box = test_btn.bounding_box()
+
+        for label_box, btn_box in ((lint_label_box, lint_btn_box), (test_label_box, test_btn_box)):
+            assert label_box and btn_box
+            assert btn_box["y"] <= label_box["y"] + label_box["height"] + 4
+            assert btn_box["y"] + btn_box["height"] >= label_box["y"] - 4
+            assert btn_box["x"] > label_box["x"]
+
     def test_task_description_field(self, page: Page):
         """Task description field should be present."""
         # Look for the task description textarea by its label

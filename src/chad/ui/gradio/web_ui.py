@@ -199,6 +199,81 @@ body, .gradio-container, .gradio-container * {
   font-family: 'JetBrains Mono', monospace !important;
 }
 
+.run-top-row {
+  gap: 12px !important;
+  align-items: flex-start !important;
+}
+
+.project-setup-column {
+  display: grid;
+  gap: 10px;
+}
+
+.project-path-input label {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-weight: 600;
+}
+
+.project-commands-row {
+  gap: 12px !important;
+}
+
+.command-column {
+  display: grid;
+  gap: 6px;
+}
+
+.command-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+}
+
+.command-label {
+  margin: 0;
+  font-weight: 600;
+  font-size: 0.9rem;
+  line-height: 1.2;
+}
+
+.command-test-btn button,
+.command-test-btn {
+  min-height: 28px !important;
+  padding: 6px 10px !important;
+}
+
+.command-input textarea,
+.command-input input {
+  min-height: 44px;
+}
+
+.command-status {
+  margin: 0;
+  min-height: 18px;
+  font-size: 0.9rem;
+}
+
+.project-actions-row {
+  align-items: center !important;
+  gap: 12px !important;
+}
+
+.project-setup-status {
+  margin: 0 !important;
+}
+
+.project-save-btn button,
+.project-save-btn {
+  min-height: 34px !important;
+  width: auto !important;
+  padding: 8px 14px !important;
+}
+
 .start-task-btn,
 .start-task-btn button {
   background: var(--task-btn-bg) !important;
@@ -1971,6 +2046,12 @@ class ChadWebUI:
         self._provider_delete_events: list = []
         # Stream client for API-based task execution (same method as CLI)
         self._stream_client: SyncStreamClient | None = None
+
+    @staticmethod
+    def _format_project_label(project_type: str) -> str:
+        """Return compact project path label including detected type."""
+        type_display = project_type or "unknown"
+        return f"Project Path (Type: {type_display})"
 
     def _get_stream_client(self) -> SyncStreamClient:
         """Get or create the stream client for API-based task execution.
@@ -5013,54 +5094,84 @@ class ChadWebUI:
                         initial_type = initial_detected.get("project_type", "unknown")
 
                         project_path = gr.Textbox(
-                            label="Project Path",
+                            label=self._format_project_label(initial_type),
                             placeholder="/path/to/project",
                             value=default_path,
                             scale=3,
                             key=f"project-path-{session_id}",
+                            elem_id="project-path-input" if is_first else None,
+                            elem_classes=["project-path-input"],
                         )
-                        # Project Setup - per-task verification config (always visible)
-                        project_setup_status = gr.Markdown(
-                            "",
-                            key=f"project-setup-status-{session_id}",
-                        )
-                        project_setup_type = gr.Markdown(
-                            f"**Type:** {initial_type}" if default_path else "**Type:** (enter path above)",
-                            key=f"project-type-{session_id}",
-                        )
-                        with gr.Row():
-                            lint_cmd_input = gr.Textbox(
-                                label="Lint Command",
-                                value=initial_lint,
-                                placeholder=".venv/bin/python -m flake8 .",
-                                key=f"lint-cmd-{session_id}",
-                            )
-                            lint_test_btn = gr.Button(
-                                "Test",
-                                variant="secondary",
-                                size="sm",
-                                key=f"lint-test-{session_id}",
-                            )
-                        lint_status = gr.Markdown("", key=f"lint-status-{session_id}")
-                        with gr.Row():
-                            test_cmd_input = gr.Textbox(
-                                label="Test Command",
-                                value=initial_test,
-                                placeholder=".venv/bin/python -m pytest tests/ -v",
-                                key=f"test-cmd-{session_id}",
-                            )
-                            test_test_btn = gr.Button(
-                                "Test",
-                                variant="secondary",
-                                size="sm",
-                                key=f"test-test-{session_id}",
-                            )
-                        test_status = gr.Markdown("", key=f"test-status-{session_id}")
-                        project_save_btn = gr.Button(
-                            "Save",
-                            variant="primary",
-                            key=f"project-save-{session_id}",
-                        )
+                        with gr.Row(elem_classes=["project-commands-row"], equal_height=True):
+                            with gr.Column(scale=1, elem_classes=["command-column"]):
+                                with gr.Row(elem_classes=["command-header"], equal_height=True):
+                                    gr.Markdown(
+                                        "**Lint Command**",
+                                        elem_classes=["command-label", "lint-command-label"],
+                                    )
+                                    lint_test_btn = gr.Button(
+                                        "Test",
+                                        variant="secondary",
+                                        size="sm",
+                                        key=f"lint-test-{session_id}",
+                                        elem_classes=["command-test-btn", "lint-test-btn"],
+                                    )
+                                lint_cmd_input = gr.Textbox(
+                                    label="Lint Command",
+                                    value=initial_lint,
+                                    placeholder=".venv/bin/python -m flake8 .",
+                                    key=f"lint-cmd-{session_id}",
+                                    show_label=False,
+                                    elem_classes=["command-input", "lint-command-input"],
+                                )
+                                lint_status = gr.Markdown(
+                                    "",
+                                    key=f"lint-status-{session_id}",
+                                    elem_classes=["command-status", "lint-command-status"],
+                                )
+                            with gr.Column(scale=1, elem_classes=["command-column"]):
+                                with gr.Row(elem_classes=["command-header"], equal_height=True):
+                                    gr.Markdown(
+                                        "**Test Command**",
+                                        elem_classes=["command-label", "test-command-label"],
+                                    )
+                                    test_test_btn = gr.Button(
+                                        "Test",
+                                        variant="secondary",
+                                        size="sm",
+                                        key=f"test-test-{session_id}",
+                                        elem_classes=["command-test-btn", "test-command-btn"],
+                                    )
+                                test_cmd_input = gr.Textbox(
+                                    label="Test Command",
+                                    value=initial_test,
+                                    placeholder=".venv/bin/python -m pytest tests/ -v",
+                                    key=f"test-cmd-{session_id}",
+                                    show_label=False,
+                                    elem_classes=["command-input", "test-command-input"],
+                                )
+                                test_status = gr.Markdown(
+                                    "",
+                                    key=f"test-status-{session_id}",
+                                    elem_classes=["command-status", "test-command-status"],
+                                )
+                        with gr.Row(elem_classes=["project-actions-row"], equal_height=True):
+                            with gr.Column(scale=3):
+                                project_setup_status = gr.Markdown(
+                                    "",
+                                    key=f"project-setup-status-{session_id}",
+                                    elem_classes=["project-setup-status"],
+                                )
+                            with gr.Column(scale=0, min_width=120):
+                                project_save_btn = gr.Button(
+                                    "Save",
+                                    variant="primary",
+                                    size="sm",
+                                    key=f"project-save-{session_id}",
+                                    elem_classes=["project-save-btn"],
+                                    min_width=120,
+                                    scale=0,
+                                )
                         with gr.Row(
                             elem_id="role-status-row" if is_first else None,
                             elem_classes=["role-status-row"],
@@ -5344,7 +5455,7 @@ class ChadWebUI:
             """Auto-detect project type and commands when path changes."""
             if not path_val:
                 return (
-                    "**Type:** (enter path above)",
+                    gr.update(label=self._format_project_label("enter path")),
                     gr.update(value=""),
                     gr.update(value=""),
                     "",
@@ -5353,7 +5464,7 @@ class ChadWebUI:
             path_obj = Path(path_val).expanduser().resolve()
             if not path_obj.exists():
                 return (
-                    "**Type:** (path not found)",
+                    gr.update(label=self._format_project_label("not found")),
                     gr.update(value=""),
                     gr.update(value=""),
                     "",
@@ -5364,7 +5475,7 @@ class ChadWebUI:
             config = load_project_config(path_obj)
             if config:
                 return (
-                    f"**Type:** {config.project_type} (saved)",
+                    gr.update(label=self._format_project_label(f"{config.project_type} (saved)")),
                     gr.update(value=config.verification.lint_command or ""),
                     gr.update(value=config.verification.test_command or ""),
                     "",
@@ -5374,7 +5485,7 @@ class ChadWebUI:
             # Auto-detect
             detected = detect_verification_commands(path_obj)
             return (
-                f"**Type:** {detected['project_type']}",
+                gr.update(label=self._format_project_label(detected["project_type"])),
                 gr.update(value=detected.get("lint_command") or ""),
                 gr.update(value=detected.get("test_command") or ""),
                 "",
@@ -5384,7 +5495,7 @@ class ChadWebUI:
         project_path.change(
             on_project_path_change,
             inputs=[project_path],
-            outputs=[project_setup_type, lint_cmd_input, test_cmd_input, lint_status, test_status],
+            outputs=[project_path, lint_cmd_input, test_cmd_input, lint_status, test_status],
         )
 
         def on_lint_test(path_val, lint_cmd):
