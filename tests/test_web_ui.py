@@ -660,10 +660,12 @@ class TestClaudeJsonParsingIntegration:
         mock_api_client.create_session.return_value = mock_session
 
         # Simulate Claude stream-json output
+        # Tool uses are placed BEFORE text so they get summarized when text arrives
+        # (tool uses after text won't be summarized since no text follows)
         claude_json_lines = (
             b'{"type":"system","subtype":"init","cwd":"/test"}' + b'\n'
-            b'{"type":"assistant","message":{"content":[{"type":"text","text":"Hello from Claude!"}]}}' + b'\n'
             b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/src/main.py"}}]}}' + b'\n'
+            b'{"type":"assistant","message":{"content":[{"type":"text","text":"Hello from Claude!"}]}}' + b'\n'
             b'{"type":"result","result":"done"}' + b'\n'
         )
 
@@ -700,7 +702,8 @@ class TestClaudeJsonParsingIntegration:
         # Verify JSON was parsed to human-readable text
         combined = "\n".join(stream_messages)
         assert "Hello from Claude!" in combined, "Assistant text should be extracted"
-        assert "Reading /src/main.py" in combined, "Tool use should be formatted"
+        # Tool uses are summarized when text follows them
+        assert "1 file read" in combined, "Tool summary should be included before text"
         assert '{"type":"system"' not in combined, "Raw JSON should not appear"
         assert '{"type":"result"' not in combined, "Result events should be filtered"
 

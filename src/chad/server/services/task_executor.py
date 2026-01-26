@@ -40,10 +40,17 @@ class ClaudeStreamJsonParser:
 
     This parser buffers incoming bytes, extracts complete JSON lines,
     and yields human-readable text suitable for terminal display.
+
+    Tool calls are accumulated and displayed as a collapsed summary rather than
+    individual verbose descriptions, keeping the live view focused on AI reasoning.
     """
 
     def __init__(self):
         self._buffer = bytearray()
+        # Tool tracking for collapsed summaries
+        self._tool_counts: dict[str, int] = {}
+        self._tool_details: list[str] = []
+        self._pending_summary = False  # True when we have tools to summarize
 
     def feed(self, data: bytes) -> list[str]:
         """Feed raw bytes and return list of human-readable text chunks.
@@ -70,6 +77,12 @@ class ClaudeStreamJsonParser:
                 obj = json.loads(line.decode("utf-8", errors="replace"))
                 text = self._format_json_event(obj)
                 if text:
+                    # Prepend accumulated tool summary before text content
+                    if self._pending_summary:
+                        summary = self.get_tool_summary()
+                        if summary:
+                            results.append(summary)
+                        self.clear_tool_tracking()
                     results.append(text)
             except json.JSONDecodeError:
                 # Not JSON, pass through as-is
@@ -112,9 +125,13 @@ class ClaudeStreamJsonParser:
                 elif item_type == "tool_use":
                     tool_name = item.get("name", "unknown")
                     tool_input = item.get("input", {})
+                    # Accumulate tool for collapsed summary instead of showing each one
+                    self._tool_counts[tool_name] = self._tool_counts.get(tool_name, 0) + 1
                     tool_desc = self._format_tool_use(tool_name, tool_input)
                     if tool_desc:
-                        parts.append(tool_desc)
+                        self._tool_details.append(tool_desc)
+                    self._pending_summary = True
+                    # Don't add to parts - tools are shown as collapsed summary
 
             return "\n".join(parts) if parts else None
 
@@ -177,6 +194,72 @@ class ClaudeStreamJsonParser:
         else:
             # Generic tool display
             return f"• {name}"
+
+    def get_tool_summary(self) -> str:
+        """Return collapsed summary of accumulated tool calls.
+
+        Returns a single line like "• 3 files read, 2 edits, 5 searches"
+        instead of showing every individual tool call.
+        """
+        if not self._tool_counts:
+            return ""
+
+        parts = []
+
+        # File reads
+        read_count = self._tool_counts.get("Read", 0)
+        if read_count:
+            parts.append(f"{read_count} file{'s' if read_count > 1 else ''} read")
+
+        # Edits (Edit + Write combined)
+        edit_count = self._tool_counts.get("Edit", 0) + self._tool_counts.get("Write", 0)
+        if edit_count:
+            parts.append(f"{edit_count} edit{'s' if edit_count > 1 else ''}")
+
+        # Searches (Glob + Grep combined)
+        search_count = self._tool_counts.get("Glob", 0) + self._tool_counts.get("Grep", 0)
+        if search_count:
+            parts.append(f"{search_count} search{'es' if search_count > 1 else ''}")
+
+        # Commands
+        bash_count = self._tool_counts.get("Bash", 0)
+        if bash_count:
+            parts.append(f"{bash_count} command{'s' if bash_count > 1 else ''}")
+
+        # Tasks (subagent spawns)
+        task_count = self._tool_counts.get("Task", 0)
+        if task_count:
+            parts.append(f"{task_count} task{'s' if task_count > 1 else ''}")
+
+        # Web operations
+        web_count = self._tool_counts.get("WebSearch", 0) + self._tool_counts.get("WebFetch", 0)
+        if web_count:
+            parts.append(f"{web_count} web request{'s' if web_count > 1 else ''}")
+
+        # Other tools not in categories above
+        categorized = {"Read", "Edit", "Write", "Glob", "Grep", "Bash", "Task", "WebSearch", "WebFetch"}
+        other = sum(c for t, c in self._tool_counts.items() if t not in categorized)
+        if other:
+            parts.append(f"{other} other")
+
+        if not parts:
+            return ""
+
+        return f"• {', '.join(parts)}"
+
+    def get_tool_details(self) -> list[str]:
+        """Return full tool call details for expandable view."""
+        return self._tool_details.copy()
+
+    def has_pending_tools(self) -> bool:
+        """Check if there are tool calls pending to be summarized."""
+        return self._pending_summary
+
+    def clear_tool_tracking(self):
+        """Reset tool tracking after summary has been rendered."""
+        self._tool_counts = {}
+        self._tool_details = []
+        self._pending_summary = False
 
 
 def _read_project_docs(project_path: Path) -> str | None:
