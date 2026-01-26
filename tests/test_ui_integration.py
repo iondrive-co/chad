@@ -94,6 +94,21 @@ class TestUIElements:
         field = page.get_by_label("Project Path")
         expect(field).to_be_visible()
 
+    def test_project_setup_commands_visible(self, page: Page):
+        """Project setup lint and test commands should be visible without clicking anything."""
+        # Lint command input should be visible immediately (not hidden in accordion)
+        lint_cmd = page.get_by_label("Lint Command")
+        expect(lint_cmd).to_be_visible()
+
+        # Test command input should be visible immediately (not hidden in accordion)
+        test_cmd = page.get_by_label("Test Command")
+        expect(test_cmd).to_be_visible()
+
+        # There should be no accordion for project setup - these should be part of the
+        # project path panel directly
+        accordion = page.locator(".project-setup-accordion")
+        expect(accordion).to_have_count(0)
+
     def test_task_description_field(self, page: Page):
         """Task description field should be present."""
         # Look for the task description textarea by its label
