@@ -218,7 +218,10 @@ body, .gradio-container, .gradio-container * {
 }
 
 .project-commands-row {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
   gap: 12px !important;
+  align-items: start !important;
 }
 
 .command-column {
@@ -593,6 +596,14 @@ body, .gradio-container, .gradio-container * {
 /* Live stream box visibility controlled by :empty pseudo-selector */
 .live-stream-box:empty {
   display: none !important;
+}
+
+.live-patch-trigger {
+  display: none !important;
+  visibility: hidden !important;
+  width: 0 !important;
+  height: 0 !important;
+  overflow: hidden !important;
 }
 
 #live-stream-box,
@@ -2912,13 +2923,33 @@ class ChadWebUI:
                 task_ended: When True, task has completed/failed/cancelled and buttons
                            should allow starting a new task (start enabled, cancel disabled).
             """
-            # DISABLED: Automatic live_patch handling was breaking live view updates
-            # The JS DOM patching mechanism isn't working reliably, causing content
-            # to stay stuck at "Waiting for agent output...". Using direct Gradio
-            # updates instead until this can be debugged.
-            # TODO: Fix JS patching or find alternative scroll preservation approach
-            _ = live_patch  # Unused - JS patching disabled
-            display_stream = live_stream
+            # Automatic live_patch handling for scroll/selection preservation
+            # - First render with content: normal Gradio update, set initial_render flag
+            # - Subsequent renders: use live_patch for JS DOM patching
+            use_live_patch = live_patch  # Explicit live_patch takes precedence
+
+            if not use_live_patch and live_stream:
+                # Check if this live_stream has our wrapper with data-live-id
+                has_live_id = f'data-live-id="{live_stream_id}"' in live_stream
+                if has_live_id:
+                    if session.has_initial_live_render:
+                        # After initial render, use live_patch for updates
+                        use_live_patch = (live_stream_id, live_stream)
+                    else:
+                        # First render with content - do normal Gradio update
+                        session.has_initial_live_render = True
+
+            # When task ends, reset initial render flag for next task
+            if task_ended:
+                session.has_initial_live_render = False
+
+            # When live_patch is provided, skip updating the live_stream component directly
+            # JS will handle patching the DOM in-place to preserve scroll/selection
+            if use_live_patch:
+                display_stream = None  # Signal to use gr.update() without value
+                live_patch = use_live_patch
+            else:
+                display_stream = live_stream
             is_error = "❌" in status
             # Get worktree path for status display
             wt_path = str(session.worktree_path) if session.worktree_path else None
@@ -5104,10 +5135,10 @@ class ChadWebUI:
                         )
                         with gr.Row(elem_classes=["project-commands-row"], equal_height=True):
                             with gr.Column(scale=1, elem_classes=["command-column"]):
-                                with gr.Row(elem_classes=["command-header"], equal_height=True):
+                                with gr.Row(elem_classes=["command-header", "lint-command-label"], equal_height=True):
                                     gr.Markdown(
                                         "**Lint Command**",
-                                        elem_classes=["command-label", "lint-command-label"],
+                                        elem_classes=["command-label"],
                                     )
                                     lint_test_btn = gr.Button(
                                         "Test",
@@ -5130,10 +5161,10 @@ class ChadWebUI:
                                     elem_classes=["command-status", "lint-command-status"],
                                 )
                             with gr.Column(scale=1, elem_classes=["command-column"]):
-                                with gr.Row(elem_classes=["command-header"], equal_height=True):
+                                with gr.Row(elem_classes=["command-header", "test-command-label"], equal_height=True):
                                     gr.Markdown(
                                         "**Test Command**",
-                                        elem_classes=["command-label", "test-command-label"],
+                                        elem_classes=["command-label"],
                                     )
                                     test_test_btn = gr.Button(
                                         "Test",
@@ -5354,7 +5385,7 @@ class ChadWebUI:
         # and patches the corresponding container's innerHTML in-place
         live_patch_trigger = gr.HTML(
             "",
-            visible=False,
+            visible=True,  # Keep rendered so MutationObserver can watch for patches
             key=f"live-patch-{session_id}",
             elem_classes=["live-patch-trigger"],
         )
@@ -6819,6 +6850,250 @@ initializeLiveDomPatching();
                     walk(document);
                     return results;
                   };
+                  const initializeLiveDomPatching = () => {
+                    const decodeHtml = (html) => {
+                      const txt = document.createElement('textarea');
+                      txt.innerHTML = html;
+                      return txt.value;
+                    };
+
+                    const patchLiveContent = (liveId, newHtml) => {
+                      const root = getRoot();
+                      const wrapper = root.querySelector(`[data-live-id="${liveId}"]`);
+                      if (!wrapper) return false;
+
+                      const content = wrapper.querySelector('.live-output-content');
+                      if (!content) return false;
+
+                      const scrollTop = content.scrollTop;
+                      const scrollHeight = content.scrollHeight;
+                      const isAtBottom = scrollTop + content.clientHeight >= scrollHeight - 10;
+
+                      const temp = document.createElement('div');
+                      temp.innerHTML = newHtml;
+                      const newWrapper = temp.querySelector('.live-output-wrapper') || temp;
+                      const newContent = newWrapper.querySelector('.live-output-content');
+
+                      if (newContent) {
+                        content.innerHTML = newContent.innerHTML;
+                      }
+
+                      requestAnimationFrame(() => {
+                        const newScrollHeight = content.scrollHeight;
+                        if (isAtBottom) {
+                          content.scrollTop = newScrollHeight;
+                        } else {
+                          content.scrollTop = scrollTop;
+                        }
+                      });
+
+                      return true;
+                    };
+
+                    const setupPatchTriggerWatcher = () => {
+                      const root = getRoot();
+                      const triggers = root.querySelectorAll('.live-patch-trigger');
+
+                      triggers.forEach(trigger => {
+                        if (trigger._patchObserverSetup) return;
+                        trigger._patchObserverSetup = true;
+
+                        const observer = new MutationObserver(() => {
+                          const patchEl = trigger.querySelector('[data-live-patch]');
+                          if (!patchEl) return;
+
+                          const liveId = patchEl.dataset.livePatch;
+                          const escapedHtml = patchEl.textContent || '';
+                          if (!liveId || !escapedHtml) return;
+
+                          const html = decodeHtml(escapedHtml);
+                          patchLiveContent(liveId, html);
+                        });
+
+                        observer.observe(trigger, {
+                          childList: true,
+                          subtree: true,
+                          characterData: true
+                        });
+                      });
+                    };
+
+                    setInterval(setupPatchTriggerWatcher, 500);
+                    setTimeout(setupPatchTriggerWatcher, 100);
+                  };
+
+                  const initializeLiveStreamScrollTracking = () => {
+                    window._liveStreamScrollState = window._liveStreamScrollState || {};
+                    window._liveStreamTrackedParents = window._liveStreamTrackedParents || new WeakSet();
+                    window._liveStreamTrackedContents = window._liveStreamTrackedContents || new WeakSet();
+
+                    const getParentId = (parent) => {
+                      if (parent.id) return parent.id;
+                      if (!parent.dataset.scrollTrackId) {
+                        parent.dataset.scrollTrackId = 'scroll-' + Math.random().toString(36).substr(2, 9);
+                      }
+                      return parent.dataset.scrollTrackId;
+                    };
+
+                    const getState = (parentId) => {
+                      if (!window._liveStreamScrollState[parentId]) {
+                        window._liveStreamScrollState[parentId] = {
+                          userScrolledUp: false,
+                          savedScrollTop: 0,
+                          lastScrollHeight: 0,
+                          settingScroll: false
+                        };
+                      }
+                      return window._liveStreamScrollState[parentId];
+                    };
+
+                    const attachScrollListener = (content, state) => {
+                      if (window._liveStreamTrackedContents.has(content)) return;
+                      window._liveStreamTrackedContents.add(content);
+
+                      content.addEventListener('scroll', () => {
+                        if (state.settingScroll) return;
+
+                        const scrollTop = content.scrollTop;
+                        const previousScrollTop = state.savedScrollTop;
+                        const isAtBottom = scrollTop + content.clientHeight >= content.scrollHeight - 10;
+                        const scrolledDown = scrollTop > previousScrollTop;
+
+                        state.savedScrollTop = scrollTop;
+
+                        if (isAtBottom && scrolledDown) {
+                          state.userScrolledUp = false;
+                        } else if (!isAtBottom) {
+                          state.userScrolledUp = true;
+                        }
+                      });
+                    };
+
+                    const setupParentTracking = (parent) => {
+                      if (window._liveStreamTrackedParents.has(parent)) {
+                        return;
+                      }
+                      window._liveStreamTrackedParents.add(parent);
+
+                      const parentId = getParentId(parent);
+                      const state = getState(parentId);
+
+                      const initialContent = parent.querySelector('.live-output-content');
+                      if (initialContent) {
+                        attachScrollListener(initialContent, state);
+                        state.lastScrollHeight = initialContent.scrollHeight;
+                      }
+
+                      const observer = new MutationObserver(() => {
+                        const content = parent.querySelector('.live-output-content');
+                        if (!content) return;
+
+                        attachScrollListener(content, state);
+
+                        requestAnimationFrame(() => {
+                          requestAnimationFrame(() => {
+                            const newScrollHeight = content.scrollHeight;
+                            const contentGrew = newScrollHeight > state.lastScrollHeight;
+                            state.lastScrollHeight = newScrollHeight;
+
+                            state.settingScroll = true;
+
+                            if (state.userScrolledUp) {
+                              content.scrollTop = state.savedScrollTop;
+                            } else if (contentGrew) {
+                              content.scrollTop = newScrollHeight;
+                            }
+
+                            requestAnimationFrame(() => {
+                              state.settingScroll = false;
+                            });
+                          });
+                        });
+                      });
+
+                      observer.observe(parent, {
+                        childList: true,
+                        subtree: true
+                      });
+                    };
+
+                    const findAndSetupParents = () => {
+                      const root = getRoot();
+                      const parents = [
+                        root.querySelector('#live-stream-box'),
+                        ...root.querySelectorAll('.live-stream-box')
+                      ].filter(Boolean);
+
+                      parents.forEach(setupParentTracking);
+                    };
+
+                    setInterval(findAndSetupParents, 500);
+                    setTimeout(findAndSetupParents, 100);
+                  };
+
+                  const initializeTerminalColumnTracking = () => {
+                    const CHAR_WIDTH = 8;
+                    const PADDING = 24;
+                    const SCROLLBAR = 20;
+                    const MIN_COLS = 80;
+                    const MAX_COLS = 300;
+
+                    const calculateCols = (width) => {
+                      const usableWidth = width - PADDING - SCROLLBAR;
+                      const cols = Math.floor(usableWidth / CHAR_WIDTH);
+                      return Math.min(MAX_COLS, Math.max(MIN_COLS, cols));
+                    };
+
+                    const updateTerminalCols = (cols) => {
+                      const root = getRoot();
+                      const inputs = [
+                        root.querySelector('#terminal-cols-state input[type=\"number\"]'),
+                        ...root.querySelectorAll('.terminal-cols-state input[type=\"number\"]')
+                      ].filter(Boolean);
+
+                      inputs.forEach(input => {
+                        if (input && parseInt(input.value) !== cols) {
+                          input.value = cols;
+                          input.dispatchEvent(new Event('input', { bubbles: true }));
+                        }
+                      });
+                    };
+
+                    const setupResizeObserver = (element) => {
+                      if (element._terminalResizeSetup) return;
+                      element._terminalResizeSetup = true;
+
+                      const resizeObserver = new ResizeObserver(entries => {
+                        for (const entry of entries) {
+                          const width = entry.contentRect.width;
+                          if (width > 0) {
+                            const cols = calculateCols(width);
+                            updateTerminalCols(cols);
+                          }
+                        }
+                      });
+
+                      resizeObserver.observe(element);
+
+                      const width = element.getBoundingClientRect().width;
+                      if (width > 0) {
+                        updateTerminalCols(calculateCols(width));
+                      }
+                    };
+
+                    const findAndSetupContainers = () => {
+                      const root = getRoot();
+                      const containers = [
+                        root.querySelector('#live-stream-box'),
+                        ...root.querySelectorAll('.live-stream-box')
+                      ].filter(Boolean);
+
+                      containers.forEach(setupResizeObserver);
+                    };
+
+                    setInterval(findAndSetupContainers, 500);
+                    setTimeout(findAndSetupContainers, 100);
+                  };
                   const ensureDiscardEditable = () => {
                     // Find status elements more broadly
                     const statuses = collectAll('.task-status-header, [id*=\"task-status\"], [class*=\"task-status\"], [class*=\"status\"]');
@@ -6989,6 +7264,9 @@ initializeLiveDomPatching();
                       }
                     });
                   };
+                  initializeLiveDomPatching();
+                  initializeLiveStreamScrollTracking();
+                  initializeTerminalColumnTracking();
                   const tickAll = () => {
                     wirePlus();
                     fixAriaLinks();
