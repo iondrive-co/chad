@@ -2157,6 +2157,16 @@ class ChadWebUI:
                     event_type = event.data.get("type", "")
                     if event_type == "session_started":
                         pass  # Already handled by task start
+                    elif event_type == "terminal_output":
+                        # Fallback for parsed terminal output from EventLog
+                        # This ensures content is shown even if raw PTY parsing fails
+                        data = event.data.get("data", "")
+                        if data and data.strip():
+                            # For JSON providers, use the already-parsed EventLog text
+                            if json_parser:
+                                accumulated_text = [data]  # Replace with EventLog content
+                                html_output = html.escape(data)
+                                message_queue.put(("stream", data, html_output))
                     elif event_type == "tool_call_started":
                         tool = event.data.get("tool", "")
                         if tool == "bash":
@@ -2266,27 +2276,12 @@ class ChadWebUI:
     def _read_project_docs(self, project_path: Path) -> str | None:
         """Read project documentation if present.
 
-        Reads AGENTS.md, .claude/CLAUDE.md, or CLAUDE.md from the project.
-        Returns the first file found, or None if no documentation exists.
+        Returns a short reference section pointing to on-disk docs instead of
+        inlining their content.
         """
-        doc_files = [
-            project_path / "AGENTS.md",
-            project_path / ".claude" / "CLAUDE.md",
-            project_path / "CLAUDE.md",
-        ]
+        from chad.util.project_setup import build_doc_reference_text
 
-        for doc_file in doc_files:
-            if doc_file.exists():
-                try:
-                    content = doc_file.read_text(encoding="utf-8")
-                    # Limit content to avoid overwhelming the context
-                    if len(content) > 8000:
-                        content = content[:8000] + "\n\n[...truncated...]"
-                    return content
-                except (OSError, UnicodeDecodeError):
-                    continue
-
-        return None
+        return build_doc_reference_text(project_path)
 
     def _run_verification(
         self,

@@ -6,11 +6,14 @@ from chad.util.project_setup import (
     detect_project_type,
     detect_verification_commands,
     detect_python_executable,
+    detect_doc_paths,
+    ensure_docs_config,
     validate_command,
     load_project_config,
     save_project_config,
     setup_project,
     build_verification_instructions,
+    build_doc_reference_text,
     ProjectConfig,
     VerificationConfig,
 )
@@ -276,3 +279,34 @@ class TestBuildVerificationInstructions:
         instructions = build_verification_instructions(tmp_path)
         assert "verification patterns" in instructions.lower()
         assert "pytest" in instructions  # Generic hints
+
+
+class TestDocsConfig:
+    """Test detection and prompt reference generation for docs."""
+
+    def test_detect_doc_paths_prefers_agents_and_architecture(self, tmp_path):
+        """Detect doc paths and store them relative to project root."""
+        (tmp_path / "AGENTS.md").write_text("instructions", encoding="utf-8")
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs" / "ARCHITECTURE.md").write_text("arch", encoding="utf-8")
+
+        docs = detect_doc_paths(tmp_path)
+        assert docs.instructions_path == "AGENTS.md"
+        assert docs.architecture_path == "docs/ARCHITECTURE.md"
+
+    def test_ensure_docs_config_persists_to_project_file(self, tmp_path):
+        """ensure_docs_config should save discovered paths into .chad/project.json."""
+        (tmp_path / "AGENTS.md").write_text("instructions", encoding="utf-8")
+        docs = ensure_docs_config(tmp_path)
+        assert docs.instructions_path == "AGENTS.md"
+
+        saved = load_project_config(tmp_path)
+        assert saved is not None
+        assert saved.docs.instructions_path == "AGENTS.md"
+
+    def test_build_doc_reference_text_outputs_absolute_paths(self, tmp_path):
+        """Doc reference text should point to absolute file locations."""
+        (tmp_path / "AGENTS.md").write_text("instructions", encoding="utf-8")
+        ref_text = build_doc_reference_text(tmp_path)
+        assert ref_text is not None
+        assert str(tmp_path / "AGENTS.md") in ref_text

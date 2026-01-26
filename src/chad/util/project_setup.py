@@ -24,6 +24,14 @@ class VerificationConfig:
 
 
 @dataclass
+class DocsConfig:
+    """Configuration for project documentation locations."""
+
+    instructions_path: str | None = None
+    architecture_path: str | None = None
+
+
+@dataclass
 class ProjectConfig:
     """Project configuration stored in .chad/project.json."""
 
@@ -32,6 +40,7 @@ class ProjectConfig:
     project_type: str = "unknown"
     verification: VerificationConfig = field(default_factory=VerificationConfig)
     instructions: str | None = None
+    docs: DocsConfig = field(default_factory=DocsConfig)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -48,6 +57,10 @@ class ProjectConfig:
                 "last_validated": self.verification.last_validated,
             },
             "instructions": self.instructions,
+            "docs": {
+                "instructions_path": self.docs.instructions_path,
+                "architecture_path": self.docs.architecture_path,
+            },
         }
 
     @classmethod
@@ -62,12 +75,18 @@ class ProjectConfig:
             validated=verification_data.get("validated", False),
             last_validated=verification_data.get("last_validated"),
         )
+        docs_data = data.get("docs", {})
+        docs = DocsConfig(
+            instructions_path=docs_data.get("instructions_path"),
+            architecture_path=docs_data.get("architecture_path"),
+        )
         return cls(
             version=data.get("version", "1.0"),
             detected_at=data.get("detected_at", ""),
             project_type=data.get("project_type", "unknown"),
             verification=verification,
             instructions=data.get("instructions"),
+            docs=docs,
         )
 
 
@@ -99,6 +118,21 @@ PROJECT_DETECTION_RULES = {
         "test_command": "go test ./...",
     },
 }
+
+INSTRUCTION_DOC_CANDIDATES = [
+    "AGENTS.md",
+    ".claude/CLAUDE.md",
+    "CLAUDE.md",
+]
+
+ARCHITECTURE_DOC_CANDIDATES = [
+    "docs/ARCHITECTURE.md",
+    "docs/architecture.md",
+    "ARCHITECTURE.md",
+    "architecture.md",
+    "docs/ARCH.md",
+    "ARCH.md",
+]
 
 
 def detect_python_executable(project_path: Path) -> str:
@@ -228,6 +262,69 @@ def detect_verification_commands(project_path: Path) -> dict:
     }
 
 
+def detect_doc_paths(project_path: Path) -> DocsConfig:
+    """Find instruction and architecture docs in the project."""
+    project_path = Path(project_path)
+    instructions_path = None
+    architecture_path = None
+
+    for candidate in INSTRUCTION_DOC_CANDIDATES:
+        candidate_path = project_path / candidate
+        if candidate_path.exists():
+            instructions_path = str(candidate_path.relative_to(project_path))
+            break
+
+    for candidate in ARCHITECTURE_DOC_CANDIDATES:
+        candidate_path = project_path / candidate
+        if candidate_path.exists():
+            architecture_path = str(candidate_path.relative_to(project_path))
+            break
+
+    return DocsConfig(
+        instructions_path=instructions_path,
+        architecture_path=architecture_path,
+    )
+
+
+def ensure_docs_config(project_path: Path) -> DocsConfig:
+    """Ensure docs paths are recorded in project config and return them."""
+    project_path = Path(project_path)
+    config = load_project_config(project_path)
+
+    if config is None:
+        config = ProjectConfig()
+
+    docs = config.docs or DocsConfig()
+    detected = detect_doc_paths(project_path)
+
+    if not docs.instructions_path:
+        docs.instructions_path = detected.instructions_path
+    if not docs.architecture_path:
+        docs.architecture_path = detected.architecture_path
+
+    config.docs = docs
+    save_project_config(project_path, config)
+
+    return docs
+
+
+def build_doc_reference_text(project_path: Path) -> str | None:
+    """Build a short reference section pointing to on-disk docs."""
+    project_path = Path(project_path).resolve()
+    docs = ensure_docs_config(project_path)
+
+    lines: list[str] = []
+    if docs.instructions_path:
+        lines.append(f"- Project instructions: {project_path / docs.instructions_path}")
+    if docs.architecture_path:
+        lines.append(f"- Architecture overview: {project_path / docs.architecture_path}")
+
+    if not lines:
+        return None
+
+    return "Read the following project files from disk before making changes:\n" + "\n".join(lines)
+
+
 def validate_command(
     command: str,
     project_path: Path,
@@ -346,6 +443,13 @@ def setup_project(project_path: Path, validate: bool = True) -> ProjectConfig:
             config.verification.test_command = detected["test_command"]
         if config.project_type == "unknown":
             config.project_type = detected["project_type"]
+
+    # Detect documentation paths
+    detected_docs = detect_doc_paths(project_path)
+    if not config.docs.instructions_path:
+        config.docs.instructions_path = detected_docs.instructions_path
+    if not config.docs.architecture_path:
+        config.docs.architecture_path = detected_docs.architecture_path
 
     # Validate commands if requested
     if validate:

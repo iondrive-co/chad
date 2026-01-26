@@ -11,7 +11,7 @@ from pathlib import Path
 # CODING AGENT SYSTEM PROMPT
 # =============================================================================
 # The coding agent receives this prompt with:
-# - {project_docs} replaced with content from AGENTS.md/CLAUDE.md if present
+# - {project_docs} replaced with references to on-disk docs (AGENTS.md, ARCHITECTURE.md, etc.)
 # - {verification_instructions} replaced with project-specific verification commands
 # - {task} replaced with the user's task description
 
@@ -161,7 +161,7 @@ def build_coding_prompt(
 
     Args:
         task: The user's task description
-        project_docs: Optional project documentation (from AGENTS.md, CLAUDE.md, etc.)
+        project_docs: Optional project documentation references (paths to read)
         project_path: Optional project path for detecting verification commands
 
     Returns:
@@ -169,7 +169,7 @@ def build_coding_prompt(
     """
     docs_section = ""
     if project_docs:
-        docs_section = f"# Project Instructions\n\n{project_docs}\n\n"
+        docs_section = f"# Project Documentation\n\n{project_docs}\n\n"
 
     # Get verification instructions
     verification_section = ""
