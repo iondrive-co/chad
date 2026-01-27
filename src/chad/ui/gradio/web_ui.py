@@ -2123,6 +2123,7 @@ class ChadWebUI:
         coding_reasoning: str | None = None,
         server_session_id: str | None = None,
         terminal_cols: int | None = None,
+        screenshots: list[str] | None = None,
     ) -> tuple[bool, str, str | None]:
         """Run a task via the API and post events to the message queue.
 
@@ -2138,6 +2139,7 @@ class ChadWebUI:
             coding_model: Optional model override
             coding_reasoning: Optional reasoning level
             terminal_cols: Terminal width in columns (calculated from panel width)
+            screenshots: Optional list of screenshot file paths for agent reference
 
         Returns:
             Tuple of (success, final_output_text, server_session_id)
@@ -2171,6 +2173,7 @@ class ChadWebUI:
                 coding_reasoning=coding_reasoning,
                 terminal_rows=TERMINAL_ROWS,
                 terminal_cols=effective_cols,
+                screenshots=screenshots,
             )
         except Exception as e:
             message_queue.put(("status", f"❌ Failed to start task: {e}"))
@@ -2818,6 +2821,7 @@ class ChadWebUI:
         verification_model: str | None = None,
         verification_reasoning: str | None = None,
         terminal_cols: int | None = None,
+        screenshots: list[str] | None = None,
     ) -> Iterator[
         tuple[
             list,
@@ -3133,6 +3137,7 @@ class ChadWebUI:
                         coding_model=selected_model if selected_model != "default" else None,
                         coding_reasoning=selected_reasoning if selected_reasoning != "default" else None,
                         terminal_cols=terminal_cols,
+                        screenshots=screenshots,
                     )
                     task_success[0] = success
                     coding_final_output[0] = output
@@ -3501,13 +3506,16 @@ class ChadWebUI:
                     )
                     session.last_verification_prompt = display_verification_prompt
 
-                    # Show verification status
+                    # Show verification status with live stream
                     verify_status = (
                         f"{status_prefix}🔍 Running verification "
                         f"(attempt {verification_attempt}/{max_verification_attempts})..."
                     )
+                    verify_placeholder = build_live_stream_html(
+                        "🔍 Starting verification...", "VERIFICATION AI", live_stream_id
+                    )
                     yield make_yield(
-                        chat_history, verify_status, "", task_state="verifying",
+                        chat_history, verify_status, verify_placeholder, task_state="verifying",
                         verification_prompt=display_verification_prompt,
                     )
 
@@ -3542,11 +3550,24 @@ class ChadWebUI:
                     verification_thread = threading.Thread(target=run_verification_thread, daemon=True)
                     verification_thread.start()
 
-                    # Poll message queue while verification runs
-                    # Note: verification streaming is silent (no inline display) since it's usually fast
+                    # Poll message queue while verification runs and stream to live view
+                    verify_display_buffer = LiveStreamDisplayBuffer()
+                    verify_display_buffer.append("🔍 Starting verification...\n")
+                    verify_last_yield = 0.0
                     while not verification_complete.is_set() and not session.cancel_requested:
                         try:
-                            message_queue.get(timeout=0.05)  # Drain queue
+                            msg = message_queue.get(timeout=0.05)
+                            if msg[0] == "stream":
+                                chunk = msg[1]
+                                if chunk.strip():
+                                    verify_display_buffer.append(chunk)
+                                    now = time_module.time()
+                                    if now - verify_last_yield >= min_yield_interval:
+                                        rendered = build_live_stream_html(
+                                            verify_display_buffer.content, "VERIFICATION AI", live_stream_id
+                                        )
+                                        yield make_yield(chat_history, verify_status, rendered, task_state="verifying")
+                                        verify_last_yield = now
                         except queue.Empty:
                             pass
 
@@ -3715,10 +3736,13 @@ class ChadWebUI:
                                 }
                                 break
 
+                            reverify_placeholder = build_live_stream_html(
+                                "✓ Revision complete, re-verifying...", "VERIFICATION AI", live_stream_id
+                            )
                             yield make_yield(
                                 chat_history,
                                 f"{status_prefix}✓ Revision complete, re-verifying...",
-                                "",
+                                reverify_placeholder,
                                 task_state="verifying",
                             )
                         elif (
@@ -3824,10 +3848,13 @@ class ChadWebUI:
                                 })
                                 break
 
+                            reverify_placeholder = build_live_stream_html(
+                                "✓ Revision complete, re-verifying...", "VERIFICATION AI", live_stream_id
+                            )
                             yield make_yield(
                                 chat_history,
                                 f"{status_prefix}✓ Revision complete, re-verifying...",
-                                "",
+                                reverify_placeholder,
                                 task_state="verifying",
                             )
                         else:
@@ -4333,25 +4360,65 @@ class ChadWebUI:
                 )
                 self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
 
-                verify_status = (
-                    f"🔍 Running verification " f"(attempt {verification_attempt}/{max_verification_attempts})..."
+                verify_placeholder = build_live_stream_html(
+                    "🔍 Starting verification...", "VERIFICATION AI", live_stream_id
                 )
-                yield make_followup_yield(chat_history, verify_status, working=True, merge_updates=merge_no_change)
+                yield make_followup_yield(chat_history, verify_placeholder, working=True, merge_updates=merge_no_change)
 
                 def verification_activity(activity_type: str, detail: str):
-                    pass  # Quiet verification
+                    content = detail if activity_type == "stream" else f"[{activity_type}] {detail}\n"
+                    message_queue.put(("verify_stream", content))
 
                 # Run verification in worktree so it can see the changes
                 verification_path = str(session.worktree_path or session.project_path or Path.cwd())
-                verified, verification_feedback = self._run_verification(
-                    verification_path,
-                    last_coding_output,
-                    task_description,
-                    verification_account_for_run,
-                    on_activity=verification_activity,
-                    verification_model=resolved_verification_model,
-                    verification_reasoning=resolved_verification_reasoning,
-                )
+                verification_result: list = [None, None]  # [verified, feedback]
+                verification_complete = threading.Event()
+
+                def run_verification_thread():
+                    try:
+                        v, f = self._run_verification(
+                            verification_path,
+                            last_coding_output,
+                            task_description,
+                            verification_account_for_run,
+                            on_activity=verification_activity,
+                            verification_model=resolved_verification_model,
+                            verification_reasoning=resolved_verification_reasoning,
+                        )
+                        verification_result[0] = v
+                        verification_result[1] = f
+                    except Exception as exc:
+                        verification_result[0] = None
+                        verification_result[1] = f"Verification error: {exc}"
+                    finally:
+                        verification_complete.set()
+
+                verification_thread = threading.Thread(target=run_verification_thread, daemon=True)
+                verification_thread.start()
+
+                # Poll message queue while verification runs and stream to live view
+                verify_display_buffer = LiveStreamDisplayBuffer()
+                verify_display_buffer.append("🔍 Starting verification...\n")
+                verify_last_yield = 0.0
+                while not verification_complete.is_set() and not session.cancel_requested:
+                    try:
+                        msg = message_queue.get(timeout=0.05)
+                        if msg[0] == "verify_stream":
+                            chunk = msg[1]
+                            if chunk.strip():
+                                verify_display_buffer.append(chunk)
+                                now = time_module.time()
+                                if now - verify_last_yield >= min_yield_interval:
+                                    rendered = build_live_stream_html(
+                                        verify_display_buffer.content, "VERIFICATION AI", live_stream_id
+                                    )
+                                    yield make_followup_yield(chat_history, rendered, working=True, merge_updates=merge_no_change)
+                                    verify_last_yield = now
+                    except queue.Empty:
+                        pass
+
+                verification_thread.join(timeout=1.0)
+                verified, verification_feedback = verification_result[0], verification_result[1]
 
                 status_label = "error" if verified is None else ("passed" if verified else "failed")
                 verification_log.append(
@@ -4464,9 +4531,12 @@ class ChadWebUI:
                             )
                             break
 
+                        reverify_placeholder = build_live_stream_html(
+                            "✓ Revision complete, re-verifying...", "VERIFICATION AI", live_stream_id
+                        )
                         yield make_followup_yield(
                             chat_history,
-                            "✓ Revision complete, re-verifying...",
+                            reverify_placeholder,
                             working=True,
                             merge_updates=merge_no_change,
                         )
@@ -5311,6 +5381,13 @@ class ChadWebUI:
                     lines=4,
                     key=f"task-desc-{session_id}",
                 )
+                screenshot_upload = gr.File(
+                    label="Screenshots (optional)",
+                    file_count="multiple",
+                    file_types=["image"],
+                    key=f"screenshot-upload-{session_id}",
+                    elem_classes=["screenshot-upload"],
+                )
                 start_btn = gr.Button(
                     "▶ Start Task",
                     variant="primary",
@@ -5582,6 +5659,7 @@ class ChadWebUI:
         def start_task_wrapper(
             proj_path,
             task_desc,
+            screenshots_data,
             coding,
             verification,
             c_model,
@@ -5590,6 +5668,10 @@ class ChadWebUI:
             v_reason,
             term_cols,
         ):
+            # Extract file paths from uploaded screenshots
+            screenshot_paths = None
+            if screenshots_data:
+                screenshot_paths = [f.name for f in screenshots_data]
             yield from self.start_chad_task(
                 session_id,
                 proj_path,
@@ -5601,6 +5683,7 @@ class ChadWebUI:
                 v_model,
                 v_reason,
                 terminal_cols=int(term_cols) if term_cols else None,
+                screenshots=screenshot_paths,
             )
 
         def cancel_wrapper():
@@ -5653,6 +5736,7 @@ class ChadWebUI:
             inputs=[
                 project_path,
                 task_description,
+                screenshot_upload,
                 coding_agent,
                 verification_agent,
                 coding_model,

@@ -1676,6 +1676,104 @@ More details here...
         assert "After" in summary_part
         assert "data:image/png;base64," in summary_part
 
+    def test_extract_coding_summary_with_files_changed_list(self):
+        """Extract files_changed as a list of paths."""
+        from chad.util.prompts import extract_coding_summary
+
+        content = '''```json
+{
+  "change_summary": "Fixed the bug",
+  "files_changed": ["src/auth.py", "tests/test_auth.py"],
+  "completion_status": "success"
+}
+```'''
+        result = extract_coding_summary(content)
+        assert result is not None
+        assert result.change_summary == "Fixed the bug"
+        assert result.files_changed == ["src/auth.py", "tests/test_auth.py"]
+        assert result.completion_status == "success"
+
+    def test_extract_coding_summary_with_files_changed_info_only(self):
+        """Extract files_changed as 'info_only' string."""
+        from chad.util.prompts import extract_coding_summary
+
+        content = '''```json
+{
+  "change_summary": "Explained the codebase structure",
+  "files_changed": "info_only",
+  "completion_status": "success"
+}
+```'''
+        result = extract_coding_summary(content)
+        assert result is not None
+        assert result.change_summary == "Explained the codebase structure"
+        assert result.files_changed == "info_only"
+        assert result.completion_status == "success"
+
+    def test_extract_coding_summary_with_completion_status_partial(self):
+        """Extract completion_status with partial value."""
+        from chad.util.prompts import extract_coding_summary
+
+        content = '''```json
+{
+  "change_summary": "Started implementing feature",
+  "files_changed": ["src/feature.py"],
+  "completion_status": "partial"
+}
+```'''
+        result = extract_coding_summary(content)
+        assert result is not None
+        assert result.completion_status == "partial"
+
+    def test_get_summary_completion_prompt_returns_none_when_complete(self):
+        """get_summary_completion_prompt returns None when all fields present."""
+        from chad.util.prompts import extract_coding_summary, get_summary_completion_prompt
+
+        content = '''```json
+{
+  "change_summary": "Fixed the bug",
+  "files_changed": ["src/auth.py"],
+  "completion_status": "success"
+}
+```'''
+        result = extract_coding_summary(content)
+        prompt = get_summary_completion_prompt(result)
+        assert prompt is None
+
+    def test_get_summary_completion_prompt_returns_prompt_when_no_summary(self):
+        """get_summary_completion_prompt returns prompt when no summary extracted."""
+        from chad.util.prompts import get_summary_completion_prompt
+
+        prompt = get_summary_completion_prompt(None)
+        assert prompt is not None
+        assert "files_changed" in prompt
+        assert "completion_status" in prompt
+
+    def test_get_summary_completion_prompt_returns_prompt_when_missing_files_changed(self):
+        """get_summary_completion_prompt returns prompt when files_changed missing."""
+        from chad.util.prompts import extract_coding_summary, get_summary_completion_prompt
+
+        content = '''```json
+{"change_summary": "Fixed the bug"}
+```'''
+        result = extract_coding_summary(content)
+        prompt = get_summary_completion_prompt(result)
+        assert prompt is not None
+        assert "files_changed" in prompt
+
+    def test_get_summary_completion_prompt_returns_prompt_when_missing_completion_status(self):
+        """get_summary_completion_prompt returns prompt when completion_status missing."""
+        from chad.util.prompts import CodingSummary, get_summary_completion_prompt
+
+        summary = CodingSummary(
+            change_summary="Fixed the bug",
+            files_changed=["src/auth.py"],
+            completion_status=None,
+        )
+        prompt = get_summary_completion_prompt(summary)
+        assert prompt is not None
+        assert "completion_status" in prompt
+
 
 class TestProgressUpdateExtraction:
     """Test progress update extraction with placeholder filtering."""
@@ -2251,3 +2349,89 @@ class TestPreferredVerificationModel:
         # Should not persist to account or global config
         mock_api_client.set_account_model.assert_not_called()
         mock_api_client.set_preferred_verification_model.assert_not_called()
+
+
+class TestScreenshotUpload:
+    """Tests for screenshot upload functionality."""
+
+    def test_build_coding_prompt_includes_screenshot_paths(self, tmp_path):
+        """build_coding_prompt should include screenshot file paths when provided."""
+        from chad.util.prompts import build_coding_prompt
+
+        # Create test screenshot files
+        screenshot1 = tmp_path / "screenshot1.png"
+        screenshot2 = tmp_path / "screenshot2.png"
+        screenshot1.write_bytes(b"PNG mock data 1")
+        screenshot2.write_bytes(b"PNG mock data 2")
+
+        prompt = build_coding_prompt(
+            task="Fix the UI layout",
+            screenshots=[str(screenshot1), str(screenshot2)],
+        )
+
+        # Screenshot paths should be included in the prompt
+        assert str(screenshot1) in prompt
+        assert str(screenshot2) in prompt
+        # Should have a screenshots section
+        assert "Screenshot" in prompt or "screenshot" in prompt
+
+    def test_build_coding_prompt_works_without_screenshots(self):
+        """build_coding_prompt should work without screenshots (backwards compatible)."""
+        from chad.util.prompts import build_coding_prompt
+
+        prompt = build_coding_prompt(task="Simple task")
+
+        assert "Simple task" in prompt
+        # No screenshot references should be present
+        assert "Screenshot" not in prompt
+
+    def test_task_create_schema_accepts_screenshots(self):
+        """TaskCreate schema should accept an optional screenshots field."""
+        from chad.server.api.schemas.task import TaskCreate
+
+        # Without screenshots
+        task = TaskCreate(
+            project_path="/tmp/project",
+            task_description="Fix bug",
+            coding_agent="claude",
+        )
+        assert task.screenshots is None or task.screenshots == []
+
+        # With screenshots
+        task_with_screenshots = TaskCreate(
+            project_path="/tmp/project",
+            task_description="Fix UI issue",
+            coding_agent="claude",
+            screenshots=["/tmp/screenshot1.png", "/tmp/screenshot2.png"],
+        )
+        assert task_with_screenshots.screenshots == ["/tmp/screenshot1.png", "/tmp/screenshot2.png"]
+
+    def test_api_client_start_task_accepts_screenshots(self):
+        """APIClient.start_task should accept screenshots parameter."""
+        from chad.ui.client.api_client import APIClient
+        import httpx
+
+        # Mock the HTTP client
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "task_id": "test-task-123",
+            "session_id": "test-session",
+            "status": "running",
+        }
+        mock_response.raise_for_status = Mock()
+
+        with patch.object(httpx.Client, "post", return_value=mock_response) as mock_post:
+            client = APIClient("http://localhost:8000")
+            client.start_task(
+                session_id="test-session",
+                project_path="/tmp/project",
+                task_description="Fix UI",
+                coding_agent="claude",
+                screenshots=["/tmp/screenshot1.png"],
+            )
+
+            # Verify screenshots were included in the request
+            call_args = mock_post.call_args
+            request_data = call_args.kwargs.get("json", {})
+            assert "screenshots" in request_data
+            assert request_data["screenshots"] == ["/tmp/screenshot1.png"]

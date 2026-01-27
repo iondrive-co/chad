@@ -337,6 +337,7 @@ def build_agent_command(
     account_name: str,
     project_path: Path,
     task_description: str | None = None,
+    screenshots: list[str] | None = None,
 ) -> tuple[list[str], dict[str, str], str | None]:
     """Build CLI command and environment for a provider.
 
@@ -345,6 +346,7 @@ def build_agent_command(
         account_name: Account name for provider-specific paths
         project_path: Path to the project/worktree
         task_description: Optional task to send as initial input
+        screenshots: Optional list of screenshot file paths for agent reference
 
     Returns:
         Tuple of (command_list, environment_dict, initial_input)
@@ -371,7 +373,7 @@ def build_agent_command(
     full_prompt: str | None = None
     if task_description:
         project_docs = _read_project_docs(project_path)
-        full_prompt = build_coding_prompt(task_description, project_docs, project_path)
+        full_prompt = build_coding_prompt(task_description, project_docs, project_path, screenshots)
 
     if provider == "anthropic":
         # Claude Code CLI
@@ -530,6 +532,7 @@ class TaskExecutor:
         on_event: Callable[[StreamEvent], None] | None = None,
         terminal_rows: int | None = None,
         terminal_cols: int | None = None,
+        screenshots: list[str] | None = None,
     ) -> Task:
         """Start a new coding task.
 
@@ -543,6 +546,7 @@ class TaskExecutor:
             on_event: Optional callback for streaming events
             terminal_rows: Optional terminal height (default: TERMINAL_ROWS)
             terminal_cols: Optional terminal width (default: TERMINAL_COLS)
+            screenshots: Optional list of screenshot file paths for agent reference
 
         Returns:
             The created Task object
@@ -596,6 +600,7 @@ class TaskExecutor:
                 on_event,
                 terminal_rows,
                 terminal_cols,
+                screenshots,
             ),
             daemon=True,
         )
@@ -618,6 +623,7 @@ class TaskExecutor:
         on_event: Callable[[StreamEvent], None] | None,
         terminal_rows: int | None,
         terminal_cols: int | None,
+        screenshots: list[str] | None,
     ):
         """Execute the task in a background thread using PTY."""
         # Use provided dimensions or fall back to defaults
@@ -702,6 +708,7 @@ class TaskExecutor:
                 coding_account,
                 worktree_path,
                 task_description,
+                screenshots,
             )
 
             # Create JSON parser for providers that use stream-json output

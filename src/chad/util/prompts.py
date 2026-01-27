@@ -40,10 +40,17 @@ Use the following sequence to complete the task:
 ```json
 {{
   "change_summary": "One sentence describing what was changed",
+  "files_changed": ["src/auth.py", "tests/test_auth.py"],
+  "completion_status": "success",
   "hypothesis": "Brief root cause explanation (include if investigating a bug)"
 }}
 ```
-Only include the hypothesis field when investigating a bug.
+Required fields:
+- change_summary: One sentence describing what was done
+- files_changed: Array of file paths that were modified, or "info_only" if this was just an information request with no file changes
+- completion_status: One of "success", "partial" (hit context/token limit), "blocked" (needs user input), or "error"
+Optional fields:
+- hypothesis: Include only when investigating a bug
 """
 
 
@@ -156,6 +163,7 @@ def build_coding_prompt(
     task: str,
     project_docs: str | None = None,
     project_path: str | Path | None = None,
+    screenshots: list[str] | None = None,
 ) -> str:
     """Build the complete prompt for the coding agent.
 
@@ -163,6 +171,7 @@ def build_coding_prompt(
         task: The user's task description
         project_docs: Optional project documentation references (paths to read)
         project_path: Optional project path for detecting verification commands
+        screenshots: Optional list of screenshot file paths to include
 
     Returns:
         Complete prompt for the coding agent including the task
@@ -177,10 +186,19 @@ def build_coding_prompt(
         from chad.util.project_setup import build_verification_instructions
         verification_section = build_verification_instructions(Path(project_path))
 
+    # Build task section with screenshots if provided
+    task_with_screenshots = task
+    if screenshots:
+        screenshot_section = "\n\nThe user has attached the following screenshots for reference. " \
+            "Use the Read tool to view them:\n"
+        for screenshot_path in screenshots:
+            screenshot_section += f"- {screenshot_path}\n"
+        task_with_screenshots = task + screenshot_section
+
     return CODING_AGENT_PROMPT.format(
         project_docs=docs_section,
         verification_instructions=verification_section,
-        task=task,
+        task=task_with_screenshots,
     )
 
 
@@ -251,6 +269,10 @@ class CodingSummary:
     """Structured summary extracted from coding agent response."""
 
     change_summary: str
+    # files_changed is a list of file paths, or "info_only" string for information requests
+    files_changed: list[str] | str | None = None
+    # completion_status: "success", "partial", "blocked", "error", or None if not specified
+    completion_status: str | None = None
     hypothesis: str | None = None
     before_screenshot: str | None = None
     before_description: str | None = None
@@ -378,8 +400,18 @@ def extract_coding_summary(response: str) -> CodingSummary | None:
         try:
             data = json.loads(json_match.group(1))
             if "change_summary" in data:
+                # Parse files_changed - can be array or "info_only" string
+                files_changed = data.get("files_changed")
+                if isinstance(files_changed, list):
+                    files_changed = [str(f) for f in files_changed]
+                elif isinstance(files_changed, str):
+                    pass  # Keep as string (e.g., "info_only")
+                else:
+                    files_changed = None
                 return CodingSummary(
                     change_summary=data["change_summary"],
+                    files_changed=files_changed,
+                    completion_status=data.get("completion_status"),
                     hypothesis=data.get("hypothesis"),
                     before_screenshot=data.get("before_screenshot"),
                     before_description=data.get("before_description"),
@@ -494,3 +526,55 @@ def check_verification_mentioned(response: str) -> bool:
             return True
 
     return False
+
+
+# =============================================================================
+# CODING SUMMARY VALIDATION AND RE-INVOKE
+# =============================================================================
+
+SUMMARY_COMPLETION_PROMPT = """\
+Your previous response is missing required fields in the JSON summary block. Please output ONLY a complete JSON \
+summary block with all required fields:
+
+```json
+{{
+  "change_summary": "One sentence describing what was done",
+  "files_changed": ["list", "of", "files"] or "info_only" if no files were changed,
+  "completion_status": "success" or "partial" or "blocked" or "error"
+}}
+```
+
+Required fields:
+- change_summary: What you accomplished
+- files_changed: Array of modified file paths, OR the string "info_only" if this was just an information request
+- completion_status: One of "success", "partial" (hit token/context limit), "blocked" (needs user input), or "error"
+
+Output ONLY the JSON block, nothing else.
+"""
+
+
+def get_summary_completion_prompt(summary: CodingSummary | None) -> str | None:
+    """Check if a coding summary is missing required fields and return a completion prompt.
+
+    This function validates that the mandatory fields (files_changed, completion_status)
+    are present in the coding summary. If they're missing, it returns a prompt to
+    re-invoke the coding agent to complete the summary.
+
+    Args:
+        summary: The extracted coding summary, or None if extraction failed
+
+    Returns:
+        A prompt string to re-invoke the agent if fields are missing, or None if complete
+    """
+    if summary is None:
+        # No summary at all - need to ask for one
+        return SUMMARY_COMPLETION_PROMPT
+
+    # Check for missing mandatory fields
+    missing_files_changed = summary.files_changed is None
+    missing_completion_status = summary.completion_status is None
+
+    if missing_files_changed or missing_completion_status:
+        return SUMMARY_COMPLETION_PROMPT
+
+    return None
