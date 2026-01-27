@@ -7,6 +7,9 @@ flawlessly working features.
 
 ## Before making changes
 
+When exploring the codebase, note that ripgrep (`rg`) is not installed here. Use `grep -R`, `find`, or language-aware 
+tools instead—do not invoke `rg`.
+
 When designing new code, never make fallback code to handle paths other than the happy one, instead spend as much effort
 as necessary to make sure that everyone using your feature sees the same happy path you tested. Similarly don't provide
 config options, instead decide which option makes the most sense and implement that without writing code to handle other
@@ -30,8 +33,6 @@ of feature, and before making changes you will look at its screenshot, describe 
 matches the issue/lack of feature you were given to work on. See `src/chad/ui/gradio/verification/screenshot_fixtures.py` 
 for example data to use for screenshots.
 
-Tooling note: ripgrep (`rg`) is not installed here. Use `grep -R`, `find`, or language-aware tools instead—do not invoke `rg`.
-
 ## During changes
 
 For gradio UI changes add any new display functionality to `src/chad/ui/gradio/verification/visual_test_map.py`.
@@ -44,6 +45,10 @@ When modifying functions that return tuples (e.g., `make_yield`, generator funct
 If you find unused or redundant code or tests, you can remove them. Clean up the code base as you go along.
 
 ## After making changes
+
+Start from the premise that the new code will NOT fix the issue or implement the feature, and prove whether it will or 
+won't. It is fine to go back and redo changes at this point, but it is NOT acceptable to declare victory and deliver the 
+wrong thing. Here are some suggested steps for proving:
 
 1. Take an after screenshot for gradio ui work (see Screenshots section below)
 2. Run verification using the `verify()` function which handles Python detection automatically:
@@ -61,7 +66,9 @@ If you find unused or redundant code or tests, you can remove them. Clean up the
    timeout 5 .venv/bin/python -c "from chad.ui.cli import launch_cli_ui" 2>&1 || echo "CLI startup failed"
    ```
    This catches NameErrors, missing imports, and other issues that flake8 and tests may miss.
-4. Perform a critical self-review and note any outstanding issues
+4. Perform a critical self-review, note down all the issues you find, and then output them one by one noting whether
+each one is a problem that will require rework of your changes. If any do, then go back and rework and then go through
+this process again
 5. All tests must pass even if you did not break them, never skip tests for any reason.
 
 ## Screenshots

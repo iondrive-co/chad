@@ -3315,7 +3315,9 @@ class ChadWebUI:
                                         render_state.reset()
                                     else:
                                         chat_history.append(progress_msg)
-                                    yield make_yield(chat_history, current_status, "", task_state="running")
+                                    # Keep showing last live stream content while buffers reset
+                                    # Don't yield "" which clears the UI during the gap before new content arrives
+                                    yield make_yield(chat_history, current_status, last_live_stream, task_state="running")
                                     last_yield_time = time_module.time()
 
                         # Track current live stream content for the dedicated panel
@@ -3430,7 +3432,8 @@ class ChadWebUI:
                                 session.event_log.log(AssistantMessageEvent(
                                     blocks=[{"kind": "text", "content": content[:1000]}]
                                 ))
-                            yield make_yield(chat_history, current_status, "", task_state="running")
+                            # Keep showing last live stream content during transition to verification
+                            yield make_yield(chat_history, current_status, last_live_stream, task_state="running")
                     except queue.Empty:
                         break
 
