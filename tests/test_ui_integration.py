@@ -319,6 +319,32 @@ class TestCodingAgentLayout:
         assert abs(verification_reasoning_box["x"] - verification_box["x"]) <= 4
         assert abs(verification_reasoning_box["width"] - verification_box["width"]) <= 4
 
+    def test_cancel_button_not_wrapped_to_bottom(self, page: Page):
+        """Cancel button should stay in the top row area, not wrap to a new line at bottom."""
+        cancel_btn = page.locator("#cancel-task-btn")
+        verification_reasoning = page.get_by_label("Verification Reasoning Effort")
+        status_row = page.locator("#role-status-row")
+
+        expect(cancel_btn).to_be_visible()
+        expect(verification_reasoning).to_be_visible()
+        expect(status_row).to_be_visible()
+
+        cancel_box = cancel_btn.bounding_box()
+        verification_reasoning_box = verification_reasoning.bounding_box()
+        status_box = status_row.bounding_box()
+
+        assert cancel_box and verification_reasoning_box and status_box
+
+        # The cancel button should NOT be below the status row (which indicates wrapping)
+        # It should be in the top portion of the layout, near the verification dropdowns
+        verification_bottom = verification_reasoning_box["y"] + verification_reasoning_box["height"]
+        status_top = status_box["y"]
+
+        assert cancel_box["y"] < status_top, (
+            f"Cancel button (y={cancel_box['y']}) should be above the status row (y={status_top}), "
+            "not wrapped to the bottom of the layout"
+        )
+
     def test_cancel_button_visible_light_and_dark(self, page: Page):
         """Cancel button should stay visible in both color schemes."""
         page.wait_for_selector("#cancel-task-btn", state="attached")

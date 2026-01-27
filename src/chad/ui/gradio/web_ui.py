@@ -204,6 +204,19 @@ body, .gradio-container, .gradio-container * {
   align-items: flex-start !important;
 }
 
+/* Verification column holds cancel button at top */
+.verification-column {
+  position: relative !important;
+}
+
+/* Cancel button in verification column - align right */
+.verification-column .cancel-task-btn,
+.verification-column > div:first-child {
+  display: flex !important;
+  justify-content: flex-end !important;
+  margin-bottom: 4px !important;
+}
+
 .project-setup-column {
   display: grid;
   gap: 10px;
@@ -5324,7 +5337,18 @@ class ChadWebUI:
                             key=f"coding-reasoning-{session_id}",
                             interactive=bool(initial_coding and initial_coding in account_choices),
                         )
-                    with gr.Column(scale=1, min_width=200):
+                    with gr.Column(scale=1, min_width=200, elem_classes=["verification-column"]):
+                        # Cancel button placed in verification column, floated to right via CSS
+                        cancel_btn = gr.Button(
+                            "🛑 Cancel",
+                            variant="stop",
+                            interactive=False,
+                            key=f"cancel-btn-{session_id}",
+                            elem_id="cancel-task-btn" if is_first else None,
+                            elem_classes=["cancel-task-btn"],
+                            min_width=100,
+                            scale=0,
+                        )
                         verification_agent = gr.Dropdown(
                             choices=verification_choices,
                             value=initial_verification,
@@ -5353,16 +5377,6 @@ class ChadWebUI:
                             key=f"verification-reasoning-{session_id}",
                             interactive=verif_state.interactive,
                         )
-            cancel_btn = gr.Button(
-                "🛑 Cancel",
-                variant="stop",
-                interactive=False,
-                key=f"cancel-btn-{session_id}",
-                elem_id="cancel-task-btn" if is_first else None,
-                elem_classes=["cancel-task-btn"],
-                min_width=40,
-                scale=0,
-            )
 
         # Task status header - always in DOM but CSS hides when empty
         # This ensures JavaScript can find it for merge section visibility logic
