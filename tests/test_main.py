@@ -189,6 +189,54 @@ class TestMain:
 
     @patch("chad.__main__.run_unified")
     @patch("chad.__main__.ConfigManager")
+    def test_main_server_url_skips_password_prompt(self, mock_config_class, mock_run_unified):
+        """Connecting to existing server should not ask for main password."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad", "--server-url", "http://127.0.0.1:9999"]):
+            with patch.dict(os.environ, {}, clear=True):
+                os.environ.pop("CHAD_PASSWORD", None)
+                result = main()
+
+        assert result == 0
+        mock_config.verify_main_password.assert_not_called()
+        mock_config.setup_main_password.assert_not_called()
+        mock_run_unified.assert_called_once()
+        call_args = mock_run_unified.call_args
+        assert call_args.args[0] is None  # main_password
+        assert call_args.kwargs.get("server_url") == "http://127.0.0.1:9999"
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.ConfigManager")
+    def test_main_server_url_auto_skips_password_prompt(self, mock_config_class, mock_run_unified, tmp_path):
+        """Autodiscovery should also skip password prompts."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config_class.return_value = mock_config
+
+        port_file = tmp_path / "server.port"
+        port_file.write_text("5555\n")
+
+        with patch.object(sys, "argv", ["chad", "--server-url", "auto"]):
+            with patch.dict(os.environ, {"CHAD_DIR": str(tmp_path)}, clear=True):
+                result = main()
+
+        assert result == 0
+        mock_config.verify_main_password.assert_not_called()
+        mock_config.setup_main_password.assert_not_called()
+        mock_run_unified.assert_called_once()
+        call_args = mock_run_unified.call_args
+        assert call_args.args[0] is None
+        assert call_args.kwargs.get("server_url") == "http://127.0.0.1:5555"
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.ConfigManager")
     def test_main_server_url_auto_fails_when_no_port_file(self, mock_config_class, mock_run_unified, tmp_path):
         """Test that --server-url auto fails gracefully when port file missing."""
         mock_config = Mock()
