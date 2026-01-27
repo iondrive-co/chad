@@ -2123,6 +2123,7 @@ class ChadWebUI:
         # Stream output via SSE using server session ID
         stream_client = self._get_stream_client()
         exit_code = 0
+        got_complete_event = False
 
         # Detect if this is a provider that outputs stream-json (needs parsing)
         # Both anthropic (Claude) and qwen use similar JSON formats
@@ -2175,6 +2176,7 @@ class ChadWebUI:
 
                 elif event.event_type == "complete":
                     exit_code = event.data.get("exit_code", 0)
+                    got_complete_event = True
                     break
 
                 elif event.event_type == "error":
@@ -2209,6 +2211,13 @@ class ChadWebUI:
         except Exception as e:
             message_queue.put(("status", f"❌ Stream error: {e}"))
             return False, str(e), server_session_id
+
+        # Check if stream ended without completion event - this indicates a bug
+        # where the SSE stream dropped unexpectedly (e.g., PTY session marked inactive
+        # prematurely). Don't treat this as success or verification will start early.
+        if not got_complete_event:
+            message_queue.put(("status", "❌ Stream ended unexpectedly without completion"))
+            return False, "Stream ended unexpectedly", server_session_id
 
         # Get plain text for final output
         if terminal:

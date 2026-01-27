@@ -872,6 +872,7 @@ class TestPlainTextTerminalEvents:
                 coding_reasoning=None,
                 terminal_rows=None,
                 terminal_cols=None,
+                screenshots=None,
             ):
                 return None
 

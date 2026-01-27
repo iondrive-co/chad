@@ -43,7 +43,10 @@ class PTYSession:
     exit_code: int | None = None
 
     # Subscribers receive events via asyncio queues
-    _subscribers: list[asyncio.Queue] = field(default_factory=list)
+    # Each subscriber is a tuple of (event_loop, queue) for thread-safe dispatch
+    _subscribers: list[tuple[asyncio.AbstractEventLoop, asyncio.Queue]] = field(
+        default_factory=list
+    )
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     # Buffer of recent events for replay to late subscribers
@@ -240,15 +243,17 @@ class PTYStreamService:
             except ChildProcessError:
                 session.exit_code = 0
 
-        session.active = False
-
-        # Dispatch exit event
+        # Dispatch exit event BEFORE setting active=False to avoid race condition.
+        # Subscribers check session.active on timeout - if we set it False first,
+        # they may exit before receiving the exit event.
         event = PTYEvent(
             type="exit",
             stream_id=session.stream_id,
             exit_code=session.exit_code,
         )
         self._dispatch_event(session, event)
+
+        session.active = False
 
         # Close fd
         try:
@@ -279,13 +284,28 @@ class PTYStreamService:
             if len(session._event_buffer) > 1000:
                 session._event_buffer = session._event_buffer[-1000:]
 
-            # Then broadcast to subscriber queues
-            for q in session._subscribers:
+            # Then broadcast to subscriber queues (thread-safe)
+            # Subscribers are (loop, queue) tuples for thread-safe dispatch
+            for loop, q in session._subscribers:
                 try:
-                    q.put_nowait(event)
-                except asyncio.QueueFull:
-                    # Drop if queue is full
+                    # Use call_soon_threadsafe to schedule queue put from the
+                    # correct event loop - this is required because this method
+                    # is called from the PTY read thread, not the async context
+                    loop.call_soon_threadsafe(self._safe_put, q, event)
+                except RuntimeError:
+                    # Loop may be closed, skip this subscriber
                     pass
+
+    def _safe_put(self, q: asyncio.Queue, event: PTYEvent) -> None:
+        """Put an event into a queue, silently ignoring if full.
+
+        This method is called via call_soon_threadsafe from the PTY read thread.
+        """
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            # Drop if queue is full
+            pass
 
     def send_input(self, stream_id: str, data: bytes) -> bool:
         """Send input to PTY.
@@ -353,12 +373,15 @@ class PTYStreamService:
         if not session:
             return
 
-        # Create queue for this subscriber
+        # Create queue for this subscriber and get the event loop
+        # The loop is needed for thread-safe dispatch from the PTY read thread
         q: asyncio.Queue[PTYEvent] = asyncio.Queue(maxsize=1000)
+        loop = asyncio.get_running_loop()
+        subscriber = (loop, q)
 
         # Atomically: add subscriber and get buffered events to replay
         with session._lock:
-            session._subscribers.append(q)
+            session._subscribers.append(subscriber)
             buffered_events = list(session._event_buffer)
 
         # Replay buffered events first (handles late subscriber race condition)
@@ -367,8 +390,8 @@ class PTYStreamService:
             if event.type == "exit":
                 # Session already ended - no need to wait for more events
                 with session._lock:
-                    if q in session._subscribers:
-                        session._subscribers.remove(q)
+                    if subscriber in session._subscribers:
+                        session._subscribers.remove(subscriber)
                 return
 
         try:
@@ -384,12 +407,24 @@ class PTYStreamService:
                 except asyncio.TimeoutError:
                     # Check if session is still active
                     if not session.active:
-                        break
+                        # Session ended - but check queue one more time for exit event
+                        # to avoid race condition where exit event was queued but we
+                        # haven't consumed it yet
+                        try:
+                            event = q.get_nowait()
+                            yield event
+                            if event.type == "exit":
+                                break
+                            # Got a non-exit event, continue processing
+                            continue
+                        except asyncio.QueueEmpty:
+                            # No pending events, safe to exit
+                            break
 
         finally:
             with session._lock:
-                if q in session._subscribers:
-                    session._subscribers.remove(q)
+                if subscriber in session._subscribers:
+                    session._subscribers.remove(subscriber)
 
     def terminate(self, stream_id: str) -> bool:
         """Terminate a PTY session.
