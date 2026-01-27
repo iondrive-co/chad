@@ -319,30 +319,30 @@ class TestCodingAgentLayout:
         assert abs(verification_reasoning_box["x"] - verification_box["x"]) <= 4
         assert abs(verification_reasoning_box["width"] - verification_box["width"]) <= 4
 
-    def test_cancel_button_not_wrapped_to_bottom(self, page: Page):
-        """Cancel button should stay in the top row area, not wrap to a new line at bottom."""
+    def test_cancel_button_in_status_row(self, page: Page):
+        """Cancel button should be in the status row, to the left of the save button."""
         cancel_btn = page.locator("#cancel-task-btn")
-        verification_reasoning = page.get_by_label("Verification Reasoning Effort")
+        save_btn = page.locator(".project-save-btn")
         status_row = page.locator("#role-status-row")
 
         expect(cancel_btn).to_be_visible()
-        expect(verification_reasoning).to_be_visible()
+        expect(save_btn).to_be_visible()
         expect(status_row).to_be_visible()
 
         cancel_box = cancel_btn.bounding_box()
-        verification_reasoning_box = verification_reasoning.bounding_box()
+        save_box = save_btn.bounding_box()
         status_box = status_row.bounding_box()
 
-        assert cancel_box and verification_reasoning_box and status_box
+        assert cancel_box and save_box and status_box
 
-        # The cancel button should NOT be below the status row (which indicates wrapping)
-        # It should be in the top portion of the layout, near the verification dropdowns
-        verification_bottom = verification_reasoning_box["y"] + verification_reasoning_box["height"]
-        status_top = status_box["y"]
+        # Cancel button should be in the status row (vertically aligned)
+        assert abs(cancel_box["y"] - status_box["y"]) < 20, (
+            f"Cancel button (y={cancel_box['y']}) should be in the status row (y={status_box['y']})"
+        )
 
-        assert cancel_box["y"] < status_top, (
-            f"Cancel button (y={cancel_box['y']}) should be above the status row (y={status_top}), "
-            "not wrapped to the bottom of the layout"
+        # Cancel button should be to the left of the save button
+        assert cancel_box["x"] < save_box["x"], (
+            f"Cancel button (x={cancel_box['x']}) should be to the left of save button (x={save_box['x']})"
         )
 
     def test_cancel_button_visible_light_and_dark(self, page: Page):
