@@ -240,15 +240,17 @@ class PTYStreamService:
             except ChildProcessError:
                 session.exit_code = 0
 
-        session.active = False
-
-        # Dispatch exit event
+        # Dispatch exit event BEFORE setting active=False to avoid race condition.
+        # Subscribers check session.active on timeout - if we set it False first,
+        # they may exit before receiving the exit event.
         event = PTYEvent(
             type="exit",
             stream_id=session.stream_id,
             exit_code=session.exit_code,
         )
         self._dispatch_event(session, event)
+
+        session.active = False
 
         # Close fd
         try:
@@ -384,7 +386,19 @@ class PTYStreamService:
                 except asyncio.TimeoutError:
                     # Check if session is still active
                     if not session.active:
-                        break
+                        # Session ended - but check queue one more time for exit event
+                        # to avoid race condition where exit event was queued but we
+                        # haven't consumed it yet
+                        try:
+                            event = q.get_nowait()
+                            yield event
+                            if event.type == "exit":
+                                break
+                            # Got a non-exit event, continue processing
+                            continue
+                        except asyncio.QueueEmpty:
+                            # No pending events, safe to exit
+                            break
 
         finally:
             with session._lock:
