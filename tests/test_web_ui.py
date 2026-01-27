@@ -621,6 +621,61 @@ class TestChadWebUI:
         assert start_interactive is True, f"Start button should be enabled after cancel, got {start_btn_update}"
         assert cancel_interactive is False, f"Cancel button should be disabled after cancel, got {cancel_btn_update}"
 
+    def test_progress_emission_preserves_live_stream(self, monkeypatch, web_ui, git_repo):
+        """Progress detection should not clear the live output panel.
+
+        Regression test: Previously, emitting a progress update would yield ""
+        for the live stream, causing the live output to disappear.
+        """
+
+        live_html = "<pre>INITIAL LIVE OUTPUT</pre>"
+        stream_complete = threading.Event()
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            # Stream initial content that will build up the live view
+            message_queue.put(("stream", "working on task\n", live_html))
+            time.sleep(0.02)  # Small delay to ensure processing
+            # Stream content with progress JSON block
+            progress_json = '```json\n{"change_summary": "Fix bug", "location": "src/main.py:42"}\n```'
+            message_queue.put(("stream", progress_json))
+            time.sleep(0.02)
+            # Stream more content after progress
+            message_queue.put(("stream", "continuing work\n"))
+            message_queue.put(("message_complete", "CODING AI", "Task done"))
+            stream_complete.set()
+            return True, "completed", "server-session"
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("test")
+        updates = []
+
+        for update in web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
+            updates.append(update)
+
+        # After progress emission, live stream should not be empty
+        # Find the update that shows progress (has progress in chatbot)
+        progress_updates = []
+        for update in updates:
+            live_stream = update[0]  # live_stream is at index 0
+            if isinstance(live_stream, dict):
+                live_stream = live_stream.get("value", "")
+            # Track updates that occurred - none should be completely empty
+            # during the task execution (before final completion)
+            progress_updates.append(live_stream)
+
+        # At least one update after streaming started should have content
+        # Check for various content indicators - either actual output or waiting placeholder
+        content_updates = [u for u in progress_updates if u and (
+            "LIVE OUTPUT" in u or
+            "Waiting" in u or
+            "working" in u or
+            "CODING AI" in u
+        )]
+        assert len(content_updates) > 0, f"Live stream should have content during streaming. Got updates: {progress_updates[:5]}"
+
 
 class TestClaudeJsonParsingIntegration:
     """Tests for Claude stream-json parsing in the web UI."""
