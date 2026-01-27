@@ -204,18 +204,6 @@ body, .gradio-container, .gradio-container * {
   align-items: flex-start !important;
 }
 
-/* Verification column holds cancel button at top */
-.verification-column {
-  position: relative !important;
-}
-
-/* Cancel button in verification column - align right */
-.verification-column .cancel-task-btn,
-.verification-column > div:first-child {
-  display: flex !important;
-  justify-content: flex-end !important;
-  margin-bottom: 4px !important;
-}
 
 .project-setup-column {
   display: grid;
@@ -292,16 +280,6 @@ body, .gradio-container, .gradio-container * {
 }
 
 .cancel-task-btn {
-  background: transparent !important;
-  border: none !important;
-  padding: 0 !important;
-  margin: 0 !important;
-  width: auto !important;
-  min-width: 0 !important;
-  max-width: fit-content !important;
-  display: inline-flex !important;
-  align-items: center !important;
-  justify-content: flex-end !important;
   flex: 0 0 auto !important;
 }
 
@@ -311,67 +289,13 @@ body, .gradio-container, .gradio-container * {
   color: var(--cancel-btn-text) !important;
   -webkit-text-fill-color: var(--cancel-btn-text) !important;
   font-size: 0.85rem !important;
-  min-height: 28px !important;
-  min-width: 110px !important;
-  padding: 6px 12px !important;
-  line-height: 1.1 !important;
-  width: auto !important;
-  max-width: none !important;
-  display: inline-flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-  gap: 6px !important;
+  min-height: 34px !important;
+  padding: 8px 14px !important;
   opacity: 1 !important;
 }
 
-.cancel-task-btn:is(button) {
-  background: var(--cancel-btn-bg) !important;
-  border: 1px solid var(--cancel-btn-border) !important;
-  color: var(--cancel-btn-text) !important;
-  -webkit-text-fill-color: var(--cancel-btn-text) !important;
-  font-size: 0.85rem !important;
-  min-height: 28px !important;
-  min-width: 110px !important;
-  padding: 6px 12px !important;
-  line-height: 1.1 !important;
-  width: auto !important;
-  max-width: none !important;
-  display: inline-flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-  gap: 6px !important;
-  opacity: 1 !important;
-}
-
-.cancel-task-btn button span,
-.cancel-task-btn span {
-  color: inherit !important;
-  -webkit-text-fill-color: inherit !important;
-  opacity: 1 !important;
-  padding: 0 !important;
-  margin: 0 !important;
-}
-
-.cancel-task-btn button span *,
-.cancel-task-btn span * {
-  color: inherit !important;
-  -webkit-text-fill-color: inherit !important;
-  opacity: 1 !important;
-}
-
-.cancel-task-btn button:disabled,
-.cancel-task-btn button[disabled],
-.cancel-task-btn button[aria-disabled="true"],
-.cancel-task-btn button.disabled,
-.cancel-task-btn:disabled,
-.cancel-task-btn[disabled],
-.cancel-task-btn[aria-disabled="true"],
-.cancel-task-btn.disabled {
-  background: var(--cancel-btn-bg) !important;
-  border: 1px solid var(--cancel-btn-border) !important;
-  color: var(--cancel-btn-text) !important;
-  opacity: 1 !important;
-  filter: none !important;
+.cancel-task-btn button:disabled {
+  opacity: 0.5 !important;
 }
 
 .start-task-btn:hover,
@@ -5286,6 +5210,16 @@ class ChadWebUI:
                                 elem_id="role-config-status" if is_first else None,
                                 elem_classes=["role-config-status"],
                             )
+                            cancel_btn = gr.Button(
+                                "Cancel",
+                                variant="stop",
+                                interactive=False,
+                                key=f"cancel-btn-{session_id}",
+                                elem_id="cancel-task-btn" if is_first else None,
+                                elem_classes=["cancel-task-btn"],
+                                min_width=80,
+                                scale=0,
+                            )
                             project_save_btn = gr.Button(
                                 "Save",
                                 variant="primary",
@@ -5338,17 +5272,6 @@ class ChadWebUI:
                             interactive=bool(initial_coding and initial_coding in account_choices),
                         )
                     with gr.Column(scale=1, min_width=200, elem_classes=["verification-column"]):
-                        # Cancel button placed in verification column, floated to right via CSS
-                        cancel_btn = gr.Button(
-                            "🛑 Cancel",
-                            variant="stop",
-                            interactive=False,
-                            key=f"cancel-btn-{session_id}",
-                            elem_id="cancel-task-btn" if is_first else None,
-                            elem_classes=["cancel-task-btn"],
-                            min_width=100,
-                            scale=0,
-                        )
                         verification_agent = gr.Dropdown(
                             choices=verification_choices,
                             value=initial_verification,
