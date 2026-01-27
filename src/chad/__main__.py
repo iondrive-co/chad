@@ -274,19 +274,7 @@ def main() -> int:
             run_server(host=args.api_host, port=args.api_port)
             return 0
 
-        # UI modes need password - verify before starting API
-        main_password = os.environ.get("CHAD_PASSWORD")
-
-        if main_password is None:
-            if config_mgr.is_first_run():
-                main_password = config_mgr.setup_main_password()
-            else:
-                main_password = config_mgr.verify_main_password()
-
-        # Determine UI mode from args or config
-        ui_mode = args.ui if args.ui else config_mgr.get_ui_mode()
-
-        # Handle server URL autodiscovery
+        # Handle server URL autodiscovery early so we can skip password prompt when connecting
         server_url = args.server_url
         if server_url == "auto":
             discovered_port = read_server_port()
@@ -295,6 +283,22 @@ def main() -> int:
                 return 1
             server_url = f"http://127.0.0.1:{discovered_port}"
             print(f"Autodiscovered server at port {discovered_port}")
+
+        # Determine UI mode from args or config
+        ui_mode = args.ui if args.ui else config_mgr.get_ui_mode()
+
+        # UI modes need password only when starting a local API server
+        main_password = None
+        needs_password = server_url is None
+
+        if needs_password:
+            main_password = os.environ.get("CHAD_PASSWORD")
+
+            if main_password is None:
+                if config_mgr.is_first_run():
+                    main_password = config_mgr.setup_main_password()
+                else:
+                    main_password = config_mgr.verify_main_password()
 
         # Run UI with optional local server (--server-url skips local server)
         run_unified(
