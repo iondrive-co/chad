@@ -13,6 +13,7 @@ from chad.util.project_setup import (
     validate_command,
     load_project_config,
     save_project_config,
+    save_project_settings,
     setup_project,
     build_verification_instructions,
     build_doc_reference_text,
@@ -322,3 +323,27 @@ class TestDocsConfig:
         ref_text = build_doc_reference_text(tmp_path)
         assert ref_text is not None
         assert str(tmp_path / "AGENTS.md") in ref_text
+
+    def test_save_project_settings_respects_custom_doc_paths(self, tmp_path, isolated_config):
+        """Custom doc paths saved via project settings should be used in prompts."""
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        custom_instructions = docs_dir / "DEV_GUIDE.md"
+        custom_architecture = tmp_path / "ARCH.md"
+        custom_instructions.write_text("custom instructions", encoding="utf-8")
+        custom_architecture.write_text("arch overview", encoding="utf-8")
+
+        saved = save_project_settings(
+            tmp_path,
+            lint_command="flake8 .",
+            test_command="pytest -q",
+            instructions_path="docs/DEV_GUIDE.md",
+            architecture_path="ARCH.md",
+        )
+
+        assert saved.docs.instructions_path == "docs/DEV_GUIDE.md"
+        assert saved.docs.architecture_path == "ARCH.md"
+
+        ref_text = build_doc_reference_text(tmp_path)
+        assert str(custom_instructions.resolve()) in ref_text
+        assert str(custom_architecture.resolve()) in ref_text

@@ -45,13 +45,11 @@ from chad.util.prompts import (
     VerificationParseError,
 )
 from chad.util.project_setup import (
-    detect_project_type,
     detect_verification_commands,
+    detect_doc_paths,
     validate_command,
     load_project_config,
-    save_project_config,
-    ProjectConfig,
-    VerificationConfig,
+    save_project_settings,
 )
 from chad.util.git_worktree import GitWorktreeManager, MergeConflict, FileDiff
 from .verification.ui_playwright_runner import cleanup_all_test_servers
@@ -898,6 +896,12 @@ body, .gradio-container, .gradio-container * {
   min-width: 0;  /* Allow text to shrink so session log can have space */
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.role-status-row button,
+.role-status-row .download-button,
+.role-status-row a[download] {
+  white-space: nowrap !important;
 }
 
 #session-log-btn,
@@ -5145,6 +5149,9 @@ class ChadWebUI:
                         initial_lint = initial_detected.get("lint_command") or ""
                         initial_test = initial_detected.get("test_command") or ""
                         initial_type = initial_detected.get("project_type", "unknown")
+                        initial_docs = detect_doc_paths(Path(default_path).expanduser().resolve())
+                        initial_instructions = initial_docs.instructions_path or ""
+                        initial_architecture = initial_docs.architecture_path or ""
 
                         project_path = gr.Textbox(
                             label=self._format_project_label(initial_type),
@@ -5208,6 +5215,21 @@ class ChadWebUI:
                                     key=f"test-status-{session_id}",
                                     elem_classes=["command-status", "test-command-status"],
                                 )
+                        with gr.Row(elem_classes=["doc-paths-row"], equal_height=True):
+                            instructions_input = gr.Textbox(
+                                label="Agent Instructions Path",
+                                value=initial_instructions,
+                                placeholder="AGENTS.md",
+                                key=f"instructions-path-{session_id}",
+                                elem_classes=["doc-path-input", "instructions-path-input"],
+                            )
+                            architecture_input = gr.Textbox(
+                                label="Architecture Doc Path",
+                                value=initial_architecture,
+                                placeholder="docs/ARCHITECTURE.md",
+                                key=f"architecture-path-{session_id}",
+                                elem_classes=["doc-path-input", "architecture-path-input"],
+                            )
                         with gr.Row(
                             elem_id="role-status-row" if is_first else None,
                             elem_classes=["role-status-row"],
@@ -5510,6 +5532,8 @@ class ChadWebUI:
                     gr.update(label=self._format_project_label("enter path")),
                     gr.update(value=""),
                     gr.update(value=""),
+                    gr.update(value=""),
+                    gr.update(value=""),
                     "",
                     "",
                 )
@@ -5519,6 +5543,8 @@ class ChadWebUI:
                     gr.update(label=self._format_project_label("not found")),
                     gr.update(value=""),
                     gr.update(value=""),
+                    gr.update(value=""),
+                    gr.update(value=""),
                     "",
                     "",
                 )
@@ -5526,20 +5552,26 @@ class ChadWebUI:
             # Try loading existing config first
             config = load_project_config(path_obj)
             if config:
+                docs = config.docs or detect_doc_paths(path_obj)
                 return (
                     gr.update(label=self._format_project_label(f"{config.project_type} (saved)")),
                     gr.update(value=config.verification.lint_command or ""),
                     gr.update(value=config.verification.test_command or ""),
+                    gr.update(value=(docs.instructions_path or "")),
+                    gr.update(value=(docs.architecture_path or "")),
                     "",
                     "",
                 )
 
             # Auto-detect
             detected = detect_verification_commands(path_obj)
+            detected_docs = detect_doc_paths(path_obj)
             return (
                 gr.update(label=self._format_project_label(detected["project_type"])),
                 gr.update(value=detected.get("lint_command") or ""),
                 gr.update(value=detected.get("test_command") or ""),
+                gr.update(value=detected_docs.instructions_path or ""),
+                gr.update(value=detected_docs.architecture_path or ""),
                 "",
                 "",
             )
@@ -5547,7 +5579,15 @@ class ChadWebUI:
         project_path.change(
             on_project_path_change,
             inputs=[project_path],
-            outputs=[project_path, lint_cmd_input, test_cmd_input, lint_status, test_status],
+            outputs=[
+                project_path,
+                lint_cmd_input,
+                test_cmd_input,
+                instructions_input,
+                architecture_input,
+                lint_status,
+                test_status,
+            ],
         )
 
         def on_lint_test(path_val, lint_cmd):
@@ -5580,28 +5620,25 @@ class ChadWebUI:
             outputs=[test_status],
         )
 
-        def on_project_save(path_val, lint_cmd, test_cmd):
+        def on_project_save(path_val, lint_cmd, test_cmd, instructions_path_val, architecture_path_val):
             if not path_val:
                 return "Enter a project path"
             path_obj = Path(path_val).expanduser().resolve()
             if not path_obj.exists():
                 return "Path not found"
 
-            ptype = detect_project_type(path_obj)
-            config = ProjectConfig(
-                project_type=ptype,
-                verification=VerificationConfig(
-                    lint_command=lint_cmd or None,
-                    test_command=test_cmd or None,
-                    validated=True,
-                ),
+            saved = save_project_settings(
+                path_obj,
+                lint_command=lint_cmd or None,
+                test_command=test_cmd or None,
+                instructions_path=instructions_path_val or None,
+                architecture_path=architecture_path_val or None,
             )
-            save_project_config(path_obj, config)
-            return "Project settings saved"
+            return f"Project settings saved (type: {saved.project_type})"
 
         project_save_btn.click(
             on_project_save,
-            inputs=[project_path, lint_cmd_input, test_cmd_input],
+            inputs=[project_path, lint_cmd_input, test_cmd_input, instructions_input, architecture_input],
             outputs=[role_status],
         )
 
