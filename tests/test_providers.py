@@ -208,9 +208,10 @@ def test_strip_ansi_codes_helper():
     colored = "\x1b[31mError\x1b[0m message"
     assert _strip_ansi_codes(colored) == "Error message"
 
-    def test_parse_codex_output_preserves_multiline_content(self):
-        """Test that multiline response content is preserved, thinking is consolidated."""
-        raw_output = """thinking
+
+def test_parse_codex_output_preserves_multiline_content():
+    """Test that multiline response content is preserved, thinking is consolidated."""
+    raw_output = """thinking
 This is line 1
 This is line 2
 
@@ -223,34 +224,36 @@ Response line 2
 Response after blank line
 tokens used: 1234
 """
-        result = parse_codex_output(raw_output)
-        # Thinking is consolidated into one line (spaces replace newlines)
-        assert "*Thinking: This is line 1 This is line 2 And after blank line*" in result
-        # Response preserves line breaks
-        assert "Response line 1" in result
-        assert "Response line 2" in result
-        assert "Response after blank line" in result
-        assert "1234" not in result
+    result = parse_codex_output(raw_output)
+    # Thinking is consolidated into one line (spaces replace newlines)
+    assert "*Thinking: This is line 1 This is line 2 And after blank line*" in result
+    # Response preserves line breaks
+    assert "Response line 1" in result
+    assert "Response line 2" in result
+    assert "Response after blank line" in result
+    assert "1234" not in result
 
-    def test_parse_codex_output_malformed_markers(self):
-        """Test that words containing markers like 'prethinking' or 'mycodex' don't trigger section parsing."""
-        raw_output = """thinking
+
+def test_parse_codex_output_malformed_markers():
+    """Test that words containing markers like 'prethinking' or 'mycodex' don't trigger section parsing."""
+    raw_output = """thinking
 prethinking about this problem
 
 codex
 This solution uses mycodex pattern
 """
-        result = parse_codex_output(raw_output)
-        # Should contain the text inside proper sections
-        assert "*Thinking: prethinking about this problem*" in result
-        assert "This solution uses mycodex pattern" in result
-        # The words themselves should be preserved within the sections
-        assert "prethinking" in result
-        assert "mycodex" in result
+    result = parse_codex_output(raw_output)
+    # Should contain the text inside proper sections
+    assert "*Thinking: prethinking about this problem*" in result
+    assert "This solution uses mycodex pattern" in result
+    # The words themselves should be preserved within the sections
+    assert "prethinking" in result
+    assert "mycodex" in result
 
-    def test_parse_codex_output_exec_preserves_non_command_output(self):
-        """Test that exec blocks are skipped but human-readable content is preserved."""
-        raw_output = """thinking
+
+def test_parse_codex_output_exec_preserves_non_command_output():
+    """Test that exec blocks are skipped but human-readable content is preserved."""
+    raw_output = """thinking
 Planning to execute
 
 exec
@@ -265,18 +268,19 @@ After exec section
 codex
 Final answer
 """
-        result = parse_codex_output(raw_output)
-        assert "*Thinking: Planning to execute*" in result
-        assert "*Thinking: After exec section*" in result
-        assert "Final answer" in result
-        # Should NOT contain exec output
-        assert "file1.py" not in result
-        assert "file2.py" not in result
-        assert "succeeded in 26ms" not in result
+    result = parse_codex_output(raw_output)
+    # Thinking sections are consolidated with arrows
+    assert "*Thinking: Planning to execute → After exec section*" in result
+    assert "Final answer" in result
+    # Should NOT contain exec output
+    assert "file1.py" not in result
+    assert "file2.py" not in result
+    assert "succeeded in 26ms" not in result
 
-    def test_parse_codex_output_mixed_token_formats(self):
-        """Test various token usage formats are filtered out."""
-        raw_output = """thinking
+
+def test_parse_codex_output_mixed_token_formats():
+    """Test various token usage formats are filtered out."""
+    raw_output = """thinking
 Planning
 
 codex
@@ -287,15 +291,15 @@ tokens used: 5678
 tokens used
 10,000
 """
-        result = parse_codex_output(raw_output)
-        assert "*Thinking: Planning*" in result
-        assert "Here is the response" in result
-        # All token formats should be filtered
-        assert "1234" not in result
-        assert "5678" not in result
-        assert "9,999" not in result
-        assert "10,000" not in result
-        assert "tokens used" not in result
+    result = parse_codex_output(raw_output)
+    assert "*Thinking: Planning*" in result
+    assert "Here is the response" in result
+    # All token formats should be filtered
+    assert "1234" not in result
+    assert "5678" not in result
+    assert "9,999" not in result
+    assert "10,000" not in result
+    assert "tokens used" not in result
 
 
 class TestClaudeCodeProvider:
