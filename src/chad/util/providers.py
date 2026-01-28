@@ -1655,18 +1655,18 @@ class QwenCodeProvider(AIProvider):
 
         qwen_cli = getattr(self, "cli_path", None) or find_cli_executable("qwen")
 
-        # Build command - use -p "" to trigger non-interactive mode
-        # The prompt is passed via stdin to handle long prompts with special chars
-        # -p "" (empty) triggers non-interactive mode while stdin provides the actual prompt
+        # Build command - pass prompt directly to -p for non-interactive mode
+        # Using stdin doesn't work reliably because qwen checks stdin at startup
+        # before we can send data via PTY (see task_executor.py)
         if self.session_id:
             cmd = [
                 qwen_cli,
                 "--output-format",
                 "stream-json",
                 "--yolo",  # Auto-approve all tool calls (required for non-interactive)
-                "-p", "",  # Empty -p triggers non-interactive mode, stdin has real prompt
                 "--resume",
                 self.session_id,
+                "-p", self.current_message,
             ]
         else:
             cmd = [
@@ -1674,7 +1674,7 @@ class QwenCodeProvider(AIProvider):
                 "--output-format",
                 "stream-json",
                 "--yolo",  # Auto-approve all tool calls
-                "-p", "",  # Empty -p triggers non-interactive mode, stdin has real prompt
+                "-p", self.current_message,
             ]
             if self.config.model_name and self.config.model_name != "default":
                 cmd.extend(["-m", self.config.model_name])
@@ -1730,10 +1730,8 @@ class QwenCodeProvider(AIProvider):
 
             self.process, self.master_fd = _start_pty_process(cmd, cwd=self.project_path, env=env)
 
-            # Pass prompt via stdin to handle long prompts and special characters
+            # Close stdin immediately - prompt is passed via -p argument
             if self.process.stdin:
-                self.process.stdin.write(self.current_message.encode("utf-8"))
-                self.process.stdin.flush()
                 self.process.stdin.close()
 
             output, timed_out, idle_stalled = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)

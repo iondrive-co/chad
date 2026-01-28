@@ -23,6 +23,8 @@ class TaskCreate(BaseModel):
     # Terminal dimensions for PTY - should match client's actual terminal size
     terminal_rows: int | None = Field(default=None, ge=10, le=500, description="Terminal rows (height)")
     terminal_cols: int | None = Field(default=None, ge=40, le=500, description="Terminal columns (width)")
+    # Screenshots for the agent to reference
+    screenshots: list[str] | None = Field(default=None, description="List of screenshot file paths")
 
 
 class TaskStatusResponse(BaseModel):

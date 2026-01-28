@@ -723,7 +723,7 @@ class TestMockProviderFullIntegration:
         assert task_id is not None
 
         # 4. Wait for task to complete (mock agent is fast)
-        time.sleep(2)
+        time.sleep(1)
 
         # 5. Get task status
         status_resp = client.get(f"/api/v1/sessions/{session_id}/tasks/{task_id}")
@@ -758,7 +758,7 @@ class TestMockProviderFullIntegration:
         assert task_resp.status_code == 201
 
         # Wait for task to complete
-        time.sleep(2)
+        time.sleep(1)
 
         # Verify events were logged (the real SSE tests are in TestEndToEndSSEStreaming)
         events_resp = client.get(f"/api/v1/sessions/{session_id}/events")
@@ -872,6 +872,7 @@ class TestPlainTextTerminalEvents:
                 coding_reasoning=None,
                 terminal_rows=None,
                 terminal_cols=None,
+                screenshots=None,
             ):
                 return None
 
@@ -937,7 +938,7 @@ class TestEndToEndSSEStreaming:
         assert task_resp.status_code == 201
 
         # Wait for task to complete and then verify via EventLog
-        time.sleep(3)
+        time.sleep(1)
 
         # Get events from the EventLog API
         response = client.get(f"/api/v1/sessions/{session_id}/events")
@@ -1057,7 +1058,7 @@ class TestEventLogAPI:
         assert task_resp.status_code == 201
 
         # Wait for task to complete
-        time.sleep(3)
+        time.sleep(1)
 
         # Get events
         response = client.get(f"/api/v1/sessions/{session_id}/events")
@@ -1096,7 +1097,7 @@ class TestEventLogAPI:
         )
 
         # Wait for task
-        time.sleep(3)
+        time.sleep(1)
 
         # Get all events first
         all_response = client.get(f"/api/v1/sessions/{session_id}/events")
@@ -1132,7 +1133,7 @@ class TestEventLogAPI:
             },
         )
 
-        time.sleep(3)
+        time.sleep(1)
 
         # Filter to only terminal_output
         response = client.get(
@@ -1166,7 +1167,7 @@ class TestAgentHandover:
             },
         )
 
-        time.sleep(3)
+        time.sleep(1)
 
         # Get events
         response = client.get(f"/api/v1/sessions/{session_id}/events")
@@ -1211,7 +1212,7 @@ class TestAgentHandover:
             },
         )
 
-        time.sleep(3)
+        time.sleep(1)
 
         # Get Agent 1's events
         agent1_events = client.get(f"/api/v1/sessions/{session1_id}/events").json()["events"]
@@ -1244,7 +1245,7 @@ class TestAgentHandover:
             },
         )
 
-        time.sleep(3)
+        time.sleep(1)
 
         # Agent 2 should have its own events
         agent2_events = client.get(f"/api/v1/sessions/{session2_id}/events").json()["events"]

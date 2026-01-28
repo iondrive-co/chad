@@ -35,6 +35,7 @@ from chad.util.event_log import (
 from chad.util.providers import ModelConfig, parse_codex_output, create_provider
 from chad.util.model_catalog import ModelCatalog
 from chad.util.prompts import (
+    build_coding_prompt,
     extract_coding_summary,
     extract_progress_update,
     check_verification_mentioned,
@@ -42,6 +43,13 @@ from chad.util.prompts import (
     parse_verification_response,
     ProgressUpdate,
     VerificationParseError,
+)
+from chad.util.project_setup import (
+    detect_verification_commands,
+    detect_doc_paths,
+    validate_command,
+    load_project_config,
+    save_project_settings,
 )
 from chad.util.git_worktree import GitWorktreeManager, MergeConflict, FileDiff
 from .verification.ui_playwright_runner import cleanup_all_test_servers
@@ -70,6 +78,11 @@ class Session:
     worktree_base_commit: str | None = None  # Commit SHA worktree was created from
     has_worktree_changes: bool = False
     merge_conflicts: list[MergeConflict] | None = None
+    # Prompt tracking for display
+    last_coding_prompt: str | None = None
+    last_verification_prompt: str | None = None
+    # Live stream DOM patching support - track if initial render is done
+    has_initial_live_render: bool = False
 
     @property
     def log_path(self) -> Path | None:
@@ -184,6 +197,76 @@ body, .gradio-container, .gradio-container * {
   font-family: 'JetBrains Mono', monospace !important;
 }
 
+.run-top-row {
+  gap: 12px !important;
+  align-items: flex-start !important;
+}
+
+
+.project-setup-column {
+  display: grid;
+  gap: 10px;
+}
+
+.project-path-input label {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-weight: 600;
+}
+
+.project-commands-row {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  gap: 12px !important;
+  align-items: start !important;
+}
+
+.command-column {
+  display: grid;
+  gap: 6px;
+}
+
+.command-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+}
+
+.command-label {
+  margin: 0;
+  font-weight: 600;
+  font-size: 0.9rem;
+  line-height: 1.2;
+}
+
+.command-test-btn button,
+.command-test-btn {
+  min-height: 28px !important;
+  padding: 6px 10px !important;
+}
+
+.command-input textarea,
+.command-input input {
+  min-height: 44px;
+}
+
+.command-status {
+  margin: 0;
+  min-height: 18px;
+  font-size: 0.9rem;
+}
+
+.project-save-btn button,
+.project-save-btn {
+  min-height: 34px !important;
+  width: auto !important;
+  padding: 8px 14px !important;
+}
+
 .start-task-btn,
 .start-task-btn button {
   background: var(--task-btn-bg) !important;
@@ -195,16 +278,6 @@ body, .gradio-container, .gradio-container * {
 }
 
 .cancel-task-btn {
-  background: transparent !important;
-  border: none !important;
-  padding: 0 !important;
-  margin: 0 !important;
-  width: auto !important;
-  min-width: 0 !important;
-  max-width: fit-content !important;
-  display: inline-flex !important;
-  align-items: center !important;
-  justify-content: flex-end !important;
   flex: 0 0 auto !important;
 }
 
@@ -214,67 +287,13 @@ body, .gradio-container, .gradio-container * {
   color: var(--cancel-btn-text) !important;
   -webkit-text-fill-color: var(--cancel-btn-text) !important;
   font-size: 0.85rem !important;
-  min-height: 28px !important;
-  min-width: 110px !important;
-  padding: 6px 12px !important;
-  line-height: 1.1 !important;
-  width: auto !important;
-  max-width: none !important;
-  display: inline-flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-  gap: 6px !important;
+  min-height: 34px !important;
+  padding: 8px 14px !important;
   opacity: 1 !important;
 }
 
-.cancel-task-btn:is(button) {
-  background: var(--cancel-btn-bg) !important;
-  border: 1px solid var(--cancel-btn-border) !important;
-  color: var(--cancel-btn-text) !important;
-  -webkit-text-fill-color: var(--cancel-btn-text) !important;
-  font-size: 0.85rem !important;
-  min-height: 28px !important;
-  min-width: 110px !important;
-  padding: 6px 12px !important;
-  line-height: 1.1 !important;
-  width: auto !important;
-  max-width: none !important;
-  display: inline-flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-  gap: 6px !important;
-  opacity: 1 !important;
-}
-
-.cancel-task-btn button span,
-.cancel-task-btn span {
-  color: inherit !important;
-  -webkit-text-fill-color: inherit !important;
-  opacity: 1 !important;
-  padding: 0 !important;
-  margin: 0 !important;
-}
-
-.cancel-task-btn button span *,
-.cancel-task-btn span * {
-  color: inherit !important;
-  -webkit-text-fill-color: inherit !important;
-  opacity: 1 !important;
-}
-
-.cancel-task-btn button:disabled,
-.cancel-task-btn button[disabled],
-.cancel-task-btn button[aria-disabled="true"],
-.cancel-task-btn button.disabled,
-.cancel-task-btn:disabled,
-.cancel-task-btn[disabled],
-.cancel-task-btn[aria-disabled="true"],
-.cancel-task-btn.disabled {
-  background: var(--cancel-btn-bg) !important;
-  border: 1px solid var(--cancel-btn-border) !important;
-  color: var(--cancel-btn-text) !important;
-  opacity: 1 !important;
-  filter: none !important;
+.cancel-task-btn button:disabled {
+  opacity: 0.5 !important;
 }
 
 .start-task-btn:hover,
@@ -503,6 +522,14 @@ body, .gradio-container, .gradio-container * {
 /* Live stream box visibility controlled by :empty pseudo-selector */
 .live-stream-box:empty {
   display: none !important;
+}
+
+.live-patch-trigger {
+  display: none !important;
+  visibility: hidden !important;
+  width: 0 !important;
+  height: 0 !important;
+  overflow: hidden !important;
 }
 
 #live-stream-box,
@@ -869,6 +896,12 @@ body, .gradio-container, .gradio-container * {
   min-width: 0;  /* Allow text to shrink so session log can have space */
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.role-status-row button,
+.role-status-row .download-button,
+.role-status-row a[download] {
+  white-space: nowrap !important;
 }
 
 #session-log-btn,
@@ -1707,8 +1740,14 @@ def highlight_code_syntax(html_content: str) -> str:
     return html_content
 
 
-def build_live_stream_html(content: str, ai_name: str = "CODING AI") -> str:
-    """Render live stream text as HTML with consistent spacing and header."""
+def build_live_stream_html(content: str, ai_name: str = "CODING AI", live_id: str | None = None) -> str:
+    """Render live stream text as HTML with consistent spacing and header.
+
+    Args:
+        content: Text content to render
+        ai_name: Name shown in the header
+        live_id: Optional ID for DOM patching (enables scroll preservation)
+    """
     cleaned = normalize_live_stream_spacing(content)
     if not cleaned.strip():
         return ""
@@ -1720,16 +1759,31 @@ def build_live_stream_html(content: str, ai_name: str = "CODING AI") -> str:
     html_content = highlight_code_syntax(html_content)
     header = f'<div class="live-output-header">▶ {ai_name} (Live Stream)</div>'
     body = f'<div class="live-output-content">{html_content}</div>'
-    return f"{header}\n{body}"
+    wrapper_attr = f' data-live-id="{live_id}"' if live_id else ''
+    return f'<div class="live-output-wrapper"{wrapper_attr}>{header}\n{body}</div>'
 
 
-def build_live_stream_html_from_pyte(content_html: str, ai_name: str = "CODING AI") -> str:
-    """Render live stream HTML generated by pyte with a consistent header."""
+def build_live_stream_html_from_pyte(content_html: str, ai_name: str = "CODING AI", live_id: str | None = None) -> str:
+    """Render live stream HTML generated by pyte with a consistent header.
+
+    Args:
+        content_html: HTML content from pyte terminal emulator or escaped text
+        ai_name: Name shown in the header
+        live_id: Optional ID for DOM patching (enables scroll preservation)
+    """
     if not content_html or not content_html.strip():
+        return ""
+    # Normalize spacing - remove blank lines for compact display
+    # Works for both pyte HTML and escaped text content
+    lines = content_html.split('\n')
+    normalized_lines = [line for line in lines if line.strip()]
+    content_html = '\n'.join(normalized_lines)
+    if not content_html.strip():
         return ""
     header = f'<div class="live-output-header">▶ {ai_name} (Live Stream)</div>'
     body = f'<div class="live-output-content">{content_html}</div>'
-    return f"{header}\n{body}"
+    wrapper_attr = f' data-live-id="{live_id}"' if live_id else ''
+    return f'<div class="live-output-wrapper"{wrapper_attr}>{header}\n{body}</div>'
 
 
 def image_to_data_url(path: str | None) -> str | None:
@@ -1936,6 +1990,12 @@ class ChadWebUI:
         # Stream client for API-based task execution (same method as CLI)
         self._stream_client: SyncStreamClient | None = None
 
+    @staticmethod
+    def _format_project_label(project_type: str) -> str:
+        """Return compact project path label including detected type."""
+        type_display = project_type or "unknown"
+        return f"Project Path (Type: {type_display})"
+
     def _get_stream_client(self) -> SyncStreamClient:
         """Get or create the stream client for API-based task execution.
 
@@ -2004,6 +2064,7 @@ class ChadWebUI:
         coding_reasoning: str | None = None,
         server_session_id: str | None = None,
         terminal_cols: int | None = None,
+        screenshots: list[str] | None = None,
     ) -> tuple[bool, str, str | None]:
         """Run a task via the API and post events to the message queue.
 
@@ -2019,6 +2080,7 @@ class ChadWebUI:
             coding_model: Optional model override
             coding_reasoning: Optional reasoning level
             terminal_cols: Terminal width in columns (calculated from panel width)
+            screenshots: Optional list of screenshot file paths for agent reference
 
         Returns:
             Tuple of (success, final_output_text, server_session_id)
@@ -2052,6 +2114,7 @@ class ChadWebUI:
                 coding_reasoning=coding_reasoning,
                 terminal_rows=TERMINAL_ROWS,
                 terminal_cols=effective_cols,
+                screenshots=screenshots,
             )
         except Exception as e:
             message_queue.put(("status", f"❌ Failed to start task: {e}"))
@@ -2064,6 +2127,7 @@ class ChadWebUI:
         # Stream output via SSE using server session ID
         stream_client = self._get_stream_client()
         exit_code = 0
+        got_complete_event = False
 
         # Detect if this is a provider that outputs stream-json (needs parsing)
         # Both anthropic (Claude) and qwen use similar JSON formats
@@ -2116,6 +2180,7 @@ class ChadWebUI:
 
                 elif event.event_type == "complete":
                     exit_code = event.data.get("exit_code", 0)
+                    got_complete_event = True
                     break
 
                 elif event.event_type == "error":
@@ -2128,6 +2193,16 @@ class ChadWebUI:
                     event_type = event.data.get("type", "")
                     if event_type == "session_started":
                         pass  # Already handled by task start
+                    elif event_type == "terminal_output":
+                        # Fallback for parsed terminal output from EventLog
+                        # This ensures content is shown even if raw PTY parsing fails
+                        data = event.data.get("data", "")
+                        if data and data.strip():
+                            # For JSON providers, use the already-parsed EventLog text
+                            if json_parser:
+                                accumulated_text = [data]  # Replace with EventLog content
+                                html_output = html.escape(data)
+                                message_queue.put(("stream", data, html_output))
                     elif event_type == "tool_call_started":
                         tool = event.data.get("tool", "")
                         if tool == "bash":
@@ -2140,6 +2215,13 @@ class ChadWebUI:
         except Exception as e:
             message_queue.put(("status", f"❌ Stream error: {e}"))
             return False, str(e), server_session_id
+
+        # Check if stream ended without completion event - this indicates a bug
+        # where the SSE stream dropped unexpectedly (e.g., PTY session marked inactive
+        # prematurely). Don't treat this as success or verification will start early.
+        if not got_complete_event:
+            message_queue.put(("status", "❌ Stream ended unexpectedly without completion"))
+            return False, "Stream ended unexpectedly", server_session_id
 
         # Get plain text for final output
         if terminal:
@@ -2237,27 +2319,12 @@ class ChadWebUI:
     def _read_project_docs(self, project_path: Path) -> str | None:
         """Read project documentation if present.
 
-        Reads AGENTS.md, .claude/CLAUDE.md, or CLAUDE.md from the project.
-        Returns the first file found, or None if no documentation exists.
+        Returns a short reference section pointing to on-disk docs instead of
+        inlining their content.
         """
-        doc_files = [
-            project_path / "AGENTS.md",
-            project_path / ".claude" / "CLAUDE.md",
-            project_path / "CLAUDE.md",
-        ]
+        from chad.util.project_setup import build_doc_reference_text
 
-        for doc_file in doc_files:
-            if doc_file.exists():
-                try:
-                    content = doc_file.read_text(encoding="utf-8")
-                    # Limit content to avoid overwhelming the context
-                    if len(content) > 8000:
-                        content = content[:8000] + "\n\n[...truncated...]"
-                    return content
-                except (OSError, UnicodeDecodeError):
-                    continue
-
-        return None
+        return build_doc_reference_text(project_path)
 
     def _run_verification(
         self,
@@ -2704,6 +2771,7 @@ class ChadWebUI:
         verification_model: str | None = None,
         verification_reasoning: str | None = None,
         terminal_cols: int | None = None,
+        screenshots: list[str] | None = None,
     ) -> Iterator[
         tuple[
             list,
@@ -2726,6 +2794,50 @@ class ChadWebUI:
         session.cancel_requested = False
         session.config = None
 
+        # Check if there's already an active task on the server for this session
+        # This prevents accidental double-starts when generators get interrupted
+        if session.server_session_id:
+            try:
+                server_session = self.api_client.get_session(session.server_session_id)
+                if server_session and server_session.active:
+                    # Task is still running - cancel it first or warn user
+                    error_msg = (
+                        "⚠️ A task is already running on this session.\n\n"
+                        "Please wait for it to complete or cancel it before starting a new task."
+                    )
+                    # We need to define make_yield before using it, so just return early
+                    # with a simple error
+                    yield (
+                        [],  # chatbot
+                        error_msg,  # task_status
+                        gr.update(),  # live_stream
+                        gr.update(),  # project_path
+                        gr.update(),  # task_description
+                        gr.update(interactive=True),  # start_btn
+                        gr.update(interactive=False),  # cancel_btn
+                        gr.update(),  # role_status
+                        gr.update(),  # summary
+                        gr.update(),  # followup_row
+                        gr.update(),  # followup_btn
+                        gr.update(),  # merge_row
+                        gr.update(),  # merge_summary
+                        gr.update(),  # branch_dropdown
+                        gr.update(),  # diff_full_content
+                        gr.update(),  # merge_section_header
+                        gr.update(),  # live_patch_trigger
+                        gr.update(),  # coding_prompt_accordion
+                        gr.update(),  # coding_prompt_content
+                        gr.update(),  # verification_prompt_accordion
+                        gr.update(),  # verification_prompt_content
+                    )
+                    return
+            except Exception:
+                # Session might not exist on server yet, which is fine
+                pass
+
+        # Stable live_id for DOM patching across the session
+        live_stream_id = f"live-{session.id}"
+
         def make_yield(
             history,
             status: str,
@@ -2740,6 +2852,8 @@ class ChadWebUI:
             live_patch: tuple[str, str] | None = None,
             task_state: str | None = None,
             task_ended: bool = False,
+            coding_prompt: str | None = None,
+            verification_prompt: str | None = None,
         ):
             """Format output tuple for Gradio with current UI state.
 
@@ -2748,18 +2862,45 @@ class ChadWebUI:
                            When provided, JavaScript will patch the container with
                            data-live-id=live_id using the inner_html content,
                            preserving scroll position and text selection.
+                           The live_stream value is ignored when patching is active.
                 task_state: Optional task state (running, verifying, completed, failed)
                            for dynamic status display.
                 task_ended: When True, task has completed/failed/cancelled and buttons
                            should allow starting a new task (start enabled, cancel disabled).
             """
-            display_stream = live_stream
+            # Automatic live_patch handling for scroll/selection preservation
+            # - First render with content: normal Gradio update, set initial_render flag
+            # - Subsequent renders: use live_patch for JS DOM patching
+            use_live_patch = live_patch  # Explicit live_patch takes precedence
+
+            if not use_live_patch and live_stream:
+                # Check if this live_stream has our wrapper with data-live-id
+                has_live_id = f'data-live-id="{live_stream_id}"' in live_stream
+                if has_live_id:
+                    if session.has_initial_live_render:
+                        # After initial render, use live_patch for updates
+                        use_live_patch = (live_stream_id, live_stream)
+                    else:
+                        # First render with content - do normal Gradio update
+                        session.has_initial_live_render = True
+
+            # When task ends, reset initial render flag for next task
+            if task_ended:
+                session.has_initial_live_render = False
+
+            # When live_patch is provided, skip updating the live_stream component directly
+            # JS will handle patching the DOM in-place to preserve scroll/selection
+            if use_live_patch:
+                display_stream = None  # Signal to use gr.update() without value
+                live_patch = use_live_patch
+            else:
+                display_stream = live_stream
             is_error = "❌" in status
             # Get worktree path for status display
             wt_path = str(session.worktree_path) if session.worktree_path else None
             display_role_status = self.format_role_status(task_state, wt_path)
             log_btn_update = gr.update(
-                label=f"📄 {session.log_path.name}" if session.log_path else "Session Log",
+                label=session.log_path.name if session.log_path else "Session Log",
                 value=str(session.log_path) if session.log_path else None,
                 visible=session.log_path is not None,
             )
@@ -2787,8 +2928,11 @@ class ChadWebUI:
             # regardless of the `interactive` flag (which controls input fields)
             start_btn_interactive = True if task_ended else interactive
             cancel_btn_interactive = False if task_ended else not interactive
+            # When display_stream is None (patching mode), don't update the live_stream value
+            # This allows JS to patch the DOM in-place without Gradio replacing it
+            live_stream_update = gr.update() if display_stream is None else gr.update(value=display_stream)
             return (
-                gr.update(value=display_stream),  # live_stream - Use gr.update for proper streaming to Markdown
+                live_stream_update,  # live_stream - Updated by JS patching when live_patch is provided
                 display_history,  # chatbot
                 # Task status - always visible in DOM, CSS :empty hides when blank
                 gr.update(value=status if is_error else ""),
@@ -2807,6 +2951,12 @@ class ChadWebUI:
                 gr.update(value=diff_full),  # Full diff content
                 header_text,  # merge_section_header - dynamic header
                 patch_html,  # live_patch_trigger - JS reads this to patch content
+                # Prompt accordions - show when prompts are provided
+                # Prompts are rendered as markdown directly since they contain markdown content
+                gr.update(visible=True) if coding_prompt else gr.update(),
+                gr.update(value=coding_prompt) if coding_prompt else gr.update(),
+                gr.update(visible=True) if verification_prompt else gr.update(),
+                gr.update(value=verification_prompt) if verification_prompt else gr.update(),
             )
 
         try:
@@ -2907,8 +3057,16 @@ class ChadWebUI:
             chat_history.append({"role": "user", "content": f"**Task**\n\n{task_description}"})
             session.event_log.log(UserMessageEvent(content=task_description))
 
+            # Build the coding prompt for display
+            project_docs = self._read_project_docs(path_obj)
+            display_coding_prompt = build_coding_prompt(task_description, project_docs, str(path_obj))
+            session.last_coding_prompt = display_coding_prompt
+
             initial_status = f"{status_prefix}⏳ Initializing session..."
-            yield make_yield(chat_history, initial_status, summary=initial_status, interactive=False, task_state="running")
+            yield make_yield(
+                chat_history, initial_status, summary=initial_status, interactive=False,
+                task_state="running", coding_prompt=display_coding_prompt,
+            )
 
             # Use the streaming API to run the task
             # This ensures both CLI and Gradio UI use the same PTY-based execution path
@@ -2929,6 +3087,7 @@ class ChadWebUI:
                         coding_model=selected_model if selected_model != "default" else None,
                         coding_reasoning=selected_reasoning if selected_reasoning != "default" else None,
                         terminal_cols=terminal_cols,
+                        screenshots=screenshots,
                     )
                     task_success[0] = success
                     coding_final_output[0] = output
@@ -3086,7 +3245,7 @@ class ChadWebUI:
                             full_history.append(_history_entry(current_ai, chunk))
                             display_buffer.append(chunk)
                             if not html_chunk:
-                                current_live_stream = build_live_stream_html(display_buffer.content, current_ai)
+                                current_live_stream = build_live_stream_html(display_buffer.content, current_ai, live_stream_id)
                                 if current_live_stream:
                                     last_live_stream = current_live_stream
 
@@ -3106,14 +3265,16 @@ class ChadWebUI:
                                         render_state.reset()
                                     else:
                                         chat_history.append(progress_msg)
-                                    yield make_yield(chat_history, current_status, "", task_state="running")
+                                    # Keep showing last live stream content while buffers reset
+                                    # Don't yield "" which clears the UI during the gap before new content arrives
+                                    yield make_yield(chat_history, current_status, last_live_stream, task_state="running")
                                     last_yield_time = time_module.time()
 
                         # Track current live stream content for the dedicated panel
                         # Must be outside chunk.strip() check - terminal can have valid HTML
                         # even when raw text is empty (e.g., cursor movements, screen updates)
                         if html_chunk:
-                            current_live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai)
+                            current_live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai, live_stream_id)
                             if current_live_stream:
                                 last_live_stream = current_live_stream
 
@@ -3133,11 +3294,11 @@ class ChadWebUI:
                             # Update only the dedicated live stream panel with activity
                             if latest_pyte_html:
                                 combined_html = latest_pyte_html + f"\n\n{html.escape(last_activity)}"
-                                activity_stream = build_live_stream_html_from_pyte(combined_html, current_ai)
+                                activity_stream = build_live_stream_html_from_pyte(combined_html, current_ai, live_stream_id)
                             else:
                                 display_content = display_buffer.content
                                 content = f"{display_content}\n\n{last_activity}" if display_content else last_activity
-                                activity_stream = build_live_stream_html(content, current_ai)
+                                activity_stream = build_live_stream_html(content, current_ai, live_stream_id)
                             if activity_stream:
                                 last_live_stream = activity_stream
                                 yield make_yield(chat_history, current_status, activity_stream, task_state="running")
@@ -3152,7 +3313,7 @@ class ChadWebUI:
                         display = current_live_stream or last_live_stream
                         if not display:
                             # Show waiting placeholder so user knows task is running
-                            display = build_live_stream_html("⏳ Waiting for agent output...", current_ai)
+                            display = build_live_stream_html("⏳ Waiting for agent output...", current_ai, live_stream_id)
                         yield make_yield(chat_history, current_status, display, task_state="running")
                         last_yield_time = now
 
@@ -3182,7 +3343,7 @@ class ChadWebUI:
                         chunk = pending_msg[1]
                         html_chunk = pending_msg[2] if len(pending_msg) > 2 else None
                         if html_chunk:
-                            last_live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai)
+                            last_live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai, live_stream_id)
                         elif chunk.strip():
                             display_buffer.append(chunk)
                     elif pending_type == "activity":
@@ -3195,7 +3356,7 @@ class ChadWebUI:
                 if not cancel_live_stream:
                     display_content = display_buffer.content
                     if display_content:
-                        cancel_live_stream = build_live_stream_html(display_content, current_ai)
+                        cancel_live_stream = build_live_stream_html(display_content, current_ai, live_stream_id)
                 yield make_yield(
                     chat_history,
                     "🛑 Task cancelled",
@@ -3221,7 +3382,8 @@ class ChadWebUI:
                                 session.event_log.log(AssistantMessageEvent(
                                     blocks=[{"kind": "text", "content": content[:1000]}]
                                 ))
-                            yield make_yield(chat_history, current_status, "", task_state="running")
+                            # Keep showing last live stream content during transition to verification
+                            yield make_yield(chat_history, current_status, last_live_stream, task_state="running")
                     except queue.Empty:
                         break
 
@@ -3288,12 +3450,27 @@ class ChadWebUI:
                         }
                     )
 
-                    # Show verification status
+                    # Build verification prompt for display before starting verification
+                    coding_summary = extract_coding_summary(last_coding_output)
+                    change_summary = coding_summary.change_summary if coding_summary else None
+                    trimmed_output = _truncate_verification_output(last_coding_output)
+                    display_verification_prompt = get_verification_prompt(
+                        trimmed_output, task_description, change_summary
+                    )
+                    session.last_verification_prompt = display_verification_prompt
+
+                    # Show verification status with live stream
                     verify_status = (
                         f"{status_prefix}🔍 Running verification "
                         f"(attempt {verification_attempt}/{max_verification_attempts})..."
                     )
-                    yield make_yield(chat_history, verify_status, "", task_state="verifying")
+                    verify_placeholder = build_live_stream_html(
+                        "🔍 Starting verification...", "VERIFICATION AI", live_stream_id
+                    )
+                    yield make_yield(
+                        chat_history, verify_status, verify_placeholder, task_state="verifying",
+                        verification_prompt=display_verification_prompt,
+                    )
 
                     # Run verification in a thread so we can stream output to live view
                     def verification_activity(activity_type: str, detail: str):
@@ -3326,11 +3503,24 @@ class ChadWebUI:
                     verification_thread = threading.Thread(target=run_verification_thread, daemon=True)
                     verification_thread.start()
 
-                    # Poll message queue while verification runs
-                    # Note: verification streaming is silent (no inline display) since it's usually fast
+                    # Poll message queue while verification runs and stream to live view
+                    verify_display_buffer = LiveStreamDisplayBuffer()
+                    verify_display_buffer.append("🔍 Starting verification...\n")
+                    verify_last_yield = 0.0
                     while not verification_complete.is_set() and not session.cancel_requested:
                         try:
-                            message_queue.get(timeout=0.05)  # Drain queue
+                            msg = message_queue.get(timeout=0.05)
+                            if msg[0] == "stream":
+                                chunk = msg[1]
+                                if chunk.strip():
+                                    verify_display_buffer.append(chunk)
+                                    now = time_module.time()
+                                    if now - verify_last_yield >= min_yield_interval:
+                                        rendered = build_live_stream_html(
+                                            verify_display_buffer.content, "VERIFICATION AI", live_stream_id
+                                        )
+                                        yield make_yield(chat_history, verify_status, rendered, task_state="verifying")
+                                        verify_last_yield = now
                         except queue.Empty:
                             pass
 
@@ -3428,7 +3618,7 @@ class ChadWebUI:
                             revision_pending_idx = len(chat_history)
                             revision_status_msg = f"{status_prefix}⏳ Coding agent working on revisions..."
                             # Show live stream placeholder during revision setup
-                            revision_placeholder = build_live_stream_html("⏳ Preparing revision...", "CODING AI")
+                            revision_placeholder = build_live_stream_html("⏳ Preparing revision...", "CODING AI", live_stream_id)
                             yield make_yield(chat_history, revision_status_msg, revision_placeholder, task_state="running")
 
                             # Run revision in a thread so we can stream output to live view
@@ -3462,7 +3652,7 @@ class ChadWebUI:
                                             if now - rev_last_yield >= min_yield_interval:
                                                 # Update only the dedicated live stream panel
                                                 rendered = build_live_stream_html(
-                                                    rev_display_buffer.content, "CODING AI"
+                                                    rev_display_buffer.content, "CODING AI", live_stream_id
                                                 )
                                                 yield make_yield(chat_history, revision_status_msg, rendered, task_state="running")
                                                 rev_last_yield = now
@@ -3499,10 +3689,13 @@ class ChadWebUI:
                                 }
                                 break
 
+                            reverify_placeholder = build_live_stream_html(
+                                "✓ Revision complete, re-verifying...", "VERIFICATION AI", live_stream_id
+                            )
                             yield make_yield(
                                 chat_history,
                                 f"{status_prefix}✓ Revision complete, re-verifying...",
-                                "",
+                                reverify_placeholder,
                                 task_state="verifying",
                             )
                         elif (
@@ -3532,7 +3725,7 @@ class ChadWebUI:
                             # Track where the revision message will be inserted
                             revision_pending_idx = len(chat_history)
                             revision_status_msg = f"{status_prefix}⏳ Coding agent working on revisions..."
-                            revision_placeholder = build_live_stream_html("⏳ Preparing revision...", "CODING AI")
+                            revision_placeholder = build_live_stream_html("⏳ Preparing revision...", "CODING AI", live_stream_id)
                             yield make_yield(chat_history, revision_status_msg, revision_placeholder, task_state="running")
 
                             # Run revision via API in a thread
@@ -3575,7 +3768,7 @@ class ChadWebUI:
                                             now = time_module.time()
                                             if now - rev_last_yield >= min_yield_interval:
                                                 rendered = build_live_stream_html(
-                                                    rev_display_buffer.content, "CODING AI"
+                                                    rev_display_buffer.content, "CODING AI", live_stream_id
                                                 )
                                                 yield make_yield(chat_history, revision_status_msg, rendered, task_state="running")
                                                 rev_last_yield = now
@@ -3608,10 +3801,13 @@ class ChadWebUI:
                                 })
                                 break
 
+                            reverify_placeholder = build_live_stream_html(
+                                "✓ Revision complete, re-verifying...", "VERIFICATION AI", live_stream_id
+                            )
                             yield make_yield(
                                 chat_history,
                                 f"{status_prefix}✓ Revision complete, re-verifying...",
-                                "",
+                                reverify_placeholder,
                                 task_state="verifying",
                             )
                         else:
@@ -3779,6 +3975,9 @@ class ChadWebUI:
         )
         task_description = session.task_description or ""
         verification_log: list[dict[str, object]] = []
+
+        # Stable live_id for DOM patching across the session
+        live_stream_id = f"live-{session.id}"
 
         merge_no_change = (gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
 
@@ -4018,7 +4217,7 @@ class ChadWebUI:
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
                             # Update only the dedicated live stream panel
-                            live_stream = build_live_stream_html(display_buffer.content, current_ai)
+                            live_stream = build_live_stream_html(display_buffer.content, current_ai, live_stream_id)
                             yield make_followup_yield(
                                 chat_history,
                                 live_stream,
@@ -4036,7 +4235,7 @@ class ChadWebUI:
                         else:
                             content = msg[1]
                         # Update only the dedicated live stream panel
-                        live_stream = build_live_stream_html(content, current_ai)
+                        live_stream = build_live_stream_html(content, current_ai, live_stream_id)
                         yield make_followup_yield(
                             chat_history,
                             live_stream,
@@ -4051,7 +4250,7 @@ class ChadWebUI:
                     display_content = display_buffer.content
                     if display_content:
                         # Update only the dedicated live stream panel
-                        live_stream = build_live_stream_html(display_content, current_ai)
+                        live_stream = build_live_stream_html(display_content, current_ai, live_stream_id)
                         yield make_followup_yield(
                             chat_history,
                             live_stream,
@@ -4114,25 +4313,65 @@ class ChadWebUI:
                 )
                 self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
 
-                verify_status = (
-                    f"🔍 Running verification " f"(attempt {verification_attempt}/{max_verification_attempts})..."
+                verify_placeholder = build_live_stream_html(
+                    "🔍 Starting verification...", "VERIFICATION AI", live_stream_id
                 )
-                yield make_followup_yield(chat_history, verify_status, working=True, merge_updates=merge_no_change)
+                yield make_followup_yield(chat_history, verify_placeholder, working=True, merge_updates=merge_no_change)
 
                 def verification_activity(activity_type: str, detail: str):
-                    pass  # Quiet verification
+                    content = detail if activity_type == "stream" else f"[{activity_type}] {detail}\n"
+                    message_queue.put(("verify_stream", content))
 
                 # Run verification in worktree so it can see the changes
                 verification_path = str(session.worktree_path or session.project_path or Path.cwd())
-                verified, verification_feedback = self._run_verification(
-                    verification_path,
-                    last_coding_output,
-                    task_description,
-                    verification_account_for_run,
-                    on_activity=verification_activity,
-                    verification_model=resolved_verification_model,
-                    verification_reasoning=resolved_verification_reasoning,
-                )
+                verification_result: list = [None, None]  # [verified, feedback]
+                verification_complete = threading.Event()
+
+                def run_verification_thread():
+                    try:
+                        v, f = self._run_verification(
+                            verification_path,
+                            last_coding_output,
+                            task_description,
+                            verification_account_for_run,
+                            on_activity=verification_activity,
+                            verification_model=resolved_verification_model,
+                            verification_reasoning=resolved_verification_reasoning,
+                        )
+                        verification_result[0] = v
+                        verification_result[1] = f
+                    except Exception as exc:
+                        verification_result[0] = None
+                        verification_result[1] = f"Verification error: {exc}"
+                    finally:
+                        verification_complete.set()
+
+                verification_thread = threading.Thread(target=run_verification_thread, daemon=True)
+                verification_thread.start()
+
+                # Poll message queue while verification runs and stream to live view
+                verify_display_buffer = LiveStreamDisplayBuffer()
+                verify_display_buffer.append("🔍 Starting verification...\n")
+                verify_last_yield = 0.0
+                while not verification_complete.is_set() and not session.cancel_requested:
+                    try:
+                        msg = message_queue.get(timeout=0.05)
+                        if msg[0] == "verify_stream":
+                            chunk = msg[1]
+                            if chunk.strip():
+                                verify_display_buffer.append(chunk)
+                                now = time_module.time()
+                                if now - verify_last_yield >= min_yield_interval:
+                                    rendered = build_live_stream_html(
+                                        verify_display_buffer.content, "VERIFICATION AI", live_stream_id
+                                    )
+                                    yield make_followup_yield(chat_history, rendered, working=True, merge_updates=merge_no_change)
+                                    verify_last_yield = now
+                    except queue.Empty:
+                        pass
+
+                verification_thread.join(timeout=1.0)
+                verified, verification_feedback = verification_result[0], verification_result[1]
 
                 status_label = "error" if verified is None else ("passed" if verified else "failed")
                 verification_log.append(
@@ -4203,7 +4442,7 @@ class ChadWebUI:
                             session, chat_history, full_history, verification_attempts=verification_log
                         )
                         # Show live stream placeholder during revision
-                        revision_placeholder = build_live_stream_html("🔄 Revision in progress...", "CODING AI")
+                        revision_placeholder = build_live_stream_html("🔄 Revision in progress...", "CODING AI", live_stream_id)
                         yield make_followup_yield(chat_history, revision_placeholder, working=True, merge_updates=merge_no_change)
 
                         revision_request = (
@@ -4245,9 +4484,12 @@ class ChadWebUI:
                             )
                             break
 
+                        reverify_placeholder = build_live_stream_html(
+                            "✓ Revision complete, re-verifying...", "VERIFICATION AI", live_stream_id
+                        )
                         yield make_followup_yield(
                             chat_history,
-                            "✓ Revision complete, re-verifying...",
+                            reverify_placeholder,
                             working=True,
                             merge_updates=merge_no_change,
                         )
@@ -4902,13 +5144,92 @@ class ChadWebUI:
             with gr.Column(scale=1):
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=3, min_width=260):
+                        # Auto-detect initial verification commands for default path
+                        initial_detected = detect_verification_commands(Path(default_path).expanduser().resolve())
+                        initial_lint = initial_detected.get("lint_command") or ""
+                        initial_test = initial_detected.get("test_command") or ""
+                        initial_type = initial_detected.get("project_type", "unknown")
+                        initial_docs = detect_doc_paths(Path(default_path).expanduser().resolve())
+                        initial_instructions = initial_docs.instructions_path or ""
+                        initial_architecture = initial_docs.architecture_path or ""
+
                         project_path = gr.Textbox(
-                            label="Project Path",
+                            label=self._format_project_label(initial_type),
                             placeholder="/path/to/project",
                             value=default_path,
                             scale=3,
                             key=f"project-path-{session_id}",
+                            elem_id="project-path-input" if is_first else None,
+                            elem_classes=["project-path-input"],
                         )
+                        with gr.Row(elem_classes=["project-commands-row"], equal_height=True):
+                            with gr.Column(scale=1, elem_classes=["command-column"]):
+                                with gr.Row(elem_classes=["command-header", "lint-command-label"], equal_height=True):
+                                    gr.Markdown(
+                                        "**Lint Command**",
+                                        elem_classes=["command-label"],
+                                    )
+                                    lint_test_btn = gr.Button(
+                                        "Test",
+                                        variant="secondary",
+                                        size="sm",
+                                        key=f"lint-test-{session_id}",
+                                        elem_classes=["command-test-btn", "lint-test-btn"],
+                                    )
+                                lint_cmd_input = gr.Textbox(
+                                    label="Lint Command",
+                                    value=initial_lint,
+                                    placeholder=".venv/bin/python -m flake8 .",
+                                    key=f"lint-cmd-{session_id}",
+                                    show_label=False,
+                                    elem_classes=["command-input", "lint-command-input"],
+                                )
+                                lint_status = gr.Markdown(
+                                    "",
+                                    key=f"lint-status-{session_id}",
+                                    elem_classes=["command-status", "lint-command-status"],
+                                )
+                            with gr.Column(scale=1, elem_classes=["command-column"]):
+                                with gr.Row(elem_classes=["command-header", "test-command-label"], equal_height=True):
+                                    gr.Markdown(
+                                        "**Test Command**",
+                                        elem_classes=["command-label"],
+                                    )
+                                    test_test_btn = gr.Button(
+                                        "Test",
+                                        variant="secondary",
+                                        size="sm",
+                                        key=f"test-test-{session_id}",
+                                        elem_classes=["command-test-btn", "test-command-btn"],
+                                    )
+                                test_cmd_input = gr.Textbox(
+                                    label="Test Command",
+                                    value=initial_test,
+                                    placeholder=".venv/bin/python -m pytest tests/ -v",
+                                    key=f"test-cmd-{session_id}",
+                                    show_label=False,
+                                    elem_classes=["command-input", "test-command-input"],
+                                )
+                                test_status = gr.Markdown(
+                                    "",
+                                    key=f"test-status-{session_id}",
+                                    elem_classes=["command-status", "test-command-status"],
+                                )
+                        with gr.Row(elem_classes=["doc-paths-row"], equal_height=True):
+                            instructions_input = gr.Textbox(
+                                label="Agent Instructions Path",
+                                value=initial_instructions,
+                                placeholder="AGENTS.md",
+                                key=f"instructions-path-{session_id}",
+                                elem_classes=["doc-path-input", "instructions-path-input"],
+                            )
+                            architecture_input = gr.Textbox(
+                                label="Architecture Doc Path",
+                                value=initial_architecture,
+                                placeholder="docs/ARCHITECTURE.md",
+                                key=f"architecture-path-{session_id}",
+                                elem_classes=["doc-path-input", "architecture-path-input"],
+                            )
                         with gr.Row(
                             elem_id="role-status-row" if is_first else None,
                             elem_classes=["role-status-row"],
@@ -4920,9 +5241,28 @@ class ChadWebUI:
                                 elem_id="role-config-status" if is_first else None,
                                 elem_classes=["role-config-status"],
                             )
+                            cancel_btn = gr.Button(
+                                "Cancel",
+                                variant="stop",
+                                interactive=False,
+                                key=f"cancel-btn-{session_id}",
+                                elem_id="cancel-task-btn" if is_first else None,
+                                elem_classes=["cancel-task-btn"],
+                                min_width=80,
+                                scale=0,
+                            )
+                            project_save_btn = gr.Button(
+                                "Save",
+                                variant="primary",
+                                size="sm",
+                                key=f"project-save-{session_id}",
+                                elem_classes=["project-save-btn"],
+                                min_width=80,
+                                scale=0,
+                            )
                             log_path = session.log_path
                             session_log_btn = gr.DownloadButton(
-                                label="Session Log" if not log_path else f"📄 {log_path.name}",
+                                label="Session Log" if not log_path else log_path.name,
                                 value=str(log_path) if log_path else None,
                                 visible=log_path is not None,
                                 variant="secondary",
@@ -4962,7 +5302,7 @@ class ChadWebUI:
                             key=f"coding-reasoning-{session_id}",
                             interactive=bool(initial_coding and initial_coding in account_choices),
                         )
-                    with gr.Column(scale=1, min_width=200):
+                    with gr.Column(scale=1, min_width=200, elem_classes=["verification-column"]):
                         verification_agent = gr.Dropdown(
                             choices=verification_choices,
                             value=initial_verification,
@@ -4991,16 +5331,6 @@ class ChadWebUI:
                             key=f"verification-reasoning-{session_id}",
                             interactive=verif_state.interactive,
                         )
-            cancel_btn = gr.Button(
-                "🛑 Cancel",
-                variant="stop",
-                interactive=False,
-                key=f"cancel-btn-{session_id}",
-                elem_id="cancel-task-btn" if is_first else None,
-                elem_classes=["cancel-task-btn"],
-                min_width=40,
-                scale=0,
-            )
 
         # Task status header - always in DOM but CSS hides when empty
         # This ensures JavaScript can find it for merge section visibility logic
@@ -5022,6 +5352,13 @@ class ChadWebUI:
                     lines=4,
                     key=f"task-desc-{session_id}",
                 )
+                screenshot_upload = gr.File(
+                    label="Screenshots (optional)",
+                    file_count="multiple",
+                    file_types=["image"],
+                    key=f"screenshot-upload-{session_id}",
+                    elem_classes=["screenshot-upload"],
+                )
                 start_btn = gr.Button(
                     "▶ Start Task",
                     variant="primary",
@@ -5032,7 +5369,9 @@ class ChadWebUI:
                 )
 
             # Live stream kept in DOM (visible=True) but hidden via CSS for visual tests
-            live_stream = gr.Markdown(
+            # Using gr.HTML instead of gr.Markdown for DOM patching support
+            # which preserves scroll position and text selection during updates
+            live_stream = gr.HTML(
                 "",
                 visible=True,
                 elem_id="live-stream-box" if is_first else None,
@@ -5048,6 +5387,33 @@ class ChadWebUI:
                 type="messages",  # Use OpenAI-style dicts with 'role' and 'content' keys
             )
 
+            # Prompt display accordions (collapsed by default, visible after task starts)
+            with gr.Accordion(
+                "Coding Agent Prompt",
+                open=False,
+                visible=True,
+                key=f"coding-prompt-accordion-{session_id}",
+                elem_classes=["prompt-accordion"],
+            ) as coding_prompt_accordion:
+                coding_prompt_display = gr.Markdown(
+                    "*Run a task to see the coding prompt*",
+                    key=f"coding-prompt-display-{session_id}",
+                    elem_classes=["prompt-display"],
+                )
+
+            with gr.Accordion(
+                "Verification Agent Prompt",
+                open=False,
+                visible=True,
+                key=f"verification-prompt-accordion-{session_id}",
+                elem_classes=["prompt-accordion"],
+            ) as verification_prompt_accordion:
+                verification_prompt_display = gr.Markdown(
+                    "*Run a task to see the verification prompt*",
+                    key=f"verification-prompt-display-{session_id}",
+                    elem_classes=["prompt-display"],
+                )
+
         # Hidden state for dynamic terminal dimensions (calculated from container width)
         # JavaScript updates this when the live-stream-box is resized
         terminal_cols_state = gr.Number(
@@ -5062,7 +5428,7 @@ class ChadWebUI:
         # and patches the corresponding container's innerHTML in-place
         live_patch_trigger = gr.HTML(
             "",
-            visible=False,
+            visible=True,  # Keep rendered so MutationObserver can watch for patches
             key=f"live-patch-{session_id}",
             elem_classes=["live-patch-trigger"],
         )
@@ -5157,9 +5523,129 @@ class ChadWebUI:
                 )
 
         # Event handlers - must be defined inside @gr.render
+
+        # Project setup handlers
+        def on_project_path_change(path_val):
+            """Auto-detect project type and commands when path changes."""
+            if not path_val:
+                return (
+                    gr.update(label=self._format_project_label("enter path")),
+                    gr.update(value=""),
+                    gr.update(value=""),
+                    gr.update(value=""),
+                    gr.update(value=""),
+                    "",
+                    "",
+                )
+            path_obj = Path(path_val).expanduser().resolve()
+            if not path_obj.exists():
+                return (
+                    gr.update(label=self._format_project_label("not found")),
+                    gr.update(value=""),
+                    gr.update(value=""),
+                    gr.update(value=""),
+                    gr.update(value=""),
+                    "",
+                    "",
+                )
+
+            # Try loading existing config first
+            config = load_project_config(path_obj)
+            if config:
+                docs = config.docs or detect_doc_paths(path_obj)
+                return (
+                    gr.update(label=self._format_project_label(f"{config.project_type} (saved)")),
+                    gr.update(value=config.verification.lint_command or ""),
+                    gr.update(value=config.verification.test_command or ""),
+                    gr.update(value=(docs.instructions_path or "")),
+                    gr.update(value=(docs.architecture_path or "")),
+                    "",
+                    "",
+                )
+
+            # Auto-detect
+            detected = detect_verification_commands(path_obj)
+            detected_docs = detect_doc_paths(path_obj)
+            return (
+                gr.update(label=self._format_project_label(detected["project_type"])),
+                gr.update(value=detected.get("lint_command") or ""),
+                gr.update(value=detected.get("test_command") or ""),
+                gr.update(value=detected_docs.instructions_path or ""),
+                gr.update(value=detected_docs.architecture_path or ""),
+                "",
+                "",
+            )
+
+        project_path.change(
+            on_project_path_change,
+            inputs=[project_path],
+            outputs=[
+                project_path,
+                lint_cmd_input,
+                test_cmd_input,
+                instructions_input,
+                architecture_input,
+                lint_status,
+                test_status,
+            ],
+        )
+
+        def on_lint_test(path_val, lint_cmd):
+            if not path_val:
+                return "Enter a project path first"
+            if not lint_cmd:
+                return "Enter a lint command"
+            path_obj = Path(path_val).expanduser().resolve()
+            success, output = validate_command(lint_cmd, path_obj, timeout=30)
+            return "Passed" if success else f"Failed: {output[:100]}"
+
+        lint_test_btn.click(
+            on_lint_test,
+            inputs=[project_path, lint_cmd_input],
+            outputs=[lint_status],
+        )
+
+        def on_test_test(path_val, test_cmd):
+            if not path_val:
+                return "Enter a project path first"
+            if not test_cmd:
+                return "Enter a test command"
+            path_obj = Path(path_val).expanduser().resolve()
+            success, output = validate_command(test_cmd, path_obj, timeout=60)
+            return "Passed" if success else f"Failed: {output[:100]}"
+
+        test_test_btn.click(
+            on_test_test,
+            inputs=[project_path, test_cmd_input],
+            outputs=[test_status],
+        )
+
+        def on_project_save(path_val, lint_cmd, test_cmd, instructions_path_val, architecture_path_val):
+            if not path_val:
+                return "Enter a project path"
+            path_obj = Path(path_val).expanduser().resolve()
+            if not path_obj.exists():
+                return "Path not found"
+
+            saved = save_project_settings(
+                path_obj,
+                lint_command=lint_cmd or None,
+                test_command=test_cmd or None,
+                instructions_path=instructions_path_val or None,
+                architecture_path=architecture_path_val or None,
+            )
+            return f"Project settings saved (type: {saved.project_type})"
+
+        project_save_btn.click(
+            on_project_save,
+            inputs=[project_path, lint_cmd_input, test_cmd_input, instructions_input, architecture_input],
+            outputs=[role_status],
+        )
+
         def start_task_wrapper(
             proj_path,
             task_desc,
+            screenshots_data,
             coding,
             verification,
             c_model,
@@ -5168,6 +5654,10 @@ class ChadWebUI:
             v_reason,
             term_cols,
         ):
+            # Extract file paths from uploaded screenshots
+            screenshot_paths = None
+            if screenshots_data:
+                screenshot_paths = [f.name for f in screenshots_data]
             yield from self.start_chad_task(
                 session_id,
                 proj_path,
@@ -5179,6 +5669,7 @@ class ChadWebUI:
                 v_model,
                 v_reason,
                 terminal_cols=int(term_cols) if term_cols else None,
+                screenshots=screenshot_paths,
             )
 
         def cancel_wrapper():
@@ -5231,6 +5722,7 @@ class ChadWebUI:
             inputs=[
                 project_path,
                 task_description,
+                screenshot_upload,
                 coding_agent,
                 verification_agent,
                 coding_model,
@@ -5258,6 +5750,10 @@ class ChadWebUI:
                 diff_content,
                 merge_section_header,
                 live_patch_trigger,
+                coding_prompt_accordion,
+                coding_prompt_display,
+                verification_prompt_accordion,
+                verification_prompt_display,
             ],
         )
 
@@ -6290,6 +6786,98 @@ function initializeTerminalColumnTracking() {
 }
 
 initializeTerminalColumnTracking();
+
+// Live DOM patching to preserve scroll position and text selection
+// Watches live_patch_trigger elements and patches live stream content in-place
+function initializeLiveDomPatching() {
+    const getRoot = () => {
+        const app = document.querySelector('gradio-app');
+        return (app && app.shadowRoot) ? app.shadowRoot : document;
+    };
+
+    // Simple HTML decoder
+    function decodeHtml(html) {
+        const txt = document.createElement('textarea');
+        txt.innerHTML = html;
+        return txt.value;
+    }
+
+    // Patch live stream content by updating innerHTML of existing container
+    function patchLiveContent(liveId, newHtml) {
+        const root = getRoot();
+        const wrapper = root.querySelector(`[data-live-id="${liveId}"]`);
+        if (!wrapper) return false;
+
+        const content = wrapper.querySelector('.live-output-content');
+        if (!content) return false;
+
+        // Save scroll position
+        const scrollTop = content.scrollTop;
+        const scrollHeight = content.scrollHeight;
+        const isAtBottom = scrollTop + content.clientHeight >= scrollHeight - 10;
+
+        // Parse new HTML to extract just the content portion
+        const temp = document.createElement('div');
+        temp.innerHTML = newHtml;
+        const newWrapper = temp.querySelector('.live-output-wrapper') || temp;
+        const newContent = newWrapper.querySelector('.live-output-content');
+
+        if (newContent) {
+            // Update only the inner content, preserving the container
+            content.innerHTML = newContent.innerHTML;
+        }
+
+        // Restore scroll position
+        requestAnimationFrame(() => {
+            const newScrollHeight = content.scrollHeight;
+            if (isAtBottom) {
+                // Was at bottom, stay at bottom
+                content.scrollTop = newScrollHeight;
+            } else {
+                // Restore previous position
+                content.scrollTop = scrollTop;
+            }
+        });
+
+        return true;
+    }
+
+    // Watch for changes to live_patch_trigger elements
+    function setupPatchTriggerWatcher() {
+        const root = getRoot();
+        const triggers = root.querySelectorAll('.live-patch-trigger');
+
+        triggers.forEach(trigger => {
+            if (trigger._patchObserverSetup) return;
+            trigger._patchObserverSetup = true;
+
+            const observer = new MutationObserver(() => {
+                // Find the data-live-patch element inside the trigger
+                const patchEl = trigger.querySelector('[data-live-patch]');
+                if (!patchEl) return;
+
+                const liveId = patchEl.dataset.livePatch;
+                const escapedHtml = patchEl.textContent || '';
+                if (!liveId || !escapedHtml) return;
+
+                // Decode the HTML and patch the live stream
+                const html = decodeHtml(escapedHtml);
+                patchLiveContent(liveId, html);
+            });
+
+            observer.observe(trigger, {
+                childList: true,
+                subtree: true,
+                characterData: true
+            });
+        });
+    }
+
+    setInterval(setupPatchTriggerWatcher, 500);
+    setTimeout(setupPatchTriggerWatcher, 100);
+}
+
+initializeLiveDomPatching();
 </script>
 """
             )
@@ -6326,6 +6914,250 @@ initializeTerminalColumnTracking();
                     };
                     walk(document);
                     return results;
+                  };
+                  const initializeLiveDomPatching = () => {
+                    const decodeHtml = (html) => {
+                      const txt = document.createElement('textarea');
+                      txt.innerHTML = html;
+                      return txt.value;
+                    };
+
+                    const patchLiveContent = (liveId, newHtml) => {
+                      const root = getRoot();
+                      const wrapper = root.querySelector(`[data-live-id="${liveId}"]`);
+                      if (!wrapper) return false;
+
+                      const content = wrapper.querySelector('.live-output-content');
+                      if (!content) return false;
+
+                      const scrollTop = content.scrollTop;
+                      const scrollHeight = content.scrollHeight;
+                      const isAtBottom = scrollTop + content.clientHeight >= scrollHeight - 10;
+
+                      const temp = document.createElement('div');
+                      temp.innerHTML = newHtml;
+                      const newWrapper = temp.querySelector('.live-output-wrapper') || temp;
+                      const newContent = newWrapper.querySelector('.live-output-content');
+
+                      if (newContent) {
+                        content.innerHTML = newContent.innerHTML;
+                      }
+
+                      requestAnimationFrame(() => {
+                        const newScrollHeight = content.scrollHeight;
+                        if (isAtBottom) {
+                          content.scrollTop = newScrollHeight;
+                        } else {
+                          content.scrollTop = scrollTop;
+                        }
+                      });
+
+                      return true;
+                    };
+
+                    const setupPatchTriggerWatcher = () => {
+                      const root = getRoot();
+                      const triggers = root.querySelectorAll('.live-patch-trigger');
+
+                      triggers.forEach(trigger => {
+                        if (trigger._patchObserverSetup) return;
+                        trigger._patchObserverSetup = true;
+
+                        const observer = new MutationObserver(() => {
+                          const patchEl = trigger.querySelector('[data-live-patch]');
+                          if (!patchEl) return;
+
+                          const liveId = patchEl.dataset.livePatch;
+                          const escapedHtml = patchEl.textContent || '';
+                          if (!liveId || !escapedHtml) return;
+
+                          const html = decodeHtml(escapedHtml);
+                          patchLiveContent(liveId, html);
+                        });
+
+                        observer.observe(trigger, {
+                          childList: true,
+                          subtree: true,
+                          characterData: true
+                        });
+                      });
+                    };
+
+                    setInterval(setupPatchTriggerWatcher, 500);
+                    setTimeout(setupPatchTriggerWatcher, 100);
+                  };
+
+                  const initializeLiveStreamScrollTracking = () => {
+                    window._liveStreamScrollState = window._liveStreamScrollState || {};
+                    window._liveStreamTrackedParents = window._liveStreamTrackedParents || new WeakSet();
+                    window._liveStreamTrackedContents = window._liveStreamTrackedContents || new WeakSet();
+
+                    const getParentId = (parent) => {
+                      if (parent.id) return parent.id;
+                      if (!parent.dataset.scrollTrackId) {
+                        parent.dataset.scrollTrackId = 'scroll-' + Math.random().toString(36).substr(2, 9);
+                      }
+                      return parent.dataset.scrollTrackId;
+                    };
+
+                    const getState = (parentId) => {
+                      if (!window._liveStreamScrollState[parentId]) {
+                        window._liveStreamScrollState[parentId] = {
+                          userScrolledUp: false,
+                          savedScrollTop: 0,
+                          lastScrollHeight: 0,
+                          settingScroll: false
+                        };
+                      }
+                      return window._liveStreamScrollState[parentId];
+                    };
+
+                    const attachScrollListener = (content, state) => {
+                      if (window._liveStreamTrackedContents.has(content)) return;
+                      window._liveStreamTrackedContents.add(content);
+
+                      content.addEventListener('scroll', () => {
+                        if (state.settingScroll) return;
+
+                        const scrollTop = content.scrollTop;
+                        const previousScrollTop = state.savedScrollTop;
+                        const isAtBottom = scrollTop + content.clientHeight >= content.scrollHeight - 10;
+                        const scrolledDown = scrollTop > previousScrollTop;
+
+                        state.savedScrollTop = scrollTop;
+
+                        if (isAtBottom && scrolledDown) {
+                          state.userScrolledUp = false;
+                        } else if (!isAtBottom) {
+                          state.userScrolledUp = true;
+                        }
+                      });
+                    };
+
+                    const setupParentTracking = (parent) => {
+                      if (window._liveStreamTrackedParents.has(parent)) {
+                        return;
+                      }
+                      window._liveStreamTrackedParents.add(parent);
+
+                      const parentId = getParentId(parent);
+                      const state = getState(parentId);
+
+                      const initialContent = parent.querySelector('.live-output-content');
+                      if (initialContent) {
+                        attachScrollListener(initialContent, state);
+                        state.lastScrollHeight = initialContent.scrollHeight;
+                      }
+
+                      const observer = new MutationObserver(() => {
+                        const content = parent.querySelector('.live-output-content');
+                        if (!content) return;
+
+                        attachScrollListener(content, state);
+
+                        requestAnimationFrame(() => {
+                          requestAnimationFrame(() => {
+                            const newScrollHeight = content.scrollHeight;
+                            const contentGrew = newScrollHeight > state.lastScrollHeight;
+                            state.lastScrollHeight = newScrollHeight;
+
+                            state.settingScroll = true;
+
+                            if (state.userScrolledUp) {
+                              content.scrollTop = state.savedScrollTop;
+                            } else if (contentGrew) {
+                              content.scrollTop = newScrollHeight;
+                            }
+
+                            requestAnimationFrame(() => {
+                              state.settingScroll = false;
+                            });
+                          });
+                        });
+                      });
+
+                      observer.observe(parent, {
+                        childList: true,
+                        subtree: true
+                      });
+                    };
+
+                    const findAndSetupParents = () => {
+                      const root = getRoot();
+                      const parents = [
+                        root.querySelector('#live-stream-box'),
+                        ...root.querySelectorAll('.live-stream-box')
+                      ].filter(Boolean);
+
+                      parents.forEach(setupParentTracking);
+                    };
+
+                    setInterval(findAndSetupParents, 500);
+                    setTimeout(findAndSetupParents, 100);
+                  };
+
+                  const initializeTerminalColumnTracking = () => {
+                    const CHAR_WIDTH = 8;
+                    const PADDING = 24;
+                    const SCROLLBAR = 20;
+                    const MIN_COLS = 80;
+                    const MAX_COLS = 300;
+
+                    const calculateCols = (width) => {
+                      const usableWidth = width - PADDING - SCROLLBAR;
+                      const cols = Math.floor(usableWidth / CHAR_WIDTH);
+                      return Math.min(MAX_COLS, Math.max(MIN_COLS, cols));
+                    };
+
+                    const updateTerminalCols = (cols) => {
+                      const root = getRoot();
+                      const inputs = [
+                        root.querySelector('#terminal-cols-state input[type=\"number\"]'),
+                        ...root.querySelectorAll('.terminal-cols-state input[type=\"number\"]')
+                      ].filter(Boolean);
+
+                      inputs.forEach(input => {
+                        if (input && parseInt(input.value) !== cols) {
+                          input.value = cols;
+                          input.dispatchEvent(new Event('input', { bubbles: true }));
+                        }
+                      });
+                    };
+
+                    const setupResizeObserver = (element) => {
+                      if (element._terminalResizeSetup) return;
+                      element._terminalResizeSetup = true;
+
+                      const resizeObserver = new ResizeObserver(entries => {
+                        for (const entry of entries) {
+                          const width = entry.contentRect.width;
+                          if (width > 0) {
+                            const cols = calculateCols(width);
+                            updateTerminalCols(cols);
+                          }
+                        }
+                      });
+
+                      resizeObserver.observe(element);
+
+                      const width = element.getBoundingClientRect().width;
+                      if (width > 0) {
+                        updateTerminalCols(calculateCols(width));
+                      }
+                    };
+
+                    const findAndSetupContainers = () => {
+                      const root = getRoot();
+                      const containers = [
+                        root.querySelector('#live-stream-box'),
+                        ...root.querySelectorAll('.live-stream-box')
+                      ].filter(Boolean);
+
+                      containers.forEach(setupResizeObserver);
+                    };
+
+                    setInterval(findAndSetupContainers, 500);
+                    setTimeout(findAndSetupContainers, 100);
                   };
                   const ensureDiscardEditable = () => {
                     // Find status elements more broadly
@@ -6497,6 +7329,9 @@ initializeTerminalColumnTracking();
                       }
                     });
                   };
+                  initializeLiveDomPatching();
+                  initializeLiveStreamScrollTracking();
+                  initializeTerminalColumnTracking();
                   const tickAll = () => {
                     wirePlus();
                     fixAriaLinks();

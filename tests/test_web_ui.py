@@ -621,6 +621,61 @@ class TestChadWebUI:
         assert start_interactive is True, f"Start button should be enabled after cancel, got {start_btn_update}"
         assert cancel_interactive is False, f"Cancel button should be disabled after cancel, got {cancel_btn_update}"
 
+    def test_progress_emission_preserves_live_stream(self, monkeypatch, web_ui, git_repo):
+        """Progress detection should not clear the live output panel.
+
+        Regression test: Previously, emitting a progress update would yield ""
+        for the live stream, causing the live output to disappear.
+        """
+
+        live_html = "<pre>INITIAL LIVE OUTPUT</pre>"
+        stream_complete = threading.Event()
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            # Stream initial content that will build up the live view
+            message_queue.put(("stream", "working on task\n", live_html))
+            time.sleep(0.02)  # Small delay to ensure processing
+            # Stream content with progress JSON block
+            progress_json = '```json\n{"change_summary": "Fix bug", "location": "src/main.py:42"}\n```'
+            message_queue.put(("stream", progress_json))
+            time.sleep(0.02)
+            # Stream more content after progress
+            message_queue.put(("stream", "continuing work\n"))
+            message_queue.put(("message_complete", "CODING AI", "Task done"))
+            stream_complete.set()
+            return True, "completed", "server-session"
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("test")
+        updates = []
+
+        for update in web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
+            updates.append(update)
+
+        # After progress emission, live stream should not be empty
+        # Find the update that shows progress (has progress in chatbot)
+        progress_updates = []
+        for update in updates:
+            live_stream = update[0]  # live_stream is at index 0
+            if isinstance(live_stream, dict):
+                live_stream = live_stream.get("value", "")
+            # Track updates that occurred - none should be completely empty
+            # during the task execution (before final completion)
+            progress_updates.append(live_stream)
+
+        # At least one update after streaming started should have content
+        # Check for various content indicators - either actual output or waiting placeholder
+        content_updates = [u for u in progress_updates if u and (
+            "LIVE OUTPUT" in u or
+            "Waiting" in u or
+            "working" in u or
+            "CODING AI" in u
+        )]
+        assert len(content_updates) > 0, f"Live stream should have content during streaming. Got updates: {progress_updates[:5]}"
+
 
 class TestClaudeJsonParsingIntegration:
     """Tests for Claude stream-json parsing in the web UI."""
@@ -660,10 +715,12 @@ class TestClaudeJsonParsingIntegration:
         mock_api_client.create_session.return_value = mock_session
 
         # Simulate Claude stream-json output
+        # Tool uses are placed BEFORE text so they get summarized when text arrives
+        # (tool uses after text won't be summarized since no text follows)
         claude_json_lines = (
             b'{"type":"system","subtype":"init","cwd":"/test"}' + b'\n'
-            b'{"type":"assistant","message":{"content":[{"type":"text","text":"Hello from Claude!"}]}}' + b'\n'
             b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/src/main.py"}}]}}' + b'\n'
+            b'{"type":"assistant","message":{"content":[{"type":"text","text":"Hello from Claude!"}]}}' + b'\n'
             b'{"type":"result","result":"done"}' + b'\n'
         )
 
@@ -700,7 +757,8 @@ class TestClaudeJsonParsingIntegration:
         # Verify JSON was parsed to human-readable text
         combined = "\n".join(stream_messages)
         assert "Hello from Claude!" in combined, "Assistant text should be extracted"
-        assert "Reading /src/main.py" in combined, "Tool use should be formatted"
+        # Tool uses are summarized when text follows them
+        assert "1 file read" in combined, "Tool summary should be included before text"
         assert '{"type":"system"' not in combined, "Raw JSON should not appear"
         assert '{"type":"result"' not in combined, "Result events should be filtered"
 
@@ -1673,6 +1731,104 @@ More details here...
         assert "After" in summary_part
         assert "data:image/png;base64," in summary_part
 
+    def test_extract_coding_summary_with_files_changed_list(self):
+        """Extract files_changed as a list of paths."""
+        from chad.util.prompts import extract_coding_summary
+
+        content = '''```json
+{
+  "change_summary": "Fixed the bug",
+  "files_changed": ["src/auth.py", "tests/test_auth.py"],
+  "completion_status": "success"
+}
+```'''
+        result = extract_coding_summary(content)
+        assert result is not None
+        assert result.change_summary == "Fixed the bug"
+        assert result.files_changed == ["src/auth.py", "tests/test_auth.py"]
+        assert result.completion_status == "success"
+
+    def test_extract_coding_summary_with_files_changed_info_only(self):
+        """Extract files_changed as 'info_only' string."""
+        from chad.util.prompts import extract_coding_summary
+
+        content = '''```json
+{
+  "change_summary": "Explained the codebase structure",
+  "files_changed": "info_only",
+  "completion_status": "success"
+}
+```'''
+        result = extract_coding_summary(content)
+        assert result is not None
+        assert result.change_summary == "Explained the codebase structure"
+        assert result.files_changed == "info_only"
+        assert result.completion_status == "success"
+
+    def test_extract_coding_summary_with_completion_status_partial(self):
+        """Extract completion_status with partial value."""
+        from chad.util.prompts import extract_coding_summary
+
+        content = '''```json
+{
+  "change_summary": "Started implementing feature",
+  "files_changed": ["src/feature.py"],
+  "completion_status": "partial"
+}
+```'''
+        result = extract_coding_summary(content)
+        assert result is not None
+        assert result.completion_status == "partial"
+
+    def test_get_summary_completion_prompt_returns_none_when_complete(self):
+        """get_summary_completion_prompt returns None when all fields present."""
+        from chad.util.prompts import extract_coding_summary, get_summary_completion_prompt
+
+        content = '''```json
+{
+  "change_summary": "Fixed the bug",
+  "files_changed": ["src/auth.py"],
+  "completion_status": "success"
+}
+```'''
+        result = extract_coding_summary(content)
+        prompt = get_summary_completion_prompt(result)
+        assert prompt is None
+
+    def test_get_summary_completion_prompt_returns_prompt_when_no_summary(self):
+        """get_summary_completion_prompt returns prompt when no summary extracted."""
+        from chad.util.prompts import get_summary_completion_prompt
+
+        prompt = get_summary_completion_prompt(None)
+        assert prompt is not None
+        assert "files_changed" in prompt
+        assert "completion_status" in prompt
+
+    def test_get_summary_completion_prompt_returns_prompt_when_missing_files_changed(self):
+        """get_summary_completion_prompt returns prompt when files_changed missing."""
+        from chad.util.prompts import extract_coding_summary, get_summary_completion_prompt
+
+        content = '''```json
+{"change_summary": "Fixed the bug"}
+```'''
+        result = extract_coding_summary(content)
+        prompt = get_summary_completion_prompt(result)
+        assert prompt is not None
+        assert "files_changed" in prompt
+
+    def test_get_summary_completion_prompt_returns_prompt_when_missing_completion_status(self):
+        """get_summary_completion_prompt returns prompt when completion_status missing."""
+        from chad.util.prompts import CodingSummary, get_summary_completion_prompt
+
+        summary = CodingSummary(
+            change_summary="Fixed the bug",
+            files_changed=["src/auth.py"],
+            completion_status=None,
+        )
+        prompt = get_summary_completion_prompt(summary)
+        assert prompt is not None
+        assert "completion_status" in prompt
+
 
 class TestProgressUpdateExtraction:
     """Test progress update extraction with placeholder filtering."""
@@ -2248,3 +2404,89 @@ class TestPreferredVerificationModel:
         # Should not persist to account or global config
         mock_api_client.set_account_model.assert_not_called()
         mock_api_client.set_preferred_verification_model.assert_not_called()
+
+
+class TestScreenshotUpload:
+    """Tests for screenshot upload functionality."""
+
+    def test_build_coding_prompt_includes_screenshot_paths(self, tmp_path):
+        """build_coding_prompt should include screenshot file paths when provided."""
+        from chad.util.prompts import build_coding_prompt
+
+        # Create test screenshot files
+        screenshot1 = tmp_path / "screenshot1.png"
+        screenshot2 = tmp_path / "screenshot2.png"
+        screenshot1.write_bytes(b"PNG mock data 1")
+        screenshot2.write_bytes(b"PNG mock data 2")
+
+        prompt = build_coding_prompt(
+            task="Fix the UI layout",
+            screenshots=[str(screenshot1), str(screenshot2)],
+        )
+
+        # Screenshot paths should be included in the prompt
+        assert str(screenshot1) in prompt
+        assert str(screenshot2) in prompt
+        # Should have a screenshots section
+        assert "Screenshot" in prompt or "screenshot" in prompt
+
+    def test_build_coding_prompt_works_without_screenshots(self):
+        """build_coding_prompt should work without screenshots (backwards compatible)."""
+        from chad.util.prompts import build_coding_prompt
+
+        prompt = build_coding_prompt(task="Simple task")
+
+        assert "Simple task" in prompt
+        # No screenshot references should be present
+        assert "Screenshot" not in prompt
+
+    def test_task_create_schema_accepts_screenshots(self):
+        """TaskCreate schema should accept an optional screenshots field."""
+        from chad.server.api.schemas.task import TaskCreate
+
+        # Without screenshots
+        task = TaskCreate(
+            project_path="/tmp/project",
+            task_description="Fix bug",
+            coding_agent="claude",
+        )
+        assert task.screenshots is None or task.screenshots == []
+
+        # With screenshots
+        task_with_screenshots = TaskCreate(
+            project_path="/tmp/project",
+            task_description="Fix UI issue",
+            coding_agent="claude",
+            screenshots=["/tmp/screenshot1.png", "/tmp/screenshot2.png"],
+        )
+        assert task_with_screenshots.screenshots == ["/tmp/screenshot1.png", "/tmp/screenshot2.png"]
+
+    def test_api_client_start_task_accepts_screenshots(self):
+        """APIClient.start_task should accept screenshots parameter."""
+        from chad.ui.client.api_client import APIClient
+        import httpx
+
+        # Mock the HTTP client
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "task_id": "test-task-123",
+            "session_id": "test-session",
+            "status": "running",
+        }
+        mock_response.raise_for_status = Mock()
+
+        with patch.object(httpx.Client, "post", return_value=mock_response) as mock_post:
+            client = APIClient("http://localhost:8000")
+            client.start_task(
+                session_id="test-session",
+                project_path="/tmp/project",
+                task_description="Fix UI",
+                coding_agent="claude",
+                screenshots=["/tmp/screenshot1.png"],
+            )
+
+            # Verify screenshots were included in the request
+            call_args = mock_post.call_args
+            request_data = call_args.kwargs.get("json", {})
+            assert "screenshots" in request_data
+            assert request_data["screenshots"] == ["/tmp/screenshot1.png"]

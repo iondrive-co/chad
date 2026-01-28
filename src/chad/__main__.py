@@ -97,6 +97,41 @@ def find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def get_chad_dir() -> Path:
+    """Get the Chad data directory, creating it if needed.
+
+    Uses CHAD_DIR env var if set, otherwise ~/.chad.
+    """
+    env_dir = os.environ.get("CHAD_DIR")
+    if env_dir:
+        chad_dir = Path(env_dir)
+    else:
+        chad_dir = Path.home() / ".chad"
+    chad_dir.mkdir(parents=True, exist_ok=True)
+    return chad_dir
+
+
+def write_server_port(port: int) -> None:
+    """Write the server port to a file for autodiscovery."""
+    port_file = get_chad_dir() / "server.port"
+    port_file.write_text(f"{port}\n")
+
+
+def read_server_port() -> int | None:
+    """Read the server port from the autodiscovery file.
+
+    Returns:
+        The port number, or None if not available or invalid.
+    """
+    port_file = get_chad_dir() / "server.port"
+    if not port_file.exists():
+        return None
+    try:
+        return int(port_file.read_text().strip())
+    except (ValueError, OSError):
+        return None
+
+
 def run_server(host: str = "0.0.0.0", port: int = 0) -> None:
     """Run the Chad API server.
 
@@ -109,6 +144,9 @@ def run_server(host: str = "0.0.0.0", port: int = 0) -> None:
 
     if port == 0:
         port = find_free_port()
+
+    # Write port for autodiscovery by other clients
+    write_server_port(port)
 
     app = create_app()
     print(f"Starting Chad API server on {host}:{port}")
@@ -157,6 +195,8 @@ def run_unified(
 
         time.sleep(0.5)
         api_base_url = f"http://127.0.0.1:{api_port}"
+        # Write port for autodiscovery by other clients
+        write_server_port(api_port)
         print(f"API server running on {api_base_url}")
 
     # Run UI in main thread (blocking)
@@ -195,7 +235,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--server-url", type=str, default=None,
-        help="Connect to existing API server instead of starting a local one"
+        help="Connect to existing API server (use 'auto' to autodiscover port from ~/.chad/server.port)"
     )
     parser.add_argument(
         "--dev", action="store_true", help="Enable development mode (enables mock provider)"
@@ -234,17 +274,31 @@ def main() -> int:
             run_server(host=args.api_host, port=args.api_port)
             return 0
 
-        # UI modes need password - verify before starting API
-        main_password = os.environ.get("CHAD_PASSWORD")
-
-        if main_password is None:
-            if config_mgr.is_first_run():
-                main_password = config_mgr.setup_main_password()
-            else:
-                main_password = config_mgr.verify_main_password()
+        # Handle server URL autodiscovery early so we can skip password prompt when connecting
+        server_url = args.server_url
+        if server_url == "auto":
+            discovered_port = read_server_port()
+            if discovered_port is None:
+                print("❌ No running Chad server found (check ~/.chad/server.port)")
+                return 1
+            server_url = f"http://127.0.0.1:{discovered_port}"
+            print(f"Autodiscovered server at port {discovered_port}")
 
         # Determine UI mode from args or config
         ui_mode = args.ui if args.ui else config_mgr.get_ui_mode()
+
+        # UI modes need password only when starting a local API server
+        main_password = None
+        needs_password = server_url is None
+
+        if needs_password:
+            main_password = os.environ.get("CHAD_PASSWORD")
+
+            if main_password is None:
+                if config_mgr.is_first_run():
+                    main_password = config_mgr.setup_main_password()
+                else:
+                    main_password = config_mgr.verify_main_password()
 
         # Run UI with optional local server (--server-url skips local server)
         run_unified(
@@ -253,7 +307,7 @@ def main() -> int:
             api_port=args.api_port,
             dev_mode=args.dev,
             ui_mode=ui_mode,
-            server_url=args.server_url,
+            server_url=server_url,
         )
 
         return 0

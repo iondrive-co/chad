@@ -4,17 +4,21 @@ Edit these prompts to customize agent behavior.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 
 
 # =============================================================================
 # CODING AGENT SYSTEM PROMPT
 # =============================================================================
 # The coding agent receives this prompt with:
-# - {project_docs} replaced with content from AGENTS.md/CLAUDE.md if present
+# - {project_docs} replaced with references to on-disk docs (AGENTS.md, ARCHITECTURE.md, etc.)
+# - {verification_instructions} replaced with project-specific verification commands
 # - {task} replaced with the user's task description
 
 CODING_AGENT_PROMPT = """\
 {project_docs}
+
+{verification_instructions}
 
 You need to complete the following task:
 ---
@@ -26,56 +30,93 @@ Use the following sequence to complete the task:
 1. Explore the code to understand the task.
 2. Once you understand what needs to be done, you MUST output a progress update so the user can see what you found:
 ```json
-{{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45 - request() method", "before_screenshot": "/path/to/before.png (optional, include if you took one)", "before_description": "Brief description of what the screenshot shows (optional, include if you took a screenshot)"}}
+{{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45 - request() method"}}
 ```
-For UI tasks: take a "before" screenshot first and include the path. For non-UI tasks: omit before_screenshot.
 3. Write test(s) that should fail until the fix/feature is implemented.
-4. Make the changes, adjusting tests as needed. If no changes are required, skip to step 9.
-5. Once you have completed your changes for the task, take an after screenshot (if that is supported) to confirm
-that the user's request is fixed/done.
-6. You MUST run verification before completing your task. For example if you were working on this project, chad, you would do:
-- Recommended approach: python -c \"from chad.ui.gradio.verification.tools import verify; result = verify(); print('✓ Passed' if result['success'] else f'✗ Failed at {{result.get(\"failed_phase\", \"unknown\")}}'); exit(0 if result['success'] else 1)\"
-- For visual-only tests when needed: python -c \"from chad.ui.gradio.verification.tools import verify; result = verify(visual_only=True); print('✓ Passed' if result['success'] else f'✗ Failed at {{result.get(\"failed_phase\", \"unknown\")}}'); exit(0 if result['success'] else 1)\"
-If verify() is unavailable, use manual commands with intelligent Python detection:
-- Detect Python: Use ./.venv/bin/python if exists, otherwise ./.venv/Scripts/python.exe (Windows), ./venv/bin/python, ./venv/Scripts/python.exe (Windows), or fallback to python3
-- Run linting: {{detected_python}} -m flake8 src/chad
-- Run core tests (visuals excluded by marker): {{detected_python}} -m pytest tests/ -v --tb=short -n auto \\
-                                               -m \"not visual\"
-- Run only the visual tests mapped to the UI you touched (see src/chad/verification/visual_test_map.py):
-    VTESTS=$({{detected_python}} - <<'PY'
-import subprocess
-from chad.ui.gradio.verification.visual_test_map import tests_for_paths
-changed = subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines()
-print(" or ".join(tests_for_paths(changed)))
-PY
-)
-    if [ -n "$VTESTS" ]; then {{detected_python}} -m pytest tests/test_ui_integration.py \\
-                                                       tests/test_ui_playwright_runner.py -v --tb=short \\
-                                                       -m \"visual\" -k "$VTESTS"; fi
-  When working on chad, if you add or change UI components, update visual_test_map.py so future runs pick the right visual tests.
-7. Fix ALL failures and retest if required.
-8. End your response with a JSON summary block like this:
+4. Make the changes, adjusting tests as needed. If no changes are required, skip to step 7.
+5. Run verification commands (lint and tests) as described above.
+6. Fix ALL failures and retest if required.
+7. End your response with a JSON summary block like this:
 ```json
 {{
   "change_summary": "One sentence describing what was changed",
-  "hypothesis": "Brief root cause explanation (include if investigating a bug)",
-  "before_screenshot": "/path/to/before.png (include if you took a before screenshot)",
-  "before_description": "Brief description of what the before screenshot shows",
-  "after_screenshot": "/path/to/after.png (include if you took an after screenshot)",
-  "after_description": "Brief description of what the after screenshot shows"
+  "files_changed": ["src/auth.py", "tests/test_auth.py"],
+  "completion_status": "success",
+  "hypothesis": "Brief root cause explanation (include if investigating a bug)"
 }}
 ```
-Only include optional fields (hypothesis, before_screenshot, before_description, after_screenshot, after_description) when applicable.
+Required fields:
+- change_summary: One sentence describing what was done
+- files_changed: Array of file paths that were modified, or "info_only" if this was just an information request with no file changes
+- completion_status: One of "success", "partial" (hit context/token limit), "blocked" (needs user input), or "error"
+Optional fields:
+- hypothesis: Include only when investigating a bug
 """
 
 
 # =============================================================================
-# VERIFICATION AGENT PROMPT
+# VERIFICATION AGENT PROMPTS (Two-Phase)
 # =============================================================================
-# The verification agent reviews the coding agent's work and outputs JSON.
+# The verification agent reviews the coding agent's work in two phases:
+# 1. Exploration - Free-form analysis of the changes
+# 2. Conclusion - Structured JSON output
 #
 # IMPORTANT: The verification agent should NOT make any changes to files.
 
+# Phase 1: Exploration - Agent can freely explore and analyze
+VERIFICATION_EXPLORATION_PROMPT = """\
+You are a code review agent verifying that another agent completed a coding task correctly.
+
+IMPORTANT RULE: DO NOT modify or create any files in this codebase. Your only job is to verify the work.
+
+## Task that was assigned:
+---
+{task}
+---
+
+## Coding agent's output:
+---
+{coding_output}
+---
+
+Please verify the work by:
+1. Using Read, Glob, and Grep tools to check that what was actually modified on disk matches the coding agent's output
+2. Checking that the coding agent's changes address everything the user asked for
+3. Reviewing the changes for correctness and completeness
+
+If the coding agent already ran tests and they passed, you do NOT need to re-run them. Trust the coding agent's test
+output unless you have specific concerns about the implementation.
+
+Explore the codebase and provide your analysis. After you're done exploring, I'll ask you for your final verdict.
+"""
+
+# Phase 2: Conclusion - Request structured JSON output
+VERIFICATION_CONCLUSION_PROMPT = """\
+Based on your analysis, provide your final verdict.
+
+You MUST respond with ONLY valid JSON and nothing else:
+```json
+{{
+  "passed": true,
+  "summary": "Brief explanation of what was checked and why it looks correct"
+}}
+```
+Or if issues were found:
+
+```json
+{{
+  "passed": false,
+  "summary": "Brief summary of what needs to be fixed",
+  "issues": [
+    "First issue that needs to be addressed",
+    "Second issue that needs to be addressed"
+  ]
+}}
+```
+Output ONLY the JSON block, no other text.
+"""
+
+# Legacy single-phase prompt (kept for backwards compatibility)
 VERIFICATION_AGENT_PROMPT = """\
 You are a code review agent and follow this IMPORTANT RULE - DO NOT modify or create any files in this codebase, instead
 your only job is to verify that another agent completed the following coding task correctly:
@@ -118,25 +159,51 @@ Output ONLY the JSON block, no other text.
 """
 
 
-def build_coding_prompt(task: str, project_docs: str | None = None) -> str:
+def build_coding_prompt(
+    task: str,
+    project_docs: str | None = None,
+    project_path: str | Path | None = None,
+    screenshots: list[str] | None = None,
+) -> str:
     """Build the complete prompt for the coding agent.
 
     Args:
         task: The user's task description
-        project_docs: Optional project documentation (from AGENTS.md, CLAUDE.md, etc.)
+        project_docs: Optional project documentation references (paths to read)
+        project_path: Optional project path for detecting verification commands
+        screenshots: Optional list of screenshot file paths to include
 
     Returns:
         Complete prompt for the coding agent including the task
     """
     docs_section = ""
     if project_docs:
-        docs_section = f"# Project Instructions\n\n{project_docs}\n\n"
+        docs_section = f"# Project Documentation\n\n{project_docs}\n\n"
 
-    return CODING_AGENT_PROMPT.format(project_docs=docs_section, task=task)
+    # Get verification instructions
+    verification_section = ""
+    if project_path:
+        from chad.util.project_setup import build_verification_instructions
+        verification_section = build_verification_instructions(Path(project_path))
+
+    # Build task section with screenshots if provided
+    task_with_screenshots = task
+    if screenshots:
+        screenshot_section = "\n\nThe user has attached the following screenshots for reference. " \
+            "Use the Read tool to view them:\n"
+        for screenshot_path in screenshots:
+            screenshot_section += f"- {screenshot_path}\n"
+        task_with_screenshots = task + screenshot_section
+
+    return CODING_AGENT_PROMPT.format(
+        project_docs=docs_section,
+        verification_instructions=verification_section,
+        task=task_with_screenshots,
+    )
 
 
 def get_verification_prompt(coding_output: str, task: str = "", change_summary: str | None = None) -> str:
-    """Build the prompt for the verification agent.
+    """Build the prompt for the verification agent (legacy single-phase).
 
     Args:
         coding_output: The output from the coding agent
@@ -153,6 +220,44 @@ def get_verification_prompt(coding_output: str, task: str = "", change_summary: 
     return VERIFICATION_AGENT_PROMPT.format(coding_output=coding_block, task=task or "(no task provided)")
 
 
+def get_verification_exploration_prompt(
+    coding_output: str,
+    task: str = "",
+    change_summary: str | None = None,
+) -> str:
+    """Build the exploration prompt for two-phase verification.
+
+    This is Phase 1 where the verification agent can freely explore the codebase.
+
+    Args:
+        coding_output: The output from the coding agent
+        task: The original task description
+        change_summary: Optional extracted change summary to prepend
+
+    Returns:
+        Exploration prompt for the verification agent
+    """
+    coding_block = coding_output
+    if change_summary:
+        coding_block = f"Summary from coding agent: {change_summary}\n\nFull response:\n{coding_output}"
+
+    return VERIFICATION_EXPLORATION_PROMPT.format(
+        coding_output=coding_block,
+        task=task or "(no task provided)",
+    )
+
+
+def get_verification_conclusion_prompt() -> str:
+    """Get the conclusion prompt for two-phase verification.
+
+    This is Phase 2 where the verification agent must output structured JSON.
+
+    Returns:
+        Conclusion prompt requesting JSON output
+    """
+    return VERIFICATION_CONCLUSION_PROMPT
+
+
 class VerificationParseError(Exception):
     """Raised when verification response cannot be parsed."""
 
@@ -164,6 +269,10 @@ class CodingSummary:
     """Structured summary extracted from coding agent response."""
 
     change_summary: str
+    # files_changed is a list of file paths, or "info_only" string for information requests
+    files_changed: list[str] | str | None = None
+    # completion_status: "success", "partial", "blocked", "error", or None if not specified
+    completion_status: str | None = None
     hypothesis: str | None = None
     before_screenshot: str | None = None
     before_description: str | None = None
@@ -291,8 +400,18 @@ def extract_coding_summary(response: str) -> CodingSummary | None:
         try:
             data = json.loads(json_match.group(1))
             if "change_summary" in data:
+                # Parse files_changed - can be array or "info_only" string
+                files_changed = data.get("files_changed")
+                if isinstance(files_changed, list):
+                    files_changed = [str(f) for f in files_changed]
+                elif isinstance(files_changed, str):
+                    pass  # Keep as string (e.g., "info_only")
+                else:
+                    files_changed = None
                 return CodingSummary(
                     change_summary=data["change_summary"],
+                    files_changed=files_changed,
+                    completion_status=data.get("completion_status"),
                     hypothesis=data.get("hypothesis"),
                     before_screenshot=data.get("before_screenshot"),
                     before_description=data.get("before_description"),
@@ -407,3 +526,55 @@ def check_verification_mentioned(response: str) -> bool:
             return True
 
     return False
+
+
+# =============================================================================
+# CODING SUMMARY VALIDATION AND RE-INVOKE
+# =============================================================================
+
+SUMMARY_COMPLETION_PROMPT = """\
+Your previous response is missing required fields in the JSON summary block. Please output ONLY a complete JSON \
+summary block with all required fields:
+
+```json
+{{
+  "change_summary": "One sentence describing what was done",
+  "files_changed": ["list", "of", "files"] or "info_only" if no files were changed,
+  "completion_status": "success" or "partial" or "blocked" or "error"
+}}
+```
+
+Required fields:
+- change_summary: What you accomplished
+- files_changed: Array of modified file paths, OR the string "info_only" if this was just an information request
+- completion_status: One of "success", "partial" (hit token/context limit), "blocked" (needs user input), or "error"
+
+Output ONLY the JSON block, nothing else.
+"""
+
+
+def get_summary_completion_prompt(summary: CodingSummary | None) -> str | None:
+    """Check if a coding summary is missing required fields and return a completion prompt.
+
+    This function validates that the mandatory fields (files_changed, completion_status)
+    are present in the coding summary. If they're missing, it returns a prompt to
+    re-invoke the coding agent to complete the summary.
+
+    Args:
+        summary: The extracted coding summary, or None if extraction failed
+
+    Returns:
+        A prompt string to re-invoke the agent if fields are missing, or None if complete
+    """
+    if summary is None:
+        # No summary at all - need to ask for one
+        return SUMMARY_COMPLETION_PROMPT
+
+    # Check for missing mandatory fields
+    missing_files_changed = summary.files_changed is None
+    missing_completion_status = summary.completion_status is None
+
+    if missing_files_changed or missing_completion_status:
+        return SUMMARY_COMPLETION_PROMPT
+
+    return None

@@ -31,19 +31,32 @@ _CLI_INSTALLER = AIToolInstaller()
 
 
 class ClaudeStreamJsonParser:
-    """Parses Claude Code stream-json output and converts to human-readable text.
+    """Parses stream-json output from Claude Code and Qwen CLI.
 
-    Claude's stream-json format outputs one JSON object per line with types:
+    Supports multiple JSON formats:
+
+    Claude format:
     - system/init: Session initialization (ignored for display)
-    - assistant: Contains message content (text and tool_use)
+    - assistant: Contains message.content array with text and tool_use items
     - result: Final result summary
+
+    Qwen format (Gemini CLI fork):
+    - system: Session initialization with session_id
+    - message: Contains role ("assistant") and content (string)
 
     This parser buffers incoming bytes, extracts complete JSON lines,
     and yields human-readable text suitable for terminal display.
+
+    Tool calls are accumulated and displayed as a collapsed summary rather than
+    individual verbose descriptions, keeping the live view focused on AI reasoning.
     """
 
     def __init__(self):
         self._buffer = bytearray()
+        # Tool tracking for collapsed summaries
+        self._tool_counts: dict[str, int] = {}
+        self._tool_details: list[str] = []
+        self._pending_summary = False  # True when we have tools to summarize
 
     def feed(self, data: bytes) -> list[str]:
         """Feed raw bytes and return list of human-readable text chunks.
@@ -70,6 +83,12 @@ class ClaudeStreamJsonParser:
                 obj = json.loads(line.decode("utf-8", errors="replace"))
                 text = self._format_json_event(obj)
                 if text:
+                    # Prepend accumulated tool summary before text content
+                    if self._pending_summary:
+                        summary = self.get_tool_summary()
+                        if summary:
+                            results.append(summary)
+                        self.clear_tool_tracking()
                     results.append(text)
             except json.JSONDecodeError:
                 # Not JSON, pass through as-is
@@ -112,14 +131,27 @@ class ClaudeStreamJsonParser:
                 elif item_type == "tool_use":
                     tool_name = item.get("name", "unknown")
                     tool_input = item.get("input", {})
+                    # Accumulate tool for collapsed summary instead of showing each one
+                    self._tool_counts[tool_name] = self._tool_counts.get(tool_name, 0) + 1
                     tool_desc = self._format_tool_use(tool_name, tool_input)
                     if tool_desc:
-                        parts.append(tool_desc)
+                        self._tool_details.append(tool_desc)
+                    self._pending_summary = True
+                    # Don't add to parts - tools are shown as collapsed summary
 
             return "\n".join(parts) if parts else None
 
         elif event_type == "result":
             # Final result - could show summary but usually redundant
+            return None
+
+        elif event_type == "message":
+            # Qwen/Gemini CLI format: {type: "message", role: "assistant", content: "..."}
+            role = obj.get("role", "")
+            if role == "assistant":
+                content = obj.get("content", "")
+                if content:
+                    return content
             return None
 
         # Unknown event type - skip
@@ -178,31 +210,82 @@ class ClaudeStreamJsonParser:
             # Generic tool display
             return f"• {name}"
 
+    def get_tool_summary(self) -> str:
+        """Return collapsed summary of accumulated tool calls.
+
+        Returns a single line like "• 3 files read, 2 edits, 5 searches"
+        instead of showing every individual tool call.
+        """
+        if not self._tool_counts:
+            return ""
+
+        parts = []
+
+        # File reads
+        read_count = self._tool_counts.get("Read", 0)
+        if read_count:
+            parts.append(f"{read_count} file{'s' if read_count > 1 else ''} read")
+
+        # Edits (Edit + Write combined)
+        edit_count = self._tool_counts.get("Edit", 0) + self._tool_counts.get("Write", 0)
+        if edit_count:
+            parts.append(f"{edit_count} edit{'s' if edit_count > 1 else ''}")
+
+        # Searches (Glob + Grep combined)
+        search_count = self._tool_counts.get("Glob", 0) + self._tool_counts.get("Grep", 0)
+        if search_count:
+            parts.append(f"{search_count} search{'es' if search_count > 1 else ''}")
+
+        # Commands
+        bash_count = self._tool_counts.get("Bash", 0)
+        if bash_count:
+            parts.append(f"{bash_count} command{'s' if bash_count > 1 else ''}")
+
+        # Tasks (subagent spawns)
+        task_count = self._tool_counts.get("Task", 0)
+        if task_count:
+            parts.append(f"{task_count} task{'s' if task_count > 1 else ''}")
+
+        # Web operations
+        web_count = self._tool_counts.get("WebSearch", 0) + self._tool_counts.get("WebFetch", 0)
+        if web_count:
+            parts.append(f"{web_count} web request{'s' if web_count > 1 else ''}")
+
+        # Other tools not in categories above
+        categorized = {"Read", "Edit", "Write", "Glob", "Grep", "Bash", "Task", "WebSearch", "WebFetch"}
+        other = sum(c for t, c in self._tool_counts.items() if t not in categorized)
+        if other:
+            parts.append(f"{other} other")
+
+        if not parts:
+            return ""
+
+        return f"• {', '.join(parts)}"
+
+    def get_tool_details(self) -> list[str]:
+        """Return full tool call details for expandable view."""
+        return self._tool_details.copy()
+
+    def has_pending_tools(self) -> bool:
+        """Check if there are tool calls pending to be summarized."""
+        return self._pending_summary
+
+    def clear_tool_tracking(self):
+        """Reset tool tracking after summary has been rendered."""
+        self._tool_counts = {}
+        self._tool_details = []
+        self._pending_summary = False
+
 
 def _read_project_docs(project_path: Path) -> str | None:
     """Read project documentation if present.
 
-    Reads AGENTS.md, .claude/CLAUDE.md, or CLAUDE.md from the project.
-    Returns the first file found, or None if no documentation exists.
+    Returns a reference block pointing to on-disk docs instead of inlining
+    their contents.
     """
-    doc_files = [
-        project_path / "AGENTS.md",
-        project_path / ".claude" / "CLAUDE.md",
-        project_path / "CLAUDE.md",
-    ]
+    from chad.util.project_setup import build_doc_reference_text
 
-    for doc_file in doc_files:
-        if doc_file.exists():
-            try:
-                content = doc_file.read_text(encoding="utf-8")
-                # Limit content to avoid overwhelming the context
-                if len(content) > 8000:
-                    content = content[:8000] + "\n\n[...truncated...]"
-                return content
-            except (OSError, UnicodeDecodeError):
-                continue
-
-    return None
+    return build_doc_reference_text(project_path)
 
 
 class TaskState(str, Enum):
@@ -254,6 +337,7 @@ def build_agent_command(
     account_name: str,
     project_path: Path,
     task_description: str | None = None,
+    screenshots: list[str] | None = None,
 ) -> tuple[list[str], dict[str, str], str | None]:
     """Build CLI command and environment for a provider.
 
@@ -262,6 +346,7 @@ def build_agent_command(
         account_name: Account name for provider-specific paths
         project_path: Path to the project/worktree
         task_description: Optional task to send as initial input
+        screenshots: Optional list of screenshot file paths for agent reference
 
     Returns:
         Tuple of (command_list, environment_dict, initial_input)
@@ -288,7 +373,7 @@ def build_agent_command(
     full_prompt: str | None = None
     if task_description:
         project_docs = _read_project_docs(project_path)
-        full_prompt = build_coding_prompt(task_description, project_docs)
+        full_prompt = build_coding_prompt(task_description, project_docs, project_path, screenshots)
 
     if provider == "anthropic":
         # Claude Code CLI
@@ -447,6 +532,7 @@ class TaskExecutor:
         on_event: Callable[[StreamEvent], None] | None = None,
         terminal_rows: int | None = None,
         terminal_cols: int | None = None,
+        screenshots: list[str] | None = None,
     ) -> Task:
         """Start a new coding task.
 
@@ -460,6 +546,7 @@ class TaskExecutor:
             on_event: Optional callback for streaming events
             terminal_rows: Optional terminal height (default: TERMINAL_ROWS)
             terminal_cols: Optional terminal width (default: TERMINAL_COLS)
+            screenshots: Optional list of screenshot file paths for agent reference
 
         Returns:
             The created Task object
@@ -513,6 +600,7 @@ class TaskExecutor:
                 on_event,
                 terminal_rows,
                 terminal_cols,
+                screenshots,
             ),
             daemon=True,
         )
@@ -535,6 +623,7 @@ class TaskExecutor:
         on_event: Callable[[StreamEvent], None] | None,
         terminal_rows: int | None,
         terminal_cols: int | None,
+        screenshots: list[str] | None,
     ):
         """Execute the task in a background thread using PTY."""
         # Use provided dimensions or fall back to defaults
@@ -614,12 +703,21 @@ class TaskExecutor:
 
             # Build agent command
             emit("status", status=f"Starting {coding_provider} agent...")
-            cmd, env, initial_input = build_agent_command(
-                coding_provider,
-                coding_account,
-                worktree_path,
-                task_description,
-            )
+            if screenshots:
+                cmd, env, initial_input = build_agent_command(
+                    coding_provider,
+                    coding_account,
+                    worktree_path,
+                    task_description,
+                    screenshots,
+                )
+            else:
+                cmd, env, initial_input = build_agent_command(
+                    coding_provider,
+                    coding_account,
+                    worktree_path,
+                    task_description,
+                )
 
             # Create JSON parser for providers that use stream-json output
             # Both Claude and Qwen use similar JSON formats
