@@ -94,6 +94,68 @@ class TestUIElements:
         field = page.get_by_label("Project Path")
         expect(field).to_be_visible()
 
+    def test_project_setup_commands_visible(self, page: Page):
+        """Project setup lint and test commands should be visible without clicking anything."""
+        # Lint command input should be visible immediately (not hidden in accordion)
+        lint_cmd = page.get_by_label("Lint Command")
+        expect(lint_cmd).to_be_visible()
+
+        # Test command input should be visible immediately (not hidden in accordion)
+        test_cmd = page.get_by_label("Test Command")
+        expect(test_cmd).to_be_visible()
+
+        # There should be no accordion for project setup - these should be part of the
+        # project path panel directly
+        accordion = page.locator(".project-setup-accordion")
+        expect(accordion).to_have_count(0)
+
+    def test_project_type_shown_in_label(self, page: Page):
+        """Project type should sit inline with the project path label to save space."""
+        label = page.locator("#project-path-input label")
+        expect(label).to_be_visible()
+        text = label.text_content()
+        assert "Type:" in text
+
+    def test_project_commands_share_row(self, page: Page):
+        """Lint and test commands should sit on the same horizontal row."""
+        lint_cmd = page.get_by_label("Lint Command")
+        test_cmd = page.get_by_label("Test Command")
+        expect(lint_cmd).to_be_visible()
+        expect(test_cmd).to_be_visible()
+
+        lint_box = lint_cmd.bounding_box()
+        test_box = test_cmd.bounding_box()
+        assert lint_box and test_box
+        assert abs(lint_box["y"] - test_box["y"]) <= 24, "Commands should align horizontally"
+
+    def test_command_test_buttons_align_with_headers(self, page: Page):
+        """Test buttons should sit beside their corresponding command headers."""
+        lint_label = page.locator(".lint-command-label")
+        lint_btn = page.locator(".lint-test-btn")
+        test_label = page.locator(".test-command-label")
+        test_btn = page.locator(".test-command-btn")
+
+        for element in (lint_label, lint_btn, test_label, test_btn):
+            expect(element).to_be_visible()
+
+        lint_label_box = lint_label.bounding_box()
+        lint_btn_box = lint_btn.bounding_box()
+        test_label_box = test_label.bounding_box()
+        test_btn_box = test_btn.bounding_box()
+
+        for label_box, btn_box in ((lint_label_box, lint_btn_box), (test_label_box, test_btn_box)):
+            assert label_box and btn_box
+            assert btn_box["y"] <= label_box["y"] + label_box["height"] + 4
+            assert btn_box["y"] + btn_box["height"] >= label_box["y"] - 4
+            assert btn_box["x"] > label_box["x"]
+
+    def test_project_doc_paths_visible(self, page: Page):
+        """Project doc path inputs should be visible for editing."""
+        instructions = page.get_by_label("Agent Instructions Path")
+        architecture = page.get_by_label("Architecture Doc Path")
+        expect(instructions).to_be_visible()
+        expect(architecture).to_be_visible()
+
     def test_task_description_field(self, page: Page):
         """Task description field should be present."""
         # Look for the task description textarea by its label
@@ -263,6 +325,32 @@ class TestCodingAgentLayout:
         assert abs(verification_model_box["width"] - verification_box["width"]) <= 4
         assert abs(verification_reasoning_box["x"] - verification_box["x"]) <= 4
         assert abs(verification_reasoning_box["width"] - verification_box["width"]) <= 4
+
+    def test_cancel_button_in_status_row(self, page: Page):
+        """Cancel button should be in the status row, to the left of the save button."""
+        cancel_btn = page.locator("#cancel-task-btn")
+        save_btn = page.locator(".project-save-btn")
+        status_row = page.locator("#role-status-row")
+
+        expect(cancel_btn).to_be_visible()
+        expect(save_btn).to_be_visible()
+        expect(status_row).to_be_visible()
+
+        cancel_box = cancel_btn.bounding_box()
+        save_box = save_btn.bounding_box()
+        status_box = status_row.bounding_box()
+
+        assert cancel_box and save_box and status_box
+
+        # Cancel button should be in the status row (vertically aligned)
+        assert abs(cancel_box["y"] - status_box["y"]) < 20, (
+            f"Cancel button (y={cancel_box['y']}) should be in the status row (y={status_box['y']})"
+        )
+
+        # Cancel button should be to the left of the save button
+        assert cancel_box["x"] < save_box["x"], (
+            f"Cancel button (x={cancel_box['x']}) should be to the left of save button (x={save_box['x']})"
+        )
 
     def test_cancel_button_visible_light_and_dark(self, page: Page):
         """Cancel button should stay visible in both color schemes."""
@@ -1021,6 +1109,75 @@ Line 4: Fourth line"""
             f"Chatbot should NOT have inline-live elements during streaming. "
             f"Found {inline_live_in_chatbot.get('inlineLiveCount')} elements: "
             f"{inline_live_in_chatbot.get('inlineLiveTexts')}"
+        )
+
+
+class TestLiveStreamScrollPreservation:
+    """Ensure live view DOM patching preserves user scroll position."""
+
+    def test_live_patch_preserves_user_scroll(self, page: Page):
+        """Updating via live patch should not reset scroll when user is mid-scroll."""
+        live_id = "live-scroll-test"
+
+        trigger = page.locator(".live-patch-trigger")
+        trigger.first.wait_for(state="attached", timeout=5000)
+        assert trigger.count() >= 1, "Live patch trigger should be rendered in the DOM"
+
+        before = page.evaluate(
+            """
+({ liveId }) => {
+  const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+  const lines = Array.from({length: 200}, (_, i) => `Line ${i + 1}`).join('\\n');
+  box.innerHTML = `<div class="live-output-wrapper" data-live-id="${liveId}"><div class="live-output-header">▶ CODING AI (Live Stream)</div><div class="live-output-content" style="height:420px; overflow:auto; white-space:pre">${lines}</div></div>`;
+  const content = box.querySelector('.live-output-content');
+  content.scrollTop = 650;
+  return { top: content.scrollTop, height: content.scrollHeight };
+}
+""",
+            {"liveId": live_id},
+        )
+
+        page.evaluate(
+            """
+({ liveId }) => {
+  const trigger = document.querySelector('.live-patch-trigger');
+  if (!trigger) return false;
+  const newLines = Array.from({length: 220}, (_, i) => `Patched ${i + 1}`).join('\\n');
+  const newHtml = `<div class="live-output-wrapper" data-live-id="${liveId}"><div class="live-output-header">▶ CODING AI (Live Stream)</div><div class="live-output-content" style="height:420px; overflow:auto; white-space:pre">${newLines}</div></div>`;
+  const escapeHtml = (str) => str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  trigger.innerHTML = `<div data-live-patch="${liveId}" style="display:none">${escapeHtml(newHtml)}</div>`;
+  return true;
+}
+""",
+            {"liveId": live_id},
+        )
+
+        page.wait_for_timeout(400)
+
+        after = page.evaluate(
+            """
+({ liveId }) => {
+  const content = document.querySelector(`[data-live-id="${liveId}"] .live-output-content`);
+  if (!content) return null;
+  return {
+    top: content.scrollTop,
+    height: content.scrollHeight,
+    sample: content.innerText.slice(0, 30),
+  };
+}
+""",
+            {"liveId": live_id},
+        )
+
+        assert after is not None, "Live stream content should exist after patch"
+        assert after["sample"].startswith("Patched"), f"Patched content missing: {after['sample']}"
+        assert after["height"] > before["height"], "Patch should increase scrollable content height"
+        assert abs(after["top"] - before["top"]) <= 5, (
+            f"Scroll position should be preserved. Before={before['top']}, After={after['top']}"
         )
 
 

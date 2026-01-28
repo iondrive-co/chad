@@ -189,16 +189,13 @@ class EventMultiplexer:
                         yield self._create_ping()
 
                     try:
-                        # Wait for next PTY event with timeout for ping checks
-                        pty_event = await asyncio.wait_for(
-                            pty_iter.__anext__(),
-                            timeout=self.ping_interval,
-                        )
-                    except asyncio.TimeoutError:
-                        # No PTY event within ping interval - loop to send ping
-                        continue
+                        # Get next PTY event - the subscribe generator already has
+                        # internal polling with short sleeps, so we don't need wait_for.
+                        # Using wait_for here would cancel the generator on timeout,
+                        # which closes it and causes StopAsyncIteration on next call.
+                        pty_event = await pty_iter.__anext__()
                     except StopAsyncIteration:
-                        # PTY stream ended without explicit exit event
+                        # PTY stream ended
                         break
 
                     if pty_event.type == "output":

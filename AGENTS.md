@@ -7,6 +7,9 @@ flawlessly working features.
 
 ## Before making changes
 
+When exploring the codebase, note that ripgrep (`rg`) is not installed here. Use `grep -R`, `find`, or language-aware 
+tools instead—do not invoke `rg`.
+
 When designing new code, never make fallback code to handle paths other than the happy one, instead spend as much effort
 as necessary to make sure that everyone using your feature sees the same happy path you tested. Similarly don't provide
 config options, instead decide which option makes the most sense and implement that without writing code to handle other
@@ -43,12 +46,17 @@ If you find unused or redundant code or tests, you can remove them. Clean up the
 
 ## After making changes
 
-1. Take an after screenshot for gradio ui work
+Start from the premise that the new code will NOT fix the issue or implement the feature, and prove whether it will or 
+won't. It is fine to go back and redo changes at this point, but it is NOT acceptable to declare victory and deliver the 
+wrong thing. Here are some suggested steps for proving:
+
+1. Take an after screenshot for gradio ui work (see Screenshots section below)
 2. Run verification using the `verify()` function which handles Python detection automatically:
    ```python
    from chad.ui.gradio.verification.tools import verify
    result = verify()  # Runs flake8 + all tests
    # Or: verify(lint_only=True)  # Just flake8
+   # Or: verify(visual_only=True)  # Just visual tests
    ```
 3. **Run startup sanity checks** to catch import/runtime errors not covered by tests:
    ```bash
@@ -58,176 +66,53 @@ If you find unused or redundant code or tests, you can remove them. Clean up the
    timeout 5 .venv/bin/python -c "from chad.ui.cli import launch_cli_ui" 2>&1 || echo "CLI startup failed"
    ```
    This catches NameErrors, missing imports, and other issues that flake8 and tests may miss.
-4. Perform a critical self-review and note any outstanding issues
+4. Perform a critical self-review, note down all the issues you find, and then output them one by one noting whether
+each one is a problem that will require rework of your changes. If any do, then go back and rework and then go through
+this process again
 5. All tests must pass even if you did not break them, never skip tests for any reason.
 
-## Providers
+## Screenshots
 
-### Anthropic (Claude Code)
-- OAuth token in `~/.claude/.credentials.json`
-- CLI: `claude -p --input-format stream-json --output-format stream-json --permission-mode bypassPermissions`
+For UI changes, take before/after screenshots to verify visual correctness:
 
-### OpenAI (Codex)
-- Multi-account via isolated HOME dirs: `~/.chad/codex-homes/<account-name>/`
-- CLI: `codex exec --full-auto --skip-git-repo-check -C {path} {message}`
-
-### Google (Gemini)
-- OAuth creds in `~/.gemini/oauth_creds.json`
-- CLI: `gemini -y` (YOLO mode)
-
-## API Reference
-
-All endpoints are prefixed with `/api/v1`. Keep this section up to date when adding or modifying endpoints.
-
-### Status
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/status` | Server status - returns health, version, uptime |
-
-### Sessions
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/sessions` | Create a new session |
-| GET | `/sessions` | List all active sessions |
-| GET | `/sessions/{id}` | Get session details |
-| DELETE | `/sessions/{id}` | Delete session and clean up resources |
-| POST | `/sessions/{id}/cancel` | Cancel running task in session |
-| POST | `/sessions/{id}/tasks` | Start a new coding task |
-| GET | `/sessions/{id}/tasks/{task_id}` | Get task status |
-
-### Accounts & Providers
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/providers` | List supported provider types |
-| GET | `/accounts` | List configured accounts |
-| POST | `/accounts` | Add new account (requires OAuth - use UI) |
-| GET | `/accounts/{name}` | Get account details |
-| DELETE | `/accounts/{name}` | Delete an account |
-| PUT | `/accounts/{name}/model` | Set account's model |
-| PUT | `/accounts/{name}/reasoning` | Set account's reasoning level |
-| PUT | `/accounts/{name}/role` | Assign role (CODING/VERIFICATION) |
-| GET | `/accounts/{name}/models` | Get available models for account |
-| GET | `/accounts/{name}/usage` | Get usage stats (not implemented) |
-
-### Worktree Operations
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/sessions/{id}/worktree` | Create git worktree for session |
-| GET | `/sessions/{id}/worktree` | Get worktree status |
-| GET | `/sessions/{id}/worktree/diff` | Get diff summary |
-| GET | `/sessions/{id}/worktree/diff/full` | Get full diff with hunks |
-| POST | `/sessions/{id}/worktree/merge` | Merge changes to main branch |
-| POST | `/sessions/{id}/worktree/reset` | Reset worktree (discard changes) |
-| DELETE | `/sessions/{id}/worktree` | Delete worktree |
-
-### Configuration
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/config/verification` | Get verification settings |
-| PUT | `/config/verification` | Update verification settings |
-| GET | `/config/cleanup` | Get cleanup settings |
-| PUT | `/config/cleanup` | Update cleanup settings |
-| GET | `/config/preferences` | Get user preferences |
-| PUT | `/config/preferences` | Update user preferences |
-| GET | `/config/verification-agent` | Get verification agent account |
-| PUT | `/config/verification-agent` | Set verification agent account |
-| GET | `/config/preferred-verification-model` | Get preferred verification model |
-| PUT | `/config/preferred-verification-model` | Set preferred verification model |
-
-### Streaming API
-
-Both Gradio UI and CLI use the same PTY-based streaming API for real-time agent output.
-
-#### SSE Endpoint (Recommended)
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/sessions/{id}/stream` | Server-Sent Events for real-time updates |
-
-**Query Parameters:**
-- `since_seq`: Resume from sequence number (default: 0)
-- `include_terminal`: Include raw PTY output (default: true)
-
-**SSE Event Types:**
-
-| Event | Description | Data Fields |
-|-------|-------------|-------------|
-| `terminal` | Raw PTY output (base64) | `data`, `seq`, `has_ansi` |
-| `event` | Structured event | `type`, `seq`, event-specific fields |
-| `ping` | Keepalive (every 15s) | `ts` |
-| `complete` | PTY exited | `exit_code`, `seq` |
-| `error` | Error occurred | `error`, `seq` |
-
-#### Input Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/sessions/{id}/input` | Send input to PTY (base64 `data` field) |
-| POST | `/sessions/{id}/resize` | Resize terminal (`rows`, `cols` fields) |
-
-#### WebSocket (Alternative)
-
-| Endpoint | Description |
-|----------|-------------|
-| `/api/v1/ws/{session_id}` | Bidirectional WebSocket |
-
-**Client → Server:**
-- `input`: Send bytes to PTY (`{type: "input", data: "base64..."}`)
-- `resize`: Resize terminal (`{type: "resize", rows: 24, cols: 80}`)
-- `cancel`: Terminate PTY session
-- `ping`: Heartbeat (receives `pong`)
-
-**Server → Client:**
-- `terminal`: Raw PTY output (same as SSE)
-- `event`: Structured event
-- `complete`: PTY exited
-- `error`: Error occurred
-- `pong`: Response to ping
-
-## File Structure
-
-The readme file is `README.md` (all caps), not `Readme.md`.
-
+1. **Before starting**: Take a screenshot showing the current state
+2. **After changes**: Take a screenshot showing the result of your changes
+3. Include screenshot paths in your JSON summary:
+```json
+{
+  "change_summary": "Added dark mode toggle button",
+  "before_screenshot": "/path/to/before.png",
+  "before_description": "Settings panel without dark mode toggle",
+  "after_screenshot": "/path/to/after.png",
+  "after_description": "Settings panel with dark mode toggle visible"
+}
 ```
-src/chad/
-├── __init__.py           # Package init
-├── __main__.py           # Entry point
-├── util/                 # Domain logic and utilities
-│   ├── providers.py      # AI provider implementations
-│   ├── config_manager.py # Configuration management
-│   ├── git_worktree.py   # Git worktree management
-│   ├── model_catalog.py  # Model discovery per provider
-│   ├── event_log.py      # Structured JSONL event logging
-│   └── prompts.py        # Coding and verification prompts
-├── server/               # FastAPI backend
-│   ├── main.py           # Server entry point
-│   ├── api/routes/       # REST + WebSocket + SSE endpoints
-│   ├── api/schemas/      # Pydantic models (incl. events.py)
-│   └── services/         # Business logic services
-│       ├── task_executor.py  # PTY-based task execution
-│       └── pty_stream.py     # PTY streaming service
-└── ui/
-    ├── gradio/           # Gradio web interface
-    │   ├── web_ui.py     # Main UI implementation
-    │   └── verification/ # Visual testing tools
-    ├── client/           # API clients
-    │   ├── api_client.py     # REST API client
-    │   └── stream_client.py  # SSE streaming client
-    └── cli/              # Simple CLI interface
-        └── app.py        # Menu-driven CLI with API streaming
 
-.claude/skills/           # Claude Code skills (auto-activated)
-├── verifying/
-└── taking-screenshots/
+When working on Gradio UI components:
+- Check `src/chad/ui/gradio/verification/visual_test_map.py` for existing screenshot tests
+- If you add or change UI components, update `visual_test_map.py` so future runs pick the right visual tests
+- See `src/chad/ui/gradio/verification/screenshot_fixtures.py` for example fixture data to use in screenshots
 
-.codex/skills/            # OpenAI Codex skills (auto-activated)
-├── verifying/
-└── taking-screenshots/
+## Visual Test Targeting
+
+For efficient testing, run only the visual tests relevant to your changes:
+
+```bash
+# Get list of visual tests for changed files
+VTESTS=$(.venv/bin/python - <<'PY'
+import subprocess
+from chad.ui.gradio.verification.visual_test_map import tests_for_paths
+changed = subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines()
+print(" or ".join(tests_for_paths(changed)))
+PY
+)
+
+# Run only relevant visual tests
+if [ -n "$VTESTS" ]; then
+    .venv/bin/python -m pytest tests/test_ui_integration.py \
+        tests/test_ui_playwright_runner.py -v --tb=short \
+        -m "visual" -k "$VTESTS"
+fi
 ```
 
 ## Configuration
@@ -319,107 +204,3 @@ rm -rf .venv
 python3.13 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 ```
-
-## Session Event Logs
-
-Session logs use JSONL format (one JSON event per line) for structured handover between agents.
-
-### Log File Structure
-
-```
-~/.chad/logs/
-├── {session_id}.jsonl           # Event log (one JSON object per line)
-└── artifacts/
-    └── {session_id}/            # Large outputs (>10KB)
-        ├── stdout_abc123.txt
-        └── stderr_def456.txt
-```
-
-Override with `CHAD_LOG_DIR` environment variable.
-
-### JSONL Format Example
-
-Each line is a complete JSON event:
-```jsonl
-{"event_id":"a1b2c3","ts":"2025-01-17T10:30:00Z","seq":1,"session_id":"sess_abc","type":"session_started","task_description":"Fix auth bug","project_path":"/home/user/myproject","coding_provider":"anthropic","coding_account":"claude-main"}
-{"event_id":"d4e5f6","ts":"2025-01-17T10:30:01Z","seq":2,"session_id":"sess_abc","turn_id":"turn_1","type":"user_message","content":"Fix the authentication bug in login.py"}
-{"event_id":"g7h8i9","ts":"2025-01-17T10:30:05Z","seq":3,"session_id":"sess_abc","turn_id":"turn_1","type":"tool_call_started","tool_call_id":"tc_xyz789","tool":"bash","cwd":"/home/user/myproject","command":"python -m pytest tests/test_auth.py"}
-{"event_id":"j0k1l2","ts":"2025-01-17T10:30:15Z","seq":4,"session_id":"sess_abc","turn_id":"turn_1","type":"tool_call_finished","tool_call_id":"tc_xyz789","exit_code":0,"duration_ms":10000,"llm_summary":"Tests passed: 5/5"}
-{"event_id":"m3n4o5","ts":"2025-01-17T10:30:20Z","seq":5,"session_id":"sess_abc","type":"session_ended","success":true,"reason":"completed","total_tool_calls":1,"total_turns":1}
-```
-
-### Common Event Fields
-
-All events include:
-| Field | Type | Description |
-|-------|------|-------------|
-| `event_id` | string | UUID for this event |
-| `ts` | string | ISO8601 timestamp (UTC) |
-| `seq` | int | Monotonically increasing sequence number |
-| `session_id` | string | Session identifier |
-| `turn_id` | string? | Conversation turn grouping |
-| `type` | string | Event type name |
-
-### Event Types Reference
-
-| Type | Description | Additional Fields |
-|------|-------------|-------------------|
-| `session_started` | Session begins | `task_description`, `project_path`, `coding_provider`, `coding_account`, `coding_model?` |
-| `model_selected` | Model chosen | `provider`, `model`, `reasoning_effort?` |
-| `provider_switched` | Provider change | `from_provider`, `to_provider`, `from_model`, `to_model`, `reason` |
-| `user_message` | User input | `content` |
-| `assistant_message` | AI response | `blocks: [{kind, content, tool?, tool_call_id?, args?}]` |
-| `tool_declared` | Tool available | `name`, `args_schema`, `version` |
-| `tool_call_started` | Tool invoked | `tool_call_id`, `tool`, `cwd?`, `command?`, `path?`, `file_bytes?`, `sha256?`, `before_sha256?`, `server?`, `tool_name?`, `args?`, `timeout_s?`, `env_redactions?` |
-| `tool_call_finished` | Tool completed | `tool_call_id`, `exit_code?`, `duration_ms`, `stdout_ref?`, `stderr_ref?`, `llm_summary`, `after_sha256?`, `patch_ref?` |
-| `verification_attempt` | Verification run | `attempt_number`, `tool_call_refs`, `passed`, `summary`, `issues` |
-| `context_condensed` | Context summary | `replaces_seq_range`, `summary_text`, `policy` |
-| `terminal_output` | Terminal screen content | `data` (human-readable text) |
-| `session_ended` | Session complete | `success`, `reason`, `total_tool_calls?`, `total_turns?` |
-
-### Artifact References
-
-Large outputs (>10KB) are stored as separate files with references:
-```json
-{
-  "stdout_ref": {
-    "path": "artifacts/sess_abc/stdout_abc123.txt",
-    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "size": 15234
-  }
-}
-```
-
-Artifacts are truncated at 10MB with a `[TRUNCATED]` marker.
-
-### Reading Logs Programmatically
-
-```python
-from chad.util.event_log import EventLog
-
-# Read events from a session
-log = EventLog("sess_abc")
-events = log.get_events()  # All events
-events = log.get_events(since_seq=5)  # Events after seq 5
-events = log.get_events(event_types=["tool_call_started", "tool_call_finished"])
-
-# Read artifact content
-for event in events:
-    if event.get("stdout_ref"):
-        content = log.get_artifact(event["stdout_ref"])
-        print(content.decode())
-
-# List all sessions with logs
-session_ids = EventLog.list_sessions()
-```
-
-### Tool Types
-
-The `tool` field in tool_call events uses these values:
-- `bash`: Shell command execution
-- `read`: File read operation
-- `write`: File creation
-- `edit`: File modification
-- `glob`: File pattern search
-- `grep`: Content search
-- `mcp`: MCP server tool (includes `server` and `tool_name` fields)

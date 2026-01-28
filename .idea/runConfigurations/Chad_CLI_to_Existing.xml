@@ -16,7 +16,7 @@
     <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
     <option name="RUN_TOOL" value="" />
     <option name="SCRIPT_NAME" value="chad" />
-    <option name="PARAMETERS" value="--dev --ui cli --server-url http://localhost:$Prompt$" />
+    <option name="PARAMETERS" value="--dev --ui cli --server-url auto" />
     <option name="SHOW_COMMAND_LINE" value="false" />
     <option name="EMULATE_TERMINAL" value="true" />
     <option name="MODULE_MODE" value="true" />

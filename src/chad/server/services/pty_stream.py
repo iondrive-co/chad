@@ -6,6 +6,7 @@ import asyncio
 import base64
 import fcntl
 import os
+import queue
 import select
 import signal
 import struct
@@ -42,8 +43,9 @@ class PTYSession:
     active: bool = True
     exit_code: int | None = None
 
-    # Subscribers receive events via asyncio queues
-    _subscribers: list[asyncio.Queue] = field(default_factory=list)
+    # Subscribers receive events via thread-safe queues
+    # Using queue.Queue instead of asyncio.Queue for safe cross-thread dispatch
+    _subscribers: list[queue.Queue] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     # Buffer of recent events for replay to late subscribers
@@ -240,15 +242,17 @@ class PTYStreamService:
             except ChildProcessError:
                 session.exit_code = 0
 
-        session.active = False
-
-        # Dispatch exit event
+        # Dispatch exit event BEFORE setting active=False to avoid race condition.
+        # Subscribers check session.active on timeout - if we set it False first,
+        # they may exit before receiving the exit event.
         event = PTYEvent(
             type="exit",
             stream_id=session.stream_id,
             exit_code=session.exit_code,
         )
         self._dispatch_event(session, event)
+
+        session.active = False
 
         # Close fd
         try:
@@ -279,11 +283,12 @@ class PTYStreamService:
             if len(session._event_buffer) > 1000:
                 session._event_buffer = session._event_buffer[-1000:]
 
-            # Then broadcast to subscriber queues
+            # Then broadcast to subscriber queues (thread-safe)
+            # Using queue.Queue which is inherently thread-safe
             for q in session._subscribers:
                 try:
                     q.put_nowait(event)
-                except asyncio.QueueFull:
+                except queue.Full:
                     # Drop if queue is full
                     pass
 
@@ -353,8 +358,9 @@ class PTYStreamService:
         if not session:
             return
 
-        # Create queue for this subscriber
-        q: asyncio.Queue[PTYEvent] = asyncio.Queue(maxsize=1000)
+        # Create thread-safe queue for this subscriber
+        # Using queue.Queue for safe cross-thread dispatch from PTY read thread
+        q: queue.Queue[PTYEvent] = queue.Queue(maxsize=1000)
 
         # Atomically: add subscriber and get buffered events to replay
         with session._lock:
@@ -373,18 +379,31 @@ class PTYStreamService:
 
         try:
             while True:
+                # Poll the thread-safe queue with non-blocking get + async sleep
+                # This allows yielding to the event loop while waiting for events
                 try:
-                    # Wait for event with timeout
-                    event = await asyncio.wait_for(q.get(), timeout=0.1)
+                    event = q.get_nowait()
                     yield event
 
                     if event.type == "exit":
                         break
 
-                except asyncio.TimeoutError:
-                    # Check if session is still active
+                except queue.Empty:
+                    # No event available, check if session is still active
                     if not session.active:
+                        # Session ended - drain any remaining events
+                        while True:
+                            try:
+                                event = q.get_nowait()
+                                yield event
+                                if event.type == "exit":
+                                    break
+                            except queue.Empty:
+                                break
                         break
+
+                    # Yield to event loop briefly before checking again
+                    await asyncio.sleep(0.05)
 
         finally:
             with session._lock:

@@ -4,8 +4,15 @@ import os
 import sys
 import threading
 import time
+from pathlib import Path
 from unittest.mock import Mock, patch
-from chad.__main__ import main, _start_parent_watchdog
+from chad.__main__ import (
+    main,
+    _start_parent_watchdog,
+    write_server_port,
+    read_server_port,
+    get_chad_dir,
+)
 
 
 class TestMain:
@@ -156,6 +163,96 @@ class TestMain:
         call_kwargs = mock_run_unified.call_args.kwargs
         assert call_kwargs.get("ui_mode") == "cli"
 
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.ConfigManager")
+    def test_main_server_url_auto_discovers_port(self, mock_config_class, mock_run_unified, tmp_path):
+        """Test that --server-url auto autodiscovers port from file."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.verify_main_password.return_value = "password"
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config_class.return_value = mock_config
+
+        # Write a port file for autodiscovery
+        port_file = tmp_path / "server.port"
+        port_file.write_text("9876\n")
+
+        with patch.object(sys, "argv", ["chad", "--server-url", "auto"]):
+            with patch.dict(os.environ, {"CHAD_DIR": str(tmp_path), "CHAD_PASSWORD": "test"}):
+                result = main()
+
+        assert result == 0
+        mock_run_unified.assert_called_once()
+        call_kwargs = mock_run_unified.call_args.kwargs
+        assert call_kwargs.get("server_url") == "http://127.0.0.1:9876"
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.ConfigManager")
+    def test_main_server_url_skips_password_prompt(self, mock_config_class, mock_run_unified):
+        """Connecting to existing server should not ask for main password."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad", "--server-url", "http://127.0.0.1:9999"]):
+            with patch.dict(os.environ, {}, clear=True):
+                os.environ.pop("CHAD_PASSWORD", None)
+                result = main()
+
+        assert result == 0
+        mock_config.verify_main_password.assert_not_called()
+        mock_config.setup_main_password.assert_not_called()
+        mock_run_unified.assert_called_once()
+        call_args = mock_run_unified.call_args
+        assert call_args.args[0] is None  # main_password
+        assert call_args.kwargs.get("server_url") == "http://127.0.0.1:9999"
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.ConfigManager")
+    def test_main_server_url_auto_skips_password_prompt(self, mock_config_class, mock_run_unified, tmp_path):
+        """Autodiscovery should also skip password prompts."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config_class.return_value = mock_config
+
+        port_file = tmp_path / "server.port"
+        port_file.write_text("5555\n")
+
+        with patch.object(sys, "argv", ["chad", "--server-url", "auto"]):
+            with patch.dict(os.environ, {"CHAD_DIR": str(tmp_path)}, clear=True):
+                result = main()
+
+        assert result == 0
+        mock_config.verify_main_password.assert_not_called()
+        mock_config.setup_main_password.assert_not_called()
+        mock_run_unified.assert_called_once()
+        call_args = mock_run_unified.call_args
+        assert call_args.args[0] is None
+        assert call_args.kwargs.get("server_url") == "http://127.0.0.1:5555"
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.ConfigManager")
+    def test_main_server_url_auto_fails_when_no_port_file(self, mock_config_class, mock_run_unified, tmp_path):
+        """Test that --server-url auto fails gracefully when port file missing."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.verify_main_password.return_value = "password"
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad", "--server-url", "auto"]):
+            with patch.dict(os.environ, {"CHAD_DIR": str(tmp_path), "CHAD_PASSWORD": "test"}):
+                result = main()
+
+        assert result == 1
+        mock_run_unified.assert_not_called()
+
 
 class TestParentWatchdog:
     """Test cases for parent process watchdog."""
@@ -195,3 +292,59 @@ class TestParentWatchdog:
 
         # Should have started a new thread
         assert thread_count_after == thread_count_before + 1
+
+
+class TestServerPortAutodiscovery:
+    """Test cases for server port autodiscovery."""
+
+    def test_write_server_port(self, tmp_path):
+        """Test writing server port to file."""
+        with patch.dict(os.environ, {"CHAD_DIR": str(tmp_path)}):
+            write_server_port(8765)
+
+            port_file = tmp_path / "server.port"
+            assert port_file.exists()
+            assert port_file.read_text().strip() == "8765"
+
+    def test_read_server_port(self, tmp_path):
+        """Test reading server port from file."""
+        port_file = tmp_path / "server.port"
+        port_file.write_text("9999\n")
+
+        with patch.dict(os.environ, {"CHAD_DIR": str(tmp_path)}):
+            port = read_server_port()
+
+        assert port == 9999
+
+    def test_read_server_port_returns_none_when_file_missing(self, tmp_path):
+        """Test reading port returns None when file doesn't exist."""
+        with patch.dict(os.environ, {"CHAD_DIR": str(tmp_path)}):
+            port = read_server_port()
+
+        assert port is None
+
+    def test_read_server_port_returns_none_when_invalid(self, tmp_path):
+        """Test reading port returns None when file has invalid content."""
+        port_file = tmp_path / "server.port"
+        port_file.write_text("not_a_number\n")
+
+        with patch.dict(os.environ, {"CHAD_DIR": str(tmp_path)}):
+            port = read_server_port()
+
+        assert port is None
+
+    def test_get_chad_dir_uses_env(self, tmp_path):
+        """Test get_chad_dir uses CHAD_DIR env var when set."""
+        with patch.dict(os.environ, {"CHAD_DIR": str(tmp_path)}):
+            result = get_chad_dir()
+
+        assert result == tmp_path
+
+    def test_get_chad_dir_defaults_to_home(self):
+        """Test get_chad_dir defaults to ~/.chad when CHAD_DIR not set."""
+        with patch.dict(os.environ, {}, clear=False):
+            # Remove CHAD_DIR if present
+            os.environ.pop("CHAD_DIR", None)
+            result = get_chad_dir()
+
+        assert result == Path.home() / ".chad"

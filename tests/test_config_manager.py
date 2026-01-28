@@ -700,3 +700,123 @@ class TestPreferredVerificationModel:
         # They should be independent
         assert mgr.get_account_model("test-account") == "claude-opus-4-20250514"
         assert mgr.get_preferred_verification_model() == "claude-3-5-sonnet-20241022"
+
+
+class TestProjectConfig:
+    """Tests for per-project configuration."""
+
+    def test_get_project_config_nonexistent(self, tmp_path):
+        """Test getting config for a project that doesn't exist."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        result = mgr.get_project_config("/some/project/path")
+        assert result is None
+
+    def test_set_and_get_project_config(self, tmp_path):
+        """Test setting and getting project config."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        project_path = tmp_path / "my_project"
+        project_path.mkdir()
+
+        project_config = {
+            "version": "1.0",
+            "project_type": "python",
+            "verification": {
+                "lint_command": "flake8 .",
+                "test_command": "pytest tests/",
+                "validated": True,
+            },
+        }
+
+        mgr.set_project_config(project_path, project_config)
+
+        result = mgr.get_project_config(project_path)
+        assert result is not None
+        assert result["project_type"] == "python"
+        assert result["verification"]["lint_command"] == "flake8 ."
+
+    def test_project_config_normalizes_path(self, tmp_path):
+        """Test that project config normalizes paths to absolute."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        project_path = tmp_path / "my_project"
+        project_path.mkdir()
+
+        project_config = {"project_type": "javascript"}
+
+        # Save with one form of the path
+        mgr.set_project_config(str(project_path), project_config)
+
+        # Retrieve with another form (Path object)
+        result = mgr.get_project_config(project_path)
+        assert result is not None
+        assert result["project_type"] == "javascript"
+
+    def test_delete_project_config(self, tmp_path):
+        """Test deleting project config."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        project_path = tmp_path / "my_project"
+        project_path.mkdir()
+
+        mgr.set_project_config(project_path, {"project_type": "rust"})
+        assert mgr.get_project_config(project_path) is not None
+
+        mgr.delete_project_config(project_path)
+        assert mgr.get_project_config(project_path) is None
+
+    def test_delete_project_config_nonexistent(self, tmp_path):
+        """Test deleting nonexistent project config is a no-op."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # Should not raise
+        mgr.delete_project_config("/nonexistent/path")
+
+    def test_list_project_configs(self, tmp_path):
+        """Test listing all project configs."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        project1 = tmp_path / "project1"
+        project1.mkdir()
+        project2 = tmp_path / "project2"
+        project2.mkdir()
+
+        mgr.set_project_config(project1, {"project_type": "python"})
+        mgr.set_project_config(project2, {"project_type": "rust"})
+
+        configs = mgr.list_project_configs()
+        assert len(configs) == 2
+        assert configs[str(project1.resolve())]["project_type"] == "python"
+        assert configs[str(project2.resolve())]["project_type"] == "rust"
+
+    def test_list_project_configs_empty(self, tmp_path):
+        """Test listing project configs when none exist."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        configs = mgr.list_project_configs()
+        assert configs == {}
+
+    def test_project_config_persists_across_instances(self, tmp_path):
+        """Test that project config persists across ConfigManager instances."""
+        config_path = tmp_path / "test.conf"
+        project_path = tmp_path / "my_project"
+        project_path.mkdir()
+
+        # Set with first instance
+        mgr1 = ConfigManager(config_path)
+        mgr1.set_project_config(project_path, {"project_type": "go"})
+
+        # Get with second instance
+        mgr2 = ConfigManager(config_path)
+        result = mgr2.get_project_config(project_path)
+
+        assert result is not None
+        assert result["project_type"] == "go"

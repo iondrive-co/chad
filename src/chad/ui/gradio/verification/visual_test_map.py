@@ -102,7 +102,28 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         component="project-path",
         tests=["TestCodingAgentLayout", "TestUIElements"],
         source_file="chad/web_ui.py",
-        keywords=["project path", "directory", "working directory"],
+        keywords=[
+            "project path",
+            "directory",
+            "working directory",
+            "project setup",
+            "lint command",
+            "test command",
+            "verification commands",
+        ],
+    ),
+    "PROJECT_DOC_PATHS": UIComponent(
+        tab="run",
+        component="project-path",
+        tests=["TestUIElements"],
+        source_file="chad/web_ui.py",
+        keywords=[
+            "instructions path",
+            "agent instructions",
+            "architecture path",
+            "doc path",
+            "documentation",
+        ],
     ),
     # --- Run Tab: Chat Interface ---
     "CHAT_INTERFACE": UIComponent(
@@ -127,13 +148,21 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         source_file="chad/web_ui.py",
         keywords=["task", "task description", "input", "prompt"],
     ),
+    "SCREENSHOT_UPLOAD": UIComponent(
+        tab="run",
+        component="agent-communication",
+        tests=["TestUIElements", "TestScreenshotUpload"],
+        source_file="chad/web_ui.py",
+        keywords=["screenshot", "upload", "image", "file upload", "screenshots"],
+    ),
     # --- Run Tab: Live Stream Panel ---
     "LIVE_STREAM": UIComponent(
         tab="run",
         component="live-view",  # Dedicated live stream panel (bottom of run tab)
         tests=["TestLiveViewFormat", "TestRealisticLiveContent", "TestLiveActivityFormat"],
         source_file="chad/web_ui.py",
-        keywords=["live view", "activity", "stream", "output", "live activity", "live stream panel"],
+        keywords=["live view", "activity", "stream", "output", "live activity", "live stream panel",
+                  "verification live", "verification stream", "verification output"],
     ),
     "MERGE_CONTROLS": UIComponent(
         tab="run",
