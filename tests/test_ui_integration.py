@@ -149,6 +149,13 @@ class TestUIElements:
             assert btn_box["y"] + btn_box["height"] >= label_box["y"] - 4
             assert btn_box["x"] > label_box["x"]
 
+    def test_project_doc_paths_visible(self, page: Page):
+        """Project doc path inputs should be visible for editing."""
+        instructions = page.get_by_label("Agent Instructions Path")
+        architecture = page.get_by_label("Architecture Doc Path")
+        expect(instructions).to_be_visible()
+        expect(architecture).to_be_visible()
+
     def test_task_description_field(self, page: Page):
         """Task description field should be present."""
         # Look for the task description textarea by its label

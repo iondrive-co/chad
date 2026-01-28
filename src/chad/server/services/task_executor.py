@@ -703,13 +703,21 @@ class TaskExecutor:
 
             # Build agent command
             emit("status", status=f"Starting {coding_provider} agent...")
-            cmd, env, initial_input = build_agent_command(
-                coding_provider,
-                coding_account,
-                worktree_path,
-                task_description,
-                screenshots,
-            )
+            if screenshots:
+                cmd, env, initial_input = build_agent_command(
+                    coding_provider,
+                    coding_account,
+                    worktree_path,
+                    task_description,
+                    screenshots,
+                )
+            else:
+                cmd, env, initial_input = build_agent_command(
+                    coding_provider,
+                    coding_account,
+                    worktree_path,
+                    task_description,
+                )
 
             # Create JSON parser for providers that use stream-json output
             # Both Claude and Qwen use similar JSON formats

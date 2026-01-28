@@ -112,6 +112,19 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
             "verification commands",
         ],
     ),
+    "PROJECT_DOC_PATHS": UIComponent(
+        tab="run",
+        component="project-path",
+        tests=["TestUIElements"],
+        source_file="chad/web_ui.py",
+        keywords=[
+            "instructions path",
+            "agent instructions",
+            "architecture path",
+            "doc path",
+            "documentation",
+        ],
+    ),
     # --- Run Tab: Chat Interface ---
     "CHAT_INTERFACE": UIComponent(
         tab="run",

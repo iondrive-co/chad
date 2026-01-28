@@ -393,6 +393,66 @@ def save_project_config(project_path: Path, config: ProjectConfig) -> None:
     config_manager.set_project_config(project_path, config.to_dict())
 
 
+def save_project_settings(
+    project_path: Path,
+    lint_command: str | None = None,
+    test_command: str | None = None,
+    instructions_path: str | None = None,
+    architecture_path: str | None = None,
+) -> ProjectConfig:
+    """Persist verification commands and documentation paths for a project.
+
+    Args:
+        project_path: Path to the project root
+        lint_command: Lint command to save (None to clear)
+        test_command: Test command to save (None to clear)
+        instructions_path: Relative/absolute path to agent instructions file
+        architecture_path: Relative/absolute path to architecture overview
+
+    Returns:
+        The saved ProjectConfig instance
+    """
+
+    project_path = Path(project_path).expanduser().resolve()
+
+    config = load_project_config(project_path)
+    if config is None:
+        detected = detect_verification_commands(project_path)
+        config = ProjectConfig(
+            project_type=detected["project_type"],
+            verification=VerificationConfig(
+                lint_command=detected.get("lint_command"),
+                test_command=detected.get("test_command"),
+            ),
+        )
+
+    # Always refresh project type so the label stays accurate
+    config.project_type = detect_project_type(project_path)
+
+    # Update verification commands and mark them validated (user provided)
+    config.verification.lint_command = lint_command or None
+    config.verification.test_command = test_command or None
+    config.verification.validated = True
+
+    docs = config.docs or DocsConfig()
+
+    if instructions_path is not None:
+        docs.instructions_path = instructions_path.strip() or None
+    if architecture_path is not None:
+        docs.architecture_path = architecture_path.strip() or None
+
+    detected_docs = detect_doc_paths(project_path)
+    if not docs.instructions_path:
+        docs.instructions_path = detected_docs.instructions_path
+    if not docs.architecture_path:
+        docs.architecture_path = detected_docs.architecture_path
+
+    config.docs = docs
+
+    save_project_config(project_path, config)
+    return config
+
+
 def setup_project(project_path: Path, validate: bool = True) -> ProjectConfig:
     """Detect and optionally validate verification commands for a project.
 
