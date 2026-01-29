@@ -126,6 +126,13 @@ def screenshot_page(page, output_path: Path) -> Path:
     return output_path
 
 
+def resolve_color_schemes(choice: str) -> list[str]:
+    """Return the list of color schemes to capture based on user choice."""
+    if choice == "both":
+        return ["dark", "light"]
+    return [choice]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Take a screenshot of Chad's Gradio UI")
     parser.add_argument(
@@ -162,8 +169,8 @@ def main():
     parser.add_argument(
         "--color-scheme",
         choices=["dark", "light", "both"],
-        default="both",
-        help=argparse.SUPPRESS,
+        default="light",
+        help="Color scheme to capture (default: light). Use 'both' to capture dark and light.",
     )
 
     args = parser.parse_args()
@@ -177,8 +184,8 @@ def main():
         print(f"Chad running on port {instance.port}")
 
         viewport = {"width": args.width, "height": args.height}
-        schemes = ["dark", "light"]
-        multi = True
+        schemes = resolve_color_schemes(args.color_scheme)
+        multi = len(schemes) > 1
         outputs = []
 
         # Create sample screenshots if needed

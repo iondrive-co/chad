@@ -22,3 +22,11 @@ def test_maybe_open_paths_opt_in(monkeypatch):
     screenshot_ui.maybe_open_paths(paths, open_images=True)
 
     assert opened == [p.as_uri() for p in paths]
+
+
+def test_resolve_color_schemes_default_light():
+    assert screenshot_ui.resolve_color_schemes("light") == ["light"]
+
+
+def test_resolve_color_schemes_both():
+    assert screenshot_ui.resolve_color_schemes("both") == ["dark", "light"]

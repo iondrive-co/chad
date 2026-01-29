@@ -974,8 +974,8 @@ class TestChadWebUIInterface:
         mock_gr.Blocks.assert_called_once()
 
     @patch("chad.ui.gradio.web_ui.gr")
-    def test_create_interface_sets_compact_screenshot_upload(self, mock_gr, mock_api_client):
-        """Screenshot upload should be compact and explicitly sized."""
+    def test_create_interface_uses_multimodal_textbox_for_task_input(self, mock_gr, mock_api_client):
+        """Task input should use MultimodalTextbox for combined text and image drag-drop."""
         from chad.ui.gradio.web_ui import ChadWebUI
 
         mock_blocks = MagicMock()
@@ -985,15 +985,17 @@ class TestChadWebUIInterface:
         web_ui = ChadWebUI(mock_api_client)
         web_ui.create_interface()
 
-        screenshot_calls = [
+        # Check that MultimodalTextbox is used for task description
+        multimodal_calls = [
             call.kwargs
-            for call in mock_gr.File.call_args_list
-            if "elem_classes" in call.kwargs and "screenshot-upload" in call.kwargs["elem_classes"]
+            for call in mock_gr.MultimodalTextbox.call_args_list
+            if "elem_classes" in call.kwargs and "task-desc-input" in call.kwargs["elem_classes"]
         ]
 
-        assert screenshot_calls, "Screenshot upload component should be created"
-        assert all("compact-upload" in kwargs.get("elem_classes", []) for kwargs in screenshot_calls)
-        assert all(kwargs.get("height") == 140 for kwargs in screenshot_calls)
+        assert multimodal_calls, "Task input should use MultimodalTextbox"
+        # Should support image uploads
+        assert all(kwargs.get("file_types") == ["image"] for kwargs in multimodal_calls)
+        assert all(kwargs.get("file_count") == "multiple" for kwargs in multimodal_calls)
 
 
 class TestLaunchWebUI:
