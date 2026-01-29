@@ -2331,6 +2331,9 @@ class ChadWebUI:
     def _get_mistral_remaining_usage(self) -> float:
         return self.provider_ui._get_mistral_remaining_usage()
 
+    def _get_qwen_remaining_usage(self) -> float:
+        return self.provider_ui._get_qwen_remaining_usage()
+
     def _provider_state(self, pending_delete: str = None) -> tuple:
         return self.provider_ui.provider_state(self.provider_card_count, pending_delete=pending_delete)
 
