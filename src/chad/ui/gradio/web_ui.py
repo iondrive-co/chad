@@ -207,14 +207,23 @@ body, .gradio-container, .gradio-container * {
 }
 
 .run-top-row {
-  gap: 12px !important;
+  gap: 10px !important;
   align-items: flex-start !important;
+}
+
+.run-top-row .row,
+.run-top-row .column {
+  gap: 8px !important;
+}
+
+.run-top-row .block {
+  margin-bottom: 6px !important;
 }
 
 
 .project-setup-column {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .project-path-input label {
@@ -228,7 +237,7 @@ body, .gradio-container, .gradio-container * {
 .project-commands-row {
   display: grid !important;
   grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
-  gap: 12px !important;
+  gap: 10px !important;
   align-items: start !important;
 }
 
@@ -267,6 +276,22 @@ body, .gradio-container, .gradio-container * {
   margin: 0;
   min-height: 18px;
   font-size: 0.9rem;
+}
+
+.doc-paths-row {
+  gap: 8px !important;
+}
+
+.agent-config {
+  display: grid !important;
+  gap: 8px !important;
+  align-content: start;
+}
+
+.agent-config .block,
+.agent-config .form,
+.agent-config .wrap {
+  margin-bottom: 0 !important;
 }
 
 .project-save-btn button,
@@ -989,6 +1014,43 @@ body, .gradio-container, .gradio-container * {
   border-radius: 0;
   padding: 0;
   box-shadow: none;
+}
+
+.task-input-row {
+  gap: 12px !important;
+  align-items: flex-start !important;
+}
+
+.task-input-row .task-desc-input textarea {
+  min-height: 120px !important;
+}
+
+.attachment-column {
+  display: grid !important;
+  gap: 10px !important;
+  align-content: start;
+}
+
+.compact-upload {
+  height: 140px !important;
+  min-height: 130px !important;
+  max-height: 160px !important;
+  padding: 6px 8px !important;
+}
+
+.compact-upload .float {
+  margin-bottom: 6px !important;
+}
+
+.compact-upload button {
+  height: calc(100% - 18px) !important;
+  min-height: 96px !important;
+  padding: 8px 10px !important;
+}
+
+.start-inline-btn {
+  align-self: flex-end;
+  justify-self: flex-end;
 }
 
 /* Follow-up input - styled as a compact chat continuation */
@@ -5510,7 +5572,7 @@ class ChadWebUI:
                                 elem_id="session-log-btn" if is_first else None,
                                 elem_classes=["session-log-btn"],
                             )
-                    with gr.Column(scale=1, min_width=200):
+                    with gr.Column(scale=1, min_width=200, elem_classes=["agent-config"]):
                         coding_agent = gr.Dropdown(
                             choices=account_choices,
                             value=initial_coding if initial_coding else None,
@@ -5539,7 +5601,7 @@ class ChadWebUI:
                             key=f"coding-reasoning-{session_id}",
                             interactive=bool(initial_coding and initial_coding in account_choices),
                         )
-                    with gr.Column(scale=1, min_width=200, elem_classes=["verification-column"]):
+                    with gr.Column(scale=1, min_width=200, elem_classes=["verification-column", "agent-config"]):
                         verification_agent = gr.Dropdown(
                             choices=verification_choices,
                             value=initial_verification,
@@ -5583,27 +5645,32 @@ class ChadWebUI:
         with gr.Column(elem_classes=["agent-panel"]):
             gr.Markdown("### Agent Communication")
             with gr.Column(elem_classes=["task-entry-bubble"] if is_first else []):
-                task_description = gr.TextArea(
-                    label="Task Description",
-                    placeholder="Describe what you want done...",
-                    lines=4,
-                    key=f"task-desc-{session_id}",
-                )
-                screenshot_upload = gr.File(
-                    label="Screenshots (optional)",
-                    file_count="multiple",
-                    file_types=["image"],
-                    key=f"screenshot-upload-{session_id}",
-                    elem_classes=["screenshot-upload"],
-                )
-                start_btn = gr.Button(
-                    "▶ Start Task",
-                    variant="primary",
-                    interactive=is_ready,
-                    key=f"start-btn-{session_id}",
-                    elem_id="start-task-btn" if is_first else None,
-                    elem_classes=["start-task-btn"],
-                )
+                with gr.Row(elem_classes=["task-input-row"], equal_height=False):
+                    task_description = gr.TextArea(
+                        label="Task Description",
+                        placeholder="Describe what you want done...",
+                        lines=3,
+                        scale=3,
+                        key=f"task-desc-{session_id}",
+                        elem_classes=["task-desc-input"],
+                    )
+                    with gr.Column(scale=1, min_width=260, elem_classes=["attachment-column"]):
+                        screenshot_upload = gr.File(
+                            label="Screenshots (optional)",
+                            file_count="multiple",
+                            file_types=["image"],
+                            height=140,
+                            key=f"screenshot-upload-{session_id}",
+                            elem_classes=["screenshot-upload", "compact-upload"],
+                        )
+                        start_btn = gr.Button(
+                            "▶ Start Task",
+                            variant="primary",
+                            interactive=is_ready,
+                            key=f"start-btn-{session_id}",
+                            elem_id="start-task-btn" if is_first else None,
+                            elem_classes=["start-task-btn", "start-inline-btn"],
+                        )
 
             # Live stream kept in DOM (visible=True) but hidden via CSS for visual tests
             # Using gr.HTML instead of gr.Markdown for DOM patching support
