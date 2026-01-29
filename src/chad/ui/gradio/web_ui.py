@@ -5530,18 +5530,76 @@ class ChadWebUI:
                                 key=f"architecture-path-{session_id}",
                                 elem_classes=["doc-path-input", "architecture-path-input"],
                             )
+                    with gr.Column(scale=1, min_width=200, elem_classes=["agent-config"]):
+                        coding_agent = gr.Dropdown(
+                            choices=account_choices,
+                            value=initial_coding if initial_coding else None,
+                            label="Coding Agent",
+                            scale=1,
+                            min_width=200,
+                            key=f"coding-agent-{session_id}",
+                        )
+                        coding_model = gr.Dropdown(
+                            choices=coding_model_choices,
+                            value=coding_model_value,
+                            label="Model",
+                            allow_custom_value=True,
+                            scale=1,
+                            min_width=200,
+                            key=f"coding-model-{session_id}",
+                            interactive=bool(initial_coding and initial_coding in account_choices),
+                        )
+                        coding_reasoning = gr.Dropdown(
+                            choices=coding_reasoning_choices,
+                            value=coding_reasoning_value,
+                            label="Reasoning Effort",
+                            allow_custom_value=True,
+                            scale=1,
+                            min_width=200,
+                            key=f"coding-reasoning-{session_id}",
+                            interactive=bool(initial_coding and initial_coding in account_choices),
+                        )
+                        wt_path = str(session.worktree_path) if session.worktree_path else None
+                        proj_path = session.project_path
+                        role_status = gr.Markdown(
+                            self.format_role_status(worktree_path=wt_path, project_path=proj_path),
+                            key=f"role-status-{session_id}",
+                            elem_id="role-config-status" if is_first else None,
+                            elem_classes=["role-config-status"],
+                        )
+                    with gr.Column(scale=1, min_width=200, elem_classes=["verification-column", "agent-config"]):
+                        verification_agent = gr.Dropdown(
+                            choices=verification_choices,
+                            value=initial_verification,
+                            label="Verification Agent",
+                            scale=1,
+                            min_width=200,
+                            key=f"verification-agent-{session_id}",
+                        )
+                        verification_model = gr.Dropdown(
+                            choices=verif_state.model_choices,
+                            value=verif_state.model_value,
+                            label="Verification Model",
+                            allow_custom_value=True,
+                            scale=1,
+                            min_width=200,
+                            key=f"verification-model-{session_id}",
+                            interactive=verif_state.interactive,
+                        )
+                        verification_reasoning = gr.Dropdown(
+                            choices=verif_state.reasoning_choices,
+                            value=verif_state.reasoning_value,
+                            label="Verification Reasoning Effort",
+                            allow_custom_value=True,
+                            scale=1,
+                            min_width=200,
+                            key=f"verification-reasoning-{session_id}",
+                            interactive=verif_state.interactive,
+                        )
                         with gr.Row(
                             elem_id="role-status-row" if is_first else None,
                             elem_classes=["role-status-row"],
                         ):
-                            wt_path = str(session.worktree_path) if session.worktree_path else None
-                            proj_path = session.project_path
-                            role_status = gr.Markdown(
-                                self.format_role_status(worktree_path=wt_path, project_path=proj_path),
-                                key=f"role-status-{session_id}",
-                                elem_id="role-config-status" if is_first else None,
-                                elem_classes=["role-config-status"],
-                            )
                             cancel_btn = gr.Button(
                                 "Cancel",
                                 variant="stop",
@@ -5574,64 +5632,6 @@ class ChadWebUI:
                                 elem_id="session-log-btn" if is_first else None,
                                 elem_classes=["session-log-btn"],
                             )
-                    with gr.Column(scale=1, min_width=200, elem_classes=["agent-config"]):
-                        coding_agent = gr.Dropdown(
-                            choices=account_choices,
-                            value=initial_coding if initial_coding else None,
-                            label="Coding Agent",
-                            scale=1,
-                            min_width=200,
-                            key=f"coding-agent-{session_id}",
-                        )
-                        coding_model = gr.Dropdown(
-                            choices=coding_model_choices,
-                            value=coding_model_value,
-                            label="Model",
-                            allow_custom_value=True,
-                            scale=1,
-                            min_width=200,
-                            key=f"coding-model-{session_id}",
-                            interactive=bool(initial_coding and initial_coding in account_choices),
-                        )
-                        coding_reasoning = gr.Dropdown(
-                            choices=coding_reasoning_choices,
-                            value=coding_reasoning_value,
-                            label="Reasoning Effort",
-                            allow_custom_value=True,
-                            scale=1,
-                            min_width=200,
-                            key=f"coding-reasoning-{session_id}",
-                            interactive=bool(initial_coding and initial_coding in account_choices),
-                        )
-                    with gr.Column(scale=1, min_width=200, elem_classes=["verification-column", "agent-config"]):
-                        verification_agent = gr.Dropdown(
-                            choices=verification_choices,
-                            value=initial_verification,
-                            label="Verification Agent",
-                            scale=1,
-                            min_width=200,
-                            key=f"verification-agent-{session_id}",
-                        )
-                        verification_model = gr.Dropdown(
-                            choices=verif_state.model_choices,
-                            value=verif_state.model_value,
-                            label="Verification Model",
-                            allow_custom_value=True,
-                            scale=1,
-                            min_width=200,
-                            key=f"verification-model-{session_id}",
-                            interactive=verif_state.interactive,
-                        )
-                        verification_reasoning = gr.Dropdown(
-                            choices=verif_state.reasoning_choices,
-                            value=verif_state.reasoning_value,
-                            label="Verification Reasoning Effort",
-                            allow_custom_value=True,
-                            scale=1,
-                            min_width=200,
-                            key=f"verification-reasoning-{session_id}",
-                            interactive=verif_state.interactive,
-                        )
 
         # Task status header - always in DOM but CSS hides when empty
         # This ensures JavaScript can find it for merge section visibility logic
