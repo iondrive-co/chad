@@ -195,8 +195,24 @@ class EventMultiplexer:
                         # which closes it and causes StopAsyncIteration on next call.
                         pty_event = await pty_iter.__anext__()
                     except StopAsyncIteration:
-                        # PTY stream ended
-                        break
+                        # PTY stream ended without explicit exit event - emit a complete
+                        # event to avoid "Stream ended unexpectedly" on the client side.
+                        # Try to get the exit code from the PTY session if it's available.
+                        self._sync_seq_with_log()
+                        if include_events:
+                            for event in self._drain_event_log(skip_terminal=True):
+                                yield event
+
+                        exit_code = None
+                        if pty_session:
+                            exit_code = pty_session.exit_code
+
+                        yield MuxEvent(
+                            type="complete",
+                            data={"exit_code": exit_code},
+                            seq=self._next_seq(),
+                        )
+                        return
 
                     if pty_event.type == "output":
                         # Align seq with EventLog which has already logged the chunk

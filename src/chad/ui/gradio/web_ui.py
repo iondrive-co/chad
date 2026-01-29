@@ -2613,8 +2613,11 @@ class ChadWebUI:
         self,
         task_state: str | None = None,
         worktree_path: str | None = None,
+        project_path: str | None = None,
     ) -> tuple[bool, str]:
-        return self.provider_ui.get_role_config_status(task_state, worktree_path)
+        return self.provider_ui.get_role_config_status(
+            task_state, worktree_path, project_path=project_path
+        )
 
     def format_role_status(
         self,
@@ -2622,8 +2625,11 @@ class ChadWebUI:
         worktree_path: str | None = None,
         switched_from: str | None = None,
         active_account: str | None = None,
+        project_path: str | None = None,
     ) -> str:
-        return self.provider_ui.format_role_status(task_state, worktree_path, switched_from, active_account)
+        return self.provider_ui.format_role_status(
+            task_state, worktree_path, switched_from, active_account, project_path
+        )
 
     def assign_role(self, account_name: str, role: str):
         return self.provider_ui.assign_role(account_name, role, self.provider_card_count)
@@ -2946,10 +2952,11 @@ class ChadWebUI:
             else:
                 display_stream = live_stream
             is_error = "❌" in status
-            # Get worktree path for status display
+            # Get worktree/project path for status display
             wt_path = str(session.worktree_path) if session.worktree_path else None
+            proj_path = session.project_path
             display_role_status = self.format_role_status(
-                task_state, wt_path, session.switched_from, session.coding_account
+                task_state, wt_path, session.switched_from, session.coding_account, proj_path
             )
             log_btn_update = gr.update(
                 label=session.log_path.name if session.log_path else "Session Log",
@@ -5347,6 +5354,10 @@ class ChadWebUI:
         session = self.get_session(session_id)
         default_path = os.environ.get("CHAD_PROJECT_PATH", str(Path.cwd()))
 
+        # Initialize session project_path if not set
+        if not session.project_path:
+            session.project_path = default_path
+
         accounts = self.api_client.list_accounts()
         accounts_map = {acc.name: acc for acc in accounts}
         account_choices = list(accounts_map.keys())
@@ -5368,7 +5379,7 @@ class ChadWebUI:
                 pass
 
         # Get ready status after any auto-assignment
-        is_ready, _ = self.get_role_config_status()
+        is_ready, _ = self.get_role_config_status(project_path=session.project_path)
 
         none_label = (
             "None (disable verification)"
@@ -5521,8 +5532,9 @@ class ChadWebUI:
                             elem_classes=["role-status-row"],
                         ):
                             wt_path = str(session.worktree_path) if session.worktree_path else None
+                            proj_path = session.project_path
                             role_status = gr.Markdown(
-                                self.format_role_status(worktree_path=wt_path),
+                                self.format_role_status(worktree_path=wt_path, project_path=proj_path),
                                 key=f"role-status-{session_id}",
                                 elem_id="role-config-status" if is_first else None,
                                 elem_classes=["role-config-status"],
@@ -6170,6 +6182,7 @@ class ChadWebUI:
         def on_coding_agent_change(selected_account, verification_value, current_verif_model, current_verif_reasoning):
             """Update role assignment, status, and dropdowns when coding agent changes."""
             wt_path = str(session.worktree_path) if session.worktree_path else None
+            proj_path = session.project_path
             if not selected_account:
                 verif_model_update, verif_reasoning_update = verification_dropdown_updates(
                     None,
@@ -6180,7 +6193,7 @@ class ChadWebUI:
                     current_verif_reasoning,
                 )
                 return (
-                    gr.update(value=self.format_role_status(worktree_path=wt_path)),
+                    gr.update(value=self.format_role_status(worktree_path=wt_path, project_path=proj_path)),
                     gr.update(interactive=False),
                     gr.update(choices=["default"], value="default", interactive=False),
                     gr.update(choices=["default"], value="default", interactive=False),
@@ -6195,8 +6208,8 @@ class ChadWebUI:
                 pass
 
             # Get updated status
-            is_ready, _ = self.get_role_config_status(worktree_path=wt_path)
-            status_text = self.format_role_status(worktree_path=wt_path)
+            is_ready, _ = self.get_role_config_status(worktree_path=wt_path, project_path=proj_path)
+            status_text = self.format_role_status(worktree_path=wt_path, project_path=proj_path)
 
             # Get model choices for the selected account
             model_choices = self.get_models_for_account(selected_account)

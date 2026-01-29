@@ -99,6 +99,34 @@ For providers without usage reporting, Chad relies on error pattern matching to 
 3. Override `get_usage_percentage()` to return usage as 0-100
 4. Update this table
 
+## Provider Handoff
+
+When switching providers (due to quota exhaustion or user preference), Chad preserves session context for continuity.
+
+**Session Log Strategy:**
+- Terminal output is logged only at session end (not periodically during execution)
+- This produces one `terminal_output` event with the final screen state, avoiding log bloat from repeated screen captures
+- The final state is most relevant for handoff since it shows what the agent was working on when interrupted
+
+**Handoff Flow:**
+1. Quota exhaustion detected via usage threshold (proactive) or error patterns (reactive)
+2. `log_handoff_checkpoint()` writes a `ContextCondensedEvent` with `policy="provider_handoff"` containing:
+   - Original task description
+   - Files changed/created (extracted from `tool_call_started` events)
+   - Key commands run (pytest, npm, etc.)
+   - Optional remaining work description
+   - Provider session ID for native resume (if supported)
+3. Old provider stopped, new provider started
+4. `build_resume_prompt()` reconstructs context from the checkpoint for the new provider
+
+**Key Files:**
+- `chad.util.handoff`: `log_handoff_checkpoint()`, `build_handoff_summary()`, `build_resume_prompt()`, `is_quota_exhaustion_error()`
+- `chad.util.event_log`: `ContextCondensedEvent`, `TerminalOutputEvent`
+- `chad.server.services.task_executor`: Terminal buffer flushing in `finally` block ensures capture on all exit paths
+
+**Error Pattern Detection:**
+`is_quota_exhaustion_error()` matches patterns like `insufficient_quota`, `rate_limit_exceeded`, `billing_hard_limit_reached`, `RESOURCE_EXHAUSTED`, etc. across providers.
+
 ## Project Configuration
 - Per-project settings (lint/test commands, doc paths) are stored in the main `~/.chad.conf` under the `projects` key, keyed by absolute project path. Managed by `ConfigManager.{get,set}_project_config()`.
 - `build_doc_reference_text` points agents to AGENTS.md and ARCHITECTURE.md on disk instead of inlining contents.

@@ -1509,6 +1509,42 @@ class TestEventMultiplexer:
         pty_service.cleanup_session(second_stream)
         reset_pty_stream_service()
 
+    @pytest.mark.asyncio
+    async def test_mux_complete_event_on_iterator_end(self, tmp_path):
+        """Multiplexer emits complete event even when PTY iterator ends prematurely.
+
+        This tests the fix for "Stream ended unexpectedly" errors - when the PTY
+        iterator raises StopAsyncIteration without first sending an explicit "exit"
+        event, the multiplexer should still emit a complete event.
+        """
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import get_pty_stream_service, reset_pty_stream_service
+
+        reset_pty_stream_service()
+        pty_service = get_pty_stream_service()
+        session_id = "mux-complete-test"
+
+        # Start a very short-lived process that completes quickly
+        stream_id = pty_service.start_pty_session(
+            session_id=session_id,
+            cmd=["bash", "-c", "exit 0"],
+            cwd=tmp_path,
+        )
+
+        got_complete_event = False
+        mux = EventMultiplexer(session_id)
+        async for event in mux.stream_events(pty_service):
+            if event.type == "complete":
+                got_complete_event = True
+                # Exit code should be available
+                assert "exit_code" in event.data
+                break
+
+        assert got_complete_event, "Should receive a complete event when stream ends"
+
+        pty_service.cleanup_session(stream_id)
+        reset_pty_stream_service()
+
     def test_format_sse_event(self):
         """format_sse_event produces valid SSE format."""
         from chad.server.services.event_mux import MuxEvent, format_sse_event

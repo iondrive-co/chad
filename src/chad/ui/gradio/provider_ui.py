@@ -1556,6 +1556,7 @@ class ProviderUIManager:
         worktree_path: str | None = None,
         switched_from: str | None = None,
         active_account: str | None = None,
+        project_path: str | None = None,
     ) -> tuple[bool, str]:
         """Check if roles are properly configured for running tasks.
 
@@ -1567,6 +1568,7 @@ class ProviderUIManager:
                           shows the previous provider name.
             active_account: If set, use this account as the active provider instead
                            of looking up the CODING role assignment.
+            project_path: Optional project path to display (shown when no worktree exists).
 
         Returns:
             Tuple of (is_ready, status_text)
@@ -1620,12 +1622,14 @@ class ProviderUIManager:
             coding_info += f", {coding_model_str}"
         coding_info += ")"
 
-        # Show worktree path in Ready status if available
+        # Show worktree path in Ready status if available, otherwise show project path
+        from pathlib import Path
         if worktree_path:
-            # Extract last component for display
-            from pathlib import Path
             worktree_name = Path(worktree_path).name
             return True, f"✓ Ready — **Coding:** {coding_info} · **Worktree:** `{worktree_name}`{switch_indicator}"
+        elif project_path:
+            project_name = Path(project_path).name
+            return True, f"✓ Ready — **Coding:** {coding_info} · **Project:** `{project_name}`{switch_indicator}"
 
         return True, f"✓ Ready — **Coding:** {coding_info}{switch_indicator}"
 
@@ -1635,6 +1639,7 @@ class ProviderUIManager:
         worktree_path: str | None = None,
         switched_from: str | None = None,
         active_account: str | None = None,
+        project_path: str | None = None,
     ) -> str:
         """Return role status text.
 
@@ -1644,11 +1649,14 @@ class ProviderUIManager:
             switched_from: If set, shows a switch indicator with the previous provider.
             active_account: If set, use this account as the active provider instead
                            of looking up the CODING role assignment.
+            project_path: Optional project path to display (shown when no worktree exists).
 
         Returns:
             Formatted status string.
         """
-        _, status = self.get_role_config_status(task_state, worktree_path, switched_from, active_account)
+        _, status = self.get_role_config_status(
+            task_state, worktree_path, switched_from, active_account, project_path
+        )
         return status
 
     def assign_role(self, account_name: str, role: str, card_slots: int):
