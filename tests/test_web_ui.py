@@ -973,6 +973,28 @@ class TestChadWebUIInterface:
         # Verify Blocks was called
         mock_gr.Blocks.assert_called_once()
 
+    @patch("chad.ui.gradio.web_ui.gr")
+    def test_create_interface_sets_compact_screenshot_upload(self, mock_gr, mock_api_client):
+        """Screenshot upload should be compact and explicitly sized."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        mock_blocks = MagicMock()
+        mock_gr.Blocks.return_value.__enter__ = Mock(return_value=mock_blocks)
+        mock_gr.Blocks.return_value.__exit__ = Mock(return_value=None)
+
+        web_ui = ChadWebUI(mock_api_client)
+        web_ui.create_interface()
+
+        screenshot_calls = [
+            call.kwargs
+            for call in mock_gr.File.call_args_list
+            if "elem_classes" in call.kwargs and "screenshot-upload" in call.kwargs["elem_classes"]
+        ]
+
+        assert screenshot_calls, "Screenshot upload component should be created"
+        assert all("compact-upload" in kwargs.get("elem_classes", []) for kwargs in screenshot_calls)
+        assert all(kwargs.get("height") == 140 for kwargs in screenshot_calls)
+
 
 class TestLaunchWebUI:
     """Test cases for launch_web_ui function."""

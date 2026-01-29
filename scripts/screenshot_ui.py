@@ -8,7 +8,7 @@ Usage:
     python scripts/screenshot_ui.py [--output /path/to/screenshot.png] [--tab providers]
 
 Examples:
-    # Take screenshot of default (Run Task) tab
+    # Take screenshot of default (Run Task) tab (no auto-open)
     python scripts/screenshot_ui.py
 
     # Screenshot specific tab
@@ -18,8 +18,8 @@ Examples:
     python scripts/screenshot_ui.py --tab run --selector "#run-top-inputs"
     python scripts/screenshot_ui.py --tab providers --selector "#provider-card-0"
 
-    # Capture both dark and light variants and open them when finished (handy in PyCharm)
-    python scripts/screenshot_ui.py
+    # Capture both dark and light variants and open them when finished
+    python scripts/screenshot_ui.py --open
 
     # Custom output path
     python scripts/screenshot_ui.py --output /tmp/chad-ui.png
@@ -68,6 +68,18 @@ except ImportError as e:
 
 
 DEFAULT_OUTPUT = Path("/tmp/chad/screenshot.png")
+
+
+def maybe_open_paths(paths: list[Path], open_images: bool = False) -> None:
+    """Optionally open screenshot paths in the default browser."""
+    if not open_images:
+        return
+    for path in paths:
+        try:
+            webbrowser.open(path.as_uri())
+        except Exception:
+            # Don't block screenshot flow if browser fails
+            continue
 
 
 def screenshot_element(page, selector: str, output_path: Path) -> Path:
@@ -137,6 +149,12 @@ def main():
     parser.add_argument("--height", type=int, default=900, help="Viewport height (default: 900)")
     parser.add_argument("--headless", action="store_true", help="Run browser in headless mode (no window)")
     parser.add_argument(
+        "--open",
+        dest="open_images",
+        action="store_true",
+        help="Open captured screenshots after saving (default: disabled)",
+    )
+    parser.add_argument(
         "--with-chat-screenshots",
         action="store_true",
         help="Populate chatbot with sample message containing before/after screenshots",
@@ -196,8 +214,7 @@ def main():
             outputs.append(target_path)
             print(f"Saved: {target_path}")
 
-        for path in outputs:
-            webbrowser.open(path.as_uri())
+        maybe_open_paths(outputs, open_images=args.open_images)
 
     except PlaywrightUnavailable as e:
         print(f"Playwright error: {e}", file=sys.stderr)
