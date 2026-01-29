@@ -1025,32 +1025,9 @@ body, .gradio-container, .gradio-container * {
   min-height: 120px !important;
 }
 
-.attachment-column {
-  display: grid !important;
-  gap: 10px !important;
-  align-content: start;
-}
-
-.compact-upload {
-  height: 140px !important;
-  min-height: 130px !important;
-  max-height: 160px !important;
-  padding: 6px 8px !important;
-}
-
-.compact-upload .float {
-  margin-bottom: 6px !important;
-}
-
-.compact-upload button {
-  height: calc(100% - 18px) !important;
-  min-height: 96px !important;
-  padding: 8px 10px !important;
-}
-
-.start-inline-btn {
-  align-self: flex-end;
-  justify-self: flex-end;
+/* Start button alignment */
+.start-task-btn {
+  align-self: stretch;
 }
 
 /* Follow-up input - styled as a compact chat continuation */
@@ -4024,6 +4001,7 @@ class ChadWebUI:
         coding_reasoning: str | None = None,
         verification_model: str | None = None,
         verification_reasoning: str | None = None,
+        screenshots: list[str] | None = None,
     ) -> Iterator[tuple[list, str, gr.update, gr.update, gr.update]]:
         """Send a follow-up message, with optional provider handoff and verification.
 
@@ -4035,6 +4013,7 @@ class ChadWebUI:
             verification_agent: Currently selected verification agent from dropdown
             coding_model: Preferred model selected in the Run tab
             coding_reasoning: Reasoning effort selected in the Run tab
+            screenshots: Optional list of screenshot file paths to include
 
         Yields:
             Tuples of (chat_history, live_stream, followup_input, followup_row, send_btn, live_patch_trigger,
@@ -4086,6 +4065,14 @@ class ChadWebUI:
         if not followup_message or not followup_message.strip():
             yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
             return
+
+        # Append screenshot paths to message if provided
+        if screenshots:
+            screenshot_section = "\n\nThe user has attached the following screenshots for reference. " \
+                "Use the Read tool to view them:\n"
+            for screenshot_path in screenshots:
+                screenshot_section += f"- {screenshot_path}\n"
+            followup_message = followup_message + screenshot_section
 
         accounts = self.api_client.list_accounts()
         account_names = {acc.name for acc in accounts}
@@ -5646,31 +5633,27 @@ class ChadWebUI:
             gr.Markdown("### Agent Communication")
             with gr.Column(elem_classes=["task-entry-bubble"] if is_first else []):
                 with gr.Row(elem_classes=["task-input-row"], equal_height=False):
-                    task_description = gr.TextArea(
+                    task_description = gr.MultimodalTextbox(
                         label="Task Description",
-                        placeholder="Describe what you want done...",
+                        placeholder="Describe what you want done... (drag screenshots here)",
                         lines=3,
-                        scale=3,
+                        scale=4,
+                        file_types=["image"],
+                        file_count="multiple",
+                        sources=["upload"],
                         key=f"task-desc-{session_id}",
                         elem_classes=["task-desc-input"],
                     )
-                    with gr.Column(scale=1, min_width=260, elem_classes=["attachment-column"]):
-                        screenshot_upload = gr.File(
-                            label="Screenshots (optional)",
-                            file_count="multiple",
-                            file_types=["image"],
-                            height=140,
-                            key=f"screenshot-upload-{session_id}",
-                            elem_classes=["screenshot-upload", "compact-upload"],
-                        )
-                        start_btn = gr.Button(
-                            "▶ Start Task",
-                            variant="primary",
-                            interactive=is_ready,
-                            key=f"start-btn-{session_id}",
-                            elem_id="start-task-btn" if is_first else None,
-                            elem_classes=["start-task-btn", "start-inline-btn"],
-                        )
+                    start_btn = gr.Button(
+                        "▶ Start Task",
+                        variant="primary",
+                        interactive=is_ready,
+                        key=f"start-btn-{session_id}",
+                        elem_id="start-task-btn" if is_first else None,
+                        elem_classes=["start-task-btn"],
+                        scale=1,
+                        min_width=120,
+                    )
 
             # Live stream kept in DOM (visible=True) but hidden via CSS for visual tests
             # Using gr.HTML instead of gr.Markdown for DOM patching support
@@ -5738,11 +5721,14 @@ class ChadWebUI:
         )
 
         with gr.Row(visible=False, key=f"followup-row-{session_id}") as followup_row:
-            followup_input = gr.TextArea(
+            followup_input = gr.MultimodalTextbox(
                 label="Continue conversation...",
-                placeholder="Ask for changes or additional work...",
+                placeholder="Ask for changes or additional work... (drag screenshots here)",
                 lines=2,
                 scale=5,
+                file_types=["image"],
+                file_count="multiple",
+                sources=["upload"],
                 key=f"followup-input-{session_id}",
             )
             send_followup_btn = gr.Button(
@@ -5948,8 +5934,7 @@ class ChadWebUI:
 
         def start_task_wrapper(
             proj_path,
-            task_desc,
-            screenshots_data,
+            task_input,
             coding,
             verification,
             c_model,
@@ -5958,10 +5943,17 @@ class ChadWebUI:
             v_reason,
             term_cols,
         ):
-            # Extract file paths from uploaded screenshots
+            # Extract text and file paths from MultimodalTextbox
+            task_desc = ""
             screenshot_paths = None
-            if screenshots_data:
-                screenshot_paths = [f.name for f in screenshots_data]
+            if task_input:
+                if isinstance(task_input, dict):
+                    task_desc = task_input.get("text", "")
+                    files = task_input.get("files", [])
+                    if files:
+                        screenshot_paths = [f if isinstance(f, str) else f.get("path", "") for f in files]
+                else:
+                    task_desc = str(task_input)
             yield from self.start_chad_task(
                 session_id,
                 proj_path,
@@ -5979,10 +5971,21 @@ class ChadWebUI:
         def cancel_wrapper():
             return self.cancel_task(session_id)
 
-        def followup_wrapper(msg, history, coding, verification, c_model, c_reason, v_model, v_reason):
+        def followup_wrapper(followup_input, history, coding, verification, c_model, c_reason, v_model, v_reason):
+            # Extract text and file paths from MultimodalTextbox
+            followup_msg = ""
+            screenshot_paths = None
+            if followup_input:
+                if isinstance(followup_input, dict):
+                    followup_msg = followup_input.get("text", "")
+                    files = followup_input.get("files", [])
+                    if files:
+                        screenshot_paths = [f if isinstance(f, str) else f.get("path", "") for f in files]
+                else:
+                    followup_msg = str(followup_input)
             yield from self.send_followup(
                 session_id,
-                msg,
+                followup_msg,
                 history,
                 coding,
                 verification,
@@ -5990,6 +5993,7 @@ class ChadWebUI:
                 c_reason,
                 v_model,
                 v_reason,
+                screenshots=screenshot_paths,
             )
 
         def verification_dropdown_updates(
@@ -6026,7 +6030,6 @@ class ChadWebUI:
             inputs=[
                 project_path,
                 task_description,
-                screenshot_upload,
                 coding_agent,
                 verification_agent,
                 coding_model,

@@ -158,9 +158,10 @@ class TestUIElements:
 
     def test_task_description_field(self, page: Page):
         """Task description field should be present."""
-        # Look for the task description textarea by its label
-        textarea = page.get_by_label("Task Description")
-        expect(textarea).to_be_visible()
+        # Look for the task description multimodal textbox by its class
+        # MultimodalTextbox uses a different structure than TextArea
+        task_input = page.locator(".task-desc-input")
+        expect(task_input).to_be_visible()
 
     def test_start_button_present(self, page: Page):
         """Start Task button should be present."""

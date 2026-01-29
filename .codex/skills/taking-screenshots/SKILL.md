@@ -8,9 +8,15 @@ metadata:
 # Taking Screenshots
 
 ```bash
-# Capture silently (default – does not open browser)
+# Capture silently (default – light mode only, does not open browser)
 ./.venv/bin/python scripts/screenshot_ui.py --tab run --headless
 
+# Capture both color schemes - this is only needed if changing something dark mode related
+./.venv/bin/python scripts/screenshot_ui.py --tab run --headless --color-scheme both
+
+# If you want the saved image to pop open after capture, this is only needed if showing the user something
+./.venv/bin/python scripts/screenshot_ui.py --tab run --headless --open
+```
 
 ## Options
 
