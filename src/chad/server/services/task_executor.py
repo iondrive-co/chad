@@ -823,8 +823,11 @@ class TaskExecutor:
 
                 time.sleep(0.1)
                 pty_session = pty_service.get_session(stream_id)
-                if time.time() - last_log_flush >= self.terminal_flush_interval:
-                    flush_terminal_buffer()
+                # Note: We no longer log terminal output periodically during the session.
+                # The terminal is still streamed to clients via PTY events in real-time.
+                # For handoff, we only log the final terminal state at session end,
+                # which dramatically reduces log size while still supporting handoff.
+                # The terminal buffer is still being filled by log_pty_event callback.
 
             # Get final exit code
             exit_code = 0

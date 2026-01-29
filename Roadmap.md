@@ -8,11 +8,13 @@ v0.11 Slip Slop Slap
 
 Use of /agents
 Repeated failures
+Task list - wait until limit expires and feed in more
 
 v0.12 Intentionality Reduction
 
-Telegram and slack integrations
+Slack integration
 Packaging for different platforms
+Remix static site ui which downloads and talks to the server on localhost
 
 ---- Repeated failures ----
 
