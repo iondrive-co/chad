@@ -31,6 +31,13 @@ from chad.util.event_log import (
     UserMessageEvent,
     AssistantMessageEvent,
     VerificationAttemptEvent,
+    ProviderSwitchedEvent,
+)
+from chad.util.handoff import (
+    log_handoff_checkpoint,
+    build_resume_prompt,
+    is_quota_exhaustion_error,
+    get_quota_error_reason,
 )
 from chad.util.providers import ModelConfig, parse_codex_output, create_provider
 from chad.util.model_catalog import ModelCatalog
@@ -72,6 +79,8 @@ class Session:
     task_description: str | None = None
     project_path: str | None = None
     coding_account: str | None = None
+    # Track provider switches for UI indication
+    switched_from: str | None = None  # Previous provider after a handoff
     # Git worktree support
     worktree_path: Path | None = None
     worktree_branch: str | None = None
@@ -2572,8 +2581,10 @@ class ChadWebUI:
         self,
         task_state: str | None = None,
         worktree_path: str | None = None,
+        switched_from: str | None = None,
+        active_account: str | None = None,
     ) -> str:
-        return self.provider_ui.format_role_status(task_state, worktree_path)
+        return self.provider_ui.format_role_status(task_state, worktree_path, switched_from, active_account)
 
     def assign_role(self, account_name: str, role: str):
         return self.provider_ui.assign_role(account_name, role, self.provider_card_count)
@@ -2898,7 +2909,9 @@ class ChadWebUI:
             is_error = "❌" in status
             # Get worktree path for status display
             wt_path = str(session.worktree_path) if session.worktree_path else None
-            display_role_status = self.format_role_status(task_state, wt_path)
+            display_role_status = self.format_role_status(
+                task_state, wt_path, session.switched_from, session.coding_account
+            )
             log_btn_update = gr.update(
                 label=session.log_path.name if session.log_path else "Session Log",
                 value=str(session.log_path) if session.log_path else None,
@@ -3595,14 +3608,14 @@ class ChadWebUI:
                         )
                         if can_revise:
                             revision_content = (
-                                "───────────── 🔄 REVISION REQUESTED ─────────────\n\n"
+                                "───────────── → REVISION REQUESTED ─────────────\n\n"
                                 "*Sending verification feedback to coding agent...*"
                             )
                             chat_history.append({"role": "user", "content": revision_content})
                             # Log revision request
                             if session.event_log:
                                 session.event_log.log(UserMessageEvent(content="Revision requested"))
-                            revision_status = f"{status_prefix}🔄 Sending revision request to coding agent..."
+                            revision_status = f"{status_prefix}→ Sending revision request to coding agent..."
                             yield make_yield(chat_history, revision_status, "", task_state="running")
 
                             # Send feedback to coding agent via session continuation
@@ -3705,13 +3718,13 @@ class ChadWebUI:
                         ):
                             # API-based revision: re-run task via API with revision feedback
                             revision_content = (
-                                "───────────── 🔄 REVISION REQUESTED ─────────────\n\n"
+                                "───────────── → REVISION REQUESTED ─────────────\n\n"
                                 "*Re-running coding agent with verification feedback...*"
                             )
                             chat_history.append({"role": "user", "content": revision_content})
                             if session.event_log:
                                 session.event_log.log(UserMessageEvent(content="Revision requested (API)"))
-                            revision_status = f"{status_prefix}🔄 Re-running coding agent with feedback..."
+                            revision_status = f"{status_prefix}→ Re-running coding agent with feedback..."
                             yield make_yield(chat_history, revision_status, "", task_state="running")
 
                             # Build revision task description
@@ -4081,6 +4094,25 @@ class ChadWebUI:
         handoff_needed = provider_changed or pref_changed
 
         if handoff_needed:
+            # Log handoff checkpoint to event log before stopping old provider
+            old_provider_type = ""
+            old_model = ""
+            if session.event_log and session.provider:
+                provider_session_id = None
+                if hasattr(session.provider, "get_session_id"):
+                    provider_session_id = session.provider.get_session_id()
+
+                log_handoff_checkpoint(
+                    session.event_log,
+                    session.task_description or "",
+                    provider_session_id,
+                )
+
+                # Track old provider info for ProviderSwitchedEvent
+                if session.config:
+                    old_provider_type = getattr(session.config, "provider", "")
+                    old_model = getattr(session.config, "model_name", "") or ""
+
             # Stop old session if active
             if session.provider:
                 try:
@@ -4107,9 +4139,9 @@ class ChadWebUI:
             handoff_detail += ")"
 
             handoff_title = "PROVIDER HANDOFF" if provider_changed else "PREFERENCE UPDATE"
-            handoff_msg = f"───────────── 🔄 {handoff_title} ─────────────\n\n" f"*Switching to {handoff_detail}*"
+            handoff_msg = f"───────────── → {handoff_title} ─────────────\n\n" f"*Switching to {handoff_detail}*"
             chat_history.append({"role": "user", "content": handoff_msg})
-            yield make_followup_yield(chat_history, "🔄 Switching providers...", working=True, merge_updates=merge_no_change)
+            yield make_followup_yield(chat_history, "→ Switching providers...", working=True, merge_updates=merge_no_change)
 
             new_provider = create_provider(coding_config)
             # Use worktree path if available, otherwise fall back to project path
@@ -4129,14 +4161,32 @@ class ChadWebUI:
                 yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
                 return
 
+            # Track the switch for UI indication
+            old_account = session.coding_account
+            session.switched_from = old_account if old_account else None
+
             session.provider = new_provider
             session.coding_account = coding_agent
             session.active = True
             session.config = coding_config
 
-            # Include conversation context for the new provider
-            context_summary = self._build_handoff_context(chat_history)
-            followup_message = f"{context_summary}\n\n# Follow-up Request\n\n{followup_message}"
+            # Log provider switched event
+            if session.event_log:
+                session.event_log.log(ProviderSwitchedEvent(
+                    from_provider=old_provider_type,
+                    to_provider=coding_provider_type,
+                    from_model=old_model,
+                    to_model=requested_model or "",
+                    reason="user_requested" if provider_changed else "preference_update",
+                ))
+
+            # Build resume prompt from event log if available
+            if session.event_log:
+                followup_message = build_resume_prompt(session.event_log, followup_message)
+            else:
+                # Fallback to old method
+                context_summary = self._build_handoff_context(chat_history)
+                followup_message = f"{context_summary}\n\n# Follow-up Request\n\n{followup_message}"
 
         if not session.active or not session.provider:
             chat_history.append({"role": "user", "content": f"**Follow-up**\n\n{followup_message}"})
@@ -4263,16 +4313,85 @@ class ChadWebUI:
 
         # Insert final response into chat history
         if error_holder[0]:
-            chat_history.insert(pending_idx, {
-                "role": "assistant",
-                "content": f"**CODING AI**\n\n❌ *Error: {error_holder[0]}*",
-            })
-            session.active = False
-            session.provider = None
-            session.config = None
-            self._update_session_log(session, chat_history, full_history)
-            yield make_followup_yield(chat_history, "", show_followup=False, merge_updates=merge_no_change)
-            return
+            # Try auto-switch on quota exhaustion
+            switched, new_account = self._try_auto_switch_provider(session, error_holder[0])
+            if switched and new_account:
+                # Show switch notification in chat
+                switch_msg = (
+                    f"───────────── → AUTO-SWITCH ─────────────\n\n"
+                    f"*Quota/rate limit reached on {session.switched_from}. "
+                    f"Switching to {new_account}...*"
+                )
+                chat_history.append({"role": "user", "content": switch_msg})
+                yield make_followup_yield(chat_history, "→ Retrying with fallback provider...", working=True, merge_updates=merge_no_change)
+
+                # Build resume prompt and retry
+                if session.event_log:
+                    retry_message = build_resume_prompt(session.event_log, followup_message)
+                else:
+                    retry_message = followup_message
+
+                # Retry with new provider
+                retry_response_holder = [None]
+                retry_error_holder = [None]
+                retry_complete = threading.Event()
+
+                def retry_relay():
+                    try:
+                        session.provider.send_message(retry_message)
+                        response = session.provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
+                        retry_response_holder[0] = response
+                    except Exception as e:
+                        retry_error_holder[0] = str(e)
+                    finally:
+                        retry_complete.set()
+
+                retry_thread = threading.Thread(target=retry_relay, daemon=True)
+                retry_thread.start()
+
+                # Wait for retry with streaming
+                while not retry_complete.is_set() and not session.cancel_requested:
+                    try:
+                        msg = message_queue.get(timeout=0.1)
+                        if msg[0] == "stream":
+                            full_history.append(_history_entry(current_ai, msg[1]))
+                            display_buffer.append(msg[1])
+                            live_stream = build_live_stream_html(display_buffer.content, current_ai, live_stream_id)
+                            yield make_followup_yield(chat_history, live_stream, working=True, merge_updates=merge_no_change)
+                    except queue.Empty:
+                        pass
+
+                retry_thread.join(timeout=1)
+
+                if retry_error_holder[0]:
+                    # Retry also failed
+                    chat_history.insert(pending_idx, {
+                        "role": "assistant",
+                        "content": f"**CODING AI**\n\n❌ *Error after auto-switch: {retry_error_holder[0]}*",
+                    })
+                    session.active = False
+                    session.provider = None
+                    session.config = None
+                    self._update_session_log(session, chat_history, full_history)
+                    yield make_followup_yield(chat_history, "", show_followup=False, merge_updates=merge_no_change)
+                    return
+
+                if retry_response_holder[0]:
+                    # Update response holder with retry result
+                    response_holder[0] = retry_response_holder[0]
+                    error_holder[0] = None
+            else:
+                # No auto-switch available, show original error
+                chat_history.insert(pending_idx, {
+                    "role": "assistant",
+                    "content": f"**CODING AI**\n\n❌ *Error: {error_holder[0]}*",
+                })
+                session.active = False
+                session.provider = None
+                session.config = None
+                self._update_session_log(session, chat_history, full_history)
+                yield make_followup_yield(chat_history, "", show_followup=False, merge_updates=merge_no_change)
+                return
 
         if not response_holder[0]:
             chat_history.insert(pending_idx, {
@@ -4428,7 +4547,7 @@ class ChadWebUI:
                         chat_history.append(
                             {
                                 "role": "user",
-                                "content": "───────────── 🔄 REVISION REQUESTED ─────────────",
+                                "content": "───────────── → REVISION REQUESTED ─────────────",
                             }
                         )
                         chat_history.append(
@@ -4442,7 +4561,7 @@ class ChadWebUI:
                             session, chat_history, full_history, verification_attempts=verification_log
                         )
                         # Show live stream placeholder during revision
-                        revision_placeholder = build_live_stream_html("🔄 Revision in progress...", "CODING AI", live_stream_id)
+                        revision_placeholder = build_live_stream_html("→ Revision in progress...", "CODING AI", live_stream_id)
                         yield make_followup_yield(chat_history, revision_placeholder, working=True, merge_updates=merge_no_change)
 
                         revision_request = (
@@ -5027,6 +5146,124 @@ class ChadWebUI:
                 context_parts.append(f"**Previous Response (summary):**\n{summary}\n")
 
         return "\n".join(context_parts)
+
+    def _try_auto_switch_provider(
+        self,
+        session: Session,
+        error_message: str,
+    ) -> tuple[bool, str | None]:
+        """Attempt to auto-switch to a fallback provider on quota exhaustion.
+
+        Args:
+            session: The current session
+            error_message: The error message from the failed provider
+
+        Returns:
+            Tuple of (switched: bool, new_account: str | None)
+            switched is True if we successfully switched to a new provider
+            new_account is the name of the new account, or None if no switch occurred
+        """
+        if not is_quota_exhaustion_error(error_message):
+            return False, None
+
+        current_account = session.coding_account
+        if not current_account:
+            return False, None
+
+        # Get the next fallback provider
+        try:
+            next_account = self.api_client.get_next_fallback_provider(current_account)
+        except Exception:
+            # API error getting fallback order - skip auto-switch
+            return False, None
+
+        if not next_account:
+            return False, None
+
+        # Get the new account's provider type
+        try:
+            accounts = {acc.name: acc.provider for acc in self.api_client.list_accounts()}
+            if next_account not in accounts:
+                return False, None
+            next_provider_type = accounts[next_account]
+        except Exception:
+            return False, None
+
+        # Log handoff checkpoint before stopping old provider
+        if session.event_log and session.provider:
+            provider_session_id = None
+            if hasattr(session.provider, "get_session_id"):
+                provider_session_id = session.provider.get_session_id()
+
+            log_handoff_checkpoint(
+                session.event_log,
+                session.task_description or "",
+                provider_session_id,
+            )
+
+        # Track old provider info
+        old_provider_type = ""
+        old_model = ""
+        if session.config:
+            old_provider_type = getattr(session.config, "provider", "")
+            old_model = getattr(session.config, "model_name", "") or ""
+
+        # Stop old provider
+        if session.provider:
+            try:
+                session.provider.stop_session()
+            except Exception:
+                pass
+            session.provider = None
+            session.active = False
+
+        # Get new account info for model/reasoning
+        try:
+            next_acc = self.api_client.get_account(next_account)
+            next_model = next_acc.model or "default"
+            next_reasoning = next_acc.reasoning or "default"
+        except Exception:
+            next_model = "default"
+            next_reasoning = "default"
+
+        # Create new provider
+        new_config = ModelConfig(
+            provider=next_provider_type,
+            model_name=next_model,
+            account_name=next_account,
+            reasoning_effort=None if next_reasoning == "default" else next_reasoning,
+        )
+
+        new_provider = create_provider(new_config)
+
+        # Use worktree path if available
+        if session.worktree_path:
+            working_dir = str(session.worktree_path)
+        else:
+            working_dir = session.project_path or "."
+
+        if not new_provider.start_session(working_dir, None):
+            return False, None
+
+        # Track the switch
+        session.switched_from = current_account
+        session.provider = new_provider
+        session.coding_account = next_account
+        session.active = True
+        session.config = new_config
+
+        # Log provider switched event
+        reason = get_quota_error_reason(error_message) or "quota_exhaustion"
+        if session.event_log:
+            session.event_log.log(ProviderSwitchedEvent(
+                from_provider=old_provider_type,
+                to_provider=next_provider_type,
+                from_model=old_model,
+                to_model=next_model,
+                reason=f"auto_switch_{reason}",
+            ))
+
+        return True, next_account
 
     def _last_event_info(self, session: Session) -> dict | None:
         """Return the last event snapshot from the provider if available."""
@@ -6045,7 +6282,7 @@ class ChadWebUI:
         provider_feedback = gr.Markdown("")
         gr.Markdown("### Setup", elem_classes=["provider-section-title"])
 
-        refresh_btn = gr.Button("🔄 Refresh", variant="secondary")
+        refresh_btn = gr.Button("→ Refresh", variant="secondary")
         pending_delete_state = gr.State(None)
 
         provider_cards = []
@@ -6247,6 +6484,41 @@ class ChadWebUI:
                     info="Gradio (web) or CLI (terminal) - applies on next launch",
                 )
 
+            # Auto-switch settings
+            gr.Markdown("### Auto-Switch Settings")
+            gr.Markdown(
+                "Configure automatic provider switching when quota is exhausted. "
+                "Order determines fallback priority."
+            )
+
+            # Load current fallback order and threshold
+            try:
+                fallback_order = self.api_client.get_provider_fallback_order()
+                fallback_order_str = ", ".join(fallback_order)
+            except Exception:
+                fallback_order_str = ""
+
+            try:
+                usage_threshold = self.api_client.get_usage_switch_threshold()
+            except Exception:
+                usage_threshold = 90
+
+            with gr.Row():
+                fallback_order_input = gr.Textbox(
+                    label="Provider Fallback Order",
+                    placeholder="e.g., work-claude, backup-gpt, gemini-free",
+                    value=fallback_order_str,
+                    info="Comma-separated account names in priority order",
+                )
+                usage_threshold_input = gr.Slider(
+                    label="Usage Switch Threshold (%)",
+                    minimum=0,
+                    maximum=100,
+                    step=5,
+                    value=usage_threshold,
+                    info="Switch provider when usage exceeds this percentage (100 = disable)",
+                )
+
         provider_outputs = [provider_feedback]
         for card in provider_cards:
             provider_outputs.extend(
@@ -6404,6 +6676,38 @@ class ChadWebUI:
                 return f"❌ {exc}"
 
         ui_mode_pref.change(on_ui_mode_change, inputs=[ui_mode_pref], outputs=[config_status])
+
+        def on_fallback_order_change(order_str):
+            try:
+                # Parse comma-separated names
+                names = [n.strip() for n in order_str.split(",") if n.strip()]
+                self.api_client.set_provider_fallback_order(names)
+                if names:
+                    return f"✅ Fallback order set: {' → '.join(names)}"
+                return "✅ Fallback order cleared (auto-switch disabled)"
+            except Exception as exc:
+                return f"❌ {exc}"
+
+        fallback_order_input.change(
+            on_fallback_order_change,
+            inputs=[fallback_order_input],
+            outputs=[config_status],
+        )
+
+        def on_usage_threshold_change(threshold):
+            try:
+                self.api_client.set_usage_switch_threshold(int(threshold))
+                if threshold >= 100:
+                    return "✅ Usage-based switching disabled"
+                return f"✅ Will switch providers when usage exceeds {int(threshold)}%"
+            except Exception as exc:
+                return f"❌ {exc}"
+
+        usage_threshold_input.change(
+            on_usage_threshold_change,
+            inputs=[usage_threshold_input],
+            outputs=[config_status],
+        )
 
         for card in provider_cards:
 

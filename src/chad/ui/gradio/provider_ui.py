@@ -1554,6 +1554,8 @@ class ProviderUIManager:
         self,
         task_state: str | None = None,
         worktree_path: str | None = None,
+        switched_from: str | None = None,
+        active_account: str | None = None,
     ) -> tuple[bool, str]:
         """Check if roles are properly configured for running tasks.
 
@@ -1561,6 +1563,10 @@ class ProviderUIManager:
             task_state: Optional task state (running, verifying, completed, failed).
                        When provided, shows dynamic status instead of static "Ready".
             worktree_path: Optional worktree path to display during active tasks.
+            switched_from: If set, indicates this is a recent provider switch and
+                          shows the previous provider name.
+            active_account: If set, use this account as the active provider instead
+                           of looking up the CODING role assignment.
 
         Returns:
             Tuple of (is_ready, status_text)
@@ -1569,15 +1575,26 @@ class ProviderUIManager:
         if not accounts:
             return False, "⚠️ Add a provider to start tasks."
 
-        # Find coding account
+        # Find coding account - prefer active_account if provided
         coding_account = None
-        for acc in accounts:
-            if acc.role == "CODING":
-                coding_account = acc
-                break
+        if active_account:
+            for acc in accounts:
+                if acc.name == active_account:
+                    coding_account = acc
+                    break
+        if not coding_account:
+            for acc in accounts:
+                if acc.role == "CODING":
+                    coding_account = acc
+                    break
 
         if not coding_account:
             return False, "⚠️ Please select a Coding Agent in the Run Task tab."
+
+        # Build switch indicator if there was a recent handoff
+        switch_indicator = ""
+        if switched_from:
+            switch_indicator = f" *(switched from {switched_from})*"
 
         # Build dynamic status based on task state
         if task_state:
@@ -1591,10 +1608,10 @@ class ProviderUIManager:
 
             # Show worktree path during active tasks, agent name when idle
             if worktree_path and task_state in ("running", "verifying"):
-                return True, f"{state_icon} {state_label} — **Worktree:** `{worktree_path}`"
+                return True, f"{state_icon} {state_label} — **Worktree:** `{worktree_path}`{switch_indicator}"
             else:
                 agent_info = f"{coding_account.name} ({coding_account.provider})"
-                return True, f"{state_icon} {state_label} — **Agent:** {agent_info}"
+                return True, f"{state_icon} {state_label} — **Agent:** {agent_info}{switch_indicator}"
 
         # Static "Ready" status when no task is active
         coding_model_str = coding_account.model if coding_account.model else ""
@@ -1608,25 +1625,30 @@ class ProviderUIManager:
             # Extract last component for display
             from pathlib import Path
             worktree_name = Path(worktree_path).name
-            return True, f"✓ Ready — **Coding:** {coding_info} · **Worktree:** `{worktree_name}`"
+            return True, f"✓ Ready — **Coding:** {coding_info} · **Worktree:** `{worktree_name}`{switch_indicator}"
 
-        return True, f"✓ Ready — **Coding:** {coding_info}"
+        return True, f"✓ Ready — **Coding:** {coding_info}{switch_indicator}"
 
     def format_role_status(
         self,
         task_state: str | None = None,
         worktree_path: str | None = None,
+        switched_from: str | None = None,
+        active_account: str | None = None,
     ) -> str:
         """Return role status text.
 
         Args:
             task_state: Optional task state for dynamic status.
             worktree_path: Optional worktree path to display.
+            switched_from: If set, shows a switch indicator with the previous provider.
+            active_account: If set, use this account as the active provider instead
+                           of looking up the CODING role assignment.
 
         Returns:
             Formatted status string.
         """
-        _, status = self.get_role_config_status(task_state, worktree_path)
+        _, status = self.get_role_config_status(task_state, worktree_path, switched_from, active_account)
         return status
 
     def assign_role(self, account_name: str, role: str, card_slots: int):

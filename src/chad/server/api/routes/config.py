@@ -37,6 +37,41 @@ class PreferredVerificationModelUpdate(BaseModel):
     model: str | None = Field(description="Model name to set, or null to clear")
 
 
+class ProviderFallbackOrderResponse(BaseModel):
+    """Response for provider fallback order endpoint."""
+
+    order: list[str] = Field(
+        default_factory=list,
+        description="Ordered list of account names for auto-switching on quota exhaustion",
+    )
+
+
+class ProviderFallbackOrderUpdate(BaseModel):
+    """Request to set provider fallback order."""
+
+    order: list[str] = Field(
+        description="Ordered list of account names for auto-switching",
+    )
+
+
+class UsageSwitchThresholdResponse(BaseModel):
+    """Response for usage switch threshold endpoint."""
+
+    threshold: int = Field(
+        description="Percentage threshold (0-100) for triggering provider switch based on usage",
+    )
+
+
+class UsageSwitchThresholdUpdate(BaseModel):
+    """Request to set usage switch threshold."""
+
+    threshold: int = Field(
+        ge=0,
+        le=100,
+        description="Percentage threshold (0-100). Use 100 to disable usage-based switching.",
+    )
+
+
 @router.get("/verification", response_model=VerificationSettings)
 async def get_verification_settings() -> VerificationSettings:
     """Get verification agent settings."""
@@ -161,3 +196,57 @@ async def set_preferred_verification_model(
     config_mgr.set_preferred_verification_model(request.model)
 
     return PreferredVerificationModelResponse(model=request.model)
+
+
+@router.get("/provider-fallback-order", response_model=ProviderFallbackOrderResponse)
+async def get_provider_fallback_order() -> ProviderFallbackOrderResponse:
+    """Get the ordered list of provider accounts for auto-switching on quota exhaustion.
+
+    When a provider runs out of credits/quota, the system will automatically
+    switch to the next provider in this list.
+    """
+    config_mgr = get_config_manager()
+    order = config_mgr.get_provider_fallback_order()
+
+    return ProviderFallbackOrderResponse(order=order)
+
+
+@router.put("/provider-fallback-order", response_model=ProviderFallbackOrderResponse)
+async def set_provider_fallback_order(
+    request: ProviderFallbackOrderUpdate,
+) -> ProviderFallbackOrderResponse:
+    """Set the ordered list of provider accounts for auto-switching.
+
+    Accounts not in this list will not be used for automatic switching.
+    """
+    config_mgr = get_config_manager()
+    config_mgr.set_provider_fallback_order(request.order)
+
+    return ProviderFallbackOrderResponse(order=request.order)
+
+
+@router.get("/usage-switch-threshold", response_model=UsageSwitchThresholdResponse)
+async def get_usage_switch_threshold() -> UsageSwitchThresholdResponse:
+    """Get the usage percentage threshold for auto-switching providers.
+
+    When a provider reports usage above this percentage, the system will
+    automatically switch to the next fallback provider.
+    """
+    config_mgr = get_config_manager()
+    threshold = config_mgr.get_usage_switch_threshold()
+
+    return UsageSwitchThresholdResponse(threshold=threshold)
+
+
+@router.put("/usage-switch-threshold", response_model=UsageSwitchThresholdResponse)
+async def set_usage_switch_threshold(
+    request: UsageSwitchThresholdUpdate,
+) -> UsageSwitchThresholdResponse:
+    """Set the usage percentage threshold for auto-switching providers.
+
+    Set to 100 to disable usage-based switching (only error-based switching).
+    """
+    config_mgr = get_config_manager()
+    config_mgr.set_usage_switch_threshold(request.threshold)
+
+    return UsageSwitchThresholdResponse(threshold=request.threshold)
