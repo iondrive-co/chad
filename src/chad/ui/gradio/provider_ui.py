@@ -265,40 +265,134 @@ class ProviderUIManager:
         return 0.3  # Error, bias low
 
     def _get_gemini_remaining_usage(self) -> float:
-        """Estimate Gemini remaining usage (0.0-1.0).
+        """Get Gemini remaining usage (0.0-1.0) by counting today's requests.
 
-        No programmatic API available for quota, so we estimate based on
-        whether logged in. Biased low since we can't verify actual quota.
+        Calculates remaining daily quota based on local session files.
         """
+        from datetime import datetime, timezone
+
         oauth_file = Path.home() / ".gemini" / "oauth_creds.json"
         if not oauth_file.exists():
             return 0.0
 
-        return 0.3  # Logged in but no quota API, bias low
+        tmp_dir = Path.home() / ".gemini" / "tmp"
+        if not tmp_dir.exists():
+            return 1.0  # Logged in, no usage yet
+
+        today_requests = 0
+        today = datetime.now(timezone.utc).date()
+        daily_limit = 2000
+
+        for session_file in tmp_dir.glob("*/chats/session-*.json"):
+            try:
+                with open(session_file, encoding="utf-8") as f:
+                    session_data = json.load(f)
+
+                for msg in session_data.get("messages", []):
+                    if msg.get("type") == "gemini":
+                        timestamp = msg.get("timestamp", "")
+                        if timestamp:
+                            try:
+                                msg_date = datetime.fromisoformat(
+                                    timestamp.replace("Z", "+00:00")
+                                ).date()
+                                if msg_date == today:
+                                    today_requests += 1
+                            except (ValueError, AttributeError):
+                                pass
+            except (json.JSONDecodeError, OSError, KeyError):
+                continue
+
+        # Return remaining as 0.0-1.0 (1.0 = full capacity)
+        used_pct = today_requests / daily_limit
+        return max(0.0, min(1.0, 1.0 - used_pct))
 
     def _get_mistral_remaining_usage(self) -> float:
-        """Estimate Mistral remaining usage (0.0-1.0).
+        """Get Mistral remaining usage (0.0-1.0) by counting today's requests.
 
-        No programmatic API available for quota, so we estimate based on
-        whether logged in. Biased low since we can't verify actual quota.
+        Calculates remaining daily quota based on local session files.
         """
+        from datetime import datetime, timezone
+
         vibe_config = Path.home() / ".vibe" / "config.toml"
         if not vibe_config.exists():
             return 0.0
 
-        return 0.3  # Logged in but no quota API, bias low
+        sessions_dir = Path.home() / ".vibe" / "logs" / "session"
+        if not sessions_dir.exists():
+            return 1.0  # Logged in, no usage yet
+
+        today_requests = 0
+        today = datetime.now(timezone.utc).date()
+        daily_limit = 1000
+
+        for session_file in sessions_dir.glob("session_*.json"):
+            try:
+                mtime = datetime.fromtimestamp(session_file.stat().st_mtime, tz=timezone.utc)
+                if mtime.date() != today:
+                    continue
+
+                with open(session_file, encoding="utf-8") as f:
+                    data = json.load(f)
+
+                metadata = data.get("metadata", {})
+                stats = metadata.get("stats", {})
+                prompt_count = stats.get("prompt_count", 1)
+                today_requests += prompt_count
+            except (json.JSONDecodeError, OSError, KeyError):
+                continue
+
+        # Return remaining as 0.0-1.0 (1.0 = full capacity)
+        used_pct = today_requests / daily_limit
+        return max(0.0, min(1.0, 1.0 - used_pct))
 
     def _get_qwen_remaining_usage(self) -> float:
-        """Estimate Qwen remaining usage (0.0-1.0).
+        """Get Qwen remaining usage (0.0-1.0) by counting today's requests.
 
-        No programmatic API available for quota, so we estimate based on
-        whether logged in. Biased low since we can't verify actual quota.
+        Calculates remaining daily quota based on local session files.
         """
+        from datetime import datetime, timezone
+
         qwen_oauth = Path.home() / ".qwen" / "oauth_creds.json"
         if not qwen_oauth.exists():
             return 0.0
 
-        return 0.3  # Logged in but no quota API, bias low
+        projects_dir = Path.home() / ".qwen" / "projects"
+        if not projects_dir.exists():
+            return 1.0  # Logged in, no usage yet
+
+        today_requests = 0
+        today = datetime.now(timezone.utc).date()
+        daily_limit = 2000
+
+        for session_file in projects_dir.glob("*/chats/*.jsonl"):
+            try:
+                with open(session_file, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                            if event.get("type") == "assistant":
+                                timestamp = event.get("timestamp", "")
+                                if timestamp:
+                                    try:
+                                        msg_date = datetime.fromisoformat(
+                                            timestamp.replace("Z", "+00:00")
+                                        ).date()
+                                        if msg_date == today:
+                                            today_requests += 1
+                                    except (ValueError, AttributeError):
+                                        pass
+                        except json.JSONDecodeError:
+                            continue
+            except OSError:
+                continue
+
+        # Return remaining as 0.0-1.0 (1.0 = full capacity)
+        used_pct = today_requests / daily_limit
+        return max(0.0, min(1.0, 1.0 - used_pct))
 
     def provider_state(self, card_slots: int, pending_delete: str | None = None) -> tuple:
         """Build UI state for provider cards (per-account controls)."""
@@ -762,6 +856,7 @@ class ProviderUIManager:
     def _get_gemini_usage(self) -> str:  # noqa: C901
         """Get usage info from Gemini by parsing session files."""
         from collections import defaultdict
+        from datetime import datetime, timezone
 
         gemini_dir = Path.home() / ".gemini"
         oauth_file = gemini_dir / "oauth_creds.json"
@@ -792,6 +887,9 @@ class ProviderUIManager:
         model_usage: dict[str, dict[str, int]] = defaultdict(
             lambda: {"requests": 0, "input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
         )
+        today_requests = 0
+        today = datetime.now(timezone.utc).date()
+        daily_limit = 2000  # Free tier limit
 
         for session_file in session_files:
             try:
@@ -808,14 +906,38 @@ class ProviderUIManager:
                         model_usage[model]["input_tokens"] += tokens.get("input", 0)
                         model_usage[model]["output_tokens"] += tokens.get("output", 0)
                         model_usage[model]["cached_tokens"] += tokens.get("cached", 0)
+
+                        # Count today's requests
+                        timestamp = msg.get("timestamp", "")
+                        if timestamp:
+                            try:
+                                msg_date = datetime.fromisoformat(
+                                    timestamp.replace("Z", "+00:00")
+                                ).date()
+                                if msg_date == today:
+                                    today_requests += 1
+                            except (ValueError, AttributeError):
+                                pass
             except (json.JSONDecodeError, OSError, KeyError):
                 continue
 
         if not model_usage:
             return "✅ **Logged in**\n\n*No usage data yet*"
 
+        # Calculate usage percentage
+        util_pct = min((today_requests / daily_limit) * 100, 100.0)
+        bar = self._progress_bar(util_pct)
+
         result = "✅ **Logged in**\n\n"
-        result += "**Model Usage**\n\n"
+
+        # Daily usage progress bar
+        result += "**Daily Usage**\n"
+        result += f"[{bar}] {util_pct:.0f}% used\n"
+        result += f"{today_requests:,} / {daily_limit:,} requests\n"
+        result += "Resets at Midnight PT\n\n"
+
+        # Model usage breakdown
+        result += "**Model Usage** (all time)\n\n"
         result += "| Model | Reqs | Input | Output |\n"
         result += "|-------|------|-------|--------|\n"
 
@@ -845,6 +967,8 @@ class ProviderUIManager:
 
     def _get_mistral_usage(self) -> str:
         """Get usage info from Mistral Vibe by parsing session files."""
+        from datetime import datetime, timezone
+
         vibe_config = Path.home() / ".vibe" / "config.toml"
         if not vibe_config.exists():
             return "❌ **Not logged in**\n\nRun `vibe --setup` in terminal to authenticate."
@@ -861,9 +985,15 @@ class ProviderUIManager:
         total_completion_tokens = 0
         total_cost = 0.0
         session_count = 0
+        today_requests = 0
+        today = datetime.now(timezone.utc).date()
+        daily_limit = 1000  # Conservative estimate for free tier
 
         for session_file in session_files:
             try:
+                # Check file modification time to see if it's from today
+                mtime = datetime.fromtimestamp(session_file.stat().st_mtime, tz=timezone.utc)
+
                 with open(session_file, encoding="utf-8") as f:
                     data = json.load(f)
 
@@ -874,15 +1004,32 @@ class ProviderUIManager:
                 total_completion_tokens += stats.get("session_completion_tokens", 0)
                 total_cost += stats.get("session_cost", 0.0)
                 session_count += 1
+
+                # Count today's requests based on file modification time
+                if mtime.date() == today:
+                    # Use prompt_count if available, otherwise count as 1
+                    prompt_count = stats.get("prompt_count", 1)
+                    today_requests += prompt_count
             except (json.JSONDecodeError, OSError, KeyError):
                 continue
 
         if session_count == 0:
             return "✅ **Logged in**\n\n*No valid session data found*"
 
+        # Calculate usage percentage
+        util_pct = min((today_requests / daily_limit) * 100, 100.0)
+        bar = self._progress_bar(util_pct)
         total_tokens = total_prompt_tokens + total_completion_tokens
 
         result = "✅ **Logged in**\n\n"
+
+        # Daily usage progress bar
+        result += "**Daily Usage**\n"
+        result += f"[{bar}] {util_pct:.0f}% used\n"
+        result += f"{today_requests:,} / {daily_limit:,} requests\n"
+        result += "Resets at Midnight UTC\n\n"
+
+        # Cumulative stats
         result += "**Cumulative Usage**\n\n"
         result += f"**Sessions:** {session_count:,}\n"
         result += f"**Input tokens:** {total_prompt_tokens:,}\n"
@@ -893,22 +1040,66 @@ class ProviderUIManager:
         return result
 
     def _get_qwen_usage(self) -> str:
-        """Get usage info from Qwen Code.
+        """Get usage info from Qwen Code by counting today's requests.
 
         Qwen Code uses QwenChat OAuth with 2000 free daily requests.
-        No programmatic API available for detailed quota.
+        We count today's API calls from local session files.
         """
+        from datetime import datetime, timezone
+
         qwen_oauth = Path.home() / ".qwen" / "oauth_creds.json"
 
         if not qwen_oauth.exists():
             return "❌ **Not logged in**\n\nRun `qwen` in terminal to authenticate."
 
-        return (
-            "✅ **Logged in**\n\n"
-            "**Qwen3-Coder** (QwenChat OAuth)\n\n"
-            "Free tier: 2,000 requests/day\n\n"
-            "*Detailed usage stats not available via API*"
-        )
+        # Count today's requests from session files
+        projects_dir = Path.home() / ".qwen" / "projects"
+        today_requests = 0
+        today = datetime.now(timezone.utc).date()
+        daily_limit = 2000
+
+        if projects_dir.exists():
+            for session_file in projects_dir.glob("*/chats/*.jsonl"):
+                try:
+                    with open(session_file, encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                event = json.loads(line)
+                                # Count assistant responses (each is one API call)
+                                if event.get("type") == "assistant":
+                                    timestamp = event.get("timestamp", "")
+                                    if timestamp:
+                                        try:
+                                            msg_date = datetime.fromisoformat(
+                                                timestamp.replace("Z", "+00:00")
+                                            ).date()
+                                            if msg_date == today:
+                                                today_requests += 1
+                                        except (ValueError, AttributeError):
+                                            pass
+                            except json.JSONDecodeError:
+                                continue
+                except OSError:
+                    continue
+
+        # Calculate usage percentage
+        util_pct = min((today_requests / daily_limit) * 100, 100.0)
+        bar = self._progress_bar(util_pct)
+
+        # Reset time is midnight UTC
+        reset_str = "Midnight UTC"
+
+        result = "✅ **Logged in**\n\n"
+        result += "**Qwen3-Coder** (QwenChat OAuth)\n\n"
+        result += "**Daily Usage**\n"
+        result += f"[{bar}] {util_pct:.0f}% used\n"
+        result += f"{today_requests:,} / {daily_limit:,} requests\n"
+        result += f"Resets at {reset_str}\n"
+
+        return result
 
     def get_account_choices(self) -> list[str]:
         """Get list of account names for dropdowns."""

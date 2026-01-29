@@ -1968,23 +1968,236 @@ class TestProviderUsageReporting:
         assert provider.supports_usage_reporting() is True
         # get_usage_percentage returns None when session files not available
 
-    def test_gemini_provider_does_not_support_usage_reporting(self):
-        """Gemini provider does not support usage percentage reporting."""
+    def test_gemini_provider_supports_usage_reporting(self):
+        """Gemini provider supports usage percentage reporting via local session files."""
         config = ModelConfig(provider="gemini", model_name="default")
         provider = GeminiCodeAssistProvider(config)
-        assert provider.supports_usage_reporting() is False
-        assert provider.get_usage_percentage() is None
+        assert provider.supports_usage_reporting() is True
 
-    def test_qwen_provider_does_not_support_usage_reporting(self):
-        """Qwen provider does not support usage percentage reporting."""
+    def test_qwen_provider_supports_usage_reporting(self):
+        """Qwen provider supports usage percentage reporting via local session files."""
         config = ModelConfig(provider="qwen", model_name="default")
         provider = QwenCodeProvider(config)
-        assert provider.supports_usage_reporting() is False
-        assert provider.get_usage_percentage() is None
+        assert provider.supports_usage_reporting() is True
 
-    def test_mistral_provider_does_not_support_usage_reporting(self):
-        """Mistral provider does not support usage percentage reporting."""
+    def test_mistral_provider_supports_usage_reporting(self):
+        """Mistral provider supports usage percentage reporting via local session files."""
         config = ModelConfig(provider="mistral", model_name="default")
         provider = MistralVibeProvider(config)
-        assert provider.supports_usage_reporting() is False
-        assert provider.get_usage_percentage() is None
+        assert provider.supports_usage_reporting() is True
+
+
+class TestUsagePercentageCalculation:
+    """Tests for usage percentage calculation from local session files."""
+
+    def test_gemini_usage_not_logged_in(self, tmp_path):
+        """Gemini returns None when oauth credentials don't exist."""
+        from chad.util.providers import _get_gemini_usage_percentage
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_gemini_usage_percentage("")
+            assert result is None
+
+    def test_gemini_usage_logged_in_no_sessions(self, tmp_path):
+        """Gemini returns 0% when logged in but no session files exist."""
+        from chad.util.providers import _get_gemini_usage_percentage
+
+        gemini_dir = tmp_path / ".gemini"
+        gemini_dir.mkdir()
+        (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_gemini_usage_percentage("")
+            assert result == 0.0
+
+    def test_gemini_usage_counts_today_requests(self, tmp_path):
+        """Gemini correctly counts today's requests from session files."""
+        import json
+        from datetime import datetime, timezone
+        from chad.util.providers import _get_gemini_usage_percentage
+
+        gemini_dir = tmp_path / ".gemini"
+        gemini_dir.mkdir()
+        (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        # Create session directory structure
+        session_dir = gemini_dir / "tmp" / "project1" / "chats"
+        session_dir.mkdir(parents=True)
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        yesterday = "2020-01-01T12:00:00.000Z"
+
+        session_data = {
+            "messages": [
+                {"type": "gemini", "timestamp": today, "model": "gemini-pro"},
+                {"type": "gemini", "timestamp": today, "model": "gemini-pro"},
+                {"type": "gemini", "timestamp": yesterday, "model": "gemini-pro"},  # Not today
+                {"type": "user", "timestamp": today},  # Not a gemini message
+            ]
+        }
+        (session_dir / "session-1.json").write_text(json.dumps(session_data))
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_gemini_usage_percentage("")
+            # 2 requests today out of 2000 limit = 0.1%
+            assert result == pytest.approx(0.1, abs=0.01)
+
+    def test_qwen_usage_not_logged_in(self, tmp_path):
+        """Qwen returns None when oauth credentials don't exist."""
+        from chad.util.providers import _get_qwen_usage_percentage
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_qwen_usage_percentage("")
+            assert result is None
+
+    def test_qwen_usage_logged_in_no_sessions(self, tmp_path):
+        """Qwen returns 0% when logged in but no session files exist."""
+        from chad.util.providers import _get_qwen_usage_percentage
+
+        qwen_dir = tmp_path / ".qwen"
+        qwen_dir.mkdir()
+        (qwen_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_qwen_usage_percentage("")
+            assert result == 0.0
+
+    def test_qwen_usage_counts_today_requests(self, tmp_path):
+        """Qwen correctly counts today's requests from jsonl session files."""
+        import json
+        from datetime import datetime, timezone
+        from chad.util.providers import _get_qwen_usage_percentage
+
+        qwen_dir = tmp_path / ".qwen"
+        qwen_dir.mkdir()
+        (qwen_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        # Create session directory structure
+        session_dir = qwen_dir / "projects" / "project1" / "chats"
+        session_dir.mkdir(parents=True)
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        yesterday = "2020-01-01T12:00:00.000Z"
+
+        # Write jsonl format (one JSON object per line)
+        lines = [
+            json.dumps({"type": "assistant", "timestamp": today}),
+            json.dumps({"type": "assistant", "timestamp": today}),
+            json.dumps({"type": "assistant", "timestamp": today}),
+            json.dumps({"type": "assistant", "timestamp": yesterday}),  # Not today
+            json.dumps({"type": "user", "timestamp": today}),  # Not assistant
+        ]
+        (session_dir / "session.jsonl").write_text("\n".join(lines))
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_qwen_usage_percentage("")
+            # 3 requests today out of 2000 limit = 0.15%
+            assert result == pytest.approx(0.15, abs=0.01)
+
+    def test_mistral_usage_not_logged_in(self, tmp_path):
+        """Mistral returns None when config doesn't exist."""
+        from chad.util.providers import _get_mistral_usage_percentage
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_mistral_usage_percentage("")
+            assert result is None
+
+    def test_mistral_usage_logged_in_no_sessions(self, tmp_path):
+        """Mistral returns 0% when logged in but no session files exist."""
+        from chad.util.providers import _get_mistral_usage_percentage
+
+        vibe_dir = tmp_path / ".vibe"
+        vibe_dir.mkdir()
+        (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"')
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_mistral_usage_percentage("")
+            assert result == 0.0
+
+    def test_mistral_usage_counts_today_sessions(self, tmp_path):
+        """Mistral correctly counts today's sessions from session files."""
+        import json
+        from chad.util.providers import _get_mistral_usage_percentage
+
+        vibe_dir = tmp_path / ".vibe"
+        vibe_dir.mkdir()
+        (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"')
+
+        # Create session directory
+        session_dir = vibe_dir / "logs" / "session"
+        session_dir.mkdir(parents=True)
+
+        # Create today's session file with prompt_count
+        session_data = {"metadata": {"stats": {"prompt_count": 5}}}
+        session_file = session_dir / "session_today.json"
+        session_file.write_text(json.dumps(session_data))
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_mistral_usage_percentage("")
+            # 5 requests today out of 1000 limit = 0.5%
+            assert result == pytest.approx(0.5, abs=0.01)
+
+    def test_gemini_usage_handles_malformed_json(self, tmp_path):
+        """Gemini gracefully handles malformed session files."""
+        from chad.util.providers import _get_gemini_usage_percentage
+
+        gemini_dir = tmp_path / ".gemini"
+        gemini_dir.mkdir()
+        (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        session_dir = gemini_dir / "tmp" / "project1" / "chats"
+        session_dir.mkdir(parents=True)
+        (session_dir / "session-1.json").write_text("not valid json")
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_gemini_usage_percentage("")
+            assert result == 0.0  # No valid requests counted
+
+    def test_qwen_usage_handles_malformed_jsonl(self, tmp_path):
+        """Qwen gracefully handles malformed jsonl lines."""
+        import json
+        from datetime import datetime, timezone
+        from chad.util.providers import _get_qwen_usage_percentage
+
+        qwen_dir = tmp_path / ".qwen"
+        qwen_dir.mkdir()
+        (qwen_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        session_dir = qwen_dir / "projects" / "project1" / "chats"
+        session_dir.mkdir(parents=True)
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        lines = [
+            "not valid json",
+            json.dumps({"type": "assistant", "timestamp": today}),
+            "{malformed",
+        ]
+        (session_dir / "session.jsonl").write_text("\n".join(lines))
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_qwen_usage_percentage("")
+            # Only 1 valid request counted
+            assert result == pytest.approx(0.05, abs=0.01)
+
+    def test_usage_capped_at_100_percent(self, tmp_path):
+        """Usage percentage is capped at 100% even if over limit."""
+        import json
+        from datetime import datetime, timezone
+        from chad.util.providers import _get_gemini_usage_percentage
+
+        gemini_dir = tmp_path / ".gemini"
+        gemini_dir.mkdir()
+        (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        session_dir = gemini_dir / "tmp" / "project1" / "chats"
+        session_dir.mkdir(parents=True)
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        # Create more requests than the daily limit (2000)
+        messages = [{"type": "gemini", "timestamp": today} for _ in range(2500)]
+        session_data = {"messages": messages}
+        (session_dir / "session-1.json").write_text(json.dumps(session_data))
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_gemini_usage_percentage("")
+            assert result == 100.0  # Capped at 100%

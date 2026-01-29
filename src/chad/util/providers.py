@@ -768,6 +768,170 @@ def _get_codex_usage_percentage(account_name: str) -> float | None:
     return None
 
 
+def _get_gemini_usage_percentage(account_name: str) -> float | None:
+    """Get Gemini usage percentage by counting today's requests.
+
+    Gemini free tier allows ~2000 requests/day.
+    We count today's requests from local session files.
+
+    Args:
+        account_name: The account name (unused for Gemini, single account only)
+
+    Returns:
+        Usage percentage (0-100), or None if unavailable
+    """
+    from datetime import datetime, timezone
+
+    gemini_dir = Path(safe_home()) / ".gemini"
+    oauth_file = gemini_dir / "oauth_creds.json"
+    if not oauth_file.exists():
+        return None
+
+    # Gemini stores sessions in tmp/*/chats/session-*.json
+    tmp_dir = gemini_dir / "tmp"
+    if not tmp_dir.exists():
+        return 0.0  # Logged in but no usage yet
+
+    # Count today's requests from all session files
+    today_requests = 0
+    today = datetime.now(timezone.utc).date()
+
+    for session_file in tmp_dir.glob("*/chats/session-*.json"):
+        try:
+            with open(session_file, encoding="utf-8") as f:
+                session_data = json.load(f)
+
+            for msg in session_data.get("messages", []):
+                if msg.get("type") == "gemini":
+                    # Check if this message was from today
+                    timestamp = msg.get("timestamp", "")
+                    if timestamp:
+                        try:
+                            msg_date = datetime.fromisoformat(
+                                timestamp.replace("Z", "+00:00")
+                            ).date()
+                            if msg_date == today:
+                                today_requests += 1
+                        except (ValueError, AttributeError):
+                            pass
+        except (json.JSONDecodeError, OSError, KeyError):
+            continue
+
+    # Free tier: ~2000 requests/day (conservative estimate)
+    daily_limit = 2000
+    return min((today_requests / daily_limit) * 100, 100.0)
+
+
+def _get_qwen_usage_percentage(account_name: str) -> float | None:
+    """Get Qwen usage percentage by counting today's requests.
+
+    Qwen free tier allows 2000 requests/day.
+    We count today's requests from local session files.
+
+    Args:
+        account_name: The account name (unused for Qwen, single account only)
+
+    Returns:
+        Usage percentage (0-100), or None if unavailable
+    """
+    from datetime import datetime, timezone
+
+    qwen_dir = Path(safe_home()) / ".qwen"
+    oauth_file = qwen_dir / "oauth_creds.json"
+    if not oauth_file.exists():
+        return None
+
+    projects_dir = qwen_dir / "projects"
+    if not projects_dir.exists():
+        return 0.0  # Logged in but no usage yet
+
+    # Count today's requests from all session files (jsonl format)
+    today_requests = 0
+    today = datetime.now(timezone.utc).date()
+
+    for session_file in projects_dir.glob("*/chats/*.jsonl"):
+        try:
+            with open(session_file, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        # Count assistant responses (each is one API call)
+                        if event.get("type") == "assistant":
+                            timestamp = event.get("timestamp", "")
+                            if timestamp:
+                                try:
+                                    msg_date = datetime.fromisoformat(
+                                        timestamp.replace("Z", "+00:00")
+                                    ).date()
+                                    if msg_date == today:
+                                        today_requests += 1
+                                except (ValueError, AttributeError):
+                                    pass
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            continue
+
+    # Free tier: 2000 requests/day
+    daily_limit = 2000
+    return min((today_requests / daily_limit) * 100, 100.0)
+
+
+def _get_mistral_usage_percentage(account_name: str) -> float | None:
+    """Get Mistral usage percentage by counting today's requests.
+
+    Mistral Vibe uses a daily request limit.
+    We count today's requests from local session files.
+
+    Args:
+        account_name: The account name (unused for Mistral, single account only)
+
+    Returns:
+        Usage percentage (0-100), or None if unavailable
+    """
+    from datetime import datetime, timezone
+
+    vibe_dir = Path(safe_home()) / ".vibe"
+    config_file = vibe_dir / "config.toml"
+    if not config_file.exists():
+        return None
+
+    sessions_dir = vibe_dir / "logs" / "session"
+    if not sessions_dir.exists():
+        return 0.0  # Logged in but no usage yet
+
+    # Count today's requests from session files
+    today_requests = 0
+    today = datetime.now(timezone.utc).date()
+
+    for session_file in sessions_dir.glob("session_*.json"):
+        try:
+            # Check file modification time to see if it's from today
+            mtime = datetime.fromtimestamp(session_file.stat().st_mtime, tz=timezone.utc)
+            if mtime.date() != today:
+                continue
+
+            with open(session_file, encoding="utf-8") as f:
+                data = json.load(f)
+
+            # Each session file represents one or more requests
+            # Count based on metadata stats
+            metadata = data.get("metadata", {})
+            stats = metadata.get("stats", {})
+            # Use prompt_count if available, otherwise count as 1 session
+            prompt_count = stats.get("prompt_count", 1)
+            today_requests += prompt_count
+        except (json.JSONDecodeError, OSError, KeyError):
+            continue
+
+    # Free tier: ~1000 requests/day (conservative estimate for Mistral API)
+    daily_limit = 1000
+    return min((today_requests / daily_limit) * 100, 100.0)
+
+
 class AIProvider(ABC):
     """Abstract base class for AI providers."""
 
@@ -1790,6 +1954,14 @@ class GeminiCodeAssistProvider(AIProvider):
         """Get the Gemini session_id for native resume."""
         return self.session_id
 
+    def supports_usage_reporting(self) -> bool:
+        """Gemini supports usage reporting via local session files."""
+        return True
+
+    def get_usage_percentage(self) -> float | None:
+        """Get Gemini usage percentage from local session files."""
+        return _get_gemini_usage_percentage(self.config.account_name)
+
 
 class QwenCodeProvider(AIProvider):
     """Provider for Qwen Code CLI with multi-turn support.
@@ -1979,6 +2151,14 @@ class QwenCodeProvider(AIProvider):
         """Get the Qwen session_id for native resume."""
         return self.session_id
 
+    def supports_usage_reporting(self) -> bool:
+        """Qwen supports usage reporting via local session files."""
+        return True
+
+    def get_usage_percentage(self) -> float | None:
+        """Get Qwen usage percentage from local session files."""
+        return _get_qwen_usage_percentage(self.config.account_name)
+
 
 class MistralVibeProvider(AIProvider):
     """Provider for Mistral Vibe CLI with multi-turn support.
@@ -2097,6 +2277,14 @@ class MistralVibeProvider(AIProvider):
 
     def supports_multi_turn(self) -> bool:
         return True
+
+    def supports_usage_reporting(self) -> bool:
+        """Mistral supports usage reporting via local session files."""
+        return True
+
+    def get_usage_percentage(self) -> float | None:
+        """Get Mistral usage percentage from local session files."""
+        return _get_mistral_usage_percentage(self.config.account_name)
 
 
 class MockProvider(AIProvider):

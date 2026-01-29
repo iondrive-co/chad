@@ -1307,14 +1307,14 @@ class TestRemainingUsage:
 
     @patch("pathlib.Path.home")
     def test_gemini_remaining_usage_logged_in(self, mock_home, web_ui, tmp_path):
-        """Gemini logged in returns low estimate (0.3)."""
+        """Gemini logged in with no usage returns 1.0 (full capacity)."""
         mock_home.return_value = tmp_path
         gemini_dir = tmp_path / ".gemini"
         gemini_dir.mkdir()
         (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
 
         result = web_ui._get_gemini_remaining_usage()
-        assert result == 0.3
+        assert result == 1.0  # Logged in, no sessions = full capacity
 
     @patch("pathlib.Path.home")
     def test_mistral_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
@@ -1327,14 +1327,14 @@ class TestRemainingUsage:
 
     @patch("pathlib.Path.home")
     def test_mistral_remaining_usage_logged_in(self, mock_home, web_ui, tmp_path):
-        """Mistral logged in returns low estimate (0.3)."""
+        """Mistral logged in with no usage returns 1.0 (full capacity)."""
         mock_home.return_value = tmp_path
         vibe_dir = tmp_path / ".vibe"
         vibe_dir.mkdir()
         (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"')
 
         result = web_ui._get_mistral_remaining_usage()
-        assert result == 0.3
+        assert result == 1.0  # Logged in, no sessions = full capacity
 
     @patch("pathlib.Path.home")
     def test_claude_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
@@ -1372,6 +1372,90 @@ class TestRemainingUsage:
 
         result = web_ui._get_codex_remaining_usage("codex")
         assert result == 0.0
+
+    @patch("pathlib.Path.home")
+    def test_gemini_remaining_usage_with_sessions(self, mock_home, web_ui, tmp_path):
+        """Gemini calculates remaining usage from today's requests."""
+        import json
+        from datetime import datetime, timezone
+
+        mock_home.return_value = tmp_path
+        gemini_dir = tmp_path / ".gemini"
+        gemini_dir.mkdir()
+        (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        session_dir = gemini_dir / "tmp" / "project1" / "chats"
+        session_dir.mkdir(parents=True)
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        # 200 requests = 10% of 2000 limit
+        messages = [{"type": "gemini", "timestamp": today} for _ in range(200)]
+        session_data = {"messages": messages}
+        (session_dir / "session-1.json").write_text(json.dumps(session_data))
+
+        result = web_ui._get_gemini_remaining_usage()
+        assert result == pytest.approx(0.9, abs=0.01)  # 90% remaining
+
+    @patch("pathlib.Path.home")
+    def test_qwen_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
+        """Qwen not logged in returns 0.0."""
+        mock_home.return_value = tmp_path
+
+        result = web_ui._get_qwen_remaining_usage()
+        assert result == 0.0
+
+    @patch("pathlib.Path.home")
+    def test_qwen_remaining_usage_logged_in_no_sessions(self, mock_home, web_ui, tmp_path):
+        """Qwen logged in with no sessions returns 1.0 (full capacity)."""
+        mock_home.return_value = tmp_path
+        qwen_dir = tmp_path / ".qwen"
+        qwen_dir.mkdir()
+        (qwen_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        result = web_ui._get_qwen_remaining_usage()
+        assert result == 1.0
+
+    @patch("pathlib.Path.home")
+    def test_qwen_remaining_usage_with_sessions(self, mock_home, web_ui, tmp_path):
+        """Qwen calculates remaining usage from today's requests."""
+        import json
+        from datetime import datetime, timezone
+
+        mock_home.return_value = tmp_path
+        qwen_dir = tmp_path / ".qwen"
+        qwen_dir.mkdir()
+        (qwen_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        session_dir = qwen_dir / "projects" / "project1" / "chats"
+        session_dir.mkdir(parents=True)
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        # 400 requests = 20% of 2000 limit
+        lines = [json.dumps({"type": "assistant", "timestamp": today}) for _ in range(400)]
+        (session_dir / "session.jsonl").write_text("\n".join(lines))
+
+        result = web_ui._get_qwen_remaining_usage()
+        assert result == pytest.approx(0.8, abs=0.01)  # 80% remaining
+
+    @patch("pathlib.Path.home")
+    def test_mistral_remaining_usage_with_sessions(self, mock_home, web_ui, tmp_path):
+        """Mistral calculates remaining usage from today's sessions."""
+        import json
+
+        mock_home.return_value = tmp_path
+        vibe_dir = tmp_path / ".vibe"
+        vibe_dir.mkdir()
+        (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"')
+
+        session_dir = vibe_dir / "logs" / "session"
+        session_dir.mkdir(parents=True)
+
+        # 100 requests = 10% of 1000 limit
+        session_data = {"metadata": {"stats": {"prompt_count": 100}}}
+        (session_dir / "session_today.json").write_text(json.dumps(session_data))
+
+        result = web_ui._get_mistral_remaining_usage()
+        assert result == pytest.approx(0.9, abs=0.01)  # 90% remaining
 
 
 class TestClaudeMultiAccount:
