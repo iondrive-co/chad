@@ -19,6 +19,7 @@ from typing import Callable
 from chad.util.utils import platform_path, safe_home
 from .installer import AIToolInstaller
 from .installer import DEFAULT_TOOLS_DIR
+import json
 
 try:
     import pty
@@ -643,6 +644,130 @@ def _stream_pty_output(
     return "".join(output_chunks), timed_out, idle_stalled
 
 
+def _get_claude_usage_percentage(account_name: str) -> float | None:
+    """Get Claude usage percentage from Anthropic API.
+
+    Args:
+        account_name: The account name to check usage for
+
+    Returns:
+        Usage percentage (0-100), or None if unavailable
+    """
+    import requests
+
+    # Get the isolated config directory for this account
+    base_home = safe_home()
+    if account_name:
+        config_dir = Path(base_home) / ".chad" / "claude_homes" / account_name / ".claude"
+    else:
+        config_dir = Path(base_home) / ".claude"
+
+    creds_file = config_dir / ".credentials.json"
+    if not creds_file.exists():
+        return None
+
+    try:
+        with open(creds_file, encoding="utf-8") as f:
+            creds = json.load(f)
+
+        oauth_data = creds.get("claudeAiOauth", {})
+        access_token = oauth_data.get("accessToken", "")
+        if not access_token:
+            return None
+
+        response = requests.get(
+            "https://api.anthropic.com/api/oauth/usage",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "anthropic-beta": "oauth-2025-04-20",
+                "User-Agent": "claude-code/2.0.32",
+                "Content-Type": "application/json",
+            },
+            timeout=10,
+        )
+
+        if response.status_code != 200:
+            return None
+
+        usage_data = response.json()
+        five_hour = usage_data.get("five_hour", {})
+        util = five_hour.get("utilization")
+        if util is not None:
+            try:
+                return float(util)
+            except (ValueError, TypeError):
+                pass
+
+        return None
+
+    except Exception:
+        return None
+
+
+def _get_codex_usage_percentage(account_name: str) -> float | None:
+    """Get Codex usage percentage from session files.
+
+    Args:
+        account_name: The account name to check usage for
+
+    Returns:
+        Usage percentage (0-100), or None if unavailable
+    """
+    # Get the isolated home directory for this account
+    base_home = safe_home()
+    if account_name:
+        codex_home = Path(base_home) / ".chad" / "codex_homes" / account_name
+    else:
+        codex_home = Path(base_home)
+
+    sessions_dir = codex_home / ".codex" / "sessions"
+    if not sessions_dir.exists():
+        return None
+
+    # Find the most recent session file
+    session_files: list[tuple[float, Path]] = []
+    for root, _, files in os.walk(sessions_dir):
+        for filename in files:
+            if filename.endswith(".jsonl"):
+                path = platform_path(root) / filename
+                try:
+                    session_files.append((path.stat().st_mtime, path))
+                except OSError:
+                    pass
+
+    if not session_files:
+        return None
+
+    session_files.sort(reverse=True)
+    latest_session = session_files[0][1]
+
+    try:
+        rate_limits = None
+        with open(latest_session, encoding="utf-8") as f:
+            for line in f:
+                if "rate_limits" in line:
+                    data = json.loads(line.strip())
+                    if data.get("type") == "event_msg":
+                        payload = data.get("payload", {})
+                        if payload.get("type") == "token_count":
+                            rate_limits = payload.get("rate_limits")
+
+        if rate_limits:
+            primary = rate_limits.get("primary", {})
+            if primary:
+                util = primary.get("used_percent")
+                if util is not None:
+                    try:
+                        return float(util)
+                    except (ValueError, TypeError):
+                        pass
+
+    except Exception:
+        pass
+
+    return None
+
+
 class AIProvider(ABC):
     """Abstract base class for AI providers."""
 
@@ -717,6 +842,38 @@ class AIProvider(ABC):
             Default implementation returns is_alive() for multi-turn providers.
         """
         return self.supports_multi_turn() and self.is_alive()
+
+    def get_session_id(self) -> str | None:
+        """Get the native session ID for this provider.
+
+        Returns the provider-specific session identifier that can be used
+        for resuming sessions natively (e.g., Codex thread_id, Gemini/Qwen
+        session_id). Used during handoffs to preserve native resume capability.
+
+        Returns:
+            Provider session ID if available, None otherwise.
+        """
+        return None
+
+    def supports_usage_reporting(self) -> bool:
+        """Check if this provider reports usage statistics.
+
+        Providers that support usage reporting can trigger auto-switching
+        based on usage percentage thresholds. Providers that don't support
+        this will only trigger switching on error detection.
+
+        Returns:
+            True if the provider reports usage data, False otherwise.
+        """
+        return False
+
+    def get_usage_percentage(self) -> float | None:
+        """Get the current usage as a percentage of the limit.
+
+        Returns:
+            Usage percentage (0-100), or None if not available.
+        """
+        return None
 
 
 class ClaudeCodeProvider(AIProvider):
@@ -938,6 +1095,14 @@ class ClaudeCodeProvider(AIProvider):
 
     def supports_multi_turn(self) -> bool:
         return True
+
+    def supports_usage_reporting(self) -> bool:
+        """Claude supports usage reporting via Anthropic API."""
+        return True
+
+    def get_usage_percentage(self) -> float | None:
+        """Get Claude usage percentage from Anthropic API."""
+        return _get_claude_usage_percentage(self.config.account_name)
 
 
 class OpenAICodexProvider(AIProvider):
@@ -1458,6 +1623,18 @@ class OpenAICodexProvider(AIProvider):
     def supports_multi_turn(self) -> bool:
         return True
 
+    def get_session_id(self) -> str | None:
+        """Get the Codex thread_id for native resume."""
+        return self.thread_id
+
+    def supports_usage_reporting(self) -> bool:
+        """Codex supports usage reporting via session files."""
+        return True
+
+    def get_usage_percentage(self) -> float | None:
+        """Get Codex usage percentage from session files."""
+        return _get_codex_usage_percentage(self.config.account_name)
+
 
 class GeminiCodeAssistProvider(AIProvider):
     """Provider for Gemini Code Assist with multi-turn support.
@@ -1608,6 +1785,10 @@ class GeminiCodeAssistProvider(AIProvider):
 
     def supports_multi_turn(self) -> bool:
         return True
+
+    def get_session_id(self) -> str | None:
+        """Get the Gemini session_id for native resume."""
+        return self.session_id
 
 
 class QwenCodeProvider(AIProvider):
@@ -1793,6 +1974,10 @@ class QwenCodeProvider(AIProvider):
 
     def supports_multi_turn(self) -> bool:
         return True
+
+    def get_session_id(self) -> str | None:
+        """Get the Qwen session_id for native resume."""
+        return self.session_id
 
 
 class MistralVibeProvider(AIProvider):

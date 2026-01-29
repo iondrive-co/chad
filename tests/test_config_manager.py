@@ -820,3 +820,183 @@ class TestProjectConfig:
 
         assert result is not None
         assert result["project_type"] == "go"
+
+
+class TestProviderFallbackOrder:
+    """Test cases for provider fallback order configuration."""
+
+    def test_get_fallback_order_empty(self, tmp_path):
+        """Test getting fallback order when none is set."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        order = mgr.get_provider_fallback_order()
+        assert order == []
+
+    def test_set_and_get_fallback_order(self, tmp_path):
+        """Test setting and getting fallback order."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # Need to set up accounts first
+        mgr.save_config({
+            "password_hash": mgr.hash_password("test"),
+            "encryption_salt": "dGVzdHNhbHQ=",
+            "accounts": {
+                "work-claude": {"provider": "anthropic", "key": "xxx"},
+                "personal-gpt": {"provider": "openai", "key": "xxx"},
+                "backup-gemini": {"provider": "gemini", "key": "xxx"},
+            },
+        })
+
+        mgr.set_provider_fallback_order(["work-claude", "personal-gpt", "backup-gemini"])
+        order = mgr.get_provider_fallback_order()
+
+        assert order == ["work-claude", "personal-gpt", "backup-gemini"]
+
+    def test_fallback_order_filters_invalid_accounts(self, tmp_path):
+        """Test that fallback order filters out accounts that no longer exist."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # Set up with some accounts
+        mgr.save_config({
+            "password_hash": mgr.hash_password("test"),
+            "encryption_salt": "dGVzdHNhbHQ=",
+            "accounts": {
+                "work-claude": {"provider": "anthropic", "key": "xxx"},
+            },
+            "provider_fallback_order": ["work-claude", "deleted-account", "also-deleted"],
+        })
+
+        order = mgr.get_provider_fallback_order()
+        assert order == ["work-claude"]
+
+    def test_set_fallback_order_validates_accounts(self, tmp_path):
+        """Test that setting fallback order validates account names."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # Set up with one account
+        mgr.save_config({
+            "password_hash": mgr.hash_password("test"),
+            "encryption_salt": "dGVzdHNhbHQ=",
+            "accounts": {
+                "work-claude": {"provider": "anthropic", "key": "xxx"},
+            },
+        })
+
+        with pytest.raises(ValueError, match="Unknown account"):
+            mgr.set_provider_fallback_order(["work-claude", "nonexistent"])
+
+    def test_get_next_fallback_provider(self, tmp_path):
+        """Test getting the next provider in fallback order."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        mgr.save_config({
+            "password_hash": mgr.hash_password("test"),
+            "encryption_salt": "dGVzdHNhbHQ=",
+            "accounts": {
+                "first": {"provider": "anthropic", "key": "xxx"},
+                "second": {"provider": "openai", "key": "xxx"},
+                "third": {"provider": "gemini", "key": "xxx"},
+            },
+            "provider_fallback_order": ["first", "second", "third"],
+        })
+
+        assert mgr.get_next_fallback_provider("first") == "second"
+        assert mgr.get_next_fallback_provider("second") == "third"
+        assert mgr.get_next_fallback_provider("third") is None
+
+    def test_get_next_fallback_provider_not_in_order(self, tmp_path):
+        """Test getting next fallback when current is not in order."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        mgr.save_config({
+            "password_hash": mgr.hash_password("test"),
+            "encryption_salt": "dGVzdHNhbHQ=",
+            "accounts": {
+                "first": {"provider": "anthropic", "key": "xxx"},
+                "second": {"provider": "openai", "key": "xxx"},
+                "other": {"provider": "gemini", "key": "xxx"},
+            },
+            "provider_fallback_order": ["first", "second"],
+        })
+
+        # When current account is not in order, return first in order
+        assert mgr.get_next_fallback_provider("other") == "first"
+
+    def test_get_next_fallback_provider_empty_order(self, tmp_path):
+        """Test getting next fallback when order is empty."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        assert mgr.get_next_fallback_provider("anything") is None
+
+    def test_fallback_order_persists(self, tmp_path):
+        """Test that fallback order persists across instances."""
+        config_path = tmp_path / "test.conf"
+
+        mgr1 = ConfigManager(config_path)
+        mgr1.save_config({
+            "password_hash": mgr1.hash_password("test"),
+            "encryption_salt": "dGVzdHNhbHQ=",
+            "accounts": {
+                "a": {"provider": "anthropic", "key": "xxx"},
+                "b": {"provider": "openai", "key": "xxx"},
+            },
+        })
+        mgr1.set_provider_fallback_order(["a", "b"])
+
+        mgr2 = ConfigManager(config_path)
+        assert mgr2.get_provider_fallback_order() == ["a", "b"]
+
+
+class TestUsageSwitchThreshold:
+    """Test cases for usage switch threshold configuration."""
+
+    def test_get_usage_threshold_default(self, tmp_path):
+        """Test that default threshold is 90%."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        assert mgr.get_usage_switch_threshold() == 90
+
+    def test_set_and_get_usage_threshold(self, tmp_path):
+        """Test setting and getting the usage threshold."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        mgr.set_usage_switch_threshold(75)
+        assert mgr.get_usage_switch_threshold() == 75
+
+    def test_set_threshold_to_100_disables_usage_switching(self, tmp_path):
+        """Test that 100% threshold effectively disables usage-based switching."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        mgr.set_usage_switch_threshold(100)
+        assert mgr.get_usage_switch_threshold() == 100
+
+    def test_set_threshold_validates_range(self, tmp_path):
+        """Test that threshold must be between 0 and 100."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        with pytest.raises(ValueError, match="must be between 0 and 100"):
+            mgr.set_usage_switch_threshold(-1)
+
+        with pytest.raises(ValueError, match="must be between 0 and 100"):
+            mgr.set_usage_switch_threshold(101)
+
+    def test_threshold_persists(self, tmp_path):
+        """Test that threshold persists across instances."""
+        config_path = tmp_path / "test.conf"
+
+        mgr1 = ConfigManager(config_path)
+        mgr1.set_usage_switch_threshold(80)
+
+        mgr2 = ConfigManager(config_path)
+        assert mgr2.get_usage_switch_threshold() == 80

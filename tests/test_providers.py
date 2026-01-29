@@ -16,6 +16,7 @@ from chad.util.providers import (
     GeminiCodeAssistProvider,
     OpenAICodexProvider,
     MistralVibeProvider,
+    QwenCodeProvider,
     parse_codex_output,
 )
 
@@ -1895,3 +1896,95 @@ print("Done", flush=True)
         # The special characters should be present (or replaced if errors='replace')
         assert "Hello" in all_output
         assert "Quotes" in all_output
+
+
+class TestProviderGetSessionId:
+    """Tests for provider get_session_id method for handoff support."""
+
+    def test_claude_provider_returns_none(self):
+        """Claude provider has no native session ID."""
+        config = ModelConfig(provider="anthropic", model_name="claude-sonnet-4")
+        provider = ClaudeCodeProvider(config)
+        assert provider.get_session_id() is None
+
+    def test_codex_provider_returns_thread_id(self):
+        """Codex provider returns thread_id when set."""
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+
+        # Initially None
+        assert provider.get_session_id() is None
+
+        # After setting thread_id
+        provider.thread_id = "thread_abc123"
+        assert provider.get_session_id() == "thread_abc123"
+
+    def test_gemini_provider_returns_session_id(self):
+        """Gemini provider returns session_id when set."""
+        config = ModelConfig(provider="gemini", model_name="default")
+        provider = GeminiCodeAssistProvider(config)
+
+        # Initially None
+        assert provider.get_session_id() is None
+
+        # After setting session_id
+        provider.session_id = "gemini_session_xyz"
+        assert provider.get_session_id() == "gemini_session_xyz"
+
+    def test_qwen_provider_returns_session_id(self):
+        """Qwen provider returns session_id when set."""
+        config = ModelConfig(provider="qwen", model_name="default")
+        provider = QwenCodeProvider(config)
+
+        # Initially None
+        assert provider.get_session_id() is None
+
+        # After setting session_id
+        provider.session_id = "qwen_session_789"
+        assert provider.get_session_id() == "qwen_session_789"
+
+    def test_mistral_provider_returns_none(self):
+        """Mistral provider has no session ID (uses continue flag)."""
+        config = ModelConfig(provider="mistral", model_name="default")
+        provider = MistralVibeProvider(config)
+        assert provider.get_session_id() is None
+
+
+class TestProviderUsageReporting:
+    """Tests for provider usage reporting capabilities."""
+
+    def test_claude_provider_supports_usage_reporting(self):
+        """Claude provider supports usage percentage reporting via Anthropic API."""
+        config = ModelConfig(provider="anthropic", model_name="claude-sonnet-4")
+        provider = ClaudeCodeProvider(config)
+        assert provider.supports_usage_reporting() is True
+        # get_usage_percentage returns None when credentials not available
+        # (we can't test actual API calls in unit tests)
+
+    def test_codex_provider_supports_usage_reporting(self):
+        """Codex provider supports usage percentage reporting via session files."""
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+        assert provider.supports_usage_reporting() is True
+        # get_usage_percentage returns None when session files not available
+
+    def test_gemini_provider_does_not_support_usage_reporting(self):
+        """Gemini provider does not support usage percentage reporting."""
+        config = ModelConfig(provider="gemini", model_name="default")
+        provider = GeminiCodeAssistProvider(config)
+        assert provider.supports_usage_reporting() is False
+        assert provider.get_usage_percentage() is None
+
+    def test_qwen_provider_does_not_support_usage_reporting(self):
+        """Qwen provider does not support usage percentage reporting."""
+        config = ModelConfig(provider="qwen", model_name="default")
+        provider = QwenCodeProvider(config)
+        assert provider.supports_usage_reporting() is False
+        assert provider.get_usage_percentage() is None
+
+    def test_mistral_provider_does_not_support_usage_reporting(self):
+        """Mistral provider does not support usage percentage reporting."""
+        config = ModelConfig(provider="mistral", model_name="default")
+        provider = MistralVibeProvider(config)
+        assert provider.supports_usage_reporting() is False
+        assert provider.get_usage_percentage() is None

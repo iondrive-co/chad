@@ -200,11 +200,23 @@ class VerificationAttemptEvent(EventBase):
 
 @dataclass
 class ContextCondensedEvent(EventBase):
-    """Logged when context is condensed/summarized."""
+    """Logged when context is condensed/summarized.
+
+    Used for both context window management and provider handoffs.
+    When policy="provider_handoff", the structured fields contain
+    progress data for resuming on a different provider.
+    """
 
     replaces_seq_range: tuple[int, int] = (0, 0)
     summary_text: str = ""
     policy: str = "rolling_window"
+    # Handoff context (populated when policy="provider_handoff")
+    original_task: str = ""
+    files_changed: list[str] = field(default_factory=list)
+    files_created: list[str] = field(default_factory=list)
+    key_commands: list[str] = field(default_factory=list)
+    remaining_work: str = ""
+    provider_session_id: str | None = None  # For native resume (thread_id, session_id)
 
 
 @dataclass

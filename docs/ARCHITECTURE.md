@@ -59,6 +59,8 @@ Base path `/api/v1` (except `/status`).
 - `GET/PUT /config/preferences` — `last_project_path`, `dark_mode`, `ui_mode`
 - `GET/PUT /config/verification-agent`
 - `GET/PUT /config/preferred-verification-model`
+- `GET/PUT /config/provider-fallback-order` — ordered list of account names for auto-switching
+- `GET/PUT /config/usage-switch-threshold` — percentage (0-100) to trigger auto-switch
 
 **Streaming**
 - SSE: `GET /sessions/{id}/stream`
@@ -69,6 +71,33 @@ Base path `/api/v1` (except `/status`).
 - Supported providers: Anthropic (Claude Code), OpenAI (Codex), Google (Gemini), Alibaba (Qwen Code), Mistral (Vibe), Mock.
 - CLI resolution/installation lives in `chad.util.providers` + `chad.util.installer`; `task_executor.build_agent_command` assembles the command/env and builds the coding prompt (with doc references and verification instructions).
 - Claude/Qwen stream‑json is parsed by `ClaudeStreamJsonParser`; PTY output is streamed through EventLog and EventMultiplexer.
+
+## Provider Capabilities
+
+Each provider implements `AIProvider` (in `chad.util.providers`) with these capability methods:
+
+| Provider | Multi-turn | Session ID | Usage Reporting |
+|----------|------------|------------|-----------------|
+| Claude Code (anthropic) | Yes | No | **Yes** (via Anthropic OAuth API) |
+| Codex (openai) | Yes | `thread_id` | **Yes** (via session files) |
+| Gemini (gemini) | Yes | `session_id` | No (no quota API) |
+| Qwen (qwen) | Yes | `session_id` | No (no quota API) |
+| Mistral Vibe (mistral) | Yes | No | No (no quota API) |
+| Mock | Yes | No | No |
+
+**Usage Reporting** enables automatic provider switching based on quota consumption:
+- `supports_usage_reporting()`: Returns `True` if the provider can report usage percentage
+- `get_usage_percentage()`: Returns 0-100 usage percentage, or `None` if unavailable
+
+When a provider's usage exceeds the configured threshold (`usage_switch_threshold`, default 90%), Chad can automatically switch to the next provider in `provider_fallback_order`.
+
+For providers without usage reporting, Chad relies on error pattern matching to detect quota exhaustion (rate limits, insufficient credits, etc.) and trigger automatic switching.
+
+**Adding Usage Support to a Provider:**
+1. Implement a way to fetch usage data (API call, session file parsing, etc.)
+2. Override `supports_usage_reporting()` to return `True`
+3. Override `get_usage_percentage()` to return usage as 0-100
+4. Update this table
 
 ## Project Configuration
 - Per-project settings (lint/test commands, doc paths) are stored in the main `~/.chad.conf` under the `projects` key, keyed by absolute project path. Managed by `ConfigManager.{get,set}_project_config()`.
