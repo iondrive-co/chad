@@ -3629,7 +3629,7 @@ class ChadWebUI:
                 # since we now run it automatically during verification phase
 
                 # Run verification loop
-                max_verification_attempts = 3
+                max_verification_attempts = self.api_client.get_max_verification_attempts()
                 verification_attempt = 0
                 verified = False
                 verification_feedback = ""
@@ -4686,7 +4686,7 @@ class ChadWebUI:
 
         if verification_account_for_run and verification_account_for_run in accounts:
             # Verification loop (like start_chad_task)
-            max_verification_attempts = 3
+            max_verification_attempts = self.api_client.get_max_verification_attempts()
             verification_attempt = 0
             verified = False
 
@@ -5899,6 +5899,7 @@ class ChadWebUI:
             )
 
             chatbot = gr.Chatbot(
+                label="Milestones",
                 height=400,
                 key=f"chatbot-{session_id}",
                 elem_id="agent-chatbot" if is_first else None,
@@ -7309,16 +7310,21 @@ function initializeLiveStreamScrollTracking() {
                 requestAnimationFrame(() => {
                     const newScrollHeight = content.scrollHeight;
                     const contentGrew = newScrollHeight > state.lastScrollHeight;
-                    state.lastScrollHeight = newScrollHeight;
 
+                    // Check if user was at bottom BEFORE content grew (using old height)
+                    const wasAtBottomBeforeGrowth = state.savedScrollTop + content.clientHeight >= state.lastScrollHeight - 10;
+
+                    state.lastScrollHeight = newScrollHeight;
                     state.settingScroll = true;
 
-                    if (state.userScrolledUp) {
+                    if (contentGrew && wasAtBottomBeforeGrowth) {
+                        // User was at bottom before content grew - auto-scroll to new bottom
+                        content.scrollTop = newScrollHeight;
+                        state.savedScrollTop = newScrollHeight;
+                        state.userScrolledUp = false;
+                    } else if (state.userScrolledUp) {
                         // Restore saved position when user has scrolled up
                         content.scrollTop = state.savedScrollTop;
-                    } else if (contentGrew) {
-                        // Auto-scroll to bottom when at bottom and content grew
-                        content.scrollTop = newScrollHeight;
                     }
 
                     requestAnimationFrame(() => {
@@ -7697,14 +7703,20 @@ initializeLiveDomPatching();
                           requestAnimationFrame(() => {
                             const newScrollHeight = content.scrollHeight;
                             const contentGrew = newScrollHeight > state.lastScrollHeight;
-                            state.lastScrollHeight = newScrollHeight;
 
+                            // Check if user was at bottom BEFORE content grew (using old height)
+                            const wasAtBottomBeforeGrowth = state.savedScrollTop + content.clientHeight >= state.lastScrollHeight - 10;
+
+                            state.lastScrollHeight = newScrollHeight;
                             state.settingScroll = true;
 
-                            if (state.userScrolledUp) {
-                              content.scrollTop = state.savedScrollTop;
-                            } else if (contentGrew) {
+                            if (contentGrew && wasAtBottomBeforeGrowth) {
+                              // User was at bottom before content grew - auto-scroll to new bottom
                               content.scrollTop = newScrollHeight;
+                              state.savedScrollTop = newScrollHeight;
+                              state.userScrolledUp = false;
+                            } else if (state.userScrolledUp) {
+                              content.scrollTop = state.savedScrollTop;
                             }
 
                             requestAnimationFrame(() => {

@@ -389,3 +389,46 @@ async def set_mock_context_remaining(
         account_name=request.account_name,
         remaining=request.remaining,
     )
+
+
+class MaxVerificationAttemptsResponse(BaseModel):
+    """Response for max verification attempts endpoint."""
+
+    attempts: int = Field(description="Maximum number of verification attempts")
+
+
+class MaxVerificationAttemptsUpdate(BaseModel):
+    """Request to set max verification attempts."""
+
+    attempts: int = Field(
+        ge=1,
+        le=20,
+        description="Maximum number of verification attempts (1-20)",
+    )
+
+
+@router.get("/max-verification-attempts", response_model=MaxVerificationAttemptsResponse)
+async def get_max_verification_attempts() -> MaxVerificationAttemptsResponse:
+    """Get the maximum number of verification attempts.
+
+    When verification fails, the system will retry up to this many times
+    before giving up.
+    """
+    config_mgr = get_config_manager()
+    attempts = config_mgr.get_max_verification_attempts()
+
+    return MaxVerificationAttemptsResponse(attempts=attempts)
+
+
+@router.put("/max-verification-attempts", response_model=MaxVerificationAttemptsResponse)
+async def set_max_verification_attempts(
+    request: MaxVerificationAttemptsUpdate,
+) -> MaxVerificationAttemptsResponse:
+    """Set the maximum number of verification attempts.
+
+    Set lower values for faster failure, higher values for more retries.
+    """
+    config_mgr = get_config_manager()
+    config_mgr.set_max_verification_attempts(request.attempts)
+
+    return MaxVerificationAttemptsResponse(attempts=request.attempts)

@@ -27,8 +27,8 @@ You need to complete the following task:
 {task}
 ---
 Use the following sequence to complete the task:
-1. Do an initial exploration of a few classes which might be involved
-2. Without terminating, output an initial progress update so the user can see what you found:
+1. Do an initial quick exploration (under a minute) of a few classes which might be involved
+2. Output an initial progress update so the user can see what you found, do not wait for user response from this:
 ```json
 {{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45 - request() method"}}
 ```

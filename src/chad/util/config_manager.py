@@ -29,6 +29,7 @@ CONFIG_BASE_KEYS: set[str] = {
     "mock_remaining_usage",  # Dict of account_name -> 0.0-1.0 for mock provider testing
     "context_switch_threshold",  # Percentage (0-100) of context usage before auto-switching providers
     "mock_context_remaining",  # Dict of account_name -> 0.0-1.0 for mock provider context testing
+    "max_verification_attempts",  # Maximum verification attempts before giving up (default 5)
 }
 
 
@@ -859,6 +860,30 @@ class ConfigManager:
         if "mock_context_remaining" not in config:
             config["mock_context_remaining"] = {}
         config["mock_context_remaining"][account_name] = remaining
+        self.save_config(config)
+
+    def get_max_verification_attempts(self) -> int:
+        """Get the maximum number of verification attempts.
+
+        Returns:
+            Maximum attempts (default 5)
+        """
+        config = self.load_config()
+        return config.get("max_verification_attempts", 5)
+
+    def set_max_verification_attempts(self, attempts: int) -> None:
+        """Set the maximum number of verification attempts.
+
+        Args:
+            attempts: Maximum attempts (1-20)
+
+        Raises:
+            ValueError: If attempts is not between 1 and 20
+        """
+        if not 1 <= attempts <= 20:
+            raise ValueError("max_verification_attempts must be between 1 and 20")
+        config = self.load_config()
+        config["max_verification_attempts"] = attempts
         self.save_config(config)
 
 

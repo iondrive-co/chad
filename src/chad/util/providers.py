@@ -1406,9 +1406,20 @@ class OpenAICodexProvider(AIProvider):
                 """Convert a JSON event to human-readable text for streaming."""
                 event_type = event.get("type", "")
 
+                # Skip events that contain user or system content (don't show system prompt)
+                if event.get("role") in ("user", "system"):
+                    return None
+
                 if event_type == "item.completed":
                     item = event.get("item", {})
                     item_type = item.get("type", "")
+
+                    # Skip user/system message items
+                    if item_type in ("user_message", "system_message", "input_message"):
+                        return None
+                    # Skip message items with user/system role
+                    if item.get("role") in ("user", "system"):
+                        return None
 
                     if item_type == "reasoning":
                         text = item.get("text", "")
@@ -1460,10 +1471,22 @@ class OpenAICodexProvider(AIProvider):
                         params = item.get("params", {})
                         path = params.get("path", params.get("file_path", ""))
                         desc = tool_descriptions.get(tool, f"Using {tool}")
+
+                        result_parts = []
+                        # Include any reasoning/thought from the tool call item
+                        reasoning = item.get("reasoning") or item.get("thought") or item.get("explanation")
+                        if reasoning:
+                            clean_reason = reasoning.replace("**", "").replace("*", "").strip()
+                            if clean_reason:
+                                result_parts.append(f"\033[36m• {clean_reason[:200]}\033[0m\n")
+
+                        # Show the tool operation
                         if path:
-                            # Show green for file operations
-                            return f"\033[32m• {desc}: {path}\033[0m\n"
-                        return f"\033[32m• {desc}\033[0m\n"
+                            result_parts.append(f"\033[32m• {desc}: {path}\033[0m\n")
+                        else:
+                            result_parts.append(f"\033[32m• {desc}\033[0m\n")
+
+                        return "".join(result_parts) if result_parts else None
                     elif item_type == "command_execution":
                         cmd = item.get("command", "")[:80]
                         output = item.get("aggregated_output", "")
@@ -1478,6 +1501,20 @@ class OpenAICodexProvider(AIProvider):
                             if len(lines) > 5:
                                 result += f"\033[90m  ... ({len(lines) - 5} more lines)\033[0m\n"
                         return result
+                    elif item_type in ("tool_call", "function_call", "tool_use"):
+                        # Handle other tool call formats
+                        tool = item.get("name") or item.get("tool") or item.get("function", {}).get("name", "tool")
+                        args = item.get("arguments") or item.get("params") or item.get("input", {})
+                        if isinstance(args, str):
+                            try:
+                                import json as json_mod
+                                args = json_mod.loads(args)
+                            except (json_mod.JSONDecodeError, ValueError):
+                                args = {}
+                        path = args.get("path", args.get("file_path", "")) if isinstance(args, dict) else ""
+                        if path:
+                            return f"\033[32m• Using {tool}: {path}\033[0m\n"
+                        return f"\033[32m• Using {tool}\033[0m\n"
 
                 return None
 
@@ -2070,13 +2107,9 @@ class QwenCodeProvider(AIProvider):
                         # Extract session_id from system/init event
                         if event.get("type") == "system" and "session_id" in event:
                             self.session_id = event["session_id"]
-                        # Collect response content from assistant messages
-                        if event.get("type") == "message" and event.get("role") == "assistant":
-                            content = event.get("content", "")
-                            if content:
-                                response_parts.append(content)
-                                self._notify_activity("text", content[:80])
-                        # Handle assistant type directly (Qwen CLI format)
+                        # Handle assistant type with content blocks (preferred format)
+                        # Skip 'message' events with role='assistant' as they duplicate
+                        # the content from 'assistant' type events
                         if event.get("type") == "assistant":
                             message = event.get("message", {})
                             content_blocks = message.get("content", [])
