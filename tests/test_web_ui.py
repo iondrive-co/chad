@@ -2289,6 +2289,51 @@ Some thinking text...
         assert result.location == "src/app.py:10"
 
 
+class TestLivePatchScrollPreservation:
+    """Ensure live patching does not reset scroll by avoiding value updates."""
+
+    @pytest.fixture
+    def mock_api_client(self):
+        from unittest.mock import Mock
+
+        client = Mock()
+        client.list_accounts.return_value = []
+        client.list_role_assignments.return_value = {}
+        client.list_providers.return_value = ["anthropic", "openai"]
+        return client
+
+    @pytest.fixture
+    def web_ui(self, mock_api_client):
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        return ChadWebUI(mock_api_client)
+
+    def test_live_patch_returns_update_without_value(self, web_ui):
+        """When live_patch is used, live_stream update should not include a value (prevents scroll reset)."""
+        session = web_ui.create_session("scroll-test")
+        session.has_initial_live_render = True  # Simulate after first render
+        live_html = '<div data-live-id="live-stream-box"><div class="live-output-content">line 1</div></div>'
+
+        display_stream, live_patch, flag = web_ui._compute_live_stream_updates(
+            live_html, None, session, live_stream_id="live-stream-box", task_ended=False
+        )
+        assert display_stream is None  # use live_patch path
+        assert live_patch is not None
+        assert flag is True  # remains set
+
+    def test_initial_render_sets_value(self, web_ui):
+        """On first render (no initial live render yet), value should be populated so content appears."""
+        session = web_ui.create_session("scroll-first")
+        session.has_initial_live_render = False
+        live_html = '<div data-live-id="live-stream-box"><div class="live-output-content">init</div></div>'
+
+        display_stream, live_patch, flag = web_ui._compute_live_stream_updates(
+            live_html, None, session, live_stream_id="live-stream-box", task_ended=False
+        )
+        assert display_stream == live_html
+        assert live_patch is None
+        assert flag is True  # should flip on first render
+
 class TestDynamicStatusLine:
     """Test dynamic status line with task state and worktree path."""
 

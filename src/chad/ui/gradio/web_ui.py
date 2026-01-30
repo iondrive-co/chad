@@ -2032,6 +2032,8 @@ class ChadWebUI:
         self.provider_ui = ProviderUIManager(api_client, self.model_catalog, dev_mode=dev_mode)
         # Store dropdown references for cross-tab updates
         self._session_dropdowns: dict[str, dict] = {}
+        # Store live patch triggers for tab rehydration
+        self._session_live_patches: dict[str, gr.HTML] = {}
         # Store provider card delete events for chaining dropdown updates
         self._provider_delete_events: list = []
         # Stream client for API-based task execution (same method as CLI)
@@ -2296,6 +2298,35 @@ class ChadWebUI:
         """Return the session ID used for worktree operations (server-aware)."""
         session = self.get_session(session_id)
         return session.server_session_id or session_id
+
+    @staticmethod
+    def _compute_live_stream_updates(
+        live_stream: str,
+        live_patch: tuple[str, str] | None,
+        session: "Session",
+        live_stream_id: str,
+        task_ended: bool,
+    ) -> tuple[str | None, tuple[str, str] | None, bool]:
+        """Decide whether to patch or replace live stream content.
+
+        Returns (display_stream, live_patch_out, has_initial_live_render_flag).
+        """
+        use_live_patch = live_patch
+        has_initial = session.has_initial_live_render
+
+        if not use_live_patch and live_stream and not task_ended:
+            has_live_id = f'data-live-id="{live_stream_id}"' in live_stream
+            if has_live_id:
+                if has_initial:
+                    use_live_patch = (live_stream_id, live_stream)
+                else:
+                    has_initial = True
+
+        if task_ended:
+            has_initial = False
+
+        display_stream = None if use_live_patch else live_stream
+        return display_stream, use_live_patch, has_initial
 
     def create_session(self, name: str = "New Session") -> Session:
         """Create a new session with a unique ID."""
@@ -3017,35 +3048,10 @@ class ChadWebUI:
                 task_ended: When True, task has completed/failed/cancelled and buttons
                            should allow starting a new task (start enabled, cancel disabled).
             """
-            # Automatic live_patch handling for scroll/selection preservation
-            # - First render with content: normal Gradio update, set initial_render flag
-            # - Subsequent renders: use live_patch for JS DOM patching
-            use_live_patch = live_patch  # Explicit live_patch takes precedence
-
-            if not use_live_patch and live_stream and not task_ended:
-                # Check if this live_stream has our wrapper with data-live-id
-                # Skip live_patch when task_ended - we need actual value in component
-                has_live_id = f'data-live-id="{live_stream_id}"' in live_stream
-                if has_live_id:
-                    if session.has_initial_live_render:
-                        # After initial render, use live_patch for updates
-                        use_live_patch = (live_stream_id, live_stream)
-                    else:
-                        # First render with content - do normal Gradio update
-                        session.has_initial_live_render = True
-
-            # When task ends, reset initial render flag for next task
-            if task_ended:
-                session.has_initial_live_render = False
-
-            # When live_patch is provided, skip updating the live_stream component directly
-            # JS will handle patching the DOM in-place to preserve scroll/selection
-            if use_live_patch:
-                # Keep underlying value populated for tab switches while still patching DOM
-                display_stream = live_stream or session.last_live_stream
-                live_patch = use_live_patch
-            else:
-                display_stream = live_stream
+            display_stream, live_patch, updated_flag = self._compute_live_stream_updates(
+                live_stream, live_patch, session, live_stream_id, task_ended
+            )
+            session.has_initial_live_render = updated_flag
             is_error = "❌" in status
             # Get worktree/project path for status display
             wt_path = str(session.worktree_path) if session.worktree_path else None
@@ -5933,6 +5939,8 @@ class ChadWebUI:
             key=f"live-patch-{session_id}",
             elem_classes=["live-patch-trigger"],
         )
+        # Track trigger for cross-tab rehydration
+        self._session_live_patches[session_id] = live_patch_trigger
 
         with gr.Row(visible=False, key=f"followup-row-{session_id}") as followup_row:
             followup_input = gr.MultimodalTextbox(
@@ -8037,7 +8045,8 @@ initializeLiveDomPatching();
                 """Refresh agent dropdowns when switching to a task tab."""
                 # Only refresh for task tabs (id >= 1, not providers tab id=0)
                 if evt.index == 0:
-                    return [gr.update() for _ in range(len(self._session_dropdowns) * 2)]
+                    total = (len(self._session_dropdowns) * 2) + len(self._session_live_patches)
+                    return [gr.update() for _ in range(total)]
 
                 # Get current account choices
                 accounts = self.api_client.list_accounts()
@@ -8058,17 +8067,41 @@ initializeLiveDomPatching();
                 for session_id in self._session_dropdowns:
                     updates.append(gr.update(choices=account_choices))  # coding_agent
                     updates.append(gr.update(choices=verification_choices))  # verification_agent
+                # Also push a live patch for the selected tab to rehydrate live view
+                selected_session = all_sessions[evt.index - 1]
+                live_stream_id = f"live-{selected_session.id}"
+                patch_html = ""
+                if selected_session.last_live_stream:
+                    import html as html_module
+
+                    escaped = html_module.escape(selected_session.last_live_stream)
+                    patch_html = f'<div data-live-patch="{live_stream_id}" style="display:none">{escaped}</div>'
+
+                for sess in all_sessions:
+                    if sess.id == selected_session.id:
+                        updates.append(gr.update(value=patch_html))
+                    else:
+                        updates.append(gr.update())
                 return updates
 
-            # Collect all dropdown outputs for the select handler
+            # Collect outputs for the select handler (dropdowns + live patch triggers)
             all_dropdown_outputs = []
-            for session_id in sorted(self._session_dropdowns.keys()):
-                dropdowns = self._session_dropdowns[session_id]
-                all_dropdown_outputs.append(dropdowns["coding_agent"])
-                all_dropdown_outputs.append(dropdowns["verification_agent"])
+            live_patch_outputs = []
+            for sess in all_sessions:
+                session_id = sess.id
+                dropdowns = self._session_dropdowns.get(session_id)
+                if dropdowns:
+                    all_dropdown_outputs.append(dropdowns["coding_agent"])
+                    all_dropdown_outputs.append(dropdowns["verification_agent"])
+                trigger = self._session_live_patches.get(session_id)
+                if trigger:
+                    live_patch_outputs.append(trigger)
 
-            if all_dropdown_outputs:
-                main_tabs.select(on_tab_select, outputs=all_dropdown_outputs)
+            if all_dropdown_outputs or live_patch_outputs:
+                main_tabs.select(
+                    on_tab_select,
+                    outputs=all_dropdown_outputs + live_patch_outputs,
+                )
 
             # Chain dropdown refresh to provider delete events
             # This ensures dropdowns update when providers are deleted
