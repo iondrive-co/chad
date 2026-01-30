@@ -32,7 +32,7 @@ Use the following sequence to complete the task:
 ```json
 {{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45 - request() method"}}
 ```
-3. Continue you work by writing test(s) that should fail until the fix/feature is implemented (you can now explore more code to achieve this goal if needed)
+3. Continue your work by writing test(s) that should fail until the fix/feature is implemented (you can now explore more code to achieve this goal if needed)
 4. Make the changes, adjusting tests and exploring more code as needed. If no changes are required, skip to step 7.
 5. Once you believe your changes will complete the task, run verification commands (lint and tests) as described above.
 6. Fix ALL failures and retest if required.
