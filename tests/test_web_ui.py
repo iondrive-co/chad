@@ -434,6 +434,58 @@ class TestChadWebUI:
             "Error" in msg.get("content", "") for msg in session.chat_history if msg.get("role") == "assistant"
         ), "Follow-up response should not include errors"
 
+    def test_followup_reconnects_when_provider_released(self, web_ui, git_repo, monkeypatch):
+        """Follow-up should reconnect to provider after API-based execution releases it."""
+        session_id = "reconnect-test"
+        git_mgr = GitWorktreeManager(git_repo)
+        worktree_path, base_commit = git_mgr.create_worktree(session_id)
+
+        session = web_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = worktree_path
+        session.worktree_branch = git_mgr._branch_name(session_id)
+        session.worktree_base_commit = base_commit
+
+        # Simulate state after API-based execution:
+        # - session.active = True (task succeeded)
+        # - session.provider = None (released after API execution)
+        # - session.coding_account set to the account name
+        session.active = True
+        session.provider = None  # This is the key condition we're testing
+        session.coding_account = "mock-claude"
+        session.config = ModelConfig(provider="mock", model_name="default", account_name="mock-claude")
+        session.chat_history = [{"role": "user", "content": "**Task**\n\nInitial task"}]
+
+        # Set up mock account with "mock" provider so create_provider uses MockProvider
+        mock_account = MockAccount(name="mock-claude", provider="mock", role="CODING")
+        web_ui.api_client.list_accounts.return_value = [mock_account]
+        web_ui.api_client.get_account.return_value = mock_account
+
+        # Speed up the mock provider
+        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
+
+        # Send a follow-up; this should reconnect and succeed, not show "Session expired"
+        list(
+            web_ui.send_followup(
+                session_id,
+                "Follow-up after API execution",
+                session.chat_history,
+                coding_agent="mock-claude",
+                verification_agent=web_ui.VERIFICATION_NONE,
+            )
+        )
+
+        # Check that no "Session expired" message was added
+        all_messages = [msg.get("content", "") for msg in session.chat_history]
+        assert not any("Session expired" in msg for msg in all_messages), (
+            "Follow-up should reconnect, not show 'Session expired'"
+        )
+
+        # Check that the follow-up was processed (BUGS.md should exist from mock provider)
+        assert session.worktree_path is not None
+        bugs_file = session.worktree_path / "BUGS.md"
+        assert bugs_file.exists(), "BUGS.md should be created by follow-up"
+
     def test_set_reasoning_success(self, web_ui, mock_api_client):
         """Test setting reasoning level for an account."""
         result = web_ui.set_reasoning("claude", "high")[0]
@@ -915,16 +967,17 @@ class TestPortResolution:
         assert "visibility:" not in box_block
 
 
-def test_live_stream_display_buffer_trims_to_tail():
-    """Live stream display buffer should keep only the most recent content."""
+def test_live_stream_display_buffer_keeps_all_content():
+    """Live stream display buffer should keep all content for infinite history."""
     from chad.ui.gradio.web_ui import LiveStreamDisplayBuffer
 
-    buffer = LiveStreamDisplayBuffer(max_chars=100)
+    buffer = LiveStreamDisplayBuffer()
     buffer.append("a" * 60)
     buffer.append("b" * 60)
 
-    assert len(buffer.content) == 100
-    assert buffer.content == ("a" * 40) + ("b" * 60)
+    # Should keep all content without truncation
+    assert len(buffer.content) == 120
+    assert buffer.content == ("a" * 60) + ("b" * 60)
 
 
 def test_live_stream_render_state_resets_for_rerender():
@@ -1456,6 +1509,208 @@ class TestRemainingUsage:
 
         result = web_ui._get_mistral_remaining_usage()
         assert result == pytest.approx(0.9, abs=0.01)  # 90% remaining
+
+
+class TestUsageBasedProviderSwitch:
+    """Test cases for proactive usage-based provider switching."""
+
+    @pytest.fixture
+    def mock_api_client(self):
+        """Create a mock API client with mock provider support."""
+        mgr = Mock()
+        accounts = {
+            "primary-mock": MockAccount(name="primary-mock", provider="mock", role="CODING"),
+            "fallback-mock": MockAccount(name="fallback-mock", provider="mock"),
+        }
+        mgr.list_accounts.return_value = list(accounts.values())
+        mgr.list_role_assignments.return_value = {}
+        mgr.get_account_model.return_value = "default"
+
+        def get_account(name):
+            if name in accounts:
+                return accounts[name]
+            raise ValueError(f"Account {name} not found")
+
+        mgr.get_account.side_effect = get_account
+        return mgr
+
+    @pytest.fixture
+    def web_ui(self, mock_api_client):
+        """Create a ChadWebUI instance."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        return ChadWebUI(mock_api_client)
+
+    def test_check_usage_and_switch_no_switch_under_threshold(self, web_ui, mock_api_client):
+        """No switch should occur when usage is below threshold."""
+        # Set threshold to 80%
+        mock_api_client.get_usage_switch_threshold.return_value = 80
+
+        # Set mock remaining usage to 0.5 (50% remaining = 50% used, under 80% threshold)
+        mock_api_client.get_mock_remaining_usage.return_value = 0.5
+
+        account, switched_from = web_ui._check_usage_and_switch("primary-mock")
+
+        assert account == "primary-mock"
+        assert switched_from is None
+
+    def test_check_usage_and_switch_triggers_switch(self, web_ui, mock_api_client):
+        """Switch should occur when usage exceeds threshold."""
+        # Set threshold to 50%
+        mock_api_client.get_usage_switch_threshold.return_value = 50
+
+        # Primary mock has 20% remaining (80% used, exceeds 50% threshold)
+        # Fallback mock has 80% remaining (20% used, under 50% threshold)
+        def mock_remaining(name):
+            if name == "primary-mock":
+                return 0.2  # 80% used
+            return 0.8  # 20% used
+
+        mock_api_client.get_mock_remaining_usage.side_effect = mock_remaining
+
+        # Set up fallback order
+        mock_api_client.get_next_fallback_provider.return_value = "fallback-mock"
+
+        account, switched_from = web_ui._check_usage_and_switch("primary-mock")
+
+        assert account == "fallback-mock"
+        assert switched_from == "primary-mock"
+
+    def test_check_usage_and_switch_disabled_at_100_percent(self, web_ui, mock_api_client):
+        """No switch should occur when threshold is 100% (disabled)."""
+        # Set threshold to 100% (disabled)
+        mock_api_client.get_usage_switch_threshold.return_value = 100
+
+        # Even with high usage, no switch should occur
+        mock_api_client.get_mock_remaining_usage.return_value = 0.05  # 95% used
+
+        account, switched_from = web_ui._check_usage_and_switch("primary-mock")
+
+        assert account == "primary-mock"
+        assert switched_from is None
+
+    def test_check_usage_and_switch_no_fallback_available(self, web_ui, mock_api_client):
+        """No switch should occur when no fallback is configured."""
+        # Set threshold to 50%
+        mock_api_client.get_usage_switch_threshold.return_value = 50
+
+        # High usage
+        mock_api_client.get_mock_remaining_usage.return_value = 0.2  # 80% used
+
+        # No fallback available
+        mock_api_client.get_next_fallback_provider.return_value = None
+
+        account, switched_from = web_ui._check_usage_and_switch("primary-mock")
+
+        assert account == "primary-mock"
+        assert switched_from is None
+
+    def test_check_usage_and_switch_fallback_also_exhausted(self, web_ui, mock_api_client):
+        """No switch when fallback is also over threshold."""
+        # Set threshold to 50%
+        mock_api_client.get_usage_switch_threshold.return_value = 50
+
+        # Both providers are over threshold
+        def mock_remaining(name):
+            return 0.1  # 90% used for both
+
+        mock_api_client.get_mock_remaining_usage.side_effect = mock_remaining
+        mock_api_client.get_next_fallback_provider.return_value = "fallback-mock"
+
+        account, switched_from = web_ui._check_usage_and_switch("primary-mock")
+
+        # Should not switch since fallback is also exhausted
+        assert account == "primary-mock"
+        assert switched_from is None
+
+
+class TestContextBasedProviderSwitch:
+    """Test cases for proactive context-based provider switching."""
+
+    @pytest.fixture
+    def mock_api_client(self):
+        """Create a mock API client with mock provider support."""
+        mgr = Mock()
+        accounts = {
+            "primary-mock": MockAccount(name="primary-mock", provider="mock", role="CODING"),
+            "fallback-mock": MockAccount(name="fallback-mock", provider="mock"),
+        }
+        mgr.list_accounts.return_value = list(accounts.values())
+        mgr.list_role_assignments.return_value = {}
+        mgr.get_account_model.return_value = "default"
+
+        def get_account(name):
+            if name in accounts:
+                return accounts[name]
+            raise ValueError(f"Account {name} not found")
+
+        mgr.get_account.side_effect = get_account
+        return mgr
+
+    @pytest.fixture
+    def web_ui(self, mock_api_client):
+        """Create a ChadWebUI instance."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        return ChadWebUI(mock_api_client)
+
+    def test_check_context_and_switch_no_switch_under_threshold(self, web_ui, mock_api_client):
+        """No switch should occur when context usage is below threshold."""
+        # Set threshold to 80%
+        mock_api_client.get_context_switch_threshold.return_value = 80
+
+        # Set mock context remaining to 0.5 (50% remaining = 50% used, under 80% threshold)
+        mock_api_client.get_mock_context_remaining.return_value = 0.5
+
+        account, switched_from = web_ui._check_context_and_switch("primary-mock")
+
+        assert account == "primary-mock"
+        assert switched_from is None
+
+    def test_check_context_and_switch_triggers_switch(self, web_ui, mock_api_client):
+        """Switch should occur when context usage exceeds threshold."""
+        # Set threshold to 50%
+        mock_api_client.get_context_switch_threshold.return_value = 50
+
+        # Primary mock has 20% remaining (80% used, exceeds 50% threshold)
+        mock_api_client.get_mock_context_remaining.return_value = 0.2
+
+        # Set up fallback order
+        mock_api_client.get_next_fallback_provider.return_value = "fallback-mock"
+
+        account, switched_from = web_ui._check_context_and_switch("primary-mock")
+
+        assert account == "fallback-mock"
+        assert switched_from == "primary-mock"
+
+    def test_check_context_and_switch_disabled_at_100_percent(self, web_ui, mock_api_client):
+        """No switch should occur when threshold is 100% (disabled)."""
+        # Set threshold to 100% (disabled)
+        mock_api_client.get_context_switch_threshold.return_value = 100
+
+        # Even with high context usage, no switch should occur
+        mock_api_client.get_mock_context_remaining.return_value = 0.05  # 95% used
+
+        account, switched_from = web_ui._check_context_and_switch("primary-mock")
+
+        assert account == "primary-mock"
+        assert switched_from is None
+
+    def test_check_context_and_switch_no_fallback_available(self, web_ui, mock_api_client):
+        """No switch should occur when no fallback is configured."""
+        # Set threshold to 50%
+        mock_api_client.get_context_switch_threshold.return_value = 50
+
+        # High context usage
+        mock_api_client.get_mock_context_remaining.return_value = 0.2  # 80% used
+
+        # No fallback available
+        mock_api_client.get_next_fallback_provider.return_value = None
+
+        account, switched_from = web_ui._check_context_and_switch("primary-mock")
+
+        assert account == "primary-mock"
+        assert switched_from is None
 
 
 class TestClaudeMultiAccount:
@@ -2130,6 +2385,102 @@ class TestDynamicStatusLine:
         status = ui.format_role_status(task_state="running", worktree_path="/tmp/wt")
         assert "Running" in status
         assert "Worktree" in status
+
+    def test_verifying_status_shows_verification_account(self):
+        """When verifying with a verification_account and no worktree, status should show that account."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def __init__(self):
+                self._mock_usage = {"verifier-agent": 0.6}
+                self._mock_context = {"verifier-agent": 0.4}
+
+            def list_accounts(self):
+                return [
+                    MockAccount(name="coding-agent", provider="anthropic", role="CODING"),
+                    MockAccount(name="verifier-agent", provider="mock", role=None),
+                ]
+
+            def get_account(self, name):
+                if name == "verifier-agent":
+                    return MockAccount(name=name, provider="mock", role=None)
+                return MockAccount(name=name, provider="anthropic", role="CODING")
+
+            def get_mock_remaining_usage(self, name):
+                return self._mock_usage.get(name, 0.5)
+
+            def get_mock_context_remaining(self, name):
+                return self._mock_context.get(name, 1.0)
+
+        ui = ProviderUIManager(MockAPIClient())
+        # Without worktree path, status shows agent name
+        ready, status = ui.get_role_config_status(
+            task_state="verifying",
+            verification_account="verifier-agent",
+        )
+        assert ready is True
+        assert "Verifying" in status
+        # Should show the verification account, not the coding account
+        assert "verifier-agent" in status
+        # Coding account should not be shown during verification
+        assert "coding-agent" not in status
+        # Metrics should be from the verification account (60% usage, 40% context)
+        assert "Usage: 60%" in status
+        assert "Context: 40%" in status
+
+    def test_format_usage_metrics_returns_percentages(self):
+        """_format_usage_metrics should return formatted usage and context percentages."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def __init__(self):
+                self._mock_usage = {"test-account": 0.75}
+                self._mock_context = {"test-account": 0.5}
+
+            def list_accounts(self):
+                return [MockAccount(name="test-account", provider="mock", role="CODING")]
+
+            def get_account(self, name):
+                return MockAccount(name=name, provider="mock", role="CODING")
+
+            def get_mock_remaining_usage(self, name):
+                return self._mock_usage.get(name, 0.5)
+
+            def get_mock_context_remaining(self, name):
+                return self._mock_context.get(name, 1.0)
+
+        ui = ProviderUIManager(MockAPIClient())
+        metrics = ui._format_usage_metrics("test-account")
+        assert "Usage: 75%" in metrics
+        assert "Context: 50%" in metrics
+
+    def test_ready_status_includes_usage_metrics(self):
+        """Ready status should include usage metrics when available."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def __init__(self):
+                self._mock_usage = {"test-account": 0.8}
+                self._mock_context = {"test-account": 0.6}
+
+            def list_accounts(self):
+                return [MockAccount(name="test-account", provider="mock", role="CODING")]
+
+            def get_account(self, name):
+                return MockAccount(name=name, provider="mock", role="CODING")
+
+            def get_mock_remaining_usage(self, name):
+                return self._mock_usage.get(name, 0.5)
+
+            def get_mock_context_remaining(self, name):
+                return self._mock_context.get(name, 1.0)
+
+        ui = ProviderUIManager(MockAPIClient())
+        ready, status = ui.get_role_config_status()
+        assert ready is True
+        assert "Ready" in status
+        assert "Usage: 80%" in status
+        assert "Context: 60%" in status
 
 
 class TestVerificationPrompt:

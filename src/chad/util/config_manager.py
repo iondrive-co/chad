@@ -26,6 +26,9 @@ CONFIG_BASE_KEYS: set[str] = {
     "projects",  # Per-project settings keyed by absolute project path
     "provider_fallback_order",  # List of account names for auto-switching on quota exhaustion
     "usage_switch_threshold",  # Percentage (0-100) of usage before auto-switching providers
+    "mock_remaining_usage",  # Dict of account_name -> 0.0-1.0 for mock provider testing
+    "context_switch_threshold",  # Percentage (0-100) of context usage before auto-switching providers
+    "mock_context_remaining",  # Dict of account_name -> 0.0-1.0 for mock provider context testing
 }
 
 
@@ -762,6 +765,100 @@ class ConfigManager:
             raise ValueError("usage_switch_threshold must be between 0 and 100")
         config = self.load_config()
         config["usage_switch_threshold"] = percentage
+        self.save_config(config)
+
+    def get_mock_remaining_usage(self, account_name: str) -> float:
+        """Get mock remaining usage for a mock provider account.
+
+        Used for testing usage-based provider switching without real providers.
+
+        Args:
+            account_name: The mock account name
+
+        Returns:
+            Remaining usage as 0.0-1.0 (1.0 = full capacity remaining)
+        """
+        config = self.load_config()
+        usage_dict = config.get("mock_remaining_usage", {})
+        return usage_dict.get(account_name, 0.5)  # Default to 50%
+
+    def set_mock_remaining_usage(self, account_name: str, remaining: float) -> None:
+        """Set mock remaining usage for a mock provider account.
+
+        Args:
+            account_name: The mock account name
+            remaining: Remaining usage as 0.0-1.0 (1.0 = full capacity remaining)
+
+        Raises:
+            ValueError: If remaining is not between 0 and 1
+        """
+        if not 0.0 <= remaining <= 1.0:
+            raise ValueError("mock_remaining_usage must be between 0.0 and 1.0")
+        config = self.load_config()
+        if "mock_remaining_usage" not in config:
+            config["mock_remaining_usage"] = {}
+        config["mock_remaining_usage"][account_name] = remaining
+        self.save_config(config)
+
+    def get_context_switch_threshold(self) -> int:
+        """Get the context usage percentage threshold for auto-switching providers.
+
+        When a provider's context window usage exceeds this percentage,
+        the system will automatically switch to the next fallback provider.
+
+        Returns:
+            Percentage threshold (0-100), defaults to 90
+        """
+        config = self.load_config()
+        return config.get("context_switch_threshold", 90)
+
+    def set_context_switch_threshold(self, percentage: int) -> None:
+        """Set the context usage percentage threshold for auto-switching providers.
+
+        Args:
+            percentage: Threshold percentage (0-100). Use 100 to disable
+                       context-based switching (only error-based switching).
+
+        Raises:
+            ValueError: If percentage is not between 0 and 100
+        """
+        if not 0 <= percentage <= 100:
+            raise ValueError("context_switch_threshold must be between 0 and 100")
+        config = self.load_config()
+        config["context_switch_threshold"] = percentage
+        self.save_config(config)
+
+    def get_mock_context_remaining(self, account_name: str) -> float:
+        """Get mock context remaining for a mock provider account.
+
+        Used for testing context-based provider switching without real providers.
+
+        Args:
+            account_name: The mock account name
+
+        Returns:
+            Remaining context as 0.0-1.0 (1.0 = full context available)
+        """
+        config = self.load_config()
+        context_dict = config.get("mock_context_remaining", {})
+        return context_dict.get(account_name, 1.0)  # Default to 100%
+
+    def set_mock_context_remaining(self, account_name: str, remaining: float) -> None:
+        """Set mock context remaining for a mock provider account.
+
+        Args:
+            account_name: The mock account name
+            remaining: Remaining context as 0.0-1.0 (1.0 = full context available)
+
+        Raises:
+            ValueError: If remaining is not between 0 and 1
+        """
+        if not 0.0 <= remaining <= 1.0:
+            raise ValueError("mock_context_remaining must be between 0.0 and 1.0")
+        config = self.load_config()
+        if "mock_context_remaining" not in config:
+            config["mock_context_remaining"] = {}
+        config["mock_context_remaining"][account_name] = remaining
         self.save_config(config)
 
 

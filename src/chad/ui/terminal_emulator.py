@@ -127,14 +127,16 @@ class TerminalEmulator:
     and renders to HTML with proper styling.
     """
 
-    def __init__(self, cols: int = TERMINAL_COLS, rows: int = TERMINAL_ROWS):
+    def __init__(self, cols: int = TERMINAL_COLS, rows: int = TERMINAL_ROWS, history: int = 10000):
         """Initialize the terminal emulator.
 
         Args:
             cols: Number of columns (width)
             rows: Number of rows (height)
+            history: Number of history lines to keep for scrollback
         """
-        self.screen = pyte.Screen(cols, rows)
+        # Use HistoryScreen for infinite scrollback support
+        self.screen = pyte.HistoryScreen(cols, rows, history=history)
         self.stream = pyte.Stream(self.screen)
         self._total_bytes = 0
 
@@ -177,7 +179,7 @@ class TerminalEmulator:
         self.screen.resize(rows, cols)
 
     def render_html(self, include_cursor: bool = False) -> str:
-        """Render the terminal screen to HTML.
+        """Render the terminal screen to HTML, including scrollback history.
 
         Args:
             include_cursor: Whether to show cursor position
@@ -187,58 +189,129 @@ class TerminalEmulator:
         """
         lines = []
 
+        # First, render history lines that have scrolled off the top
+        # HistoryScreen stores scrolled-off lines in history.top
+        if hasattr(self.screen, 'history') and self.screen.history.top:
+            for history_line in self.screen.history.top:
+                line_html = self._render_line(history_line)
+                if line_html:
+                    lines.append(line_html)
+
+        # Then render the current screen buffer
         for y in range(self.screen.lines):
-            # First, find the last non-whitespace column on this line
-            last_nonspace = -1
-            for x in range(self.screen.columns - 1, -1, -1):
-                char_data = self.screen.buffer[y][x].data
-                if char_data and char_data.strip():
-                    last_nonspace = x
-                    break
-
-            # Skip entirely empty lines
-            if last_nonspace < 0:
-                continue
-
-            # Render up to and including the last non-whitespace character
-            line_spans = []
-            x = 0
-
-            while x <= last_nonspace:
-                char = self.screen.buffer[y][x]
-
-                # Collect consecutive characters with same style
-                span_chars = []
-                span_style = self._get_char_style(char)
-
-                while x <= last_nonspace:
-                    char = self.screen.buffer[y][x]
-                    if self._get_char_style(char) != span_style:
-                        break
-
-                    # Handle cursor
-                    if include_cursor and y == self.screen.cursor.y and x == self.screen.cursor.x:
-                        span_chars.append(f'<span class="cursor">{escape(char.data or " ")}</span>')
-                    else:
-                        span_chars.append(escape(char.data or " "))
-                    x += 1
-
-                if span_chars:
-                    content = "".join(span_chars)
-                    if span_style:
-                        line_spans.append(f'<span style="{span_style}">{content}</span>')
-                    else:
-                        line_spans.append(content)
-
-            line = "".join(line_spans)
-            if line:
-                lines.append(line)
+            line_html = self._render_buffer_line(y, include_cursor)
+            if line_html:
+                lines.append(line_html)
 
         # Add at least one line if buffer was all whitespace
         if not lines:
             lines.append(" ")
 
         return "\n".join(lines)
+
+    def _render_line(self, line: dict) -> str:
+        """Render a single history line to HTML.
+
+        Args:
+            line: Dictionary mapping column index to Char
+
+        Returns:
+            HTML string for the line, or empty string if blank
+        """
+        if not line:
+            return ""
+
+        # Find the last non-whitespace column
+        last_nonspace = -1
+        for x in sorted(line.keys(), reverse=True):
+            char_data = line[x].data
+            if char_data and char_data.strip():
+                last_nonspace = x
+                break
+
+        if last_nonspace < 0:
+            return ""
+
+        # Render up to and including the last non-whitespace character
+        line_spans = []
+        x = 0
+
+        while x <= last_nonspace:
+            char = line.get(x, pyte.screens.Char(" "))
+
+            # Collect consecutive characters with same style
+            span_chars = []
+            span_style = self._get_char_style(char)
+
+            while x <= last_nonspace:
+                char = line.get(x, pyte.screens.Char(" "))
+                if self._get_char_style(char) != span_style:
+                    break
+                span_chars.append(escape(char.data or " "))
+                x += 1
+
+            if span_chars:
+                content = "".join(span_chars)
+                if span_style:
+                    line_spans.append(f'<span style="{span_style}">{content}</span>')
+                else:
+                    line_spans.append(content)
+
+        return "".join(line_spans)
+
+    def _render_buffer_line(self, y: int, include_cursor: bool = False) -> str:
+        """Render a single line from the screen buffer to HTML.
+
+        Args:
+            y: Line index in the buffer
+            include_cursor: Whether to show cursor position
+
+        Returns:
+            HTML string for the line, or empty string if blank
+        """
+        # First, find the last non-whitespace column on this line
+        last_nonspace = -1
+        for x in range(self.screen.columns - 1, -1, -1):
+            char_data = self.screen.buffer[y][x].data
+            if char_data and char_data.strip():
+                last_nonspace = x
+                break
+
+        # Skip entirely empty lines
+        if last_nonspace < 0:
+            return ""
+
+        # Render up to and including the last non-whitespace character
+        line_spans = []
+        x = 0
+
+        while x <= last_nonspace:
+            char = self.screen.buffer[y][x]
+
+            # Collect consecutive characters with same style
+            span_chars = []
+            span_style = self._get_char_style(char)
+
+            while x <= last_nonspace:
+                char = self.screen.buffer[y][x]
+                if self._get_char_style(char) != span_style:
+                    break
+
+                # Handle cursor
+                if include_cursor and y == self.screen.cursor.y and x == self.screen.cursor.x:
+                    span_chars.append(f'<span class="cursor">{escape(char.data or " ")}</span>')
+                else:
+                    span_chars.append(escape(char.data or " "))
+                x += 1
+
+            if span_chars:
+                content = "".join(span_chars)
+                if span_style:
+                    line_spans.append(f'<span style="{span_style}">{content}</span>')
+                else:
+                    line_spans.append(content)
+
+        return "".join(line_spans)
 
     def _get_char_style(self, char: pyte.screens.Char) -> str:
         """Get CSS style string for a character.

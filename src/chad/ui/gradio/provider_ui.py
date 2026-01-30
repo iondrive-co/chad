@@ -51,6 +51,55 @@ class ProviderUIManager:
         self.installer = installer or AIToolInstaller()
         self.dev_mode = dev_mode
 
+    def set_mock_remaining_usage(self, account_name: str, value: float) -> None:
+        """Set mock remaining usage for testing handover (0.0-1.0)."""
+        clamped = max(0.0, min(1.0, value))
+        try:
+            self.api_client.set_mock_remaining_usage(account_name, clamped)
+        except Exception:
+            pass  # Ignore errors setting mock usage
+
+    def get_mock_remaining_usage(self, account_name: str) -> float:
+        """Get mock remaining usage (0.0-1.0), defaults to 0.5."""
+        try:
+            return self.api_client.get_mock_remaining_usage(account_name)
+        except Exception:
+            return 0.5  # Default to 50%
+
+    def set_mock_context_remaining(self, account_name: str, value: float) -> None:
+        """Set mock context remaining for testing context-based handover (0.0-1.0)."""
+        clamped = max(0.0, min(1.0, value))
+        try:
+            self.api_client.set_mock_context_remaining(account_name, clamped)
+        except Exception:
+            pass  # Ignore errors setting mock context
+
+    def get_mock_context_remaining(self, account_name: str) -> float:
+        """Get mock context remaining (0.0-1.0), defaults to 1.0."""
+        try:
+            return self.api_client.get_mock_context_remaining(account_name)
+        except Exception:
+            return 1.0  # Default to 100%
+
+    def get_context_remaining(self, account_name: str) -> float:
+        """Get remaining context capacity for a provider (0.0-1.0).
+
+        For mock providers, returns the configured mock value.
+        For real providers, would query the actual context usage.
+        """
+        try:
+            account = self.api_client.get_account(account_name)
+            provider = account.provider
+        except Exception:
+            return 1.0
+
+        if provider == "mock":
+            return self.get_mock_context_remaining(account_name)
+
+        # Real providers would implement their own context tracking
+        # For now, return 1.0 (full context available)
+        return 1.0
+
     def get_provider_card_items(self) -> list[tuple[str, str]]:
         """Return provider account items for card display."""
         accounts = self.api_client.list_accounts()
@@ -126,6 +175,8 @@ class ProviderUIManager:
             status_text = self._get_qwen_usage()
         elif provider == "mistral":
             status_text = self._get_mistral_usage()
+        elif provider == "mock":
+            status_text = ""  # Mock provider uses slider input instead
         else:
             status_text = "⚠️ **Unknown provider**"
 
@@ -174,6 +225,8 @@ class ProviderUIManager:
             return self._get_qwen_remaining_usage()
         if provider == "mistral":
             return self._get_mistral_remaining_usage()
+        if provider == "mock":
+            return self.get_mock_remaining_usage(account_name)
 
         return 0.3  # Unknown provider, bias low
 
@@ -404,6 +457,7 @@ class ProviderUIManager:
                 account_name, provider = account_items[idx]
                 header = self.format_provider_header(account_name, provider, idx)
                 usage = self.get_provider_usage(account_name)
+                is_mock = provider == "mock"
 
                 delete_btn_update = (
                     gr.update(value="✓", variant="stop")
@@ -411,13 +465,23 @@ class ProviderUIManager:
                     else gr.update(value="🗑︎", variant="secondary")
                 )
 
+                # Mock providers use slider, others use markdown
+                if is_mock:
+                    mock_value = int(self.get_mock_remaining_usage(account_name) * 100)
+                    usage_update = gr.update(visible=False)
+                    slider_update = gr.update(visible=True, value=mock_value)
+                else:
+                    usage_update = gr.update(visible=True, value=usage)
+                    slider_update = gr.update(visible=False)
+
                 outputs.extend(
                     [
                         gr.update(visible=True),  # Show column
                         gr.update(visible=True),  # Show card group
                         header,
                         account_name,
-                        usage,
+                        usage_update,
+                        slider_update,
                         delete_btn_update,
                     ]
                 )
@@ -428,7 +492,8 @@ class ProviderUIManager:
                         gr.update(visible=False),  # Hide card group
                         "",
                         "",
-                        "",
+                        gr.update(visible=False),  # usage_box hidden
+                        gr.update(visible=False),  # slider hidden
                         gr.update(value="🗑︎", variant="secondary"),
                     ]
                 )
@@ -1741,6 +1806,19 @@ class ProviderUIManager:
         except Exception:
             pass
 
+    def _format_usage_metrics(self, account_name: str) -> str:
+        """Format usage and context remaining as a compact string."""
+        try:
+            usage_remaining = self.get_remaining_usage(account_name)
+            context_remaining = self.get_context_remaining(account_name)
+
+            usage_pct = int(usage_remaining * 100)
+            context_pct = int(context_remaining * 100)
+
+            return f"[Usage: {usage_pct}% · Context: {context_pct}%]"
+        except Exception:
+            return ""
+
     def get_role_config_status(
         self,
         task_state: str | None = None,
@@ -1748,6 +1826,7 @@ class ProviderUIManager:
         switched_from: str | None = None,
         active_account: str | None = None,
         project_path: str | None = None,
+        verification_account: str | None = None,
     ) -> tuple[bool, str]:
         """Check if roles are properly configured for running tasks.
 
@@ -1760,6 +1839,7 @@ class ProviderUIManager:
             active_account: If set, use this account as the active provider instead
                            of looking up the CODING role assignment.
             project_path: Optional project path to display (shown when no worktree exists).
+            verification_account: If set, use this account when showing verifying status.
 
         Returns:
             Tuple of (is_ready, status_text)
@@ -1799,11 +1879,24 @@ class ProviderUIManager:
             }.get(task_state, "⏳")
             state_label = task_state.capitalize()
 
+            # Determine which account to show metrics for
+            if task_state == "verifying" and verification_account:
+                metrics_account = verification_account
+                agent_info = f"{verification_account}"
+            else:
+                metrics_account = coding_account.name
+                agent_info = f"{coding_account.name} ({coding_account.provider})"
+
+            usage_metrics = self._format_usage_metrics(metrics_account)
+
             # Show worktree path during active tasks, agent name when idle
             if worktree_path and task_state in ("running", "verifying"):
+                if usage_metrics:
+                    return True, f"{state_icon} {state_label} — **Worktree:** `{worktree_path}` {usage_metrics}{switch_indicator}"
                 return True, f"{state_icon} {state_label} — **Worktree:** `{worktree_path}`{switch_indicator}"
             else:
-                agent_info = f"{coding_account.name} ({coding_account.provider})"
+                if usage_metrics:
+                    return True, f"{state_icon} {state_label} — **Agent:** {agent_info} {usage_metrics}{switch_indicator}"
                 return True, f"{state_icon} {state_label} — **Agent:** {agent_info}{switch_indicator}"
 
         # Static "Ready" status when no task is active
@@ -1813,15 +1906,24 @@ class ProviderUIManager:
             coding_info += f", {coding_model_str}"
         coding_info += ")"
 
+        # Add usage metrics for ready status
+        usage_metrics = self._format_usage_metrics(coding_account.name)
+
         # Show worktree path in Ready status if available, otherwise show project path
         from pathlib import Path
         if worktree_path:
             worktree_name = Path(worktree_path).name
+            if usage_metrics:
+                return True, f"✓ Ready — **Coding:** {coding_info} {usage_metrics} · **Worktree:** `{worktree_name}`{switch_indicator}"
             return True, f"✓ Ready — **Coding:** {coding_info} · **Worktree:** `{worktree_name}`{switch_indicator}"
         elif project_path:
             project_name = Path(project_path).name
+            if usage_metrics:
+                return True, f"✓ Ready — **Coding:** {coding_info} {usage_metrics} · **Project:** `{project_name}`{switch_indicator}"
             return True, f"✓ Ready — **Coding:** {coding_info} · **Project:** `{project_name}`{switch_indicator}"
 
+        if usage_metrics:
+            return True, f"✓ Ready — **Coding:** {coding_info} {usage_metrics}{switch_indicator}"
         return True, f"✓ Ready — **Coding:** {coding_info}{switch_indicator}"
 
     def format_role_status(
@@ -1831,6 +1933,7 @@ class ProviderUIManager:
         switched_from: str | None = None,
         active_account: str | None = None,
         project_path: str | None = None,
+        verification_account: str | None = None,
     ) -> str:
         """Return role status text.
 
@@ -1841,12 +1944,13 @@ class ProviderUIManager:
             active_account: If set, use this account as the active provider instead
                            of looking up the CODING role assignment.
             project_path: Optional project path to display (shown when no worktree exists).
+            verification_account: If set, use this account when showing verifying status.
 
         Returns:
             Formatted status string.
         """
         _, status = self.get_role_config_status(
-            task_state, worktree_path, switched_from, active_account, project_path
+            task_state, worktree_path, switched_from, active_account, project_path, verification_account
         )
         return status
 

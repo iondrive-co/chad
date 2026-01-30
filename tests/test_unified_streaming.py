@@ -1287,6 +1287,194 @@ class TestAgentHandover:
         assert events[0]["data"] == screen_text
 
 
+class TestUsageBasedProviderSwitch:
+    """Tests for proactive usage-based provider switching."""
+
+    def test_mock_usage_api_endpoints(self, client):
+        """Test mock usage API endpoints for get/set operations."""
+        # Create a mock provider account
+        client.post("/api/v1/accounts", json={"name": "usage-mock-1", "provider": "mock"})
+
+        # Default mock usage should be 0.5 (50%)
+        resp = client.get("/api/v1/config/mock-remaining-usage/usage-mock-1")
+        assert resp.status_code == 200
+        assert resp.json()["remaining"] == 0.5
+
+        # Set mock usage to 0.2 (20% remaining = 80% used)
+        resp = client.put(
+            "/api/v1/config/mock-remaining-usage",
+            json={"account_name": "usage-mock-1", "remaining": 0.2}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["remaining"] == 0.2
+
+        # Verify it persisted
+        resp = client.get("/api/v1/config/mock-remaining-usage/usage-mock-1")
+        assert resp.json()["remaining"] == 0.2
+
+    def test_usage_threshold_triggers_switch(self, client, git_repo):
+        """Test that exceeding usage threshold triggers provider switch.
+
+        When the primary provider's usage exceeds the configured threshold,
+        the system should automatically switch to the next fallback provider.
+        """
+        # Create two mock provider accounts
+        client.post("/api/v1/accounts", json={"name": "primary-mock", "provider": "mock"})
+        client.post("/api/v1/accounts", json={"name": "fallback-mock", "provider": "mock"})
+
+        # Set up fallback order: primary-mock -> fallback-mock
+        resp = client.put(
+            "/api/v1/config/provider-fallback-order",
+            json={"order": ["primary-mock", "fallback-mock"]}
+        )
+        assert resp.status_code == 200
+
+        # Set usage threshold to 50% (switch when usage exceeds 50%)
+        resp = client.put(
+            "/api/v1/config/usage-switch-threshold",
+            json={"threshold": 50}
+        )
+        assert resp.status_code == 200
+
+        # Set primary-mock to have 30% remaining (70% used) - exceeds 50% threshold
+        resp = client.put(
+            "/api/v1/config/mock-remaining-usage",
+            json={"account_name": "primary-mock", "remaining": 0.3}
+        )
+        assert resp.status_code == 200
+
+        # Set fallback-mock to have 80% remaining (20% used) - under threshold
+        resp = client.put(
+            "/api/v1/config/mock-remaining-usage",
+            json={"account_name": "fallback-mock", "remaining": 0.8}
+        )
+        assert resp.status_code == 200
+
+        # Verify the configuration was set correctly
+        resp = client.get("/api/v1/config/mock-remaining-usage/primary-mock")
+        assert resp.json()["remaining"] == 0.3
+
+        resp = client.get("/api/v1/config/mock-remaining-usage/fallback-mock")
+        assert resp.json()["remaining"] == 0.8
+
+        resp = client.get("/api/v1/config/usage-switch-threshold")
+        assert resp.json()["threshold"] == 50
+
+        resp = client.get("/api/v1/config/provider-fallback-order")
+        assert resp.json()["order"] == ["primary-mock", "fallback-mock"]
+
+    def test_no_switch_when_under_threshold(self, client, git_repo):
+        """Test that no switch occurs when usage is under threshold."""
+        # Create a mock provider
+        client.post("/api/v1/accounts", json={"name": "healthy-mock", "provider": "mock"})
+
+        # Set threshold to 90%
+        client.put("/api/v1/config/usage-switch-threshold", json={"threshold": 90})
+
+        # Set usage to 70% (30% remaining) - under the 90% threshold
+        client.put(
+            "/api/v1/config/mock-remaining-usage",
+            json={"account_name": "healthy-mock", "remaining": 0.3}
+        )
+
+        # Verify the remaining usage is correctly set
+        resp = client.get("/api/v1/config/mock-remaining-usage/healthy-mock")
+        assert resp.json()["remaining"] == 0.3
+
+    def test_switch_disabled_at_100_percent(self, client):
+        """Test that usage-based switching is disabled when threshold is 100%."""
+        # Set threshold to 100% (disabled)
+        resp = client.put("/api/v1/config/usage-switch-threshold", json={"threshold": 100})
+        assert resp.status_code == 200
+        assert resp.json()["threshold"] == 100
+
+
+class TestContextBasedProviderSwitch:
+    """Tests for proactive context-based provider switching."""
+
+    def test_mock_context_api_endpoints(self, client):
+        """Test mock context API endpoints for get/set operations."""
+        # Create a mock provider account
+        client.post("/api/v1/accounts", json={"name": "context-mock-1", "provider": "mock"})
+
+        # Default mock context should be 1.0 (100%)
+        resp = client.get("/api/v1/config/mock-context-remaining/context-mock-1")
+        assert resp.status_code == 200
+        assert resp.json()["remaining"] == 1.0
+
+        # Set mock context to 0.2 (20% remaining = 80% used)
+        resp = client.put(
+            "/api/v1/config/mock-context-remaining",
+            json={"account_name": "context-mock-1", "remaining": 0.2}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["remaining"] == 0.2
+
+        # Verify it persisted
+        resp = client.get("/api/v1/config/mock-context-remaining/context-mock-1")
+        assert resp.json()["remaining"] == 0.2
+
+    def test_context_threshold_api_endpoints(self, client):
+        """Test context switch threshold API endpoints."""
+        # Get default threshold (should be 90%)
+        resp = client.get("/api/v1/config/context-switch-threshold")
+        assert resp.status_code == 200
+        assert resp.json()["threshold"] == 90
+
+        # Set threshold to 70%
+        resp = client.put(
+            "/api/v1/config/context-switch-threshold",
+            json={"threshold": 70}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["threshold"] == 70
+
+        # Verify it persisted
+        resp = client.get("/api/v1/config/context-switch-threshold")
+        assert resp.json()["threshold"] == 70
+
+    def test_context_threshold_configuration(self, client, git_repo):
+        """Test complete context threshold configuration for provider switch."""
+        # Create two mock provider accounts
+        client.post("/api/v1/accounts", json={"name": "context-primary", "provider": "mock"})
+        client.post("/api/v1/accounts", json={"name": "context-fallback", "provider": "mock"})
+
+        # Set up fallback order
+        resp = client.put(
+            "/api/v1/config/provider-fallback-order",
+            json={"order": ["context-primary", "context-fallback"]}
+        )
+        assert resp.status_code == 200
+
+        # Set context threshold to 50%
+        resp = client.put(
+            "/api/v1/config/context-switch-threshold",
+            json={"threshold": 50}
+        )
+        assert resp.status_code == 200
+
+        # Set primary to have 30% context remaining (70% used, exceeds 50% threshold)
+        resp = client.put(
+            "/api/v1/config/mock-context-remaining",
+            json={"account_name": "context-primary", "remaining": 0.3}
+        )
+        assert resp.status_code == 200
+
+        # Verify the configuration
+        resp = client.get("/api/v1/config/mock-context-remaining/context-primary")
+        assert resp.json()["remaining"] == 0.3
+
+        resp = client.get("/api/v1/config/context-switch-threshold")
+        assert resp.json()["threshold"] == 50
+
+    def test_context_switch_disabled_at_100_percent(self, client):
+        """Test that context-based switching is disabled when threshold is 100%."""
+        # Set threshold to 100% (disabled)
+        resp = client.put("/api/v1/config/context-switch-threshold", json={"threshold": 100})
+        assert resp.status_code == 200
+        assert resp.json()["threshold"] == 100
+
+
 class TestEventMultiplexer:
     """Tests for the EventMultiplexer class."""
 

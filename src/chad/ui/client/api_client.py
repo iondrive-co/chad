@@ -629,3 +629,98 @@ class APIClient:
         )
         resp.raise_for_status()
         return resp.json().get("threshold", threshold)
+
+    def get_mock_remaining_usage(self, account_name: str) -> float:
+        """Get mock remaining usage for a mock provider account.
+
+        Used for testing usage-based provider switching.
+
+        Args:
+            account_name: The mock account name
+
+        Returns:
+            Remaining usage as 0.0-1.0 (1.0 = full capacity remaining)
+        """
+        resp = self._client.get(self._url(f"/config/mock-remaining-usage/{account_name}"))
+        resp.raise_for_status()
+        return resp.json().get("remaining", 0.5)
+
+    def set_mock_remaining_usage(self, account_name: str, remaining: float) -> float:
+        """Set mock remaining usage for a mock provider account.
+
+        Used for testing usage-based provider switching.
+
+        Args:
+            account_name: The mock account name
+            remaining: Remaining usage as 0.0-1.0 (1.0 = full capacity remaining)
+
+        Returns:
+            The remaining usage that was set
+        """
+        resp = self._client.put(
+            self._url("/config/mock-remaining-usage"),
+            json={"account_name": account_name, "remaining": remaining},
+        )
+        resp.raise_for_status()
+        return resp.json().get("remaining", remaining)
+
+    def get_context_switch_threshold(self) -> int:
+        """Get the context usage percentage threshold for auto-switching providers.
+
+        Returns:
+            Percentage threshold (0-100), defaults to 90
+        """
+        resp = self._client.get(self._url("/config/context-switch-threshold"))
+        resp.raise_for_status()
+        return resp.json().get("threshold", 90)
+
+    def set_context_switch_threshold(self, threshold: int) -> int:
+        """Set the context usage percentage threshold for auto-switching providers.
+
+        Args:
+            threshold: Percentage threshold (0-100). Use 100 to disable
+                      context-based switching.
+
+        Returns:
+            The threshold that was set
+        """
+        resp = self._client.put(
+            self._url("/config/context-switch-threshold"),
+            json={"threshold": threshold},
+        )
+        resp.raise_for_status()
+        return resp.json().get("threshold", threshold)
+
+    def get_mock_context_remaining(self, account_name: str) -> float:
+        """Get mock context remaining for a mock provider account.
+
+        Used for testing context-based provider switching.
+
+        Args:
+            account_name: The mock account name
+
+        Returns:
+            Remaining context as 0.0-1.0 (1.0 = full context available)
+        """
+        resp = self._client.get(self._url(f"/config/mock-context-remaining/{account_name}"))
+        resp.raise_for_status()
+        return resp.json().get("remaining", 1.0)
+
+    def set_mock_context_remaining(self, account_name: str, remaining: float) -> float:
+        """Set mock context remaining for a mock provider account.
+
+        Used for testing context-based provider switching.
+
+        Args:
+            account_name: The mock account name
+            remaining: Remaining context as 0.0-1.0 (1.0 = full context available)
+
+        Returns:
+            The remaining context that was set
+        """
+        resp = self._client.put(
+            self._url("/config/mock-context-remaining"),
+            json={"account_name": account_name, "remaining": remaining},
+        )
+        resp.raise_for_status()
+        return resp.json().get("remaining", remaining)
