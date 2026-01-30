@@ -2958,15 +2958,42 @@ class TestScreenshotUpload:
         # No screenshot references should be present
         assert "Screenshot" not in prompt
 
-    def test_coding_prompt_frontloads_progress_and_time_cap(self):
-        """Coding prompt should require immediate progress update and 2-minute cap before the task block."""
+    def test_coding_prompt_frontloads_progress_update(self):
+        """Coding prompt should require initial exploration and progress update."""
         from chad.util.prompts import build_coding_prompt
 
         prompt = build_coding_prompt(task="Do thing")
-        assert "Within your FIRST tool call" in prompt
-        assert "2 minutes" in prompt
-        # Progress instructions should appear before the Task section
-        assert prompt.index("Within your FIRST tool call") < prompt.index("# Task")
+        assert "initial exploration" in prompt
+        assert "progress" in prompt
+        # Progress instructions should appear after the Task section (as part of sequence)
+        assert "Without terminating" in prompt or "progress update" in prompt
+
+    def test_progress_continuation_message_is_sent(self):
+        """When progress is detected, a continuation message should be sent to the agent.
+
+        This test verifies the hack propagation fix: agents (especially Codex) were
+        stopping after outputting progress JSON because they interpreted it as the
+        end of a turn. The fix sends a continuation message to prompt the agent
+        to continue with the remaining steps.
+        """
+        from chad.util.prompts import extract_progress_update
+
+        # Verify progress is correctly extracted from agent output
+        agent_output = """
+        I've explored the codebase and found the relevant files.
+        ```json
+        {"type": "progress", "summary": "Found main entry point", "location": "src/main.py:42"}
+        ```
+        """
+        progress = extract_progress_update(agent_output)
+        assert progress is not None
+        assert progress.summary == "Found main entry point"
+        assert progress.location == "src/main.py:42"
+
+        # The continuation message format
+        continuation_msg = "Continue with step 3: write tests and implement the changes.\n"
+        assert "Continue" in continuation_msg
+        assert "step 3" in continuation_msg
 
     def test_task_create_schema_accepts_screenshots(self):
         """TaskCreate schema should accept an optional screenshots field."""

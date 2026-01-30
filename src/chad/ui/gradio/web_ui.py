@@ -3449,6 +3449,19 @@ class ChadWebUI:
                                     yield make_yield(chat_history, current_status, last_live_stream, task_state="running")
                                     last_yield_time = time_module.time()
 
+                                    # Send continuation message to the agent to prevent it from waiting
+                                    # for user input. Codex CLI waits for input after outputting text,
+                                    # so we need to tell it to continue with the task.
+                                    if session.server_session_id:
+                                        try:
+                                            stream_client = self._get_stream_client()
+                                            # Send a continuation prompt - this tells the agent to proceed
+                                            # with the next steps (writing tests, making changes, etc.)
+                                            continuation = "Continue with step 3: write tests and implement the changes.\n"
+                                            stream_client.send_input(session.server_session_id, continuation.encode())
+                                        except Exception:
+                                            pass  # Best effort - don't fail if continuation fails
+
                         # Track current live stream content for the dedicated panel
                         # Must be outside chunk.strip() check - terminal can have valid HTML
                         # even when raw text is empty (e.g., cursor movements, screen updates)
