@@ -27,12 +27,12 @@ You need to complete the following task:
 {task}
 ---
 Use the following sequence to complete the task:
-1. Do a quick exploration, lasting no more than 2 minutes, of the code to understand some classes involved in the task.
-2. Output a progress update so the user can see what you found:
+1. Do an initial exploration of a few classes which might be involved
+2. Without terminating, output an initial progress update so the user can see what you found:
 ```json
 {{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45 - request() method"}}
 ```
-3. Write test(s) that should fail until the fix/feature is implemented (you can explore more code to achieve this goal)
+3. Continue you work by writing test(s) that should fail until the fix/feature is implemented (you can now explore more code to achieve this goal if needed)
 4. Make the changes, adjusting tests and exploring more code as needed. If no changes are required, skip to step 7.
 5. Once you believe your changes will complete the task, run verification commands (lint and tests) as described above.
 6. Fix ALL failures and retest if required.
