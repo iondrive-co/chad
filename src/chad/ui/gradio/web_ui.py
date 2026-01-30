@@ -92,6 +92,8 @@ class Session:
     last_verification_prompt: str | None = None
     # Live stream DOM patching support - track if initial render is done
     has_initial_live_render: bool = False
+    # Persistent live stream content for tab switch restoration
+    last_live_stream: str = ""
 
     @property
     def log_path(self) -> Path | None:
@@ -223,7 +225,7 @@ body, .gradio-container, .gradio-container * {
 
 .project-setup-column {
   display: grid;
-  gap: 8px;
+  gap: 4px;
 }
 
 .project-path-input label {
@@ -1637,18 +1639,15 @@ def normalize_live_stream_spacing(content: str) -> str:
 
 
 class LiveStreamDisplayBuffer:
-    """Rolling buffer for live stream display content."""
+    """Buffer for live stream display content with infinite history."""
 
-    def __init__(self, max_chars: int = 50000) -> None:
-        self.max_chars = max_chars
+    def __init__(self) -> None:
         self.content = ""
 
     def append(self, chunk: str) -> None:
         if not chunk:
             return
         self.content += chunk
-        if len(self.content) > self.max_chars:
-            self.content = self.content[-self.max_chars :]
 
 
 class LiveStreamRenderState:
@@ -2334,6 +2333,91 @@ class ChadWebUI:
     def _get_qwen_remaining_usage(self) -> float:
         return self.provider_ui._get_qwen_remaining_usage()
 
+    def _check_usage_and_switch(self, coding_account: str) -> tuple[str, str | None]:
+        """Check if current provider exceeds usage threshold and switch if needed.
+
+        Returns:
+            Tuple of (account_to_use, switched_from_account)
+            switched_from_account is None if no switch occurred
+        """
+        try:
+            threshold = self.api_client.get_usage_switch_threshold()
+        except Exception:
+            threshold = 90
+
+        # Threshold of 100 disables usage-based switching
+        if threshold >= 100:
+            return coding_account, None
+
+        # Check current account usage
+        remaining = self.get_remaining_usage(coding_account)
+        used_pct = (1.0 - remaining) * 100
+
+        if used_pct < threshold:
+            # Usage is below threshold, no switch needed
+            return coding_account, None
+
+        # Usage exceeds threshold, try to find a fallback
+        try:
+            next_account = self.api_client.get_next_fallback_provider(coding_account)
+        except Exception:
+            return coding_account, None
+
+        if not next_account:
+            return coding_account, None
+
+        # Check that fallback has better usage
+        next_remaining = self.get_remaining_usage(next_account)
+        next_used_pct = (1.0 - next_remaining) * 100
+
+        if next_used_pct >= threshold:
+            # Fallback also exceeds threshold, don't switch
+            return coding_account, None
+
+        # Switch to fallback
+        return next_account, coding_account
+
+    def get_context_remaining(self, account_name: str) -> float:
+        """Get remaining context capacity for a provider (0.0-1.0)."""
+        return self.provider_ui.get_context_remaining(account_name)
+
+    def _check_context_and_switch(self, coding_account: str) -> tuple[str, str | None]:
+        """Check if current provider's context exceeds threshold and switch if needed.
+
+        Returns:
+            Tuple of (account_to_use, switched_from_account)
+            switched_from_account is None if no switch occurred
+        """
+        try:
+            threshold = self.api_client.get_context_switch_threshold()
+        except Exception:
+            threshold = 90
+
+        # Threshold of 100 disables context-based switching
+        if threshold >= 100:
+            return coding_account, None
+
+        # Check current account context usage
+        remaining = self.get_context_remaining(coding_account)
+        used_pct = (1.0 - remaining) * 100
+
+        if used_pct < threshold:
+            # Context usage is below threshold, no switch needed
+            return coding_account, None
+
+        # Context exceeds threshold, try to find a fallback
+        try:
+            next_account = self.api_client.get_next_fallback_provider(coding_account)
+        except Exception:
+            return coding_account, None
+
+        if not next_account:
+            return coding_account, None
+
+        # Fallback provider starts fresh, so it has full context
+        # No need to check fallback's context usage
+        return next_account, coding_account
+
     def _provider_state(self, pending_delete: str = None) -> tuple:
         return self.provider_ui.provider_state(self.provider_card_count, pending_delete=pending_delete)
 
@@ -2617,9 +2701,10 @@ class ChadWebUI:
         task_state: str | None = None,
         worktree_path: str | None = None,
         project_path: str | None = None,
+        verification_account: str | None = None,
     ) -> tuple[bool, str]:
         return self.provider_ui.get_role_config_status(
-            task_state, worktree_path, project_path=project_path
+            task_state, worktree_path, project_path=project_path, verification_account=verification_account
         )
 
     def format_role_status(
@@ -2629,9 +2714,10 @@ class ChadWebUI:
         switched_from: str | None = None,
         active_account: str | None = None,
         project_path: str | None = None,
+        verification_account: str | None = None,
     ) -> str:
         return self.provider_ui.format_role_status(
-            task_state, worktree_path, switched_from, active_account, project_path
+            task_state, worktree_path, switched_from, active_account, project_path, verification_account
         )
 
     def assign_role(self, account_name: str, role: str):
@@ -2913,6 +2999,7 @@ class ChadWebUI:
             task_ended: bool = False,
             coding_prompt: str | None = None,
             verification_prompt: str | None = None,
+            verification_account: str | None = None,
         ):
             """Format output tuple for Gradio with current UI state.
 
@@ -2959,7 +3046,8 @@ class ChadWebUI:
             wt_path = str(session.worktree_path) if session.worktree_path else None
             proj_path = session.project_path
             display_role_status = self.format_role_status(
-                task_state, wt_path, session.switched_from, session.coding_account, proj_path
+                task_state, wt_path, session.switched_from, session.coding_account, proj_path,
+                verification_account=verification_account
             )
             log_btn_update = gr.update(
                 label=session.log_path.name if session.log_path else "Session Log",
@@ -3054,12 +3142,28 @@ class ChadWebUI:
 
             session.task_description = task_description
             session.project_path = str(path_obj)
+            session.last_live_stream = ""  # Clear for new task
 
             # Worktree will be created by the API when the task starts
             # For now, set the project path; worktree info will be fetched after task starts
 
             coding_account = coding_agent
             coding_provider = account.provider
+
+            # Check usage threshold and switch provider if needed
+            coding_account, switched_from = self._check_usage_and_switch(coding_account)
+            if switched_from:
+                # Provider was switched due to usage threshold
+                session.switched_from = switched_from
+                try:
+                    new_account = self.api_client.get_account(coding_account)
+                    coding_provider = new_account.provider
+                except Exception:
+                    # Fallback failed, revert to original
+                    coding_account = coding_agent
+                    coding_provider = account.provider
+                    session.switched_from = None
+
             self.api_client.set_account_role(coding_account, "CODING")
 
             selected_model = coding_model or account.model or "default"
@@ -3188,7 +3292,7 @@ class ChadWebUI:
             current_status = f"{status_prefix}⏳ Coding AI is working..."
             current_ai = "CODING AI"
             current_live_stream = ""
-            last_live_stream = ""
+            last_live_stream = session.last_live_stream  # Restore from session for tab switches
             yield make_yield(
                 chat_history,
                 current_status,
@@ -3310,6 +3414,7 @@ class ChadWebUI:
                                 current_live_stream = build_live_stream_html(display_buffer.content, current_ai, live_stream_id)
                                 if current_live_stream:
                                     last_live_stream = current_live_stream
+                                    session.last_live_stream = current_live_stream
 
                             # Check for progress update in streaming buffer
                             if not progress_emitted:
@@ -3339,6 +3444,7 @@ class ChadWebUI:
                             current_live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai, live_stream_id)
                             if current_live_stream:
                                 last_live_stream = current_live_stream
+                                session.last_live_stream = current_live_stream
 
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
@@ -3363,6 +3469,7 @@ class ChadWebUI:
                                 activity_stream = build_live_stream_html(content, current_ai, live_stream_id)
                             if activity_stream:
                                 last_live_stream = activity_stream
+                                session.last_live_stream = activity_stream
                                 yield make_yield(chat_history, current_status, activity_stream, task_state="running")
                                 last_yield_time = now
 
@@ -3406,6 +3513,7 @@ class ChadWebUI:
                         html_chunk = pending_msg[2] if len(pending_msg) > 2 else None
                         if html_chunk:
                             last_live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai, live_stream_id)
+                            session.last_live_stream = last_live_stream
                         elif chunk.strip():
                             display_buffer.append(chunk)
                     elif pending_type == "activity":
@@ -3532,6 +3640,7 @@ class ChadWebUI:
                     yield make_yield(
                         chat_history, verify_status, verify_placeholder, task_state="verifying",
                         verification_prompt=display_verification_prompt,
+                        verification_account=verification_account_for_run,
                     )
 
                     # Run verification in a thread so we can stream output to live view
@@ -3581,7 +3690,8 @@ class ChadWebUI:
                                         rendered = build_live_stream_html(
                                             verify_display_buffer.content, "VERIFICATION AI", live_stream_id
                                         )
-                                        yield make_yield(chat_history, verify_status, rendered, task_state="verifying")
+                                        yield make_yield(chat_history, verify_status, rendered, task_state="verifying",
+                                                         verification_account=verification_account_for_run)
                                         verify_last_yield = now
                         except queue.Empty:
                             pass
@@ -3759,6 +3869,7 @@ class ChadWebUI:
                                 f"{status_prefix}✓ Revision complete, re-verifying...",
                                 reverify_placeholder,
                                 task_state="verifying",
+                                verification_account=verification_account_for_run,
                             )
                         elif (
                             session.server_session_id
@@ -3871,6 +3982,7 @@ class ChadWebUI:
                                 f"{status_prefix}✓ Revision complete, re-verifying...",
                                 reverify_placeholder,
                                 task_state="verifying",
+                                verification_account=verification_account_for_run,
                             )
                         else:
                             # Can't continue - max attempts reached or cancelled
@@ -4084,9 +4196,9 @@ class ChadWebUI:
                 screenshot_section += f"- {screenshot_path}\n"
             followup_message = followup_message + screenshot_section
 
-        accounts = self.api_client.list_accounts()
-        account_names = {acc.name for acc in accounts}
-        has_account = bool(coding_agent and coding_agent in account_names)
+        accounts_list = self.api_client.list_accounts()
+        accounts = {acc.name: acc.provider for acc in accounts_list}  # Map name -> provider
+        has_account = bool(coding_agent and coding_agent in accounts)
 
         def normalize_model_value(value: str | None) -> str:
             return value if value else "default"
@@ -4150,7 +4262,9 @@ class ChadWebUI:
             and (active_model != requested_model or active_reasoning != requested_reasoning)
         )
 
-        handoff_needed = provider_changed or pref_changed
+        # Also need handoff if session is active but provider was released (API-based execution)
+        provider_reconnect_needed = has_account and session.active and session.provider is None
+        handoff_needed = provider_changed or pref_changed or provider_reconnect_needed
 
         if handoff_needed:
             # Log handoff checkpoint to event log before stopping old provider
@@ -4190,17 +4304,20 @@ class ChadWebUI:
                 reasoning_effort=None if requested_reasoning == "default" else requested_reasoning,
             )
 
-            handoff_detail = f"{coding_agent} ({coding_provider_type}"
-            if requested_model and requested_model != "default":
-                handoff_detail += f", {requested_model}"
-            if requested_reasoning and requested_reasoning != "default":
-                handoff_detail += f", {requested_reasoning} reasoning"
-            handoff_detail += ")"
+            # Only show handoff message if actually changing provider or preferences
+            # Skip message for silent reconnects (when provider was released after API-based execution)
+            if provider_changed or pref_changed:
+                handoff_detail = f"{coding_agent} ({coding_provider_type}"
+                if requested_model and requested_model != "default":
+                    handoff_detail += f", {requested_model}"
+                if requested_reasoning and requested_reasoning != "default":
+                    handoff_detail += f", {requested_reasoning} reasoning"
+                handoff_detail += ")"
 
-            handoff_title = "PROVIDER HANDOFF" if provider_changed else "PREFERENCE UPDATE"
-            handoff_msg = f"───────────── → {handoff_title} ─────────────\n\n" f"*Switching to {handoff_detail}*"
-            chat_history.append({"role": "user", "content": handoff_msg})
-            yield make_followup_yield(chat_history, "→ Switching providers...", working=True, merge_updates=merge_no_change)
+                handoff_title = "PROVIDER HANDOFF" if provider_changed else "PREFERENCE UPDATE"
+                handoff_msg = f"───────────── → {handoff_title} ─────────────\n\n" f"*Switching to {handoff_detail}*"
+                chat_history.append({"role": "user", "content": handoff_msg})
+            yield make_followup_yield(chat_history, "→ Reconnecting...", working=True, merge_updates=merge_no_change)
 
             new_provider = create_provider(coding_config)
             # Use worktree path if available, otherwise fall back to project path
@@ -5596,42 +5713,6 @@ class ChadWebUI:
                             key=f"verification-reasoning-{session_id}",
                             interactive=verif_state.interactive,
                         )
-                        with gr.Row(
-                            elem_id="role-status-row" if is_first else None,
-                            elem_classes=["role-status-row"],
-                        ):
-                            cancel_btn = gr.Button(
-                                "Cancel",
-                                variant="stop",
-                                interactive=False,
-                                key=f"cancel-btn-{session_id}",
-                                elem_id="cancel-task-btn" if is_first else None,
-                                elem_classes=["cancel-task-btn"],
-                                min_width=80,
-                                scale=0,
-                            )
-                            project_save_btn = gr.Button(
-                                "Save",
-                                variant="primary",
-                                size="sm",
-                                key=f"project-save-{session_id}",
-                                elem_classes=["project-save-btn"],
-                                min_width=80,
-                                scale=0,
-                            )
-                            log_path = session.log_path
-                            session_log_btn = gr.DownloadButton(
-                                label="Session Log" if not log_path else log_path.name,
-                                value=str(log_path) if log_path else None,
-                                visible=log_path is not None,
-                                variant="secondary",
-                                size="sm",
-                                scale=0,
-                                min_width=140,
-                                key=f"log-btn-{session_id}",
-                                elem_id="session-log-btn" if is_first else None,
-                                elem_classes=["session-log-btn"],
-                            )
 
         # Task status header - always in DOM but CSS hides when empty
         # This ensures JavaScript can find it for merge section visibility logic
@@ -5642,6 +5723,44 @@ class ChadWebUI:
             elem_id="task-status-header" if is_first else None,
             elem_classes=["task-status-header"],
         )
+
+        # Buttons placed beneath the status text
+        with gr.Row(
+            elem_id="role-status-row" if is_first else None,
+            elem_classes=["role-status-row"],
+        ):
+            cancel_btn = gr.Button(
+                "Cancel",
+                variant="stop",
+                interactive=False,
+                key=f"cancel-btn-{session_id}",
+                elem_id="cancel-task-btn" if is_first else None,
+                elem_classes=["cancel-task-btn"],
+                min_width=80,
+                scale=0,
+            )
+            project_save_btn = gr.Button(
+                "Save",
+                variant="primary",
+                size="sm",
+                key=f"project-save-{session_id}",
+                elem_classes=["project-save-btn"],
+                min_width=80,
+                scale=0,
+            )
+            log_path = session.log_path
+            session_log_btn = gr.DownloadButton(
+                label="Session Log" if not log_path else log_path.name,
+                value=str(log_path) if log_path else None,
+                visible=log_path is not None,
+                variant="secondary",
+                size="sm",
+                scale=0,
+                min_width=140,
+                key=f"log-btn-{session_id}",
+                elem_id="session-log-btn" if is_first else None,
+                elem_classes=["session-log-btn"],
+            )
 
         # Agent communication view
         with gr.Column(elem_classes=["agent-panel"]):
@@ -6379,11 +6498,16 @@ class ChadWebUI:
                     visible = True
                     header_text = self.provider_ui.format_provider_header(account_name, provider_type, idx)
                     usage_text = self.get_provider_usage(account_name)
+                    is_mock = provider_type == "mock"
+                    mock_usage_value = self.provider_ui.get_mock_remaining_usage(account_name) if is_mock else 0.5
                 else:
                     account_name = ""
+                    provider_type = ""
                     visible = False
                     header_text = ""
                     usage_text = ""
+                    is_mock = False
+                    mock_usage_value = 0.5
 
                 card_group_classes = ["provider-card"] if visible else ["provider-card", "provider-card-empty"]
                 with gr.Column(visible=visible, scale=1) as card_column:
@@ -6401,7 +6525,16 @@ class ChadWebUI:
                             )
                         account_state = gr.State(account_name)
                         gr.Markdown("Usage", elem_classes=["provider-usage-title"])
-                        usage_box = gr.Markdown(usage_text, elem_classes=["provider-usage"])
+                        usage_box = gr.Markdown(usage_text, elem_classes=["provider-usage"], visible=not is_mock)
+                        mock_usage_slider = gr.Slider(
+                            minimum=0,
+                            maximum=100,
+                            value=int(mock_usage_value * 100),
+                            step=5,
+                            label="Remaining %",
+                            visible=is_mock,
+                            elem_classes=["mock-usage-slider"],
+                        )
 
                 provider_cards.append(
                     {
@@ -6411,6 +6544,7 @@ class ChadWebUI:
                         "account_state": account_state,
                         "account_name": account_name,
                         "usage_box": usage_box,
+                        "mock_usage_slider": mock_usage_slider,
                         "delete_btn": delete_btn,
                     }
                 )
@@ -6614,6 +6748,7 @@ class ChadWebUI:
                     card["header"],
                     card["account_state"],
                     card["usage_box"],
+                    card["mock_usage_slider"],
                     card["delete_btn"],
                 ]
             )
@@ -6824,6 +6959,18 @@ class ChadWebUI:
                 outputs=delete_outputs,
             )
             self._provider_delete_events.append(delete_event)
+
+            # Mock usage slider change handler
+            def make_mock_usage_handler():
+                def handler(value, account_name):
+                    if account_name:
+                        self.provider_ui.set_mock_remaining_usage(account_name, value / 100.0)
+                return handler
+
+            card["mock_usage_slider"].change(
+                fn=make_mock_usage_handler(),
+                inputs=[card["mock_usage_slider"], card["account_state"]],
+            )
 
     def create_interface(self) -> gr.Blocks:
         """Create the Gradio interface."""

@@ -269,6 +269,8 @@ def get_mock_usage(account_name: str) -> str:
         return generate_gemini_usage(account)
     elif provider == "mistral":
         return generate_mistral_usage(account)
+    elif provider == "mock":
+        return ""  # Mock provider uses slider input
     return "⚠️ Unknown provider type"
 
 

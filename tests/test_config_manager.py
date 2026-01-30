@@ -1000,3 +1000,135 @@ class TestUsageSwitchThreshold:
 
         mgr2 = ConfigManager(config_path)
         assert mgr2.get_usage_switch_threshold() == 80
+
+
+class TestMockRemainingUsage:
+    """Test cases for mock remaining usage (for testing usage-based switching)."""
+
+    def test_get_mock_usage_default(self, tmp_path):
+        """Test that default mock usage is 0.5 (50%)."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        assert mgr.get_mock_remaining_usage("any-mock") == 0.5
+
+    def test_set_and_get_mock_usage(self, tmp_path):
+        """Test setting and getting mock remaining usage."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        mgr.set_mock_remaining_usage("mock-1", 0.3)
+        assert mgr.get_mock_remaining_usage("mock-1") == 0.3
+
+        mgr.set_mock_remaining_usage("mock-2", 0.8)
+        assert mgr.get_mock_remaining_usage("mock-2") == 0.8
+
+        # mock-1 should still be 0.3
+        assert mgr.get_mock_remaining_usage("mock-1") == 0.3
+
+    def test_mock_usage_validates_range(self, tmp_path):
+        """Test that mock usage must be between 0.0 and 1.0."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        with pytest.raises(ValueError, match="must be between 0.0 and 1.0"):
+            mgr.set_mock_remaining_usage("mock-1", -0.1)
+
+        with pytest.raises(ValueError, match="must be between 0.0 and 1.0"):
+            mgr.set_mock_remaining_usage("mock-1", 1.1)
+
+    def test_mock_usage_persists(self, tmp_path):
+        """Test that mock usage persists across instances."""
+        config_path = tmp_path / "test.conf"
+
+        mgr1 = ConfigManager(config_path)
+        mgr1.set_mock_remaining_usage("test-mock", 0.25)
+
+        mgr2 = ConfigManager(config_path)
+        assert mgr2.get_mock_remaining_usage("test-mock") == 0.25
+
+
+class TestContextSwitchThreshold:
+    """Test cases for context switch threshold configuration."""
+
+    def test_get_context_threshold_default(self, tmp_path):
+        """Test that default threshold is 90%."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        assert mgr.get_context_switch_threshold() == 90
+
+    def test_set_and_get_context_threshold(self, tmp_path):
+        """Test setting and getting the context threshold."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        mgr.set_context_switch_threshold(75)
+        assert mgr.get_context_switch_threshold() == 75
+
+    def test_context_threshold_validates_range(self, tmp_path):
+        """Test that context threshold must be between 0 and 100."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        with pytest.raises(ValueError, match="must be between 0 and 100"):
+            mgr.set_context_switch_threshold(-1)
+
+        with pytest.raises(ValueError, match="must be between 0 and 100"):
+            mgr.set_context_switch_threshold(101)
+
+    def test_context_threshold_persists(self, tmp_path):
+        """Test that context threshold persists across instances."""
+        config_path = tmp_path / "test.conf"
+
+        mgr1 = ConfigManager(config_path)
+        mgr1.set_context_switch_threshold(80)
+
+        mgr2 = ConfigManager(config_path)
+        assert mgr2.get_context_switch_threshold() == 80
+
+
+class TestMockContextRemaining:
+    """Test cases for mock context remaining (for testing context-based switching)."""
+
+    def test_get_mock_context_default(self, tmp_path):
+        """Test that default mock context is 1.0 (100%)."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        assert mgr.get_mock_context_remaining("any-mock") == 1.0
+
+    def test_set_and_get_mock_context(self, tmp_path):
+        """Test setting and getting mock context remaining."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        mgr.set_mock_context_remaining("mock-1", 0.3)
+        assert mgr.get_mock_context_remaining("mock-1") == 0.3
+
+        mgr.set_mock_context_remaining("mock-2", 0.8)
+        assert mgr.get_mock_context_remaining("mock-2") == 0.8
+
+        # mock-1 should still be 0.3
+        assert mgr.get_mock_context_remaining("mock-1") == 0.3
+
+    def test_mock_context_validates_range(self, tmp_path):
+        """Test that mock context must be between 0.0 and 1.0."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        with pytest.raises(ValueError, match="must be between 0.0 and 1.0"):
+            mgr.set_mock_context_remaining("mock-1", -0.1)
+
+        with pytest.raises(ValueError, match="must be between 0.0 and 1.0"):
+            mgr.set_mock_context_remaining("mock-1", 1.1)
+
+    def test_mock_context_persists(self, tmp_path):
+        """Test that mock context persists across instances."""
+        config_path = tmp_path / "test.conf"
+
+        mgr1 = ConfigManager(config_path)
+        mgr1.set_mock_context_remaining("test-mock", 0.25)
+
+        mgr2 = ConfigManager(config_path)
+        assert mgr2.get_mock_context_remaining("test-mock") == 0.25
