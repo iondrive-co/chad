@@ -3041,7 +3041,8 @@ class ChadWebUI:
             # When live_patch is provided, skip updating the live_stream component directly
             # JS will handle patching the DOM in-place to preserve scroll/selection
             if use_live_patch:
-                display_stream = None  # Signal to use gr.update() without value
+                # Keep underlying value populated for tab switches while still patching DOM
+                display_stream = live_stream or session.last_live_stream
                 live_patch = use_live_patch
             else:
                 display_stream = live_stream

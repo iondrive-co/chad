@@ -494,6 +494,22 @@ def extract_progress_update(response: str) -> ProgressUpdate | None:
         if parsed:
             return parsed
 
+    # Last-resort manual extraction (handles malformed JSON with embedded newlines)
+    manual_match = re.search(
+        r'"type"\\s*:\\s*"progress"(?P<body>[^}]*)}',
+        response,
+        re.DOTALL,
+    )
+    if manual_match:
+        body = manual_match.group("body")
+        summary_match = re.search(r'"summary"\\s*:\\s*"(?P<summary>.*?)"', body, re.DOTALL)
+        location_match = re.search(r'"location"\\s*:\\s*"(?P<loc>[^"]+)"', body)
+        if summary_match:
+            summary = " ".join(summary_match.group("summary").splitlines()).strip()
+            if not _is_placeholder_text(summary):
+                location = location_match.group("loc") if location_match else ""
+                return ProgressUpdate(summary=summary, location=location)
+
     return None
 
 
