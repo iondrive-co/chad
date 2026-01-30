@@ -2342,6 +2342,9 @@ class ChadWebUI:
         """
         try:
             threshold = self.api_client.get_usage_switch_threshold()
+            # Ensure threshold is a valid number
+            if not isinstance(threshold, (int, float)):
+                threshold = 90
         except Exception:
             threshold = 90
 
@@ -3019,8 +3022,9 @@ class ChadWebUI:
             # - Subsequent renders: use live_patch for JS DOM patching
             use_live_patch = live_patch  # Explicit live_patch takes precedence
 
-            if not use_live_patch and live_stream:
+            if not use_live_patch and live_stream and not task_ended:
                 # Check if this live_stream has our wrapper with data-live-id
+                # Skip live_patch when task_ended - we need actual value in component
                 has_live_id = f'data-live-id="{live_stream_id}"' in live_stream
                 if has_live_id:
                     if session.has_initial_live_render:
@@ -3139,7 +3143,6 @@ class ChadWebUI:
                 error_msg = f"❌ Project must be a git repository: {project_path}"
                 yield make_yield([], error_msg, summary=error_msg, interactive=True)
                 return
-
             session.task_description = task_description
             session.project_path = str(path_obj)
             session.last_live_stream = ""  # Clear for new task
@@ -3200,16 +3203,19 @@ class ChadWebUI:
             )
 
             # Create event log for structured logging
-            if not session.event_log:
-                session.event_log = EventLog(session.id)
-            session.event_log.log(SessionStartedEvent(
-                task_description=task_description,
-                project_path=str(path_obj),
-                coding_provider=coding_provider,
-                coding_account=coding_account,
-                coding_model=selected_model if selected_model != "default" else None,
-            ))
-            session.event_log.start_turn()
+            try:
+                if not session.event_log:
+                    session.event_log = EventLog(session.id)
+                session.event_log.log(SessionStartedEvent(
+                    task_description=task_description,
+                    project_path=str(path_obj),
+                    coding_provider=coding_provider,
+                    coding_account=coding_account,
+                    coding_model=selected_model if selected_model != "default" else None,
+                ))
+                session.event_log.start_turn()
+            except Exception:
+                pass  # Event logging is optional
 
             status_prefix = "**Starting Chad...**\n\n"
             status_prefix += f"• Project: {path_obj}\n"
@@ -3316,7 +3322,6 @@ class ChadWebUI:
             pending_message_idx = None
             render_state = LiveStreamRenderState()
             progress_emitted = False  # Track if we've shown a progress update bubble
-
             while not relay_complete.is_set() and not session.cancel_requested:
                 try:
                     msg = message_queue.get(timeout=0.02)
@@ -3678,23 +3683,38 @@ class ChadWebUI:
                     verify_display_buffer = LiveStreamDisplayBuffer()
                     verify_display_buffer.append("🔍 Starting verification...\n")
                     verify_last_yield = 0.0
+                    verify_live_stream = ""
                     while not verification_complete.is_set() and not session.cancel_requested:
                         try:
                             msg = message_queue.get(timeout=0.05)
                             if msg[0] == "stream":
                                 chunk = msg[1]
+                                html_chunk = msg[2] if len(msg) > 2 else None
                                 if chunk.strip():
                                     verify_display_buffer.append(chunk)
+                                # Use HTML chunk from API if available, otherwise render from text
+                                if html_chunk:
+                                    verify_live_stream = build_live_stream_html_from_pyte(
+                                        html_chunk, "VERIFICATION AI", live_stream_id
+                                    )
+                                elif chunk.strip():
+                                    verify_live_stream = build_live_stream_html(
+                                        verify_display_buffer.content, "VERIFICATION AI", live_stream_id
+                                    )
+                                if verify_live_stream:
+                                    session.last_live_stream = verify_live_stream
                                     now = time_module.time()
                                     if now - verify_last_yield >= min_yield_interval:
-                                        rendered = build_live_stream_html(
-                                            verify_display_buffer.content, "VERIFICATION AI", live_stream_id
-                                        )
-                                        yield make_yield(chat_history, verify_status, rendered, task_state="verifying",
+                                        yield make_yield(chat_history, verify_status, verify_live_stream, task_state="verifying",
                                                          verification_account=verification_account_for_run)
                                         verify_last_yield = now
                         except queue.Empty:
                             pass
+
+                    # Final yield to ensure content is shown even if loop exited quickly
+                    if verify_live_stream:
+                        yield make_yield(chat_history, verify_status, verify_live_stream, task_state="verifying",
+                                         verification_account=verification_account_for_run)
 
                     verification_thread.join(timeout=1.0)
                     verified, verification_feedback = verification_result[0], verification_result[1]
@@ -3813,23 +3833,36 @@ class ChadWebUI:
                             # Poll message queue while revision runs (live stream updates)
                             rev_display_buffer = LiveStreamDisplayBuffer()
                             rev_last_yield = 0.0
+                            rev_live_stream = ""
                             while not revision_complete.is_set() and not session.cancel_requested:
                                 try:
                                     msg = message_queue.get(timeout=0.05)
                                     if msg[0] == "stream":
                                         chunk = msg[1]
+                                        html_chunk = msg[2] if len(msg) > 2 else None
                                         if chunk.strip():
                                             rev_display_buffer.append(chunk)
+                                        # Use HTML chunk from API if available, otherwise render from text
+                                        if html_chunk:
+                                            rev_live_stream = build_live_stream_html_from_pyte(
+                                                html_chunk, "CODING AI", live_stream_id
+                                            )
+                                        elif chunk.strip():
+                                            rev_live_stream = build_live_stream_html(
+                                                rev_display_buffer.content, "CODING AI", live_stream_id
+                                            )
+                                        if rev_live_stream:
+                                            session.last_live_stream = rev_live_stream
                                             now = time_module.time()
                                             if now - rev_last_yield >= min_yield_interval:
-                                                # Update only the dedicated live stream panel
-                                                rendered = build_live_stream_html(
-                                                    rev_display_buffer.content, "CODING AI", live_stream_id
-                                                )
-                                                yield make_yield(chat_history, revision_status_msg, rendered, task_state="running")
+                                                yield make_yield(chat_history, revision_status_msg, rev_live_stream, task_state="running")
                                                 rev_last_yield = now
                                 except queue.Empty:
                                     pass
+
+                            # Final yield to ensure content is shown even if loop exited quickly
+                            if rev_live_stream:
+                                yield make_yield(chat_history, revision_status_msg, rev_live_stream, task_state="running")
 
                             revision_thread.join(timeout=1.0)
                             revision_response = revision_result[0]
@@ -3931,22 +3964,36 @@ class ChadWebUI:
                             # Poll message queue while revision runs
                             rev_display_buffer = LiveStreamDisplayBuffer()
                             rev_last_yield = 0.0
+                            rev_live_stream = ""
                             while not revision_complete.is_set() and not session.cancel_requested:
                                 try:
                                     msg = message_queue.get(timeout=0.05)
                                     if msg[0] == "stream":
                                         chunk = msg[1]
+                                        html_chunk = msg[2] if len(msg) > 2 else None
                                         if chunk.strip():
                                             rev_display_buffer.append(chunk)
+                                        # Use HTML chunk from API if available, otherwise render from text
+                                        if html_chunk:
+                                            rev_live_stream = build_live_stream_html_from_pyte(
+                                                html_chunk, "CODING AI", live_stream_id
+                                            )
+                                        elif chunk.strip():
+                                            rev_live_stream = build_live_stream_html(
+                                                rev_display_buffer.content, "CODING AI", live_stream_id
+                                            )
+                                        if rev_live_stream:
+                                            session.last_live_stream = rev_live_stream
                                             now = time_module.time()
                                             if now - rev_last_yield >= min_yield_interval:
-                                                rendered = build_live_stream_html(
-                                                    rev_display_buffer.content, "CODING AI", live_stream_id
-                                                )
-                                                yield make_yield(chat_history, revision_status_msg, rendered, task_state="running")
+                                                yield make_yield(chat_history, revision_status_msg, rev_live_stream, task_state="running")
                                                 rev_last_yield = now
                                 except queue.Empty:
                                     pass
+
+                            # Final yield to ensure content is shown even if loop exited quickly
+                            if rev_live_stream:
+                                yield make_yield(chat_history, revision_status_msg, rev_live_stream, task_state="running")
 
                             revision_thread.join(timeout=1.0)
                             revision_success = revision_result[0]
@@ -4430,6 +4477,7 @@ class ChadWebUI:
         last_yield_time = 0.0
         min_yield_interval = 0.05
 
+        live_stream = ""
         while not relay_complete.is_set() and not session.cancel_requested:
             try:
                 msg = message_queue.get(timeout=0.02)
@@ -4437,13 +4485,19 @@ class ChadWebUI:
 
                 if msg_type == "stream":
                     chunk = msg[1]
+                    html_chunk = msg[2] if len(msg) > 2 else None
                     if chunk.strip():
                         full_history.append(_history_entry(current_ai, chunk))
                         display_buffer.append(chunk)
+                    # Use HTML chunk from API if available, otherwise render from text
+                    if html_chunk:
+                        live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai, live_stream_id)
+                    elif chunk.strip():
+                        live_stream = build_live_stream_html(display_buffer.content, current_ai, live_stream_id)
+                    if live_stream:
+                        session.last_live_stream = live_stream
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
-                            # Update only the dedicated live stream panel
-                            live_stream = build_live_stream_html(display_buffer.content, current_ai, live_stream_id)
                             yield make_followup_yield(
                                 chat_history,
                                 live_stream,
@@ -4526,16 +4580,29 @@ class ChadWebUI:
                 retry_thread.start()
 
                 # Wait for retry with streaming
+                retry_live_stream = ""
                 while not retry_complete.is_set() and not session.cancel_requested:
                     try:
                         msg = message_queue.get(timeout=0.1)
                         if msg[0] == "stream":
-                            full_history.append(_history_entry(current_ai, msg[1]))
-                            display_buffer.append(msg[1])
-                            live_stream = build_live_stream_html(display_buffer.content, current_ai, live_stream_id)
-                            yield make_followup_yield(chat_history, live_stream, working=True, merge_updates=merge_no_change)
+                            chunk = msg[1]
+                            html_chunk = msg[2] if len(msg) > 2 else None
+                            if chunk.strip():
+                                full_history.append(_history_entry(current_ai, chunk))
+                                display_buffer.append(chunk)
+                            if html_chunk:
+                                retry_live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai, live_stream_id)
+                            elif chunk.strip():
+                                retry_live_stream = build_live_stream_html(display_buffer.content, current_ai, live_stream_id)
+                            if retry_live_stream:
+                                session.last_live_stream = retry_live_stream
+                                yield make_followup_yield(chat_history, retry_live_stream, working=True, merge_updates=merge_no_change)
                     except queue.Empty:
                         pass
+
+                # Final yield to ensure content is shown
+                if retry_live_stream:
+                    yield make_followup_yield(chat_history, retry_live_stream, working=True, merge_updates=merge_no_change)
 
                 retry_thread.join(timeout=1)
 
@@ -4648,6 +4715,7 @@ class ChadWebUI:
                 verify_display_buffer = LiveStreamDisplayBuffer()
                 verify_display_buffer.append("🔍 Starting verification...\n")
                 verify_last_yield = 0.0
+                verify_live_stream = ""
                 while not verification_complete.is_set() and not session.cancel_requested:
                     try:
                         msg = message_queue.get(timeout=0.05)
@@ -4655,15 +4723,21 @@ class ChadWebUI:
                             chunk = msg[1]
                             if chunk.strip():
                                 verify_display_buffer.append(chunk)
+                                verify_live_stream = build_live_stream_html(
+                                    verify_display_buffer.content, "VERIFICATION AI", live_stream_id
+                                )
+                                if verify_live_stream:
+                                    session.last_live_stream = verify_live_stream
                                 now = time_module.time()
                                 if now - verify_last_yield >= min_yield_interval:
-                                    rendered = build_live_stream_html(
-                                        verify_display_buffer.content, "VERIFICATION AI", live_stream_id
-                                    )
-                                    yield make_followup_yield(chat_history, rendered, working=True, merge_updates=merge_no_change)
+                                    yield make_followup_yield(chat_history, verify_live_stream, working=True, merge_updates=merge_no_change)
                                     verify_last_yield = now
                     except queue.Empty:
                         pass
+
+                # Final yield to ensure content is shown even if loop exited quickly
+                if verify_live_stream:
+                    yield make_followup_yield(chat_history, verify_live_stream, working=True, merge_updates=merge_no_change)
 
                 verification_thread.join(timeout=1.0)
                 verified, verification_feedback = verification_result[0], verification_result[1]
