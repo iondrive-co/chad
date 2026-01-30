@@ -27,14 +27,14 @@ You need to complete the following task:
 {task}
 ---
 Use the following sequence to complete the task:
-1. Explore the code to understand the task.
-2. Once you understand what needs to be done, you MUST output a progress update so the user can see what you found:
+1. Do a quick exploration, lasting no more than 2 minutes, of the code to understand some classes involved in the task.
+2. Output a progress update so the user can see what you found:
 ```json
 {{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45 - request() method"}}
 ```
-3. Write test(s) that should fail until the fix/feature is implemented.
-4. Make the changes, adjusting tests as needed. If no changes are required, skip to step 7.
-5. Run verification commands (lint and tests) as described above.
+3. Write test(s) that should fail until the fix/feature is implemented (you can explore more code to achieve this goal)
+4. Make the changes, adjusting tests and exploring more code as needed. If no changes are required, skip to step 7.
+5. Once you believe your changes will complete the task, run verification commands (lint and tests) as described above.
 6. Fix ALL failures and retest if required.
 7. End your response with a JSON summary block like this:
 ```json

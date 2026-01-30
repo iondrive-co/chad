@@ -229,6 +229,19 @@ def test_task_executor_times_out_hung_agent(tmp_path, monkeypatch):
     reasons = [e.get("reason") for e in events if e.get("type") == "session_ended"]
     assert "timeout" in reasons
 
+    # Stream events should include both complete and message_complete so UI closes cleanly
+    stream_events = executor.get_events(task.id, timeout=0.01)
+    complete_events = [e for e in stream_events if e.type == "complete"]
+    message_events = [e for e in stream_events if e.type == "message_complete"]
+    assert complete_events, "timeout should emit a complete event"
+    assert any(
+        ("timeout" in (e.data.get("message", "") or "").lower())
+        or ("timed out" in (e.data.get("message", "") or "").lower())
+        for e in complete_events
+    )
+    assert message_events, "timeout should emit a final message_complete bubble"
+    assert any("timed out" in (e.data.get("content", "") or "") for e in message_events)
+
     # Ensure the PTY session was cleaned up
     assert get_pty_stream_service().list_sessions() == []
 
