@@ -519,6 +519,9 @@ class TaskExecutor:
         self.inactivity_timeout = inactivity_timeout
         self.terminal_flush_interval = terminal_flush_interval
         self._tasks: dict[str, Task] = {}
+        # Track activity across all channels (PTY output AND tool calls) so timeouts
+        # don't ignore heavy Read/Grep usage with no terminal writes.
+        self._activity_times: dict[str, float] = {}
         self._lock = threading.RLock()
 
     def start_task(
@@ -578,8 +581,10 @@ class TaskExecutor:
         # Create event log
         task.event_log = EventLog(session_id)
 
+        now = time.time()
         with self._lock:
             self._tasks[task.id] = task
+            self._activity_times[task.id] = now
 
         # Get provider info
         coding_provider = accounts[coding_account]
@@ -631,6 +636,7 @@ class TaskExecutor:
         cols = terminal_cols if terminal_cols else TERMINAL_COLS
 
         last_output_time = time.time()
+        last_warning_time = 0.0
         terminal_buffer = bytearray()
         terminal_lock = threading.Lock()
         last_log_flush = time.time()
@@ -665,6 +671,11 @@ class TaskExecutor:
         def emit(event_type: str, **data):
             event = StreamEvent(type=event_type, data=data)
             task._event_queue.put(event)
+            # Count any emitted event as activity (covers status/progress when no PTY output yet)
+            try:
+                self._touch_activity(task.id)
+            except Exception:
+                pass
             if on_event:
                 try:
                     on_event(event)
@@ -730,6 +741,8 @@ class TaskExecutor:
                 nonlocal last_output_time
                 if event.type == "output":
                     last_output_time = time.time()
+                    with self._lock:
+                        self._activity_times[task.id] = last_output_time
 
                     try:
                         chunk_bytes = base64.b64decode(event.data)
@@ -797,7 +810,17 @@ class TaskExecutor:
                 # Inactivity timeout to catch hung agents
                 if self.inactivity_timeout is not None:
                     now = time.time()
-                    if now - last_output_time > self.inactivity_timeout:
+                    last_any_activity = last_output_time
+                    with self._lock:
+                        last_any_activity = self._activity_times.get(task.id, last_output_time)
+
+                    idle_secs = now - last_any_activity
+                    warn_after = self.inactivity_timeout * 0.8
+                    if idle_secs > warn_after and (now - last_warning_time) > 5.0:
+                        emit("status", status=f"⚠️ Agent idle for {int(idle_secs)}s — will time out at {int(self.inactivity_timeout)}s")
+                        last_warning_time = now
+
+                    if idle_secs > self.inactivity_timeout:
                         flush_terminal_buffer()
                         pty_service.terminate(stream_id)
                         emit(
@@ -817,6 +840,9 @@ class TaskExecutor:
                                 success=False,
                                 reason="timeout",
                             ))
+
+                        # Also emit a message_complete so UI closes the live slot
+                        emit("message_complete", speaker="CODING AI", content="Task timed out due to inactivity")
 
                         pty_service.cleanup_session(stream_id)
                         return
@@ -861,6 +887,10 @@ class TaskExecutor:
                     exit_code=exit_code,
                 )
 
+                # Ensure UI gets a final assistant bubble when we fail without one
+                if exit_code != -1:
+                    emit("message_complete", speaker="CODING AI", content=f"Task failed (exit {exit_code})")
+
             task.completed_at = datetime.now(timezone.utc)
             session.active = False
 
@@ -896,11 +926,20 @@ class TaskExecutor:
                     pty_service.cleanup_session(task.stream_id)
             except Exception:
                 pass
+            # Drop activity tracker entry to avoid stale references
+            with self._lock:
+                self._activity_times.pop(task.id, None)
 
     def get_task(self, task_id: str) -> Task | None:
         """Get a task by ID."""
         with self._lock:
             return self._tasks.get(task_id)
+
+    def _touch_activity(self, task_id: str) -> None:
+        """Update last activity timestamp for a task (tool calls, etc.)."""
+        now = time.time()
+        with self._lock:
+            self._activity_times[task_id] = now
 
     def cancel_task(self, task_id: str) -> bool:
         """Request cancellation of a task."""

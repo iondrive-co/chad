@@ -2899,6 +2899,16 @@ class TestScreenshotUpload:
         # No screenshot references should be present
         assert "Screenshot" not in prompt
 
+    def test_coding_prompt_frontloads_progress_and_time_cap(self):
+        """Coding prompt should require immediate progress update and 2-minute cap before the task block."""
+        from chad.util.prompts import build_coding_prompt
+
+        prompt = build_coding_prompt(task="Do thing")
+        assert "Within your FIRST tool call" in prompt
+        assert "2 minutes" in prompt
+        # Progress instructions should appear before the Task section
+        assert prompt.index("Within your FIRST tool call") < prompt.index("# Task")
+
     def test_task_create_schema_accepts_screenshots(self):
         """TaskCreate schema should accept an optional screenshots field."""
         from chad.server.api.schemas.task import TaskCreate

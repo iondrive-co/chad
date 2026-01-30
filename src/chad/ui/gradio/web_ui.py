@@ -3572,6 +3572,8 @@ class ChadWebUI:
             verification_log: list[dict[str, object]] = []
             verified: bool | None = None  # Track verification result
 
+            sanitized_reason = completion_reason[0] or ""
+
             if session.cancel_requested:
                 final_status = "🛑 Task cancelled by user"
                 chat_history.append(
@@ -4054,14 +4056,17 @@ class ChadWebUI:
                             completion_msg += f"\n\n*{verification_feedback}*"
                     chat_history.append({"role": "user", "content": completion_msg})
             else:
+                sanitized_reason = completion_reason[0] or ""
+                if "End your response with a JSON summary block" in sanitized_reason or '"change_summary": "One sentence describing what was changed"' in sanitized_reason:
+                    sanitized_reason = "Task ended before producing any agent output."
                 final_status = (
-                    f"❌ Task did not complete successfully\n\n*{completion_reason[0]}*"
-                    if completion_reason[0]
+                    f"❌ Task did not complete successfully\n\n*{sanitized_reason}*"
+                    if sanitized_reason
                     else "❌ Task did not complete successfully"
                 )
                 failure_msg = "───────────── ❌ TASK FAILED ─────────────"
-                if completion_reason[0]:
-                    failure_msg += f"\n\n*{completion_reason[0]}*"
+                if sanitized_reason:
+                    failure_msg += f"\n\n*{sanitized_reason}*"
                 chat_history.append({"role": "user", "content": failure_msg})
 
             if final_status:
@@ -4088,7 +4093,7 @@ class ChadWebUI:
             if session.event_log:
                 session.event_log.log(SessionEndedEvent(
                     success=overall_success,
-                    reason=completion_reason[0] or session_status,
+                    reason=sanitized_reason if not overall_success else (completion_reason[0] or session_status),
                 ))
             if session.log_path:
                 final_status += f"\n\n*Session log: {session.log_path}*"
