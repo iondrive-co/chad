@@ -459,43 +459,40 @@ def extract_progress_update(response: str) -> ProgressUpdate | None:
     import json
     import re
 
+    def _parse_progress(json_text: str) -> ProgressUpdate | None:
+        """Parse progress JSON, retrying with newline normalization."""
+        candidates = [json_text, json_text.replace("\r", " ").replace("\n", " ")]
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if data.get("type") != "progress":
+                return None
+            summary = data.get("summary", "")
+            if _is_placeholder_text(summary):
+                return None
+            return ProgressUpdate(
+                summary=summary,
+                location=data.get("location", ""),
+                before_screenshot=data.get("before_screenshot"),
+                before_description=data.get("before_description"),
+            )
+        return None
+
     # Look for JSON block with type: "progress"
     json_match = re.search(r'```json\s*(\{[^`]*"type"\s*:\s*"progress"[^`]*\})\s*```', response, re.DOTALL)
     if json_match:
-        try:
-            data = json.loads(json_match.group(1))
-            if data.get("type") == "progress":
-                summary = data.get("summary", "")
-                # Filter out placeholder text
-                if _is_placeholder_text(summary):
-                    return None
-                return ProgressUpdate(
-                    summary=summary,
-                    location=data.get("location", ""),
-                    before_screenshot=data.get("before_screenshot"),
-                    before_description=data.get("before_description"),
-                )
-        except json.JSONDecodeError:
-            pass
+        parsed = _parse_progress(json_match.group(1))
+        if parsed:
+            return parsed
 
     # Try to find raw JSON with type: progress (fallback)
-    raw_match = re.search(r'\{\s*"type"\s*:\s*"progress"[^}]+\}', response)
+    raw_match = re.search(r'\{\s*"type"\s*:\s*"progress"[^}]+\}', response, re.DOTALL)
     if raw_match:
-        try:
-            data = json.loads(raw_match.group(0))
-            if data.get("type") == "progress":
-                summary = data.get("summary", "")
-                # Filter out placeholder text
-                if _is_placeholder_text(summary):
-                    return None
-                return ProgressUpdate(
-                    summary=summary,
-                    location=data.get("location", ""),
-                    before_screenshot=data.get("before_screenshot"),
-                    before_description=data.get("before_description"),
-                )
-        except json.JSONDecodeError:
-            pass
+        parsed = _parse_progress(raw_match.group(0))
+        if parsed:
+            return parsed
 
     return None
 
