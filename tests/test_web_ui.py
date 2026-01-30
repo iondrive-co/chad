@@ -2274,6 +2274,20 @@ Some thinking text...
         result = extract_progress_update(content)
         assert result is None
 
+    def test_extract_progress_update_handles_newlines_in_summary(self):
+        """Progress JSON with accidental newlines should still parse."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+{"type":"progress","summary":"Line 1 of summary
+ Line 2 continuing","location":"src/app.py:10"}
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert "Line 1 of summary" in result.summary
+        assert "Line 2 continuing" in result.summary
+        assert result.location == "src/app.py:10"
+
 
 class TestDynamicStatusLine:
     """Test dynamic status line with task state and worktree path."""
