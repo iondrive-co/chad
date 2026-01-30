@@ -640,6 +640,7 @@ class TaskExecutor:
         terminal_buffer = bytearray()
         terminal_lock = threading.Lock()
         last_log_flush = time.time()
+        first_stream_chunk_seen = False
 
         # Terminal emulator for extracting meaningful text from PTY output
         log_emulator = TerminalEmulator(cols=cols, rows=rows)
@@ -739,6 +740,7 @@ class TaskExecutor:
             # and doesn't compete with client subscriber queues
             def log_pty_event(event: PTYEvent):
                 nonlocal last_output_time
+                nonlocal first_stream_chunk_seen
                 if event.type == "output":
                     last_output_time = time.time()
                     with self._lock:
@@ -748,6 +750,13 @@ class TaskExecutor:
                         chunk_bytes = base64.b64decode(event.data)
                     except Exception:
                         chunk_bytes = b""
+
+                    # Suppress the provider launch banner (e.g., OpenAI Codex header) from live view
+                    if not first_stream_chunk_seen:
+                        first_stream_chunk_seen = True
+                        decoded = chunk_bytes.decode(errors="ignore")
+                        if "OpenAI Codex" in decoded or "model:" in decoded and "directory:" in decoded:
+                            return
 
                     # For anthropic, parse stream-json and convert to readable text
                     if json_parser:
