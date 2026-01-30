@@ -8079,7 +8079,12 @@ initializeLiveDomPatching();
 
                 for sess in all_sessions:
                     if sess.id == selected_session.id:
-                        updates.append(gr.update(value=patch_html))
+                        # Only update if we have content to restore; otherwise leave current
+                        # content intact to avoid showing "Waiting for agent output" prematurely
+                        if patch_html:
+                            updates.append(gr.update(value=patch_html))
+                        else:
+                            updates.append(gr.update())
                     else:
                         updates.append(gr.update())
                 return updates

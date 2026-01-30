@@ -752,10 +752,12 @@ class TaskExecutor:
                         chunk_bytes = b""
 
                     # Suppress the provider launch banner (e.g., OpenAI Codex header) from live view
+                    # Note: this only affects the emit() call below - SSE subscribers still receive
+                    # the raw PTY events via _dispatch_event which runs before this callback.
                     if not first_stream_chunk_seen:
                         first_stream_chunk_seen = True
                         decoded = chunk_bytes.decode(errors="ignore")
-                        if "OpenAI Codex" in decoded or "model:" in decoded and "directory:" in decoded:
+                        if "OpenAI Codex" in decoded or ("model:" in decoded and "directory:" in decoded):
                             return
 
                     # For anthropic, parse stream-json and convert to readable text
