@@ -724,3 +724,29 @@ class APIClient:
         )
         resp.raise_for_status()
         return resp.json().get("remaining", remaining)
+
+    def get_max_verification_attempts(self) -> int:
+        """Get the maximum number of verification attempts.
+
+        Returns:
+            Maximum attempts (default 5)
+        """
+        resp = self._client.get(self._url("/config/max-verification-attempts"))
+        resp.raise_for_status()
+        return resp.json().get("attempts", 5)
+
+    def set_max_verification_attempts(self, attempts: int) -> int:
+        """Set the maximum number of verification attempts.
+
+        Args:
+            attempts: Maximum attempts (1-20)
+
+        Returns:
+            The attempts that was set
+        """
+        resp = self._client.put(
+            self._url("/config/max-verification-attempts"),
+            json={"attempts": attempts},
+        )
+        resp.raise_for_status()
+        return resp.json().get("attempts", attempts)
