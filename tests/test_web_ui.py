@@ -2963,18 +2963,16 @@ class TestScreenshotUpload:
         from chad.util.prompts import build_coding_prompt
 
         prompt = build_coding_prompt(task="Do thing")
-        assert "initial exploration" in prompt
+        assert "exploration" in prompt
         assert "progress" in prompt
         # Progress instructions should appear after the Task section (as part of sequence)
-        assert "Without terminating" in prompt or "progress update" in prompt
+        assert "progress update" in prompt
 
-    def test_progress_continuation_message_is_sent(self):
-        """When progress is detected, a continuation message should be sent to the agent.
+    def test_progress_is_extracted_correctly(self):
+        """Progress JSON should be correctly extracted from agent output.
 
-        This test verifies the hack propagation fix: agents (especially Codex) were
-        stopping after outputting progress JSON because they interpreted it as the
-        end of a turn. The fix sends a continuation message to prompt the agent
-        to continue with the remaining steps.
+        The progress update allows users to see what the agent found during
+        initial exploration before it continues with the remaining steps.
         """
         from chad.util.prompts import extract_progress_update
 
@@ -2989,11 +2987,6 @@ class TestScreenshotUpload:
         assert progress is not None
         assert progress.summary == "Found main entry point"
         assert progress.location == "src/main.py:42"
-
-        # The continuation message format
-        continuation_msg = "Continue with step 3: write tests and implement the changes.\n"
-        assert "Continue" in continuation_msg
-        assert "step 3" in continuation_msg
 
     def test_task_create_schema_accepts_screenshots(self):
         """TaskCreate schema should accept an optional screenshots field."""

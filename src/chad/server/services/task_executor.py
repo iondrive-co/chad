@@ -394,17 +394,20 @@ def build_agent_command(
             initial_input = None
 
     elif provider == "openai":
-        # Codex CLI with isolated home
+        # Codex CLI with isolated home - use exec mode for non-interactive execution
+        # This prevents the agent from stopping after outputting text and waiting for input
         codex_home = Path.home() / ".chad" / "codex-homes" / account_name
         cmd = [
             resolve_tool("codex"),
+            "exec",  # Non-interactive mode - runs to completion
             "--dangerously-bypass-approvals-and-sandbox",
             "-C",
             str(project_path),
+            "-",  # Read prompt from stdin
         ]
         env["HOME"] = str(codex_home)
         if full_prompt:
-            cmd.extend([full_prompt])
+            initial_input = full_prompt + "\n"
 
     elif provider == "gemini":
         # Gemini CLI in YOLO mode

@@ -8,7 +8,8 @@ v0.11 Slip Slop Slap
 
 Use of /agents
 Repeated failures
-Task list - wait until limit expires and feed in more
+Task list - wait until limit expires and feed in more. User inputs a list of bugs/features, these are async run through
+phases ANALYZE, IMPLEMENT <-> REVIEW (prove with screenshot)
 
 v0.12 Intentionality Reduction
 
