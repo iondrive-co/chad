@@ -592,6 +592,10 @@ class GitWorktreeManager:
         if not worktree_path.exists():
             return False, None, "Worktree not found"
 
+        # If there is nothing to merge, surface a clear error early
+        if not self.has_changes(task_id):
+            return False, None, "No changes to merge"
+
         # First commit any uncommitted changes in the worktree
         # Message doesn't matter since we'll squash everything into one commit
         commit_ok, commit_error = self.commit_all_changes(task_id, "WIP")

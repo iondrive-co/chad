@@ -2334,6 +2334,7 @@ class TestLivePatchScrollPreservation:
         assert live_patch is None
         assert flag is True  # should flip on first render
 
+
 class TestDynamicStatusLine:
     """Test dynamic status line with task state and worktree path."""
 

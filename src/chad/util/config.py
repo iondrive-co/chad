@@ -12,6 +12,20 @@ def resolve_project_root(project_root: Path | None = None) -> tuple[Path, str]:
     Returns:
         Tuple of (resolved_path, reason)
     """
+    def _find_root(start: Path) -> Path | None:
+        """Walk upward from a starting path to locate a project root.
+
+        A project root is defined by the presence of either a pyproject.toml
+        file or a .git directory. The first match encountered while walking
+        upward is returned.
+        """
+        for candidate in [start] + list(start.parents):
+            if (candidate / "pyproject.toml").exists():
+                return candidate
+            if (candidate / ".git").exists():
+                return candidate
+        return None
+
     if project_root:
         resolved = Path(project_root).expanduser().resolve()
         return resolved, "argument"
@@ -25,7 +39,22 @@ def resolve_project_root(project_root: Path | None = None) -> tuple[Path, str]:
             return candidate.resolve(), "env:CHAD_PROJECT_ROOT"
         fallback_reason = f"env_missing:{candidate}"
 
-    return Path(__file__).resolve().parents[2], fallback_reason
+    # Prefer an auto-detected root based on git/pyproject markers
+    search_starts = []
+    try:
+        search_starts.append(Path.cwd())
+    except Exception:
+        pass
+    search_starts.append(Path(__file__).resolve())
+
+    for start in search_starts:
+        root = _find_root(start)
+        if root:
+            reason = "auto:pyproject" if (root / "pyproject.toml").exists() else "auto:git"
+            return root, reason
+
+    # Fallback to the repository parent of src/chad/...
+    return Path(__file__).resolve().parents[3], fallback_reason
 
 
 def ensure_project_root_env(project_root: Path | None = None) -> dict[str, object]:
