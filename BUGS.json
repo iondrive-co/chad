@@ -4,21 +4,24 @@
     "description": "When watching live updates in the Gradio live-stream box, the viewport stops at an old offset even if the user was at the bottom; new output arrives but the log no longer auto-pins to the new bottom.",
     "hypothesis": "The custom autoscroll logic in initializeLiveStreamScrollTracking (src/chad/ui/gradio/web_ui.py) restores saved scrollTop when MutationObserver fires because userScrolledUp is set and lastScrollHeight isn't refreshed for live DOM patches, so height growth isn't treated as contentGrew; detect 'near bottom' before patching and always set scrollTop to scrollHeight in that case.",
     "status": "unverified",
-    "fix": "Modified the MutationObserver callback in initializeLiveStreamScrollTracking to check if the user was at the bottom BEFORE content grew (using lastScrollHeight), and if so, always auto-scroll to the new bottom and reset userScrolledUp to false. This prevents the stale scroll state from blocking autoscroll when new content arrives."
+    "fix": "Modified the MutationObserver callback in initializeLiveStreamScrollTracking to check if the user was at the bottom BEFORE content grew (using lastScrollHeight), and if so, always auto-scroll to the new bottom and reset userScrolledUp to false. This prevents the stale scroll state from blocking autoscroll when new content arrives.",
+    "screenshot": "N/A - behavioral fix during live streaming, cannot be captured in static screenshot"
   },
   {
     "title": "CLI settings omit new config options",
     "description": "The CLI UI settings menu only exposes accounts, cleanup days, and a verification toggle, leaving verification settings, preferred verification model, provider fallback order, usage/context thresholds, mock usage/context, UI mode, and other config values unviewable/uneditable from the CLI.",
     "hypothesis": "Settings are hard-coded in src/chad/ui/cli/app.py with no shared schema from config_manager/routes/config.py, so any new config key is easy to forget; drive the CLI menu from the server config metadata (CONFIG_BASE_KEYS or a config schema endpoint) to force parity and fail when a new key isn't rendered.",
     "status": "unverified",
-    "fix": "Expanded run_settings_menu in src/chad/ui/cli/app.py to expose all config options via the APIClient: verification agent, preferred verification model, provider fallback order, usage switch threshold, context switch threshold, and UI mode. The menu now displays current values for all settings and provides options [4]-[8] to edit them."
+    "fix": "Expanded run_settings_menu in src/chad/ui/cli/app.py to expose all config options via the APIClient: verification agent, preferred verification model, provider fallback order, usage switch threshold, context switch threshold, and UI mode. The menu now displays current values for all settings and provides options [4]-[8] to edit them.",
+    "screenshot": "Use scripts/screenshot_cli.py to capture CLI menu output showing all config options"
   },
   {
     "title": "Cannot set verification agent in CLI",
     "description": "Choosing a verification agent in the CLI has no effect—tasks run without a verifier and the selection is not persisted.",
     "hypothesis": "run_settings_menu uses set_account_role('VERIFICATION') but start_task never passes verification_agent/model/reasoning to the API and the CLI ignores /config/verification-agent; wire the CLI to get/set verification agent via APIClient and include it in start_task payloads.",
     "status": "unverified",
-    "fix": "Updated run_settings_menu to use client.set_verification_agent() API instead of role assignment. Added verification_account lookup via client.get_verification_agent() in the main menu loop, and passed it to run_task_with_streaming which now includes verification_agent in the start_task payload."
+    "fix": "Updated run_settings_menu to use client.set_verification_agent() API instead of role assignment. Added verification_account lookup via client.get_verification_agent() in the main menu loop, and passed it to run_task_with_streaming which now includes verification_agent in the start_task payload.",
+    "screenshot": "Use scripts/screenshot_cli.py to capture CLI menu showing verification agent option"
   },
   {
     "title": "Run Task header layout shows raw JSON and misaligned controls",
@@ -31,34 +34,39 @@
     "description": "Verification stops after three tries; product wants a global setting (visible in Setup/global config) defaulting to five attempts instead of being hardcoded.",
     "hypothesis": "web_ui verification loop sets max_verification_attempts = 3 (src/chad/ui/gradio/web_ui.py ~3619) with no config hook; add a config_manager + API field for max attempts (default 5) and read it where the loop is defined.",
     "status": "unverified",
-    "fix": "Added max_verification_attempts to CONFIG_BASE_KEYS and ConfigManager with get/set methods (default 5). Created API endpoint /config/max-verification-attempts for GET/PUT. Added APIClient method get_max_verification_attempts. Updated both verification loops in web_ui.py (start_chad_task and send_followup) to use self.api_client.get_max_verification_attempts() instead of hardcoded 3. Added setting to CLI settings menu as option [5]."
+    "fix": "Added max_verification_attempts to CONFIG_BASE_KEYS and ConfigManager with get/set methods (default 5). Created API endpoint /config/max-verification-attempts for GET/PUT. Added APIClient method get_max_verification_attempts. Updated both verification loops in web_ui.py (start_chad_task and send_followup) to use self.api_client.get_max_verification_attempts() instead of hardcoded 3. Added setting to CLI settings menu as option [5].",
+    "screenshot": "Now exposed in Gradio UI Setup tab under 'Verification Settings' section; use screenshot_ui.py --tab providers to capture"
   },
   {
     "title": "Qwen outputs duplicated",
     "description": "Streaming responses from the Qwen provider repeat the same text blocks, so the user sees duplicate output lines.",
     "hypothesis": "QwenCodeProvider.get_response (src/chad/util/providers.py) appends content from both 'message' events and 'assistant' events emitted by stream-json, but Qwen sends the same text in both, leading to duplicates; capture only one event type or de-dupe by message id/content before appending.",
     "status": "unverified",
-    "fix": "Removed the handler for 'message' events with role='assistant' in QwenCodeProvider.get_response, keeping only the 'assistant' type handler which uses structured content blocks. This eliminates the duplicate content from the two event types."
+    "fix": "Removed the handler for 'message' events with role='assistant' in QwenCodeProvider.get_response, keeping only the 'assistant' type handler which uses structured content blocks. This eliminates the duplicate content from the two event types.",
+    "screenshot": "N/A - behavioral fix during streaming output, requires live Qwen provider to demonstrate"
   },
   {
     "title": "Rename Chatbot panel to Milestones",
     "description": "The Gradio task view still labels the conversation panel \"Chatbot\"; design wants it titled \"Milestones\".",
     "hypothesis": "The gr.Chatbot component in src/chad/ui/gradio/web_ui.py is instantiated without an explicit label, so it defaults to \"Chatbot\"; set label='Milestones' (and update any visual tests) to match the desired copy.",
     "status": "unverified",
-    "fix": "Added label=\"Milestones\" to the gr.Chatbot constructor in _create_session_ui to rename the panel from 'Chatbot' to 'Milestones'."
+    "fix": "Added label=\"Milestones\" to the gr.Chatbot constructor in _create_session_ui to rename the panel from 'Chatbot' to 'Milestones'.",
+    "screenshot": "/tmp/claude-1000/-home-miles-chad/8c47b01c-c463-4652-8ab3-794535b78a26/scratchpad/bug-screenshots/run-tab-full_run.png"
   },
   {
     "title": "Codex shows system prompt before user-visible output",
     "description": "When using the Codex/OpenAI provider, the live stream begins by printing the full system prompt instead of starting with the assistant's first response.",
     "hypothesis": "The Codex provider streaming handler isn't filtering out system-role messages before forwarding events; the stream JSON decoder (likely in src/chad/util/providers.py or stream_client) forwards all roles verbatim, so the first chunk renders the system prompt.",
     "status": "unverified",
-    "fix": "Added filtering in OpenAICodexProvider.format_json_event_as_text to skip events with role 'user' or 'system', and item.completed events with item_type 'user_message', 'system_message', or 'input_message', or items with role 'user'/'system'. This prevents the system prompt from being displayed in the live stream."
+    "fix": "Added filtering in OpenAICodexProvider.format_json_event_as_text to skip events with role 'user' or 'system', and item.completed events with item_type 'user_message', 'system_message', or 'input_message', or items with role 'user'/'system'. This prevents the system prompt from being displayed in the live stream.",
+    "screenshot": "N/A - behavioral fix during streaming output, requires live Codex provider to demonstrate"
   },
   {
     "title": "Codex only outputs tool calls with no explanations",
     "description": "After the initial system prompt, subsequent Codex output renders raw tool call payloads without any plain-language explanation for the user.",
     "hypothesis": "Tool call events from the Codex provider are forwarded directly without the accompanying assistant commentary; the tool/assistant event merge logic in the Codex provider (src/chad/util/providers.py) or the live stream renderer drops assistant text blocks and only surfaces tool call JSON.",
     "status": "unverified",
-    "fix": "Enhanced the mcp_tool_call handler in format_json_event_as_text to extract and display reasoning/thought/explanation fields from tool call items before showing the tool operation. Also added handlers for other tool call item types (tool_call, function_call, tool_use) to ensure all tool invocation formats are properly formatted instead of shown as raw JSON."
+    "fix": "Enhanced the mcp_tool_call handler in format_json_event_as_text to extract and display reasoning/thought/explanation fields from tool call items before showing the tool operation. Also added handlers for other tool call item types (tool_call, function_call, tool_use) to ensure all tool invocation formats are properly formatted instead of shown as raw JSON.",
+    "screenshot": "N/A - behavioral fix during streaming output, requires live Codex provider to demonstrate"
   }
 ]

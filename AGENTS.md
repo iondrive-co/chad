@@ -73,7 +73,7 @@ this process again
 
 ## Screenshots
 
-For UI changes, take before/after screenshots to verify visual correctness:
+For UI changes, take before/after screenshots to verify visual correctness. **Both Gradio and CLI can be screenshotted.**
 
 1. **Before starting**: Take a screenshot showing the current state
 2. **After changes**: Take a screenshot showing the result of your changes
@@ -88,10 +88,17 @@ For UI changes, take before/after screenshots to verify visual correctness:
 }
 ```
 
-When working on Gradio UI components:
+### Gradio UI Screenshots
+- Use `scripts/screenshot_ui.py` for web UI screenshots
 - Check `src/chad/ui/gradio/verification/visual_test_map.py` for existing screenshot tests
 - If you add or change UI components, update `visual_test_map.py` so future runs pick the right visual tests
 - See `src/chad/ui/gradio/verification/screenshot_fixtures.py` for example fixture data to use in screenshots
+
+### CLI Terminal Screenshots
+- Use `scripts/screenshot_cli.py` for CLI/terminal screenshots
+- Example: `./.venv/bin/python scripts/screenshot_cli.py --command "chad --help" --output /tmp/chad/cli.png`
+- For interactive menus, capture output to a file first, then screenshot the file
+- **Never say "CLI cannot be screenshotted"** - it can, using this script
 
 ## Visual Test Targeting
 
