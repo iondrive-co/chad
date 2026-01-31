@@ -94,6 +94,8 @@ class Session:
     has_initial_live_render: bool = False
     # Persistent live stream content for tab switch restoration
     last_live_stream: str = ""
+    # Track file modifications from last coding run (for revision context)
+    last_work_done: dict | None = None
 
     @property
     def log_path(self) -> Path | None:
@@ -135,7 +137,7 @@ class VerificationDropdownState:
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\][^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")
 
 DEFAULT_CODING_TIMEOUT = 900.0
-DEFAULT_VERIFICATION_TIMEOUT = 600.0
+DEFAULT_VERIFICATION_TIMEOUT = 1800.0  # 30 minutes to match provider defaults
 MAX_VERIFICATION_PROMPT_CHARS = 6000
 
 
@@ -2114,7 +2116,7 @@ class ChadWebUI:
         server_session_id: str | None = None,
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
-    ) -> tuple[bool, str, str | None]:
+    ) -> tuple[bool, str, str | None, dict | None]:
         """Run a task via the API and post events to the message queue.
 
         This method enables unified streaming - both CLI and Gradio UI use
@@ -2132,8 +2134,17 @@ class ChadWebUI:
             screenshots: Optional list of screenshot file paths for agent reference
 
         Returns:
-            Tuple of (success, final_output_text, server_session_id)
+            Tuple of (success, final_output_text, server_session_id, work_done)
+            where work_done is a dict with files_modified, files_created, commands_run
         """
+        # Track file modifications to detect exploration-only vs actual work
+        work_done: dict = {
+            "files_modified": [],
+            "files_created": [],
+            "commands_run": [],
+            "total_tool_calls": 0,
+        }
+
         # Create server-side session first when not provided
         if server_session_id is None:
             try:
@@ -2144,7 +2155,7 @@ class ChadWebUI:
                 server_session_id = server_session.id
             except Exception as e:
                 message_queue.put(("status", f"❌ Failed to create session: {e}"))
-                return False, str(e), None
+                return False, str(e), None, None
 
         if server_session_id:
             message_queue.put(("session_id", server_session_id))
@@ -2167,7 +2178,7 @@ class ChadWebUI:
             )
         except Exception as e:
             message_queue.put(("status", f"❌ Failed to start task: {e}"))
-            return False, str(e), server_session_id
+            return False, str(e), server_session_id, None
 
         # Emit message start
         message_queue.put(("ai_switch", "CODING AI"))
@@ -2235,7 +2246,7 @@ class ChadWebUI:
                 elif event.event_type == "error":
                     error_msg = event.data.get("error", "Unknown error")
                     message_queue.put(("status", f"❌ Error: {error_msg}"))
-                    return False, error_msg, server_session_id
+                    return False, error_msg, server_session_id, work_done
 
                 elif event.event_type == "event":
                     # Structured events from EventLog
@@ -2254,23 +2265,34 @@ class ChadWebUI:
                                 message_queue.put(("stream", data, html_output))
                     elif event_type == "tool_call_started":
                         tool = event.data.get("tool", "")
+                        work_done["total_tool_calls"] += 1
                         if tool == "bash":
-                            cmd = event.data.get("command", "")[:50]
-                            message_queue.put(("activity", f"● bash: {cmd}"))
+                            cmd = event.data.get("command", "")
+                            message_queue.put(("activity", f"● bash: {cmd[:50]}"))
+                            # Track significant commands
+                            cmd_lower = cmd.lower()
+                            keywords = ["pytest", "npm", "make", "cargo", "go ", "yarn", "pnpm", "gradle", "mvn"]
+                            if any(kw in cmd_lower for kw in keywords):
+                                work_done["commands_run"].append(cmd[:100])
                         elif tool in ("read", "write", "edit"):
                             path = event.data.get("path", "")
                             message_queue.put(("activity", f"● {tool}: {path}"))
+                            # Track file modifications
+                            if tool == "write" and path and path not in work_done["files_created"]:
+                                work_done["files_created"].append(path)
+                            elif tool == "edit" and path and path not in work_done["files_modified"]:
+                                work_done["files_modified"].append(path)
 
         except Exception as e:
             message_queue.put(("status", f"❌ Stream error: {e}"))
-            return False, str(e), server_session_id
+            return False, str(e), server_session_id, work_done
 
         # Check if stream ended without completion event - this indicates a bug
         # where the SSE stream dropped unexpectedly (e.g., PTY session marked inactive
         # prematurely). Don't treat this as success or verification will start early.
         if not got_complete_event:
             message_queue.put(("status", "❌ Stream ended unexpectedly without completion"))
-            return False, "Stream ended unexpectedly", server_session_id
+            return False, "Stream ended unexpectedly", server_session_id, work_done
 
         # Get plain text for final output
         if terminal:
@@ -2282,11 +2304,15 @@ class ChadWebUI:
         # Emit completion
         if exit_code == 0:
             message_queue.put(("message_complete", "CODING AI", final_output))
-            return True, final_output, server_session_id
+            # Check if agent only explored without making changes
+            made_changes = bool(work_done["files_modified"] or work_done["files_created"])
+            if not made_changes:
+                message_queue.put(("warning", "Agent completed without modifying any files"))
+            return True, final_output, server_session_id, work_done
         else:
             message_queue.put(("status", f"❌ Agent exited with code {exit_code}"))
             message_queue.put(("message_complete", "CODING AI", final_output))
-            return False, f"Agent exited with code {exit_code}", server_session_id
+            return False, f"Agent exited with code {exit_code}", server_session_id, work_done
 
     def get_session(self, session_id: str) -> Session:
         """Get or create a session by ID."""
@@ -3257,7 +3283,7 @@ class ChadWebUI:
             def api_task_loop():
                 """Run the task via the API streaming endpoint."""
                 try:
-                    success, output, server_session_id = self.run_task_via_api(
+                    success, output, server_session_id, work_done = self.run_task_via_api(
                         session_id=session_id,
                         project_path=str(path_obj),
                         task_description=task_description,
@@ -3268,6 +3294,8 @@ class ChadWebUI:
                         terminal_cols=terminal_cols,
                         screenshots=screenshots,
                     )
+                    # Store work_done for later use in revision context
+                    session.last_work_done = work_done
                     task_success[0] = success
                     coding_final_output[0] = output
                     if success:
@@ -3693,6 +3721,7 @@ class ChadWebUI:
                     verify_display_buffer.append("🔍 Starting verification...\n")
                     verify_last_yield = 0.0
                     verify_live_stream = ""
+                    keepalive_interval = 2.0  # Yield every 2 seconds even without new data
                     while not verification_complete.is_set() and not session.cancel_requested:
                         try:
                             msg = message_queue.get(timeout=0.05)
@@ -3718,7 +3747,22 @@ class ChadWebUI:
                                                          verification_account=verification_account_for_run)
                                         verify_last_yield = now
                         except queue.Empty:
-                            pass
+                            # Yield periodic keepalive updates to show verification is still running
+                            now = time_module.time()
+                            if now - verify_last_yield >= keepalive_interval:
+                                # Build live stream if we have content but haven't shown it yet
+                                if not verify_live_stream and verify_display_buffer.content:
+                                    verify_live_stream = build_live_stream_html(
+                                        verify_display_buffer.content, "VERIFICATION AI", live_stream_id
+                                    )
+                                if verify_live_stream:
+                                    yield make_yield(chat_history, verify_status, verify_live_stream, task_state="verifying",
+                                                     verification_account=verification_account_for_run)
+                                else:
+                                    # Even without content, yield to keep connection alive
+                                    yield make_yield(chat_history, verify_status, "", task_state="verifying",
+                                                     verification_account=verification_account_for_run)
+                                verify_last_yield = now
 
                     # Final yield to ensure content is shown even if loop exited quickly
                     if verify_live_stream:
@@ -3929,12 +3973,27 @@ class ChadWebUI:
                             revision_status = f"{status_prefix}→ Re-running coding agent with feedback..."
                             yield make_yield(chat_history, revision_status, "", task_state="running")
 
-                            # Build revision task description
+                            # Build revision task description with context about previous work
+                            work_context = ""
+                            if session.last_work_done:
+                                wd = session.last_work_done
+                                work_parts = []
+                                if wd.get("files_modified"):
+                                    work_parts.append("Files modified:\n" + "\n".join(f"  - {f}" for f in wd["files_modified"]))
+                                if wd.get("files_created"):
+                                    work_parts.append("Files created:\n" + "\n".join(f"  - {f}" for f in wd["files_created"]))
+                                if wd.get("commands_run"):
+                                    work_parts.append("Commands run:\n" + "\n".join(f"  - {c}" for c in wd["commands_run"][-5:]))
+                                if not work_parts:
+                                    work_parts.append("No file modifications were made in the previous attempt.")
+                                work_context = "\n\nPrevious attempt work:\n" + "\n".join(work_parts)
+
                             revision_task = (
                                 f"REVISION REQUEST: The previous attempt had verification issues.\n\n"
                                 f"Original task: {task_description}\n\n"
-                                f"Verification feedback:\n{verification_feedback}\n\n"
-                                f"Please fix these issues."
+                                f"Verification feedback:\n{verification_feedback}"
+                                f"{work_context}\n\n"
+                                f"Please fix these issues. Make sure to actually modify files, not just analyze them."
                             )
 
                             # Track where the revision message will be inserted
@@ -3944,12 +4003,12 @@ class ChadWebUI:
                             yield make_yield(chat_history, revision_status_msg, revision_placeholder, task_state="running")
 
                             # Run revision via API in a thread
-                            revision_result: list = [None, None, None]  # [success, output, error]
+                            revision_result: list = [None, None, None, None]  # [success, output, error, work_done]
                             revision_complete = threading.Event()
 
                             def run_api_revision_thread():
                                 try:
-                                    success, output, _ = self.run_task_via_api(
+                                    success, output, _, work_done = self.run_task_via_api(
                                         session_id=session.id,
                                         project_path=str(path_obj),
                                         task_description=revision_task,
@@ -3962,6 +4021,10 @@ class ChadWebUI:
                                     )
                                     revision_result[0] = success
                                     revision_result[1] = output
+                                    revision_result[3] = work_done
+                                    # Update session's work_done with revision changes
+                                    if work_done:
+                                        session.last_work_done = work_done
                                 except Exception as exc:
                                     revision_result[2] = exc
                                 finally:
@@ -4096,11 +4159,15 @@ class ChadWebUI:
                 session_status = "failed"
                 overall_success = False
 
-            # Log session end event
+            # Log session end event with tool call count from tracked work
+            total_tool_calls = 0
+            if session.last_work_done:
+                total_tool_calls = session.last_work_done.get("total_tool_calls", 0)
             if session.event_log:
                 session.event_log.log(SessionEndedEvent(
                     success=overall_success,
                     reason=sanitized_reason if not overall_success else (completion_reason[0] or session_status),
+                    total_tool_calls=total_tool_calls,
                 ))
             if session.log_path:
                 final_status += f"\n\n*Session log: {session.log_path}*"

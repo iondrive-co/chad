@@ -894,7 +894,7 @@ class TestPlainTextTerminalEvents:
 
         msg_queue = queue.Queue()
 
-        success, final_output, server_session_id = ui.run_task_via_api(
+        success, final_output, server_session_id, _ = ui.run_task_via_api(
             session_id="local-plain",
             project_path="/tmp",
             task_description="Handle plain text terminal event",
