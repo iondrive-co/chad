@@ -223,39 +223,39 @@ class TestReadyStatus:
 class TestCodingAgentLayout:
     """Ensure the coding agent selector and controls are properly laid out."""
 
-    def test_status_row_in_verification_column(self, page: Page):
-        """Status row should sit in the verification column, to the right of project path."""
+    def test_status_row_below_config_panel(self, page: Page):
+        """Status row with buttons should sit below the config panel at full width."""
         top_row = page.locator("#run-top-row")
         status_row = page.locator("#role-status-row")
+        role_status = page.locator("#role-config-status")
         cancel_btn = page.locator("#cancel-task-btn")
         expect(top_row).to_be_visible()
-
-        project_path = top_row.get_by_label("Project Path")
-        verification_agent = top_row.get_by_label("Verification Agent")
         expect(status_row).to_be_visible()
+        expect(role_status).to_be_visible()
+        expect(cancel_btn).to_be_visible()
 
-        expect(project_path).to_be_visible()
-        expect(verification_agent).to_be_visible()
-
-        status_box = status_row.bounding_box()
         row_box = top_row.bounding_box()
-        cancel_box = cancel_btn.bounding_box()
-        project_box = project_path.bounding_box()
-        verif_box = verification_agent.bounding_box()
+        status_line_box = role_status.bounding_box()
+        button_row_box = status_row.bounding_box()
 
-        assert status_box and row_box and cancel_box and project_box and verif_box, (
+        assert row_box and status_line_box and button_row_box, (
             "Missing bounding box data for layout assertions"
         )
 
-        # Status row should be positioned to the right of the project path column
+        # Status line should be below the config panel (top row)
         assert (
-            status_box["x"] >= project_box["x"] + project_box["width"] - 50
-        ), "Status row should appear to the right of the project path column"
+            status_line_box["y"] >= row_box["y"] + row_box["height"] - 10
+        ), "Status line should appear below the config panel"
 
-        # Status row should be horizontally aligned with the verification column
-        assert abs(status_box["x"] - verif_box["x"]) < 50, (
-            "Status row should align horizontally with verification agent dropdown"
-        )
+        # Button row should be below the status line
+        assert (
+            button_row_box["y"] >= status_line_box["y"] + status_line_box["height"] - 10
+        ), "Button row should appear below the status line"
+
+        # Status line should be near full width (starts near left edge of config panel)
+        assert (
+            status_line_box["x"] < row_box["x"] + 50
+        ), "Status line should start near the left edge"
 
     def test_run_top_controls_stack_with_matching_widths(self, page: Page):
         """Model/Reasoning controls should stack under matching agent selectors with aligned widths."""
