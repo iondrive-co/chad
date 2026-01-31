@@ -241,11 +241,16 @@ body, .gradio-container, .gradio-container * {
   grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
   gap: 10px !important;
   align-items: start !important;
+  margin-bottom: 0 !important;
 }
 
 .command-column {
   display: grid;
-  gap: 6px;
+  gap: 4px;
+}
+
+.command-column .block {
+  margin-bottom: 0 !important;
 }
 
 .command-header {
@@ -275,14 +280,21 @@ body, .gradio-container, .gradio-container * {
 }
 
 .command-status {
-  margin: 0;
-  min-height: 18px;
+  margin: 0 !important;
   font-size: 0.9rem;
+}
+
+/* Only show min-height when there's actual status content */
+.command-status:has(p:not(:empty)) {
+  min-height: 18px;
 }
 
 .doc-paths-row {
   gap: 8px !important;
+  margin-top: 0 !important;
+  padding-top: 0 !important;
 }
+
 
 .agent-config {
   display: grid !important;
@@ -927,11 +939,8 @@ body, .gradio-container, .gradio-container * {
 }
 
 #role-config-status {
-  flex: 1 1 0;  /* Grow, shrink, start from 0 width */
+  width: 100%;
   margin: 0;
-  min-width: 0;  /* Allow text to shrink so session log can have space */
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .role-status-row button,
@@ -1113,25 +1122,16 @@ body, .gradio-container, .gradio-container * {
   border-style: solid !important;
 }
 
-/* Fix status text wrapping to prevent cancel button width changes */
-.role-status-row {
-  flex-wrap: nowrap !important;
-  overflow: hidden !important;
-}
-
+/* Status line can wrap to multiple lines and span full width */
 .role-config-status {
-  flex: 1 1 auto !important;
-  min-width: 0 !important;
-  overflow: hidden !important;
-  text-overflow: ellipsis !important;
-  white-space: nowrap !important;
+  width: 100% !important;
+  margin: 0 !important;
 }
 
 .role-config-status p {
-  overflow: hidden !important;
-  text-overflow: ellipsis !important;
-  white-space: nowrap !important;
   margin: 0 !important;
+  word-wrap: break-word !important;
+  white-space: normal !important;
 }
 
 /* Ensure cancel button has fixed width */
@@ -5762,14 +5762,6 @@ class ChadWebUI:
                             key=f"coding-reasoning-{session_id}",
                             interactive=bool(initial_coding and initial_coding in account_choices),
                         )
-                        wt_path = str(session.worktree_path) if session.worktree_path else None
-                        proj_path = session.project_path
-                        role_status = gr.Markdown(
-                            self.format_role_status(worktree_path=wt_path, project_path=proj_path),
-                            key=f"role-status-{session_id}",
-                            elem_id="role-config-status" if is_first else None,
-                            elem_classes=["role-config-status"],
-                        )
                     with gr.Column(scale=1, min_width=200, elem_classes=["verification-column", "agent-config"]):
                         verification_agent = gr.Dropdown(
                             choices=verification_choices,
@@ -5800,6 +5792,16 @@ class ChadWebUI:
                             interactive=verif_state.interactive,
                         )
 
+        # Full-width status line below the config panel
+        wt_path = str(session.worktree_path) if session.worktree_path else None
+        proj_path = session.project_path
+        role_status = gr.Markdown(
+            self.format_role_status(worktree_path=wt_path, project_path=proj_path),
+            key=f"role-status-{session_id}",
+            elem_id="role-config-status" if is_first else None,
+            elem_classes=["role-config-status"],
+        )
+
         # Task status header - always in DOM but CSS hides when empty
         # This ensures JavaScript can find it for merge section visibility logic
         task_status = gr.Markdown(
@@ -5810,7 +5812,7 @@ class ChadWebUI:
             elem_classes=["task-status-header"],
         )
 
-        # Buttons placed beneath the status text
+        # Buttons placed beneath the status line
         with gr.Row(
             elem_id="role-status-row" if is_first else None,
             elem_classes=["role-status-row"],
