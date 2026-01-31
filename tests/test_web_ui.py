@@ -571,7 +571,7 @@ class TestChadWebUI:
             message_queue.put(("stream", "working", live_html))
             stream_ready.set()
             cancel_gate.wait(timeout=1.0)
-            return False, "stopped", "server-session"
+            return False, "stopped", "server-session", None
 
         monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
 
@@ -607,7 +607,7 @@ class TestChadWebUI:
             message_queue.put(("stream", live_text))
             stream_ready.set()
             cancel_gate.wait(timeout=1.0)
-            return False, "stopped", "server-session"
+            return False, "stopped", "server-session", None
 
         monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
 
@@ -697,7 +697,7 @@ class TestChadWebUI:
             message_queue.put(("stream", "continuing work\n"))
             message_queue.put(("message_complete", "CODING AI", "Task done"))
             stream_complete.set()
-            return True, "completed", "server-session"
+            return True, "completed", "server-session", None
 
         monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
 
@@ -791,7 +791,7 @@ class TestClaudeJsonParsingIntegration:
 
         # Run the task
         message_queue = queue.Queue()
-        success, output, _ = web_ui.run_task_via_api(
+        success, output, _, _ = web_ui.run_task_via_api(
             session_id="test",
             project_path=str(git_repo),
             task_description="test task",
@@ -848,7 +848,7 @@ class TestClaudeJsonParsingIntegration:
 
         # Run the task
         message_queue = queue.Queue()
-        success, output, _ = web_ui.run_task_via_api(
+        success, output, _, _ = web_ui.run_task_via_api(
             session_id="test",
             project_path=str(git_repo),
             task_description="test task",
