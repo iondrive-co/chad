@@ -1132,3 +1132,134 @@ class TestMockContextRemaining:
 
         mgr2 = ConfigManager(config_path)
         assert mgr2.get_mock_context_remaining("test-mock") == 0.25
+
+
+class TestConfigUIParity:
+    """Test that both Gradio and CLI UIs expose all required config options.
+
+    These tests enforce that any user-editable config key is exposed in BOTH UIs.
+    If a new config option is added to CONFIG_BASE_KEYS that should be user-editable,
+    it must be added to REQUIRED_UI_CONFIG_KEYS and exposed in both UIs.
+
+    IMPORTANT: When adding a new config option:
+    1. Add getter/setter to ConfigManager
+    2. Add API endpoint in routes/config.py
+    3. Add APIClient method in api_client.py
+    4. Add UI element in web_ui.py (Gradio)
+    5. Add menu option in cli/app.py (CLI)
+    6. Add the key to REQUIRED_UI_CONFIG_KEYS below
+    """
+
+    # Config keys that MUST be editable in both Gradio and CLI UIs
+    # Internal keys (password_hash, encryption_salt, accounts, role_assignments, preferences, projects)
+    # and mock testing keys (mock_remaining_usage, mock_context_remaining) are excluded.
+    REQUIRED_UI_CONFIG_KEYS = {
+        "verification_agent",
+        "preferred_verification_model",
+        "cleanup_days",
+        "provider_fallback_order",
+        "usage_switch_threshold",
+        "context_switch_threshold",
+        "max_verification_attempts",
+    }
+
+    # Keys that are only in Gradio UI (makes sense for web-only settings)
+    GRADIO_ONLY_KEYS = {"ui_mode"}
+
+    def test_required_keys_subset_of_config_base_keys(self):
+        """Ensure all required UI keys are valid CONFIG_BASE_KEYS."""
+        all_required = self.REQUIRED_UI_CONFIG_KEYS | self.GRADIO_ONLY_KEYS
+        invalid_keys = all_required - CONFIG_BASE_KEYS
+        assert not invalid_keys, (
+            f"Keys in REQUIRED_UI_CONFIG_KEYS not in CONFIG_BASE_KEYS: {invalid_keys}. "
+            f"Either add them to CONFIG_BASE_KEYS or remove from REQUIRED_UI_CONFIG_KEYS."
+        )
+
+    # Mapping from config keys to patterns that indicate the key is exposed in UI
+    # Some keys use different naming conventions in the UI code
+    KEY_PATTERNS = {
+        "verification_agent": ["verification_agent", "verification_pref"],
+        "preferred_verification_model": ["verification_model", "preferred_verification_model"],
+        "cleanup_days": ["cleanup_days", "retention_days", "cleanup_settings", "retention_input"],
+        "provider_fallback_order": ["fallback_order"],
+        "usage_switch_threshold": ["usage_threshold", "usage_switch"],
+        "context_switch_threshold": ["context_threshold", "context_switch"],
+        "max_verification_attempts": ["max_verification_attempts", "verification_attempts"],
+        "ui_mode": ["ui_mode"],
+    }
+
+    def test_gradio_ui_exposes_all_required_keys(self):
+        """Verify Gradio web_ui.py references all required config keys."""
+        import pathlib
+        import re
+
+        web_ui_path = pathlib.Path(__file__).parent.parent / "src" / "chad" / "ui" / "gradio" / "web_ui.py"
+        content = web_ui_path.read_text()
+
+        all_gradio_keys = self.REQUIRED_UI_CONFIG_KEYS | self.GRADIO_ONLY_KEYS
+        missing_keys = []
+
+        for key in all_gradio_keys:
+            # Get patterns for this key, or use the key itself as fallback
+            patterns_to_check = self.KEY_PATTERNS.get(key, [key])
+
+            # Check for any of the patterns in various forms
+            found = False
+            for pattern in patterns_to_check:
+                search_patterns = [
+                    rf'"{pattern}"',
+                    rf"'{pattern}'",
+                    rf"get_{pattern}",
+                    rf"set_{pattern}",
+                    rf"{pattern}_input",
+                    rf"{pattern}_pref",
+                    rf"on_{pattern}_change",
+                    pattern,  # Direct reference
+                ]
+                if any(re.search(p, content, re.IGNORECASE) for p in search_patterns):
+                    found = True
+                    break
+
+            if not found:
+                missing_keys.append(key)
+
+        assert not missing_keys, (
+            f"Gradio web_ui.py is missing UI elements for config keys: {missing_keys}. "
+            f"Add UI elements (input fields, sliders, etc.) and change handlers for these keys."
+        )
+
+    def test_cli_ui_exposes_all_required_keys(self):
+        """Verify CLI app.py references all required config keys."""
+        import pathlib
+        import re
+
+        cli_app_path = pathlib.Path(__file__).parent.parent / "src" / "chad" / "ui" / "cli" / "app.py"
+        content = cli_app_path.read_text()
+
+        missing_keys = []
+
+        for key in self.REQUIRED_UI_CONFIG_KEYS:
+            # Get patterns for this key, or use the key itself as fallback
+            patterns_to_check = self.KEY_PATTERNS.get(key, [key])
+
+            # Check for any of the patterns in various forms
+            found = False
+            for pattern in patterns_to_check:
+                search_patterns = [
+                    rf'"{pattern}"',
+                    rf"'{pattern}'",
+                    rf"get_{pattern}",
+                    rf"set_{pattern}",
+                    pattern,  # Direct reference
+                ]
+                if any(re.search(p, content, re.IGNORECASE) for p in search_patterns):
+                    found = True
+                    break
+
+            if not found:
+                missing_keys.append(key)
+
+        assert not missing_keys, (
+            f"CLI app.py is missing menu options for config keys: {missing_keys}. "
+            f"Add settings menu options for these keys in run_settings_menu()."
+        )

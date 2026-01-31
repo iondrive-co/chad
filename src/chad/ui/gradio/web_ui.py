@@ -6812,6 +6812,11 @@ class ChadWebUI:
             except Exception:
                 usage_threshold = 90
 
+            try:
+                context_threshold = self.api_client.get_context_switch_threshold()
+            except Exception:
+                context_threshold = 80
+
             with gr.Row():
                 fallback_order_input = gr.Textbox(
                     label="Provider Fallback Order",
@@ -6819,6 +6824,7 @@ class ChadWebUI:
                     value=fallback_order_str,
                     info="Comma-separated account names in priority order",
                 )
+            with gr.Row():
                 usage_threshold_input = gr.Slider(
                     label="Usage Switch Threshold (%)",
                     minimum=0,
@@ -6826,6 +6832,32 @@ class ChadWebUI:
                     step=5,
                     value=usage_threshold,
                     info="Switch provider when usage exceeds this percentage (100 = disable)",
+                )
+                context_threshold_input = gr.Slider(
+                    label="Context Switch Threshold (%)",
+                    minimum=0,
+                    maximum=100,
+                    step=5,
+                    value=context_threshold,
+                    info="Switch provider when context exceeds this percentage (100 = disable)",
+                )
+
+            # Verification settings
+            gr.Markdown("### Verification Settings")
+            try:
+                max_attempts = self.api_client.get_max_verification_attempts()
+            except Exception:
+                max_attempts = 5
+
+            with gr.Row():
+                max_verification_attempts_input = gr.Number(
+                    label="Max Verification Attempts",
+                    minimum=1,
+                    maximum=20,
+                    step=1,
+                    value=max_attempts,
+                    info="Maximum verification attempts before giving up (1-20)",
+                    precision=0,
                 )
 
         provider_outputs = [provider_feedback]
@@ -7016,6 +7048,34 @@ class ChadWebUI:
         usage_threshold_input.change(
             on_usage_threshold_change,
             inputs=[usage_threshold_input],
+            outputs=[config_status],
+        )
+
+        def on_context_threshold_change(threshold):
+            try:
+                self.api_client.set_context_switch_threshold(int(threshold))
+                if threshold >= 100:
+                    return "✅ Context-based switching disabled"
+                return f"✅ Will switch providers when context exceeds {int(threshold)}%"
+            except Exception as exc:
+                return f"❌ {exc}"
+
+        context_threshold_input.change(
+            on_context_threshold_change,
+            inputs=[context_threshold_input],
+            outputs=[config_status],
+        )
+
+        def on_max_verification_attempts_change(attempts):
+            try:
+                self.api_client.set_max_verification_attempts(int(attempts))
+                return f"✅ Max verification attempts set to {int(attempts)}"
+            except Exception as exc:
+                return f"❌ {exc}"
+
+        max_verification_attempts_input.change(
+            on_max_verification_attempts_change,
+            inputs=[max_verification_attempts_input],
             outputs=[config_status],
         )
 
