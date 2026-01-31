@@ -297,7 +297,7 @@ class GitWorktreeManager:
         if result.stdout.strip():
             return True
 
-        # Check for commits ahead of main
+        # Check for commits ahead of main (even if working tree clean)
         main_branch = self.get_main_branch()
         branch_name = self._branch_name(task_id)
         result = self._run_git("rev-list", "--count", f"{main_branch}..{branch_name}", check=False)
@@ -305,112 +305,90 @@ class GitWorktreeManager:
         return ahead_count > 0
 
     def get_diff_summary(self, task_id: str, base_commit: str | None = None) -> str:
-        """Get a summary of changes in the worktree.
-
-        Args:
-            task_id: The task ID
-            base_commit: Commit SHA to compare against (default: main branch)
-        """
+        """Get a summary of *uncommitted* changes in the worktree."""
         worktree_path = self._worktree_path(task_id)
         if not worktree_path.exists():
             return ""
 
-        # Use provided base commit or fall back to main
-        base = base_commit or self.get_main_branch()
-        branch_name = self._branch_name(task_id)
+        # Staged + unstaged diff against HEAD
+        stat_result = self._run_git("diff", "--stat", "HEAD", cwd=worktree_path, check=False)
+        stat = stat_result.stdout.strip()
 
-        # Get diff stat against base
-        result = self._run_git("diff", "--stat", f"{base}...{branch_name}", cwd=worktree_path, check=False)
-        stat = result.stdout.strip()
+        status_result = self._run_git("status", "--porcelain", cwd=worktree_path, check=False)
+        status = status_result.stdout.strip()
 
-        # Get list of changed files
-        result = self._run_git("diff", "--name-status", f"{base}...{branch_name}", cwd=worktree_path, check=False)
-        files = result.stdout.strip()
+        if not status and not stat:
+            return ""
 
-        # Also check for uncommitted changes
-        result = self._run_git("status", "--porcelain", cwd=worktree_path, check=False)
-        uncommitted = result.stdout.strip()
+        summary_lines = ["**Uncommitted changes:**"]
+        if stat:
+            summary_lines.append("```\n" + stat + "\n```")
+        else:
+            # Fall back to porcelain output for clarity when --stat is empty (e.g., rename only)
+            summary_lines.append("```\n" + status + "\n```")
 
-        summary_parts = []
-        if files:
-            summary_parts.append(f"**Committed changes:**\n```\n{stat}\n```")
-        if uncommitted:
-            summary_parts.append(f"**Uncommitted changes:**\n```\n{uncommitted}\n```")
-
-        return "\n\n".join(summary_parts)
+        return "\n".join(summary_lines)
 
     def get_full_diff(self, task_id: str, base_commit: str | None = None) -> str:
-        """Get the full diff content for the worktree changes.
-
-        Args:
-            task_id: The task ID
-            base_commit: Commit SHA to compare against (default: main branch)
-        """
+        """Get the full diff content for *uncommitted* worktree changes."""
         worktree_path = self._worktree_path(task_id)
         if not worktree_path.exists():
             return ""
 
-        # Use provided base commit or fall back to main
-        base = base_commit or self.get_main_branch()
-        branch_name = self._branch_name(task_id)
-
-        diff_parts = []
-
-        # Get committed diff
-        result = self._run_git("diff", f"{base}...{branch_name}", cwd=worktree_path, check=False)
-        if result.stdout.strip():
-            diff_parts.append(result.stdout.strip())
-
-        # Get uncommitted diff
-        result = self._run_git("diff", cwd=worktree_path, check=False)
-        if result.stdout.strip():
-            if diff_parts:
-                diff_parts.append("\n# Uncommitted changes:\n")
-            diff_parts.append(result.stdout.strip())
-
-        # Get staged diff
-        result = self._run_git("diff", "--cached", cwd=worktree_path, check=False)
-        if result.stdout.strip():
-            if diff_parts:
-                diff_parts.append("\n# Staged changes:\n")
-            diff_parts.append(result.stdout.strip())
-
-        return "\n".join(diff_parts) if diff_parts else "No changes"
+        result = self._run_git("diff", "HEAD", cwd=worktree_path, check=False)
+        return result.stdout.strip() or "No changes"
 
     def get_parsed_diff(self, task_id: str, base_commit: str | None = None) -> list[FileDiff]:
-        """Get structured diff data for the worktree changes.
-
-        Args:
-            task_id: The task ID
-            base_commit: Commit SHA to compare against (default: main branch)
-
-        Returns:
-            List of FileDiff objects for side-by-side rendering
-        """
+        """Get structured diff data for *uncommitted* worktree changes."""
         worktree_path = self._worktree_path(task_id)
         if not worktree_path.exists():
             return []
 
-        base = base_commit or self.get_main_branch()
-        branch_name = self._branch_name(task_id)
+        diff_texts = []
 
-        # Collect all diffs
-        all_diff_text = []
-
-        # Committed changes
-        result = self._run_git("diff", f"{base}...{branch_name}", cwd=worktree_path, check=False)
-        if result.stdout.strip():
-            all_diff_text.append(result.stdout)
-
-        # Uncommitted changes (staged and unstaged)
+        # Staged + unstaged changes (tracked files)
         result = self._run_git("diff", "HEAD", cwd=worktree_path, check=False)
         if result.stdout.strip():
-            all_diff_text.append(result.stdout)
+            diff_texts.append(result.stdout)
 
-        if not all_diff_text:
+        # Untracked files - include their content as a diff against /dev/null
+        untracked = self._run_git("ls-files", "--others", "--exclude-standard", cwd=worktree_path, check=False)
+        for path in filter(None, untracked.stdout.splitlines()):
+            file_path = worktree_path / path
+            if not file_path.exists():
+                continue
+            # git diff --no-index to generate a unified diff for new file
+            new_file_diff = self._run_git(
+                "diff", "--no-index", "--", "/dev/null", str(file_path),
+                cwd=worktree_path, check=False
+            )
+            if new_file_diff.stdout.strip():
+                diff_texts.append(new_file_diff.stdout)
+
+        if not diff_texts:
             return []
 
-        return self._parse_unified_diff("\n".join(all_diff_text))
+        parsed = self._parse_unified_diff("\n".join(diff_texts))
+
+        # Filter to files that actually appear in status/untracked to avoid showing committed-only files
+        status = self._run_git("status", "--porcelain", cwd=worktree_path, check=False).stdout.splitlines()
+        changed_files = {line[3:].strip() for line in status if line.strip()}
+        changed_files.update(
+            path for path in
+            self._run_git("ls-files", "--others", "--exclude-standard", cwd=worktree_path, check=False).stdout.splitlines()
+            if path.strip()
+        )
+
+        def _matches(file_path: str) -> bool:
+            p = Path(file_path)
+            try:
+                rel = p.resolve().relative_to(worktree_path.resolve())
+                rel_str = rel.as_posix()
+            except Exception:
+                rel_str = p.name
+            return rel_str in changed_files or p.name in {Path(c).name for c in changed_files}
+
+        return [f for f in parsed if _matches(f.new_path)]
 
     def _parse_unified_diff(self, diff_text: str) -> list[FileDiff]:
         """Parse unified diff output into structured FileDiff objects."""

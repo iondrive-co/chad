@@ -46,14 +46,6 @@
     "screenshot": "N/A - behavioral fix during streaming output, requires live Qwen provider to demonstrate"
   },
   {
-    "title": "Rename Chatbot panel to Milestones",
-    "description": "The Gradio task view still labels the conversation panel \"Chatbot\"; design wants it titled \"Milestones\".",
-    "hypothesis": "The gr.Chatbot component in src/chad/ui/gradio/web_ui.py is instantiated without an explicit label, so it defaults to \"Chatbot\"; set label='Milestones' (and update any visual tests) to match the desired copy.",
-    "status": "unverified",
-    "fix": "Added label=\"Milestones\" to the gr.Chatbot constructor in _create_session_ui to rename the panel from 'Chatbot' to 'Milestones'.",
-    "screenshot": "/tmp/claude-1000/-home-miles-chad/8c47b01c-c463-4652-8ab3-794535b78a26/scratchpad/bug-screenshots/run-tab-full_run.png"
-  },
-  {
     "title": "Codex shows system prompt before user-visible output",
     "description": "When using the Codex/OpenAI provider, the live stream begins by printing the full system prompt instead of starting with the assistant's first response.",
     "hypothesis": "The Codex provider streaming handler isn't filtering out system-role messages before forwarding events; the stream JSON decoder (likely in src/chad/util/providers.py or stream_client) forwards all roles verbatim, so the first chunk renders the system prompt.",
