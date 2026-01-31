@@ -1,6 +1,7 @@
 """Tests for git worktree management."""
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -301,6 +302,36 @@ class TestGitWorktreeManager:
         summary = mgr.get_diff_summary(task_id)
         assert "Uncommitted changes" in summary
         assert "new_file.txt" in summary
+
+    def test_diff_summary_ignores_committed_changes(self, git_repo):
+        """Committed-only worktree should report no uncommitted summary."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-task-7b"
+
+        worktree_path, _ = mgr.create_worktree(task_id)
+        (worktree_path / "committed.txt").write_text("committed")
+        subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Commit file"], cwd=worktree_path, check=True, capture_output=True)
+
+        summary = mgr.get_diff_summary(task_id)
+        assert summary == ""
+
+    def test_parsed_diff_only_uncommitted(self, git_repo):
+        """Parsed diff should only include uncommitted changes."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-task-7c"
+
+        worktree_path, _ = mgr.create_worktree(task_id)
+        (worktree_path / "committed.txt").write_text("committed")
+        subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Commit file"], cwd=worktree_path, check=True, capture_output=True)
+
+        (worktree_path / "uncommitted.txt").write_text("pending")
+
+        diffs = mgr.get_parsed_diff(task_id)
+        names = [Path(f.new_path).name for f in diffs]
+        assert "uncommitted.txt" in names
+        assert "committed.txt" not in names
 
     def test_commit_all_changes(self, git_repo):
         """Test committing all changes."""

@@ -3,6 +3,7 @@ v0.10 Hack-Propagation
 Full inter-provider handoff including summarize progress and resume from checkpoints
 Improve the mistral and gemini and qwen providers data 
 Load balance based on usage, user preference, context limits hit, etc.
+Repo map and next step field in initial update
 
 v0.11 Slip Slop Slap
 
