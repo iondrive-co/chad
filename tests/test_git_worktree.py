@@ -379,6 +379,19 @@ class TestGitWorktreeManager:
         )
         assert "blocked.txt" in status.stdout
 
+    def test_merge_to_main_no_changes(self, git_repo):
+        """Merge should surface an explicit message when there is nothing to merge."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-task-no-changes"
+
+        mgr.create_worktree(task_id)
+
+        success, conflicts, error = mgr.merge_to_main(task_id)
+
+        assert success is False
+        assert conflicts is None
+        assert error and "No changes" in error
+
     def test_merge_to_main_with_conflict(self, git_repo):
         """Test merge with conflicts."""
         mgr = GitWorktreeManager(git_repo)
