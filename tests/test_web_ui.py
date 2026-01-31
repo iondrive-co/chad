@@ -2255,12 +2255,25 @@ Some thinking text...
 
         content = '''
 ```json
-{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45"}
+{"type": "progress", "summary": "Found authentication handler in login module", "location": "src/auth/login.py:45"}
 ```
 '''
         result = extract_progress_update(content)
         assert result is not None
-        assert result.summary == "Adding retry logic to handle API rate limits"
+        assert result.summary == "Found authentication handler in login module"
+
+    def test_extract_progress_update_filters_prompt_example(self):
+        """The exact example from the prompt should be filtered."""
+        from chad.util.prompts import extract_progress_update
+
+        # This is the exact example in the coding agent prompt - should be filtered
+        content = '''
+```json
+{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is None
 
     def test_extract_progress_update_filters_empty_summary(self):
         """Empty summary should be filtered."""

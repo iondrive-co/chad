@@ -28,7 +28,8 @@ You need to complete the following task:
 ---
 Use the following sequence to complete the task:
 1. Do an initial quick exploration (under a minute) of a few classes which might be involved
-2. Output an initial progress update so the user can see what you found, do not wait for user response from this:
+2. Output an initial progress update so the user can see what you found, do not wait for user response. Here is an
+EXAMPLE of a progress update, you must substitute the values from your own explanation in the fields:
 ```json
 {{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45 - request() method"}}
 ```
@@ -435,6 +436,9 @@ _PLACEHOLDER_PATTERNS = [
     "brief description of",
     "src/file.py:123",
     "/path/to/before.png",
+    # The exact example from the prompt - filter if agent copies it verbatim
+    "adding retry logic to handle api rate limits",
+    "src/api/client.py",
 ]
 
 
