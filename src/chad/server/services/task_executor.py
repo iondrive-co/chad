@@ -401,6 +401,7 @@ def build_agent_command(
             resolve_tool("codex"),
             "exec",  # Non-interactive mode - runs to completion
             "--dangerously-bypass-approvals-and-sandbox",
+            "--skip-git-repo-check",  # Avoid git validation issues in worktrees
             "-C",
             str(project_path),
             "-",  # Read prompt from stdin
@@ -734,6 +735,10 @@ class TaskExecutor:
                     task_description,
                 )
 
+            # Use stdin pipe for Codex to avoid prompt echo in output
+            # (Codex exec reads from stdin with -, PTY echo would show the prompt)
+            use_stdin_pipe = coding_provider == "openai"
+
             # Create JSON parser for providers that use stream-json output
             # Both Claude and Qwen use similar JSON formats
             json_parser = ClaudeStreamJsonParser() if coding_provider in ("anthropic", "qwen") else None
@@ -790,6 +795,7 @@ class TaskExecutor:
                 rows=rows,
                 cols=cols,
                 log_callback=log_pty_event,
+                stdin_pipe=use_stdin_pipe,
             )
             task.stream_id = stream_id
             session.active = True
@@ -800,7 +806,8 @@ class TaskExecutor:
             # Send initial input if needed (for prompt)
             if initial_input:
                 time.sleep(0.2)  # Brief delay for process to start
-                pty_service.send_input(stream_id, initial_input.encode())
+                # Close stdin after sending when using pipe mode (signals EOF to process)
+                pty_service.send_input(stream_id, initial_input.encode(), close_stdin=use_stdin_pipe)
 
             # Wait for PTY to complete
             # The logging callback handles emitting events and persisting to EventLog
