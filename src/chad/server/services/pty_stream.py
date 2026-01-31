@@ -38,6 +38,8 @@ class PTYSession:
 
     # Subprocess object (when using subprocess.Popen instead of pty.fork)
     _proc: subprocess.Popen | None = None
+    # Whether stdin uses a pipe instead of PTY (avoids echo issues)
+    _stdin_pipe: bool = False
 
     # State
     active: bool = True
@@ -88,6 +90,7 @@ class PTYStreamService:
         rows: int = 24,
         cols: int = 80,
         log_callback: Callable[["PTYEvent"], None] | None = None,
+        stdin_pipe: bool = False,
     ) -> str:
         """Start a PTY process.
 
@@ -103,6 +106,8 @@ class PTYStreamService:
             cols: Initial terminal columns
             log_callback: Optional callback for logging events (called synchronously
                 before broadcasting to subscriber queues, never drops events)
+            stdin_pipe: If True, use a pipe for stdin instead of PTY (avoids echo).
+                Use write_stdin() to send input when this is True.
 
         Returns:
             stream_id for this PTY session
@@ -136,10 +141,11 @@ class PTYStreamService:
             # Set the slave as the controlling terminal
             fcntl.ioctl(_slave_fd, termios.TIOCSCTTY, 0)
 
-        # Start the process with the slave PTY as stdin/stdout/stderr
+        # Start the process with the slave PTY as stdout/stderr
+        # stdin can optionally use a pipe to avoid echo issues
         proc = subprocess.Popen(
             cmd,
-            stdin=slave_fd,
+            stdin=subprocess.PIPE if stdin_pipe else slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,
             cwd=str(cwd),
@@ -166,6 +172,7 @@ class PTYStreamService:
             cwd=cwd,
             env=full_env,
             _proc=proc,
+            _stdin_pipe=stdin_pipe,
             _log_callback=log_callback,
         )
 
@@ -292,12 +299,14 @@ class PTYStreamService:
                     # Drop if queue is full
                     pass
 
-    def send_input(self, stream_id: str, data: bytes) -> bool:
-        """Send input to PTY.
+    def send_input(self, stream_id: str, data: bytes, close_stdin: bool = False) -> bool:
+        """Send input to PTY or stdin pipe.
 
         Args:
             stream_id: The PTY stream ID
             data: Raw bytes to send
+            close_stdin: If True and using stdin_pipe mode, close stdin after writing.
+                This signals EOF to the process (useful for single-prompt agents).
 
         Returns:
             True if sent, False if session not found
@@ -309,7 +318,15 @@ class PTYStreamService:
             return False
 
         try:
-            os.write(session.master_fd, data)
+            if session._stdin_pipe and session._proc and session._proc.stdin:
+                # Write to stdin pipe (no echo)
+                session._proc.stdin.write(data)
+                session._proc.stdin.flush()
+                if close_stdin:
+                    session._proc.stdin.close()
+            else:
+                # Write to PTY master (may echo)
+                os.write(session.master_fd, data)
             return True
         except OSError:
             return False
