@@ -3679,6 +3679,8 @@ class ChadWebUI:
                     verify_placeholder = build_live_stream_html(
                         "🔍 Starting verification...", "VERIFICATION AI", live_stream_id
                     )
+                    # Reset live render flag so verification gets a full render, not a patch
+                    session.has_initial_live_render = False
                     yield make_yield(
                         chat_history, verify_status, verify_placeholder, task_state="verifying",
                         verification_prompt=display_verification_prompt,
@@ -3864,6 +3866,8 @@ class ChadWebUI:
                             revision_status_msg = f"{status_prefix}⏳ Coding agent working on revisions..."
                             # Show live stream placeholder during revision setup
                             revision_placeholder = build_live_stream_html("⏳ Preparing revision...", "CODING AI", live_stream_id)
+                            # Reset live render flag so revision gets a full render, not a patch
+                            session.has_initial_live_render = False
                             yield make_yield(chat_history, revision_status_msg, revision_placeholder, task_state="running")
 
                             # Run revision in a thread so we can stream output to live view
@@ -4000,6 +4004,8 @@ class ChadWebUI:
                             revision_pending_idx = len(chat_history)
                             revision_status_msg = f"{status_prefix}⏳ Coding agent working on revisions..."
                             revision_placeholder = build_live_stream_html("⏳ Preparing revision...", "CODING AI", live_stream_id)
+                            # Reset live render flag so revision gets a full render, not a patch
+                            session.has_initial_live_render = False
                             yield make_yield(chat_history, revision_status_msg, revision_placeholder, task_state="running")
 
                             # Run revision via API in a thread
@@ -4757,6 +4763,8 @@ class ChadWebUI:
                 verify_placeholder = build_live_stream_html(
                     "🔍 Starting verification...", "VERIFICATION AI", live_stream_id
                 )
+                # Reset live render flag so verification gets a full render, not a patch
+                session.has_initial_live_render = False
                 yield make_followup_yield(chat_history, verify_placeholder, working=True, merge_updates=merge_no_change)
 
                 def verification_activity(activity_type: str, detail: str):
@@ -4891,6 +4899,8 @@ class ChadWebUI:
                         )
                         # Show live stream placeholder during revision
                         revision_placeholder = build_live_stream_html("→ Revision in progress...", "CODING AI", live_stream_id)
+                        # Reset live render flag so revision gets a full render, not a patch
+                        session.has_initial_live_render = False
                         yield make_followup_yield(chat_history, revision_placeholder, working=True, merge_updates=merge_no_change)
 
                         revision_request = (

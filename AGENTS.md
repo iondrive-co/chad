@@ -143,6 +143,28 @@ chad --server-url http://localhost:8000
 chad --server-url http://localhost:8000 --ui cli
 ```
 
+### Adding New Config Options
+
+**IMPORTANT**: All user-editable config options MUST be exposed in BOTH Gradio and CLI UIs.
+Tests in `test_config_manager.py::TestConfigUIParity` will FAIL if you add a new config key
+without proper UI support.
+
+When adding a new config option:
+1. Add the key to `CONFIG_BASE_KEYS` in `src/chad/util/config_manager.py`
+2. Add getter/setter methods to `ConfigManager`
+3. Add API endpoint in `src/chad/server/api/routes/config.py`
+4. Add `APIClient` method in `src/chad/ui/client/api_client.py`
+5. Add UI element in `src/chad/ui/gradio/web_ui.py` (in the config panel)
+6. Add menu option in `src/chad/ui/cli/app.py` (in `run_settings_menu`)
+7. Update `tests/test_config_manager.py`:
+   - Add to `REQUIRED_UI_CONFIG_KEYS` if user-editable in both UIs
+   - Add to `GRADIO_ONLY_KEYS` if only relevant for web UI
+   - Add to `INTERNAL_KEYS` if system-managed (not user-editable)
+   - Add to `KEY_PATTERNS` if the UI uses different naming
+
+The `test_all_config_keys_categorized` test ensures you can't add a new key to
+`CONFIG_BASE_KEYS` without explicitly categorizing it.
+
 ## Running Tests
 
 ### Test Organization
