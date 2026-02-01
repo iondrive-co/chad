@@ -61,6 +61,7 @@ class ProgressData(BaseModel):
 
     summary: str = Field(description="Progress summary")
     location: str | None = Field(default=None, description="Code location")
+    next_step: str | None = Field(default=None, description="What the agent plans to do next")
     before_screenshot: str | None = Field(default=None, description="Path to before screenshot")
     before_description: str | None = Field(default=None, description="Screenshot description")
 

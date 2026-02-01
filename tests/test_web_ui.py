@@ -2301,6 +2301,84 @@ Some thinking text...
         assert "Line 2 continuing" in result.summary
         assert result.location == "src/app.py:10"
 
+    def test_extract_progress_update_includes_next_step(self):
+        """Progress update should include next_step field."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+```json
+{"type": "progress", "summary": "Found the config manager", "location": "src/config.py:42", "next_step": "Adding the new option to the config schema"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert result.summary == "Found the config manager"
+        assert result.location == "src/config.py:42"
+        assert result.next_step == "Adding the new option to the config schema"
+
+    def test_extract_progress_update_next_step_optional(self):
+        """Progress update should work without next_step field."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+```json
+{"type": "progress", "summary": "Investigating issue", "location": "src/app.py:10"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert result.next_step is None
+
+    def test_extract_progress_update_filters_placeholder_next_step(self):
+        """Progress with placeholder next_step should be filtered."""
+        from chad.util.prompts import extract_progress_update
+
+        # The example from the prompt should be filtered
+        content = '''
+```json
+{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45", "next_step": "Writing tests to verify the retry behavior"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is None
+
+
+class TestMakeProgressMessage:
+    """Test progress message formatting."""
+
+    def test_make_progress_message_with_next_step(self):
+        """Progress message should display next step."""
+        from chad.ui.gradio.web_ui import make_progress_message
+        from chad.util.prompts import ProgressUpdate
+
+        progress = ProgressUpdate(
+            summary="Found the config module",
+            location="src/config.py:42",
+            next_step="Adding the new option",
+        )
+        result = make_progress_message(progress)
+
+        assert result["role"] == "assistant"
+        content = result["content"]
+        assert "Found the config module" in content
+        assert "`src/config.py:42`" in content
+        assert "**Next:** Adding the new option" in content
+
+    def test_make_progress_message_without_next_step(self):
+        """Progress message should work without next step."""
+        from chad.ui.gradio.web_ui import make_progress_message
+        from chad.util.prompts import ProgressUpdate
+
+        progress = ProgressUpdate(
+            summary="Investigating issue",
+            location="src/app.py:10",
+        )
+        result = make_progress_message(progress)
+
+        content = result["content"]
+        assert "Investigating issue" in content
+        assert "**Next:**" not in content
+
 
 class TestLivePatchScrollPreservation:
     """Ensure live patching does not reset scroll by avoiding value updates."""

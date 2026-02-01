@@ -31,7 +31,7 @@ Use the following sequence to complete the task:
 2. Output an initial progress update so the user can see what you found, do not wait for user response. Here is an
 EXAMPLE of a progress update, you must substitute the values from your own explanation in the fields:
 ```json
-{{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45 - request() method"}}
+{{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45 - request() method", "next_step": "Writing tests to verify the retry behavior"}}
 ```
 3. Continue your work by writing test(s) that should fail until the fix/feature is implemented (you can now explore more code to achieve this goal if needed)
 4. Make the changes, adjusting tests and exploring more code as needed. If no changes are required, skip to step 7.
@@ -287,6 +287,7 @@ class ProgressUpdate:
 
     summary: str
     location: str
+    next_step: str | None = None
     before_screenshot: str | None = None
     before_description: str | None = None
 
@@ -439,14 +440,15 @@ _PLACEHOLDER_PATTERNS = [
     # The exact example from the prompt - filter if agent copies it verbatim
     "adding retry logic to handle api rate limits",
     "src/api/client.py",
+    "writing tests to verify the retry behavior",
 ]
 
 
-def _is_placeholder_text(summary: str) -> bool:
-    """Check if summary looks like placeholder text from the prompt example."""
-    if not summary:
+def _is_placeholder_text(text: str) -> bool:
+    """Check if text looks like placeholder from the prompt example."""
+    if not text:
         return True
-    lower = summary.lower()
+    lower = text.lower()
     return any(pattern in lower for pattern in _PLACEHOLDER_PATTERNS)
 
 
@@ -458,7 +460,7 @@ def extract_progress_update(response: str) -> ProgressUpdate | None:
 
     Returns:
         ProgressUpdate if found, None otherwise. Returns None if the summary
-        appears to be placeholder text copied from the prompt example.
+        or next_step appears to be placeholder text copied from the prompt example.
     """
     import json
     import re
@@ -474,11 +476,16 @@ def extract_progress_update(response: str) -> ProgressUpdate | None:
             if data.get("type") != "progress":
                 return None
             summary = data.get("summary", "")
+            next_step = data.get("next_step")
+            # Filter if summary or next_step looks like placeholder text
             if _is_placeholder_text(summary):
+                return None
+            if next_step and _is_placeholder_text(next_step):
                 return None
             return ProgressUpdate(
                 summary=summary,
                 location=data.get("location", ""),
+                next_step=next_step,
                 before_screenshot=data.get("before_screenshot"),
                 before_description=data.get("before_description"),
             )
@@ -508,11 +515,15 @@ def extract_progress_update(response: str) -> ProgressUpdate | None:
         body = manual_match.group("body")
         summary_match = re.search(r'"summary"\\s*:\\s*"(?P<summary>.*?)"', body, re.DOTALL)
         location_match = re.search(r'"location"\\s*:\\s*"(?P<loc>[^"]+)"', body)
+        next_step_match = re.search(r'"next_step"\\s*:\\s*"(?P<ns>[^"]+)"', body)
         if summary_match:
             summary = " ".join(summary_match.group("summary").splitlines()).strip()
+            next_step = next_step_match.group("ns") if next_step_match else None
             if not _is_placeholder_text(summary):
+                if next_step and _is_placeholder_text(next_step):
+                    return None
                 location = location_match.group("loc") if location_match else ""
-                return ProgressUpdate(summary=summary, location=location)
+                return ProgressUpdate(summary=summary, location=location, next_step=next_step)
 
     return None
 

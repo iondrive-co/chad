@@ -1981,7 +1981,7 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
 def make_progress_message(progress: ProgressUpdate) -> dict:
     """Create a chat message for an intermediate progress update.
 
-    Shows the before screenshot full-width with a summary and location.
+    Shows the before screenshot full-width with a summary, location, and next step.
     """
     screenshot_url = image_to_data_url(progress.before_screenshot)
     parts = ["**CODING AI** *(Progress)*"]
@@ -1989,6 +1989,8 @@ def make_progress_message(progress: ProgressUpdate) -> dict:
         parts.append(f"\n\n{progress.summary}")
     if progress.location:
         parts.append(f"\n\n**Location:** `{progress.location}`")
+    if progress.next_step:
+        parts.append(f"\n\n**Next:** {progress.next_step}")
     if screenshot_url:
         desc_html = f'<div class="screenshot-description">{progress.before_description}</div>' if progress.before_description else ''
         parts.append(
