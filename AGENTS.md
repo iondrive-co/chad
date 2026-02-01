@@ -5,6 +5,101 @@ to clear roadblocks yourself without involving a user. You are allowed to develo
 researching and developing tools required to complete your tasks. Use these abilities to find creative ways to deliver
 flawlessly working features.
 
+## Class Map
+
+Consult this map before exploring to find the right starting point. Chad is a multi-provider AI coding assistant with a FastAPI backend and Gradio/CLI frontends.
+
+### Architecture
+
+```
+Entry: __main__.py → server + UI
+Server: SessionManager → TaskExecutor → PTYStreamService → EventMultiplexer → SSE
+Client: APIClient (REST) + StreamClient (SSE) + WSClient (WebSocket)
+UI: ChadWebUI (Gradio) or app.py (CLI), both use TerminalEmulator
+```
+
+### Provider Layer (`chad.util.providers`)
+
+| Class | Description |
+|-------|-------------|
+| ModelConfig | Dataclass: account name, provider type, model ID, reasoning effort, project path. |
+| AIProvider | Abstract base for providers. Methods: start_session, send_message, get_response, stop_session, is_alive. |
+| ClaudeCodeProvider | Anthropic Claude Code CLI. Streaming JSON, isolated CLAUDE_CONFIG_DIR per account. |
+| OpenAICodexProvider | OpenAI Codex CLI. Isolated HOME per account, reasoning effort levels. |
+| GeminiCodeAssistProvider | Google Gemini CLI in YOLO mode. |
+| QwenCodeProvider | Alibaba Qwen CLI. Stream-json output like Claude. |
+| MistralVibeProvider | Mistral Vibe CLI. |
+| MockProvider | Test provider simulating agent behavior with ANSI output. |
+
+### Server Services (`chad.server.services`)
+
+| Class | Description |
+|-------|-------------|
+| Session | Per-session state: ID, provider, worktree info, chat history, task, project path. |
+| SessionManager | Thread-safe CRUD for sessions. Global singleton via `get_session_manager()`. |
+| Task | Running/completed task: state, progress, result, PTY stream_id, EventLog. |
+| TaskState | Enum: PENDING, RUNNING, COMPLETED, FAILED, CANCELLED. |
+| TaskExecutor | Orchestrates tasks via PTY. Spawns provider CLIs, manages timeouts, routes events. |
+| ClaudeStreamJsonParser | Parses stream-json from Claude/Qwen. Buffers bytes, yields readable text. |
+| PTYSession | Active PTY: stream_id, PID, master FD, subscribers, event buffer. |
+| PTYEvent | PTY event: type (output/exit/error), stream_id, base64 data. |
+| PTYStreamService | Manages PTYs. Uses subprocess+openpty to avoid deadlocks. Global singleton via `get_pty_stream_service()`. |
+| MuxEvent | Unified event: type (terminal/event/complete/error/ping), data, sequence. |
+| EventMultiplexer | Unifies PTY + EventLog into single SSE stream with keepalive pings. |
+
+### Event Logging (`chad.util.event_log`)
+
+| Class | Description |
+|-------|-------------|
+| EventLog | JSONL logging per session in `~/.chad/logs/`. Large artifacts stored separately. |
+| EventBase | Base event: event_id, timestamp, sequence, session_id, turn_id. |
+| SessionStartedEvent | Task description, project path, provider/account/model. |
+| UserMessageEvent | User input message. |
+| AssistantMessageEvent | AI response with message blocks. |
+| ToolCallStartedEvent | Tool invocation: name, args, status. |
+| ToolCallFinishedEvent | Tool result, is_error flag. |
+| TerminalOutputEvent | Raw terminal chunk. |
+| SessionEndedEvent | Reason, success, summary. |
+
+### Git Integration (`chad.util.git_worktree`)
+
+| Class | Description |
+|-------|-------------|
+| GitWorktreeManager | Manages worktrees in `.chad-worktrees/`. Create, diff, merge, cleanup. |
+| FileDiff | Diff for one file: paths, hunks, new/deleted/binary flags. |
+| MergeConflict | Conflicts in a file: path + list of ConflictHunks. |
+
+### Configuration (`chad.util.config_manager`)
+
+| Class | Description |
+|-------|-------------|
+| ConfigManager | App config in `~/.chad.conf`. Password hashing, API key encryption, accounts, preferences. |
+
+### Client Layer (`chad.ui.client`)
+
+| Class | Description |
+|-------|-------------|
+| APIClient | REST client for server. Sessions, accounts, tasks, worktrees, config. |
+| StreamClient | Async SSE client. Parses events, yields StreamEvent. |
+| SyncStreamClient | Sync wrapper for Gradio (needs sync generators). |
+| WSClient | Sync WebSocket client. |
+| AsyncWSClient | Async WebSocket client. |
+
+### UI Layer
+
+| Class | File | Description |
+|-------|------|-------------|
+| ChadWebUI | `chad.ui.gradio.web_ui` | Gradio interface. Sessions, provider cards, streaming, merge resolution. |
+| ProviderUIManager | `chad.ui.gradio.provider_ui` | Provider management: accounts, models, OAuth. |
+| TerminalEmulator | `chad.ui.terminal_emulator` | Pyte-based emulator. ANSI to HTML with scrollback. |
+| ModelCatalog | `chad.util.model_catalog` | Discovers/caches models per provider from config files. |
+| AIToolInstaller | `chad.util.installer` | Installs CLIs (claude, codex, etc.) in `~/.chad/tools/`. |
+| ProcessRegistry | `chad.util.process_registry` | Process lifecycle with cleanup guarantees. SIGTERM→SIGKILL escalation. |
+
+### API Schemas (`chad.server.api.schemas`)
+
+Pydantic models for request/response validation: SessionCreate, TaskCreate, AccountCreate, WorktreeStatus, etc.
+
 ## Before making changes
 
 When exploring the codebase, note that ripgrep (`rg`) is not installed here. Use `grep -R`, `find`, or language-aware 
