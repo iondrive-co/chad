@@ -395,9 +395,14 @@ def open_playwright_page(
             time.sleep(render_delay)
             if tab:
                 _select_tab(page, tab)
-            # Ensure core run tab elements are present before yielding
-            page.wait_for_selector("#agent-chatbot", timeout=20000)
-            page.wait_for_selector(".merge-section", state="attached", timeout=20000)
+            # Ensure core elements are present before yielding (tab-specific)
+            normalized_tab = (tab or "run").strip().lower()
+            if normalized_tab in {"run", "task", "default", None}:
+                page.wait_for_selector("#agent-chatbot", timeout=20000)
+                page.wait_for_selector(".merge-section", state="attached", timeout=20000)
+            else:
+                # Setup/Providers tab - wait for config panel
+                page.wait_for_selector("#config-panel", state="attached", timeout=20000)
             yield page
         finally:
             browser.close()

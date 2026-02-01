@@ -1147,12 +1147,27 @@ class TestConfigUIParity:
     3. Add APIClient method in api_client.py
     4. Add UI element in web_ui.py (Gradio)
     5. Add menu option in cli/app.py (CLI)
-    6. Add the key to REQUIRED_UI_CONFIG_KEYS below
+    6. Add the key to REQUIRED_UI_CONFIG_KEYS below (or INTERNAL_KEYS if not user-editable)
+
+    The test_all_config_keys_categorized test will FAIL if you add a new key
+    to CONFIG_BASE_KEYS without categorizing it here. This is intentional -
+    it forces you to decide whether the key needs UI exposure.
     """
 
+    # Internal keys that are NOT user-editable via UI
+    # These are system-managed or accessed via other UI paths (like account management)
+    INTERNAL_KEYS = {
+        "password_hash",      # Security - never exposed
+        "encryption_salt",    # Security - never exposed
+        "accounts",           # Managed via provider cards, not direct config
+        "role_assignments",   # Managed via account role dropdowns
+        "preferences",        # Container object, individual prefs exposed separately
+        "projects",           # Per-project settings, not global config
+        "mock_remaining_usage",    # Testing only - per-account mock via provider cards
+        "mock_context_remaining",  # Testing only - per-account mock via provider cards
+    }
+
     # Config keys that MUST be editable in both Gradio and CLI UIs
-    # Internal keys (password_hash, encryption_salt, accounts, role_assignments, preferences, projects)
-    # and mock testing keys (mock_remaining_usage, mock_context_remaining) are excluded.
     REQUIRED_UI_CONFIG_KEYS = {
         "verification_agent",
         "preferred_verification_model",
@@ -1173,6 +1188,26 @@ class TestConfigUIParity:
         assert not invalid_keys, (
             f"Keys in REQUIRED_UI_CONFIG_KEYS not in CONFIG_BASE_KEYS: {invalid_keys}. "
             f"Either add them to CONFIG_BASE_KEYS or remove from REQUIRED_UI_CONFIG_KEYS."
+        )
+
+    def test_all_config_keys_categorized(self):
+        """Ensure every CONFIG_BASE_KEY is categorized as internal, required, or gradio-only.
+
+        This test FAILS if you add a new key to CONFIG_BASE_KEYS without deciding
+        whether it needs UI exposure. This forces explicit categorization of all config keys.
+
+        If you add a new config key:
+        - Add to INTERNAL_KEYS if it's system-managed (not user-editable)
+        - Add to REQUIRED_UI_CONFIG_KEYS if users should edit it in both UIs
+        - Add to GRADIO_ONLY_KEYS if it only makes sense in the web UI
+        """
+        all_categorized = self.INTERNAL_KEYS | self.REQUIRED_UI_CONFIG_KEYS | self.GRADIO_ONLY_KEYS
+        uncategorized = CONFIG_BASE_KEYS - all_categorized
+        assert not uncategorized, (
+            f"CONFIG_BASE_KEYS contains uncategorized keys: {uncategorized}. "
+            f"Add each key to one of: INTERNAL_KEYS (system-managed), "
+            f"REQUIRED_UI_CONFIG_KEYS (both UIs), or GRADIO_ONLY_KEYS (web UI only). "
+            f"See TestConfigUIParity docstring for details."
         )
 
     # Mapping from config keys to patterns that indicate the key is exposed in UI
