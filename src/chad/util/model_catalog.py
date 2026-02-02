@@ -59,12 +59,17 @@ class ModelCatalog:
         "default",
     )
     MISTRAL_FALLBACK: tuple[str, ...] = ("default",)
+    OPENCODE_FALLBACK: tuple[str, ...] = (
+        "anthropic/claude-sonnet-4-5",
+        "openai/gpt-4o",
+        "default",
+    )
     MOCK_FALLBACK: tuple[str, ...] = ("default",)
 
     _cache: dict[str, tuple[float, list[str]]] = field(default_factory=dict, init=False)
 
     def supported_providers(self) -> set[str]:
-        return {"anthropic", "openai", "gemini", "qwen", "mistral", "mock"}
+        return {"anthropic", "openai", "gemini", "qwen", "mistral", "opencode", "mock"}
 
     def get_models(self, provider: str, account_name: str | None = None) -> list[str]:
         """Return discovered models for a provider, cached with TTL."""
@@ -100,6 +105,7 @@ class ModelCatalog:
             "gemini": self.GEMINI_FALLBACK,
             "qwen": self.QWEN_FALLBACK,
             "mistral": self.MISTRAL_FALLBACK,
+            "opencode": self.OPENCODE_FALLBACK,
             "mock": self.MOCK_FALLBACK,
         }.get(provider, ("default",))
 
