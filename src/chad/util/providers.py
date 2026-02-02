@@ -2592,6 +2592,12 @@ class MistralVibeProvider(AIProvider):
         return _get_mistral_usage_percentage(self.config.account_name)
 
 
+class MockProviderQuotaError(Exception):
+    """Raised when MockProvider simulates quota exhaustion."""
+
+    pass
+
+
 class MockProvider(AIProvider):
     """Mock provider for testing UI without real API calls.
 
@@ -2600,11 +2606,20 @@ class MockProvider(AIProvider):
     - Makes actual file changes to BUGS.md in the worktree
     - Returns proper JSON responses
     - Rejects first verification attempt, accepts second
+    - Simulates quota exhaustion when mock_remaining_usage is 0
+
+    Quota Simulation:
+        Set mock_remaining_usage to 0 via ConfigManager to trigger quota errors.
+        This enables testing provider handover without real API costs.
+        The error message matches patterns detected by is_quota_exhaustion_error().
     """
 
     # Class-level state to persist across provider instances (keyed by project path)
     _verification_counts: dict[str, int] = {}
     _coding_turn_counts: dict[str, int] = {}
+
+    # Usage decrement per response (configurable for testing)
+    USAGE_DECREMENT_PER_RESPONSE = 0.1
 
     def __init__(self, config: ModelConfig):
         super().__init__(config)
@@ -2613,10 +2628,74 @@ class MockProvider(AIProvider):
         self._response_queue: list[str] = []
         self._project_path: str | None = None
         self._is_verification_mode = False
+        self._simulate_quota = False  # Enable to test quota exhaustion/handover
 
     def queue_response(self, response: str) -> None:
         """Queue a response to be returned by get_response (for unit tests)."""
         self._response_queue.append(response)
+
+    def _get_remaining_usage(self) -> float:
+        """Get the configured mock remaining usage for this account.
+
+        Returns:
+            Remaining usage as 0.0-1.0 (1.0 = full capacity)
+        """
+        from .config_manager import ConfigManager
+
+        account_name = self.config.account_name
+        if not account_name:
+            return 0.5  # Default when no account configured
+
+        config_mgr = ConfigManager()
+        return config_mgr.get_mock_remaining_usage(account_name)
+
+    def _decrement_usage(self, amount: float | None = None) -> None:
+        """Decrement the mock remaining usage after a response.
+
+        Only decrements when _simulate_quota is True (opt-in).
+
+        Args:
+            amount: Amount to decrement (0.0-1.0), defaults to USAGE_DECREMENT_PER_RESPONSE
+        """
+        if not self._simulate_quota:
+            return
+
+        from .config_manager import ConfigManager
+
+        account_name = self.config.account_name
+        if not account_name:
+            return
+
+        decrement = amount if amount is not None else self.USAGE_DECREMENT_PER_RESPONSE
+        config_mgr = ConfigManager()
+        current = config_mgr.get_mock_remaining_usage(account_name)
+        new_value = max(0.0, current - decrement)
+        config_mgr.set_mock_remaining_usage(account_name, new_value)
+
+    def _check_quota_and_raise_if_exhausted(self) -> None:
+        """Check if quota is exhausted and raise MockProviderQuotaError if so.
+
+        This method checks the mock_remaining_usage config value and raises
+        an error with a message that matches quota exhaustion patterns,
+        enabling testing of provider handover.
+
+        Only checks quota when _simulate_quota is True (opt-in).
+
+        Raises:
+            MockProviderQuotaError: When mock_remaining_usage is 0 and _simulate_quota is True
+        """
+        if not self._simulate_quota:
+            return
+
+        remaining = self._get_remaining_usage()
+        if remaining <= 0.0:
+            account = self.config.account_name or "mock"
+            # Use error message that matches is_quota_exhaustion_error() patterns
+            raise MockProviderQuotaError(
+                f"Quota exceeded for mock provider account '{account}'. "
+                "Insufficient credits remaining. "
+                "Set mock_remaining_usage > 0 to restore capacity."
+            )
 
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         self._alive = True
@@ -2784,6 +2863,10 @@ I modified BUGS.md to add a test marker.
         if self._response_queue:
             return self._response_queue.pop(0)
 
+        # Check quota before generating response (simulates API quota check)
+        # This raises MockProviderQuotaError if mock_remaining_usage is 0
+        self._check_quota_and_raise_if_exhausted()
+
         # Check for explicit breakdown requests (for unit test compatibility)
         last_msg = self._messages[-1] if self._messages else ""
         if "break down into subtasks" in last_msg.lower() or "breakdown" in last_msg.lower():
@@ -2791,9 +2874,15 @@ I modified BUGS.md to add a test marker.
 
         # Generate appropriate response based on mode
         if self._is_verification_mode:
-            return self._generate_verification_response()
+            response = self._generate_verification_response()
         else:
-            return self._generate_coding_response()
+            response = self._generate_coding_response()
+
+        # Decrement usage after successful response (simulates token consumption)
+        # This allows testing gradual quota depletion
+        self._decrement_usage()
+
+        return response
 
     def stop_session(self) -> None:
         self._alive = False
