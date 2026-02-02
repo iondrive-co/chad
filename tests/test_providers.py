@@ -17,6 +17,7 @@ from chad.util.providers import (
     OpenAICodexProvider,
     MistralVibeProvider,
     QwenCodeProvider,
+    OpenCodeProvider,
     parse_codex_output,
 )
 
@@ -43,6 +44,11 @@ class TestCreateProvider:
         config = ModelConfig(provider="mistral", model_name="default")
         provider = create_provider(config)
         assert isinstance(provider, MistralVibeProvider)
+
+    def test_create_opencode_provider(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = create_provider(config)
+        assert isinstance(provider, OpenCodeProvider)
 
     def test_unsupported_provider(self):
         config = ModelConfig(provider="unsupported", model_name="model")
@@ -1554,6 +1560,117 @@ class TestMistralVibeProvider:
         assert provider.current_message == "Hello"
 
 
+class TestOpenCodeProvider:
+    """Test cases for OpenCodeProvider."""
+
+    @patch("chad.util.providers._ensure_cli_tool", return_value=(True, "/bin/opencode"))
+    def test_start_session_success(self, mock_ensure):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+
+        result = provider.start_session("/tmp/test_project")
+        assert result is True
+        assert provider.project_path == "/tmp/test_project"
+        mock_ensure.assert_called_once_with("opencode", provider._notify_activity)
+
+    @patch("chad.util.providers._ensure_cli_tool", return_value=(False, "CLI not found"))
+    def test_start_session_failure(self, mock_ensure):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+
+        result = provider.start_session("/tmp/test_project")
+        assert result is False
+        mock_ensure.assert_called_once_with("opencode", provider._notify_activity)
+
+    @patch("chad.util.providers._ensure_cli_tool", return_value=(True, "/bin/opencode"))
+    def test_start_session_with_system_prompt(self, mock_ensure):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+
+        result = provider.start_session("/tmp/test_project", system_prompt="Initial prompt")
+        assert result is True
+        assert provider.system_prompt == "Initial prompt"
+        # System prompt is prepended to messages when no session_id
+        provider.send_message("Test message")
+        assert "Initial prompt" in provider.current_message
+        assert "Test message" in provider.current_message
+
+    def test_send_message(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+
+        provider.send_message("Hello")
+        assert provider.current_message == "Hello"
+
+    def test_send_message_without_system_prompt_on_continuation(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+        provider.system_prompt = "System prompt"
+        provider.session_id = "ses_abc123"  # Session already established
+
+        provider.send_message("Follow-up message")
+        # Should not include system prompt since session_id is set
+        assert provider.current_message == "Follow-up message"
+
+    def test_is_alive_with_session_id(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+
+        # Initially not alive
+        assert provider.is_alive() is False
+
+        # With session_id, should be alive
+        provider.session_id = "ses_abc123"
+        assert provider.is_alive() is True
+
+    def test_stop_session_clears_session_id(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+        provider.session_id = "ses_abc123"
+
+        provider.stop_session()
+        assert provider.session_id is None
+
+    def test_supports_multi_turn(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+        assert provider.supports_multi_turn() is True
+
+    def test_get_session_id(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+
+        # Initially None
+        assert provider.get_session_id() is None
+
+        # After setting session_id
+        provider.session_id = "ses_xyz789"
+        assert provider.get_session_id() == "ses_xyz789"
+
+    def test_supports_usage_reporting(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+        assert provider.supports_usage_reporting() is True
+
+    def test_get_response_no_message(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+        assert provider.get_response(timeout=1) == ""
+
+    def test_get_isolated_data_dir_with_account(self):
+        config = ModelConfig(provider="opencode", model_name="default", account_name="myaccount")
+        provider = OpenCodeProvider(config)
+        data_dir = provider._get_isolated_data_dir()
+        assert "opencode-data" in str(data_dir)
+        assert "myaccount" in str(data_dir)
+
+    def test_get_isolated_data_dir_without_account(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+        data_dir = provider._get_isolated_data_dir()
+        assert ".local/share" in str(data_dir) or "share" in str(data_dir)
+
+
 class TestGeminiCodeAssistProvider:
     """Tests for GeminiCodeAssistProvider."""
 
@@ -1949,6 +2066,18 @@ class TestProviderGetSessionId:
         provider = MistralVibeProvider(config)
         assert provider.get_session_id() is None
 
+    def test_opencode_provider_returns_session_id(self):
+        """OpenCode provider returns session_id when set."""
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+
+        # Initially None
+        assert provider.get_session_id() is None
+
+        # After setting session_id
+        provider.session_id = "ses_opencode_abc"
+        assert provider.get_session_id() == "ses_opencode_abc"
+
 
 class TestProviderUsageReporting:
     """Tests for provider usage reporting capabilities."""
@@ -1984,6 +2113,12 @@ class TestProviderUsageReporting:
         """Mistral provider supports usage percentage reporting via local session files."""
         config = ModelConfig(provider="mistral", model_name="default")
         provider = MistralVibeProvider(config)
+        assert provider.supports_usage_reporting() is True
+
+    def test_opencode_provider_supports_usage_reporting(self):
+        """OpenCode provider supports usage percentage reporting via local session files."""
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
         assert provider.supports_usage_reporting() is True
 
 
@@ -2201,3 +2336,68 @@ class TestUsagePercentageCalculation:
         with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
             result = _get_gemini_usage_percentage("")
             assert result == 100.0  # Capped at 100%
+
+    def test_opencode_usage_no_sessions(self, tmp_path):
+        """OpenCode returns 0% when no session files exist."""
+        from chad.util.providers import _get_opencode_usage_percentage
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_opencode_usage_percentage("")
+            assert result == 0.0
+
+    def test_opencode_usage_with_account_isolation(self, tmp_path):
+        """OpenCode returns 0% when using account-isolated data dir with no sessions."""
+        from chad.util.providers import _get_opencode_usage_percentage
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_opencode_usage_percentage("myaccount")
+            assert result == 0.0
+
+    def test_opencode_usage_counts_today_requests(self, tmp_path):
+        """OpenCode correctly counts today's requests from jsonl session files."""
+        import json
+        from datetime import datetime, timezone
+        from chad.util.providers import _get_opencode_usage_percentage
+
+        # Create session directory structure for account
+        data_dir = tmp_path / ".chad" / "opencode-data" / "testaccount" / "opencode" / "sessions"
+        data_dir.mkdir(parents=True)
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        yesterday = "2020-01-01T12:00:00.000Z"
+
+        # Write jsonl format (one JSON object per line)
+        lines = [
+            json.dumps({"type": "assistant", "timestamp": today}),
+            json.dumps({"type": "assistant", "timestamp": today}),
+            json.dumps({"type": "assistant", "timestamp": yesterday}),  # Not today
+            json.dumps({"type": "user", "timestamp": today}),  # Not assistant
+        ]
+        (data_dir / "session.jsonl").write_text("\n".join(lines))
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_opencode_usage_percentage("testaccount")
+            # 2 requests today out of 2000 limit = 0.1%
+            assert result == pytest.approx(0.1, abs=0.01)
+
+    def test_opencode_usage_handles_malformed_jsonl(self, tmp_path):
+        """OpenCode gracefully handles malformed jsonl lines."""
+        import json
+        from datetime import datetime, timezone
+        from chad.util.providers import _get_opencode_usage_percentage
+
+        data_dir = tmp_path / ".chad" / "opencode-data" / "testaccount" / "opencode" / "sessions"
+        data_dir.mkdir(parents=True)
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        lines = [
+            "not valid json",
+            json.dumps({"type": "assistant", "timestamp": today}),
+            "{malformed",
+        ]
+        (data_dir / "session.jsonl").write_text("\n".join(lines))
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_opencode_usage_percentage("testaccount")
+            # Only 1 valid request counted
+            assert result == pytest.approx(0.05, abs=0.01)
