@@ -2194,10 +2194,97 @@ More details here...
 
 
 class TestProgressUpdateExtraction:
-    """Test progress update extraction with placeholder filtering."""
+    """Test progress update extraction with placeholder filtering.
+
+    Supports two formats:
+    1. Markdown (preferred) - avoids Codex CLI early exit with JSON
+    2. JSON (legacy fallback)
+    """
+
+    # =========================================================================
+    # Markdown format tests (preferred format)
+    # =========================================================================
+
+    def test_extract_progress_update_from_markdown_block(self):
+        """Extract progress from markdown code block format."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+Some thinking text...
+
+```
+**Progress:** Fixing authentication bug in login flow
+**Location:** src/auth.py:45
+**Next:** Writing tests
+```
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert result.summary == "Fixing authentication bug in login flow"
+        assert result.location == "src/auth.py:45"
+        assert result.next_step == "Writing tests"
+
+    def test_extract_progress_update_markdown_without_code_block(self):
+        """Extract progress from markdown without code block wrapper."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+**Progress:** Found the config manager in settings module
+**Location:** src/config.py:42
+**Next:** Adding validation logic
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert result.summary == "Found the config manager in settings module"
+        assert result.location == "src/config.py:42"
+        assert result.next_step == "Adding validation logic"
+
+    def test_extract_progress_update_markdown_next_step_optional(self):
+        """Markdown progress should work without Next field."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+**Progress:** Investigating the issue
+**Location:** src/app.py:10
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert result.summary == "Investigating the issue"
+        assert result.location == "src/app.py:10"
+        assert result.next_step is None
+
+    def test_extract_progress_update_markdown_filters_placeholder(self):
+        """Markdown progress with placeholder text should be filtered."""
+        from chad.util.prompts import extract_progress_update
+
+        # The exact example from the prompt should be filtered
+        content = '''
+**Progress:** Adding retry logic to handle API rate limits
+**Location:** src/api/client.py:45
+**Next:** Writing tests to verify the retry behavior
+'''
+        result = extract_progress_update(content)
+        assert result is None
+
+    def test_extract_progress_update_markdown_case_insensitive(self):
+        """Markdown field names should be case-insensitive."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+**progress:** Found authentication handler
+**LOCATION:** src/auth.py:45
+**next:** Adding tests
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert result.summary == "Found authentication handler"
+
+    # =========================================================================
+    # JSON format tests (legacy fallback)
+    # =========================================================================
 
     def test_extract_progress_update_from_json_block(self):
-        """Extract progress from code-fenced JSON."""
+        """Extract progress from code-fenced JSON (legacy format)."""
         from chad.util.prompts import extract_progress_update
 
         content = '''
