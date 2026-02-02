@@ -72,6 +72,47 @@ Base path `/api/v1` (except `/status`).
 - CLI resolution/installation lives in `chad.util.providers` + `chad.util.installer`; `task_executor.build_agent_command` assembles the command/env and builds the coding prompt (with doc references and verification instructions).
 - Claude/Qwen stream‑json is parsed by `ClaudeStreamJsonParser`; PTY output is streamed through EventLog and EventMultiplexer.
 
+## Agent Prompt Formats
+
+**CRITICAL: Progress updates MUST use markdown format, NOT JSON.**
+
+The coding prompt asks agents to emit progress updates during multi-step tasks. These updates use markdown:
+
+```
+**Progress:** Found the authentication handler
+**Location:** src/auth.py:45
+**Next:** Adding input validation
+```
+
+The final completion summary uses JSON (to enforce structured output):
+
+```json
+{
+  "change_summary": "Added input validation to auth handler",
+  "files_changed": ["src/auth.py"],
+  "completion_status": "success"
+}
+```
+
+**Why markdown for progress?** The Codex CLI (`codex exec -`) interprets bare JSON objects in assistant output as completion signals and terminates the session immediately. This caused agents to exit after outputting their first progress update, before doing any actual work. Markdown avoids this issue because it's not parsed as a structured completion message.
+
+This was discovered through debugging where Codex would:
+1. Do initial exploration
+2. Output `{"type": "progress", ...}`
+3. Exit immediately (even saying "Will continue now..." which was ignored)
+4. Chad would trigger verification on the incomplete output
+
+The fix (using markdown) was validated by running reproduction tests:
+- JSON progress: Codex exits immediately, no files created
+- Markdown progress: Codex completes full task
+
+**DO NOT reintroduce JSON format for progress updates** without testing against all providers, especially Codex. Future multi-step progress updates should also use markdown. See `tests/test_web_ui.py::TestProgressUpdateExtraction` for format examples.
+
+Related files:
+- `chad.util.prompts.CODING_AGENT_PROMPT`: The prompt template
+- `chad.util.prompts.extract_progress_update()`: Parser supporting both formats
+- `src/chad/server/services/task_executor.py`: Codex runs in `exec` mode with stdin closed after prompt
+
 ## Provider Capabilities
 
 Each provider implements `AIProvider` (in `chad.util.providers`) with these capability methods:

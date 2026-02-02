@@ -28,10 +28,11 @@ You need to complete the following task:
 ---
 Use the following sequence to complete the task:
 1. Do an initial quick exploration (under a minute) of a few classes which might be involved
-2. Output an initial progress update so the user can see what you found, do not wait for user response. Here is an
-EXAMPLE of a progress update, you must substitute the values from your own explanation in the fields:
-```json
-{{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45 - request() method", "next_step": "Writing tests to verify the retry behavior"}}
+2. Output an initial progress update so the user can see what you found, do not wait for user response. Use this markdown format (substitute your own values):
+```
+**Progress:** Adding retry logic to handle API rate limits
+**Location:** src/api/client.py:45 - request() method
+**Next:** Writing tests to verify the retry behavior
 ```
 3. Continue your work by writing test(s) that should fail until the fix/feature is implemented (you can now explore more code to achieve this goal if needed)
 4. Make the changes, adjusting tests and exploring more code as needed. If no changes are required, skip to step 7.
@@ -455,6 +456,16 @@ def _is_placeholder_text(text: str) -> bool:
 def extract_progress_update(response: str) -> ProgressUpdate | None:
     """Extract a progress update from coding agent streaming output.
 
+    Supports two formats:
+    1. Markdown (preferred) - used because JSON triggers early exit in some CLI agents:
+       ```
+       **Progress:** summary text
+       **Location:** file:line
+       **Next:** next step
+       ```
+    2. JSON (legacy fallback):
+       {"type": "progress", "summary": "...", "location": "...", "next_step": "..."}
+
     Args:
         response: Raw response chunk from the coding agent
 
@@ -465,7 +476,35 @@ def extract_progress_update(response: str) -> ProgressUpdate | None:
     import json
     import re
 
-    def _parse_progress(json_text: str) -> ProgressUpdate | None:
+    # Try markdown format first (preferred - avoids CLI agent early exit issues)
+    # Match code block with **Progress:**, **Location:**, **Next:** lines
+    md_block = re.search(r'```\s*\n(.*?\*\*Progress:\*\*.*?)```', response, re.DOTALL | re.IGNORECASE)
+    if md_block:
+        block_content = md_block.group(1)
+    else:
+        # Also try without code block - just the **Progress:** pattern
+        block_content = response
+
+    # Extract markdown fields
+    progress_match = re.search(r'\*\*Progress:\*\*\s*(.+?)(?:\n|$)', block_content, re.IGNORECASE)
+    location_match = re.search(r'\*\*Location:\*\*\s*(.+?)(?:\n|$)', block_content, re.IGNORECASE)
+    next_match = re.search(r'\*\*Next:\*\*\s*(.+?)(?:\n|$)', block_content, re.IGNORECASE)
+
+    if progress_match:
+        summary = progress_match.group(1).strip()
+        location = location_match.group(1).strip() if location_match else ""
+        next_step = next_match.group(1).strip() if next_match else None
+
+        # Filter placeholder text
+        if _is_placeholder_text(summary):
+            return None
+        if next_step and _is_placeholder_text(next_step):
+            return None
+
+        return ProgressUpdate(summary=summary, location=location, next_step=next_step)
+
+    # Fall back to JSON parsing for backwards compatibility
+    def _parse_progress_json(json_text: str) -> ProgressUpdate | None:
         """Parse progress JSON, retrying with newline normalization."""
         candidates = [json_text, json_text.replace("\r", " ").replace("\n", " ")]
         for candidate in candidates:
@@ -494,14 +533,14 @@ def extract_progress_update(response: str) -> ProgressUpdate | None:
     # Look for JSON block with type: "progress"
     json_match = re.search(r'```json\s*(\{[^`]*"type"\s*:\s*"progress"[^`]*\})\s*```', response, re.DOTALL)
     if json_match:
-        parsed = _parse_progress(json_match.group(1))
+        parsed = _parse_progress_json(json_match.group(1))
         if parsed:
             return parsed
 
     # Try to find raw JSON with type: progress (fallback)
     raw_match = re.search(r'\{\s*"type"\s*:\s*"progress"[^}]+\}', response, re.DOTALL)
     if raw_match:
-        parsed = _parse_progress(raw_match.group(0))
+        parsed = _parse_progress_json(raw_match.group(0))
         if parsed:
             return parsed
 

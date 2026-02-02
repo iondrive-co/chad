@@ -160,6 +160,16 @@ wrong thing. Here are some suggested steps for proving:
    # CLI UI
    timeout 5 .venv/bin/python -c "from chad.ui.cli import launch_cli_ui" 2>&1 || echo "CLI startup failed"
    ```
+4. **Run provider integration tests** when changing prompts, PTY handling, or task execution:
+   ```bash
+   # Changes to these files require provider testing:
+   # - src/chad/util/prompts.py
+   # - src/chad/server/services/task_executor.py
+   # - src/chad/server/services/pty_stream.py
+   CHAD_RUN_PROVIDER_TESTS=1 .venv/bin/python -m pytest tests/provider_integration/ -v -k codex
+   ```
+   See the `provider-testing` skill for the full guide. Unit tests mock providers and cannot
+   catch CLI-specific behaviors like early exit on certain output formats.
    This catches NameErrors, missing imports, and other issues that flake8 and tests may miss.
 4. Perform a critical self-review, note down all the issues you find, and then output them one by one noting whether
 each one is a problem that will require rework of your changes. If any do, then go back and rework and then go through
