@@ -18,6 +18,8 @@ from chad.util.providers import (
     MistralVibeProvider,
     QwenCodeProvider,
     OpenCodeProvider,
+    MockProvider,
+    MockProviderQuotaError,
     parse_codex_output,
 )
 
@@ -995,8 +997,23 @@ class TestImportOnWindows:
 
         import chad.util.providers as providers
 
-        importlib.reload(providers)
-        assert providers.__name__ == "chad.util.providers"
+        # Save class references before reload - importlib.reload() modifies
+        # the module in-place, creating new class definitions. We need to
+        # restore the original classes to prevent class identity issues in
+        # subsequent tests (e.g., pytest.raises(MockProviderQuotaError) won't
+        # match if the class was redefined by reload).
+        original_classes = {
+            "MockProviderQuotaError": providers.MockProviderQuotaError,
+            "MockProvider": providers.MockProvider,
+        }
+
+        try:
+            importlib.reload(providers)
+            assert providers.__name__ == "chad.util.providers"
+        finally:
+            # Restore original class definitions
+            for name, cls in original_classes.items():
+                setattr(providers, name, cls)
 
     @patch("chad.util.providers._stream_pty_output", return_value=("", False, True))
     @patch("chad.util.providers._start_pty_process")
@@ -2401,3 +2418,201 @@ class TestUsagePercentageCalculation:
             result = _get_opencode_usage_percentage("testaccount")
             # Only 1 valid request counted
             assert result == pytest.approx(0.05, abs=0.01)
+
+
+class TestMockProviderQuotaSimulation:
+    """Tests for MockProvider quota exhaustion simulation.
+
+    These tests verify that MockProvider can simulate quota errors,
+    enabling testing of provider handover without real API costs.
+
+    Note: These tests use direct method patching instead of the config system
+    to avoid test pollution issues when run in sequence with other tests.
+    """
+
+    @pytest.fixture(autouse=True)
+    def reset_mock_provider_state(self):
+        """Reset MockProvider class-level state before each test."""
+        MockProvider._verification_counts.clear()
+        MockProvider._coding_turn_counts.clear()
+        yield
+        MockProvider._verification_counts.clear()
+        MockProvider._coding_turn_counts.clear()
+
+    def test_quota_error_when_usage_is_zero(self, tmp_path):
+        """MockProvider raises quota error when mock_remaining_usage is 0."""
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-account",
+        )
+        provider = MockProvider(model_config)
+        provider._simulate_quota = True
+        # Mock the internal method to return 0 usage
+        provider._get_remaining_usage = lambda: 0.0
+        provider.start_session(str(tmp_path))
+        provider.send_message("test task")
+
+        with pytest.raises(MockProviderQuotaError) as exc_info:
+            provider.get_response()
+
+        error_msg = str(exc_info.value)
+        assert "quota exceeded" in error_msg.lower()
+        assert "insufficient credits" in error_msg.lower()
+
+    def test_no_quota_error_when_usage_available(self, tmp_path):
+        """MockProvider works normally when mock_remaining_usage > 0."""
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-account",
+        )
+        provider = MockProvider(model_config)
+        provider._simulate_quota = True
+        provider._get_remaining_usage = lambda: 0.5
+        provider._decrement_usage = lambda amount=None: None  # No-op
+        provider.start_session(str(tmp_path))
+        provider.send_message("test task")
+
+        response = provider.get_response()
+        assert response
+        assert "change_summary" in response or "BUGS.md" in response
+
+    def test_usage_decrements_after_response(self, tmp_path):
+        """MockProvider decrements usage after each response."""
+        usage = [0.5]  # Use list to allow mutation in closure
+
+        def get_usage():
+            return usage[0]
+
+        def decrement_usage(amount=None):
+            decrement = amount if amount is not None else MockProvider.USAGE_DECREMENT_PER_RESPONSE
+            usage[0] = max(0.0, usage[0] - decrement)
+
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-account",
+        )
+        provider = MockProvider(model_config)
+        provider._simulate_quota = True
+        provider._get_remaining_usage = get_usage
+        provider._decrement_usage = decrement_usage
+        provider.start_session(str(tmp_path))
+        provider.send_message("test task")
+
+        initial_usage = usage[0]
+        provider.get_response()
+        final_usage = usage[0]
+
+        assert final_usage < initial_usage
+        expected = initial_usage - MockProvider.USAGE_DECREMENT_PER_RESPONSE
+        assert final_usage == pytest.approx(expected, abs=0.001)
+
+    def test_queued_responses_bypass_quota_check(self, tmp_path):
+        """Queued responses (for unit tests) bypass quota simulation."""
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-account",
+        )
+        provider = MockProvider(model_config)
+        provider._simulate_quota = True
+        provider._get_remaining_usage = lambda: 0.0  # Would fail if checked
+        provider.start_session(str(tmp_path))
+
+        provider.queue_response('{"test": "response"}')
+        response = provider.get_response()
+        assert response == '{"test": "response"}'
+
+    def test_quota_simulation_disabled_by_default(self, tmp_path):
+        """Quota simulation is disabled by default (doesn't affect existing tests)."""
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-account",
+        )
+        provider = MockProvider(model_config)
+        # _simulate_quota is False by default - quota check won't run
+        provider._get_remaining_usage = lambda: 0.0  # Would fail if checked
+        provider.start_session(str(tmp_path))
+        provider.send_message("test task")
+
+        response = provider.get_response()
+        assert response  # Should work despite "zero" usage
+
+    def test_quota_error_matches_handoff_detection(self, tmp_path):
+        """Quota error message matches is_quota_exhaustion_error() patterns."""
+        from chad.util.handoff import is_quota_exhaustion_error
+
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-account",
+        )
+        provider = MockProvider(model_config)
+        provider._simulate_quota = True
+        provider._get_remaining_usage = lambda: 0.0
+        provider.start_session(str(tmp_path))
+        provider.send_message("test task")
+
+        try:
+            provider.get_response()
+            pytest.fail("Expected MockProviderQuotaError")
+        except MockProviderQuotaError as e:
+            assert is_quota_exhaustion_error(str(e)), (
+                f"Error message '{e}' not detected as quota exhaustion. "
+                "This will break provider handover testing."
+            )
+
+    def test_gradual_quota_depletion(self, tmp_path):
+        """MockProvider can simulate gradual quota depletion over multiple responses."""
+        usage = [0.15]  # Start with just enough for 2 responses
+
+        def get_usage():
+            return usage[0]
+
+        def decrement_usage(amount=None):
+            decrement = amount if amount is not None else MockProvider.USAGE_DECREMENT_PER_RESPONSE
+            usage[0] = max(0.0, usage[0] - decrement)
+
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-account",
+        )
+        provider = MockProvider(model_config)
+        provider._simulate_quota = True
+        provider._get_remaining_usage = get_usage
+        provider._decrement_usage = decrement_usage
+        provider.start_session(str(tmp_path))
+
+        # First response should succeed
+        provider.send_message("task 1")
+        response1 = provider.get_response()
+        assert response1
+
+        # Second response should also succeed (0.15 - 0.1 = 0.05 > 0)
+        provider.send_message("task 2")
+        response2 = provider.get_response()
+        assert response2
+
+        # Third response should fail (0.05 - 0.1 = -0.05 -> clamped to 0)
+        provider.send_message("task 3")
+        with pytest.raises(MockProviderQuotaError):
+            provider.get_response()
+
+    def test_default_usage_when_no_account(self, tmp_path):
+        """MockProvider uses default usage when no account configured."""
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            # No account_name
+        )
+        provider = MockProvider(model_config)
+        provider.start_session(str(tmp_path))
+        provider.send_message("test task")
+
+        # Should use default 0.5 usage and work normally
+        response = provider.get_response()
+        assert response
