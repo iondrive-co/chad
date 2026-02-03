@@ -996,6 +996,70 @@ def _get_opencode_usage_percentage(account_name: str) -> float | None:
     return min((today_requests / daily_limit) * 100, 100.0)
 
 
+def _get_kimi_usage_percentage(account_name: str) -> float | None:
+    """Get Kimi Code usage percentage by counting today's requests.
+
+    Kimi Code stores session data in ~/.kimi/ directory.
+
+    Args:
+        account_name: The account name for isolated config directory
+
+    Returns:
+        Usage percentage (0-100), or None if unavailable
+    """
+    from datetime import datetime, timezone
+
+    # Get isolated config directory for this account
+    base_home = safe_home()
+    if account_name:
+        kimi_dir = Path(base_home) / ".chad" / "kimi-homes" / account_name / ".kimi"
+    else:
+        kimi_dir = Path(base_home) / ".kimi"
+
+    config_file = kimi_dir / "config.toml"
+    if not config_file.exists():
+        return None  # Not configured
+
+    # Kimi stores sessions - count today's requests
+    # Session files may be in different locations depending on version
+    sessions_dir = kimi_dir / "sessions"
+    if not sessions_dir.exists():
+        return 0.0  # Configured but no sessions yet
+
+    today_requests = 0
+    today = datetime.now(timezone.utc).date()
+
+    for session_file in sessions_dir.glob("*.jsonl"):
+        try:
+            with open(session_file, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        # Count assistant responses
+                        if event.get("type") == "assistant" or event.get("role") == "assistant":
+                            timestamp = event.get("timestamp", "") or event.get("created_at", "")
+                            if timestamp:
+                                try:
+                                    msg_date = datetime.fromisoformat(
+                                        timestamp.replace("Z", "+00:00")
+                                    ).date()
+                                    if msg_date == today:
+                                        today_requests += 1
+                                except (ValueError, AttributeError):
+                                    pass
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            continue
+
+    # Kimi has generous limits, estimate 2000/day
+    daily_limit = 2000
+    return min((today_requests / daily_limit) * 100, 100.0)
+
+
 class AIProvider(ABC):
     """Abstract base class for AI providers."""
 
@@ -2465,6 +2529,204 @@ class OpenCodeProvider(AIProvider):
         return _get_opencode_usage_percentage(self.config.account_name)
 
 
+class KimiCodeProvider(AIProvider):
+    """Provider for Kimi Code CLI with multi-turn support.
+
+    Uses the `kimi` command-line interface with stream-json output format
+    for real-time streaming. Supports multi-turn via `--session <id>` or `--continue`.
+
+    Kimi Code is an AI coding agent from Moonshot AI, powered by Kimi K2.5 model.
+    Config stored in ~/.kimi/config.toml.
+    """
+
+    def __init__(self, config: ModelConfig):
+        super().__init__(config)
+        self.project_path: str | None = None
+        self.system_prompt: str | None = None
+        self.current_message: str | None = None
+        self.process: object | None = None
+        self.master_fd: int | None = None
+        self.session_id: str | None = None  # For multi-turn support
+
+    def _get_isolated_config_dir(self) -> Path:
+        """Get isolated ~/.kimi directory for this account."""
+        base_home = safe_home()
+        if self.config.account_name:
+            return Path(base_home) / ".chad" / "kimi-homes" / self.config.account_name
+        return Path(base_home)
+
+    def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
+        ok, detail = _ensure_cli_tool("kimi", self._notify_activity)
+        if not ok:
+            return False
+
+        self.project_path = project_path
+        self.system_prompt = system_prompt
+        self.cli_path = detail
+        return True
+
+    def send_message(self, message: str) -> None:
+        # Only prepend system prompt on first message (no session_id yet)
+        if self.system_prompt and not self.session_id:
+            self.current_message = f"{self.system_prompt}\n\n---\n\n{message}"
+        else:
+            self.current_message = message
+
+    def get_response(self, timeout: float = 1800.0) -> str:  # noqa: C901
+        import json
+
+        if not self.current_message:
+            return ""
+
+        kimi_cli = getattr(self, "cli_path", None) or find_cli_executable("kimi")
+
+        # Build command using Kimi CLI flags:
+        # -p/--prompt: pass prompt
+        # --output-format stream-json: structured JSON output
+        # --print: non-interactive mode (implies --yolo)
+        # --session: resume specific session
+        if self.session_id:
+            cmd = [
+                kimi_cli,
+                "-p", self.current_message,
+                "--output-format", "stream-json",
+                "--print",
+                "--session", self.session_id,
+            ]
+        else:
+            cmd = [
+                kimi_cli,
+                "-p", self.current_message,
+                "--output-format", "stream-json",
+                "--print",
+            ]
+            if self.config.model_name and self.config.model_name != "default":
+                cmd.extend(["-m", self.config.model_name])
+
+        try:
+            env = os.environ.copy()
+            env["TERM"] = "xterm-256color"
+            # Set isolated home directory for config
+            env["HOME"] = str(self._get_isolated_config_dir())
+
+            json_events = []
+            response_parts = []
+            final_result = [None]
+
+            def handle_chunk(decoded: str) -> None:
+                # Stream raw output for live display
+                self._notify_activity("stream", decoded)
+                # Parse JSON lines
+                for line in decoded.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        if not isinstance(event, dict):
+                            continue
+                        json_events.append(event)
+                        # Extract session_id from session/system event
+                        if event.get("type") == "session" and "id" in event:
+                            self.session_id = event["id"]
+                        elif event.get("type") == "system" and "session_id" in event:
+                            self.session_id = event["session_id"]
+                        # Handle assistant type with content blocks
+                        if event.get("type") == "assistant":
+                            message = event.get("message", {})
+                            content_blocks = message.get("content", [])
+                            for block in content_blocks:
+                                if isinstance(block, dict) and block.get("type") == "text":
+                                    text = block.get("text", "")
+                                    if text:
+                                        response_parts.append(text)
+                                        self._notify_activity("text", text[:80])
+                        # Capture final result from result event
+                        if event.get("type") == "result" and "result" in event:
+                            final_result[0] = event["result"]
+                    except json.JSONDecodeError:
+                        # Non-JSON line - just notify
+                        if line and len(line) > 10:
+                            self._notify_activity("text", line[:80])
+
+            self.process, self.master_fd = _start_pty_process(cmd, cwd=self.project_path, env=env)
+
+            # Close stdin immediately - prompt is passed via -p argument
+            if self.process.stdin:
+                self.process.stdin.close()
+
+            output, timed_out, idle_stalled = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
+
+            self.current_message = None
+            self.process = None
+            self.master_fd = None
+
+            if idle_stalled:
+                return f"Error: Kimi execution stalled (no output for {int(timeout)}s)"
+            if timed_out:
+                return f"Error: Kimi execution timed out ({int(timeout / 60)} minutes)"
+
+            # Prefer final result from result event (most reliable)
+            if final_result[0]:
+                return str(final_result[0]).strip()
+
+            # Return collected response parts if any
+            if response_parts:
+                return "".join(response_parts).strip()
+
+            # Fallback to raw output
+            output = _strip_ansi_codes(output)
+            return output.strip() if output else "No response from Kimi Code"
+
+        except FileNotFoundError:
+            self.current_message = None
+            self.process = None
+            _close_master_fd(self.master_fd)
+            self.master_fd = None
+            return (
+                "Failed to run Kimi Code: command not found\n\n"
+                "Install with: pip install kimi-cli"
+            )
+        except (PermissionError, OSError) as exc:
+            self.current_message = None
+            self.process = None
+            _close_master_fd(self.master_fd)
+            self.master_fd = None
+            return f"Failed to run Kimi Code: {exc}"
+
+    def stop_session(self) -> None:
+        self.current_message = None
+        self.session_id = None  # Clear session_id to end multi-turn
+        _close_master_fd(self.master_fd)
+        self.master_fd = None
+        if self.process:
+            try:
+                self.process.kill()
+                self.process.wait(timeout=5)
+            except Exception:
+                pass
+            self.process = None
+
+    def is_alive(self) -> bool:
+        # Session is "alive" if we have a session_id for resuming
+        return self.session_id is not None or (self.process is not None and self.process.poll() is None)
+
+    def supports_multi_turn(self) -> bool:
+        return True
+
+    def get_session_id(self) -> str | None:
+        """Get the Kimi session_id for native resume."""
+        return self.session_id
+
+    def supports_usage_reporting(self) -> bool:
+        """Kimi supports usage reporting via local session files."""
+        return True
+
+    def get_usage_percentage(self) -> float | None:
+        """Get Kimi usage percentage from local session files."""
+        return _get_kimi_usage_percentage(self.config.account_name)
+
+
 class MistralVibeProvider(AIProvider):
     """Provider for Mistral Vibe CLI with multi-turn support.
 
@@ -2916,6 +3178,8 @@ def create_provider(config: ModelConfig) -> AIProvider:
         return QwenCodeProvider(config)
     elif config.provider == "opencode":
         return OpenCodeProvider(config)
+    elif config.provider == "kimi":
+        return KimiCodeProvider(config)
     elif config.provider == "mistral":
         return MistralVibeProvider(config)
     elif config.provider == "mock":

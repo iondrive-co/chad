@@ -22,8 +22,8 @@ if TYPE_CHECKING:
 class ProviderUIManager:
     """Provider management and display helpers for the web UI."""
 
-    _ALL_PROVIDERS = {"anthropic", "openai", "gemini", "qwen", "mistral", "opencode", "mock"}
-    SUPPORTED_PROVIDERS = {"anthropic", "openai", "gemini", "qwen", "mistral", "opencode", "mock"}  # For backwards compat
+    _ALL_PROVIDERS = {"anthropic", "openai", "gemini", "qwen", "mistral", "opencode", "kimi", "mock"}
+    SUPPORTED_PROVIDERS = {"anthropic", "openai", "gemini", "qwen", "mistral", "opencode", "kimi", "mock"}  # For backwards compat
     OPENAI_REASONING_LEVELS = ["default", "low", "medium", "high", "xhigh"]
 
     def get_supported_providers(self) -> set[str]:
@@ -35,7 +35,7 @@ class ProviderUIManager:
     def get_provider_choices(self) -> list[str]:
         """Get ordered list of provider type choices for dropdowns."""
         # Fixed order for consistent UI
-        order = ["anthropic", "openai", "gemini", "qwen", "mistral", "opencode", "mock"]
+        order = ["anthropic", "openai", "gemini", "qwen", "mistral", "opencode", "kimi", "mock"]
         supported = self.get_supported_providers()
         return [p for p in order if p in supported]
 
@@ -177,6 +177,8 @@ class ProviderUIManager:
             status_text = self._get_mistral_usage()
         elif provider == "opencode":
             status_text = self._get_opencode_usage(account_name)
+        elif provider == "kimi":
+            status_text = self._get_kimi_usage(account_name)
         elif provider == "mock":
             status_text = ""  # Mock provider uses slider input instead
         else:
@@ -229,6 +231,8 @@ class ProviderUIManager:
             return self._get_mistral_remaining_usage()
         if provider == "opencode":
             return self._get_opencode_remaining_usage(account_name)
+        if provider == "kimi":
+            return self._get_kimi_remaining_usage(account_name)
         if provider == "mock":
             return self.get_mock_remaining_usage(account_name)
 
@@ -1286,6 +1290,119 @@ class ProviderUIManager:
         used_pct = today_requests / daily_limit
         return max(0.0, min(1.0, 1.0 - used_pct))
 
+    def _get_kimi_usage(self, account_name: str) -> str:
+        """Get usage info from Kimi Code by counting today's requests.
+
+        Kimi Code stores config and sessions in ~/.kimi/.
+        """
+        from datetime import datetime, timezone
+
+        # Get isolated config directory for this account
+        if account_name:
+            kimi_dir = Path.home() / ".chad" / "kimi-homes" / account_name / ".kimi"
+        else:
+            kimi_dir = Path.home() / ".kimi"
+
+        config_file = kimi_dir / "config.toml"
+
+        if not config_file.exists():
+            return "❌ **Not configured**\n\nRun `kimi` in terminal and use `/login` to authenticate."
+
+        # Count today's requests from session files
+        sessions_dir = kimi_dir / "sessions"
+        today_requests = 0
+        today = datetime.now(timezone.utc).date()
+        daily_limit = 2000  # Kimi has generous limits
+
+        if sessions_dir.exists():
+            for session_file in sessions_dir.glob("*.jsonl"):
+                try:
+                    with open(session_file, encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                event = json.loads(line)
+                                if event.get("type") == "assistant" or event.get("role") == "assistant":
+                                    timestamp = event.get("timestamp", "") or event.get("created_at", "")
+                                    if timestamp:
+                                        try:
+                                            msg_date = datetime.fromisoformat(
+                                                timestamp.replace("Z", "+00:00")
+                                            ).date()
+                                            if msg_date == today:
+                                                today_requests += 1
+                                        except (ValueError, AttributeError):
+                                            pass
+                            except json.JSONDecodeError:
+                                continue
+                except OSError:
+                    continue
+
+        # Calculate usage percentage
+        util_pct = min((today_requests / daily_limit) * 100, 100.0)
+        bar = self._progress_bar(util_pct)
+
+        result = "✅ **Configured**\n\n"
+        result += "**Kimi Code** (Kimi K2.5)\n\n"
+        result += "**Daily Usage**\n"
+        result += f"[{bar}] {util_pct:.0f}% used\n"
+        result += f"{today_requests:,} / {daily_limit:,} requests\n"
+        result += "Resets at Midnight UTC\n"
+
+        return result
+
+    def _get_kimi_remaining_usage(self, account_name: str) -> float:
+        """Get Kimi remaining usage (0.0-1.0) by counting today's requests."""
+        from datetime import datetime, timezone
+
+        # Get isolated config directory for this account
+        if account_name:
+            kimi_dir = Path.home() / ".chad" / "kimi-homes" / account_name / ".kimi"
+        else:
+            kimi_dir = Path.home() / ".kimi"
+
+        config_file = kimi_dir / "config.toml"
+        if not config_file.exists():
+            return 0.0  # Not configured
+
+        sessions_dir = kimi_dir / "sessions"
+        if not sessions_dir.exists():
+            return 1.0  # Configured but no sessions yet
+
+        today_requests = 0
+        today = datetime.now(timezone.utc).date()
+        daily_limit = 2000
+
+        for session_file in sessions_dir.glob("*.jsonl"):
+            try:
+                with open(session_file, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                            if event.get("type") == "assistant" or event.get("role") == "assistant":
+                                timestamp = event.get("timestamp", "") or event.get("created_at", "")
+                                if timestamp:
+                                    try:
+                                        msg_date = datetime.fromisoformat(
+                                            timestamp.replace("Z", "+00:00")
+                                        ).date()
+                                        if msg_date == today:
+                                            today_requests += 1
+                                    except (ValueError, AttributeError):
+                                        pass
+                        except json.JSONDecodeError:
+                            continue
+            except OSError:
+                continue
+
+        used_pct = today_requests / daily_limit
+        return max(0.0, min(1.0, 1.0 - used_pct))
+
     def get_account_choices(self) -> list[str]:
         """Get list of account names for dropdowns."""
         accounts = self.api_client.list_accounts()
@@ -1330,6 +1447,12 @@ class ProviderUIManager:
                 # OpenCode doesn't require login, uses backend credentials
                 return True, "Ready (uses backend credentials)"
 
+            if provider_type == "kimi":
+                kimi_config = Path.home() / ".kimi" / "config.toml"
+                if kimi_config.exists():
+                    return True, "Logged in"
+                return False, "Not logged in"
+
             if provider_type == "mock":
                 return True, "Mock provider (no login required)"
 
@@ -1360,6 +1483,7 @@ class ProviderUIManager:
             "qwen": "qwen",
             "mistral": "vibe",
             "opencode": "opencode",
+            "kimi": "kimi",
         }
         tool_key = tool_map.get(provider_type)
         if not tool_key:

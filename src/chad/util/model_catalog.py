@@ -64,12 +64,16 @@ class ModelCatalog:
         "openai/gpt-4o",
         "default",
     )
+    KIMI_FALLBACK: tuple[str, ...] = (
+        "kimi-k2.5",
+        "default",
+    )
     MOCK_FALLBACK: tuple[str, ...] = ("default",)
 
     _cache: dict[str, tuple[float, list[str]]] = field(default_factory=dict, init=False)
 
     def supported_providers(self) -> set[str]:
-        return {"anthropic", "openai", "gemini", "qwen", "mistral", "opencode", "mock"}
+        return {"anthropic", "openai", "gemini", "qwen", "mistral", "opencode", "kimi", "mock"}
 
     def get_models(self, provider: str, account_name: str | None = None) -> list[str]:
         """Return discovered models for a provider, cached with TTL."""
@@ -106,6 +110,7 @@ class ModelCatalog:
             "qwen": self.QWEN_FALLBACK,
             "mistral": self.MISTRAL_FALLBACK,
             "opencode": self.OPENCODE_FALLBACK,
+            "kimi": self.KIMI_FALLBACK,
             "mock": self.MOCK_FALLBACK,
         }.get(provider, ("default",))
 

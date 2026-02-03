@@ -76,6 +76,13 @@ class AIToolInstaller:
                 package="https://raw.githubusercontent.com/opencode-ai/opencode/refs/heads/main/install",
                 version=None,
             ),
+            "kimi": CLIToolSpec(
+                name="Kimi Code",
+                binary="kimi",
+                installer="pip",
+                package="kimi-cli",
+                version=None,
+            ),
         }
 
     def resolve_tool_path(self, binary: str) -> Path | None:
