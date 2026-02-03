@@ -6,6 +6,7 @@ import platform
 import sys
 import textwrap
 import time
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -18,6 +19,7 @@ from chad.util.providers import (
     MistralVibeProvider,
     QwenCodeProvider,
     OpenCodeProvider,
+    KimiCodeProvider,
     MockProvider,
     MockProviderQuotaError,
     parse_codex_output,
@@ -51,6 +53,11 @@ class TestCreateProvider:
         config = ModelConfig(provider="opencode", model_name="default")
         provider = create_provider(config)
         assert isinstance(provider, OpenCodeProvider)
+
+    def test_create_kimi_provider(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = create_provider(config)
+        assert isinstance(provider, KimiCodeProvider)
 
     def test_unsupported_provider(self):
         config = ModelConfig(provider="unsupported", model_name="model")
@@ -1688,6 +1695,118 @@ class TestOpenCodeProvider:
         assert ".local/share" in str(data_dir) or "share" in str(data_dir)
 
 
+class TestKimiCodeProvider:
+    """Test cases for KimiCodeProvider."""
+
+    @patch("chad.util.providers._ensure_cli_tool", return_value=(True, "/bin/kimi"))
+    def test_start_session_success(self, mock_ensure):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+
+        result = provider.start_session("/tmp/test_project")
+        assert result is True
+        assert provider.project_path == "/tmp/test_project"
+        mock_ensure.assert_called_once_with("kimi", provider._notify_activity)
+
+    @patch("chad.util.providers._ensure_cli_tool", return_value=(False, "CLI not found"))
+    def test_start_session_failure(self, mock_ensure):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+
+        result = provider.start_session("/tmp/test_project")
+        assert result is False
+        mock_ensure.assert_called_once_with("kimi", provider._notify_activity)
+
+    @patch("chad.util.providers._ensure_cli_tool", return_value=(True, "/bin/kimi"))
+    def test_start_session_with_system_prompt(self, mock_ensure):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+
+        result = provider.start_session("/tmp/test_project", system_prompt="Initial prompt")
+        assert result is True
+        assert provider.system_prompt == "Initial prompt"
+        # System prompt is prepended to messages when no session_id
+        provider.send_message("Test message")
+        assert "Initial prompt" in provider.current_message
+        assert "Test message" in provider.current_message
+
+    def test_send_message(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+
+        provider.send_message("Hello")
+        assert provider.current_message == "Hello"
+
+    def test_send_message_without_system_prompt_on_continuation(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+        provider.system_prompt = "System prompt"
+        provider.session_id = "ses_abc123"  # Session already established
+
+        provider.send_message("Follow-up message")
+        # Should not include system prompt since session_id is set
+        assert provider.current_message == "Follow-up message"
+
+    def test_is_alive_with_session_id(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+
+        # Initially not alive
+        assert provider.is_alive() is False
+
+        # With session_id, should be alive
+        provider.session_id = "ses_abc123"
+        assert provider.is_alive() is True
+
+    def test_stop_session_clears_session_id(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+        provider.session_id = "ses_abc123"
+
+        provider.stop_session()
+        assert provider.session_id is None
+
+    def test_supports_multi_turn(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+        assert provider.supports_multi_turn() is True
+
+    def test_get_session_id(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+
+        # Initially None
+        assert provider.get_session_id() is None
+
+        # After setting session_id
+        provider.session_id = "ses_xyz789"
+        assert provider.get_session_id() == "ses_xyz789"
+
+    def test_supports_usage_reporting(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+        assert provider.supports_usage_reporting() is True
+
+    def test_get_response_no_message(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+        assert provider.get_response(timeout=1) == ""
+
+    def test_get_isolated_config_dir_with_account(self):
+        config = ModelConfig(provider="kimi", model_name="default", account_name="myaccount")
+        provider = KimiCodeProvider(config)
+        config_dir = provider._get_isolated_config_dir()
+        assert "kimi-homes" in str(config_dir)
+        assert "myaccount" in str(config_dir)
+
+    def test_get_isolated_config_dir_without_account(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+        config_dir = provider._get_isolated_config_dir()
+        # Should return user home directory
+        assert str(config_dir).startswith(str(Path.home()))
+
+
 class TestGeminiCodeAssistProvider:
     """Tests for GeminiCodeAssistProvider."""
 
@@ -2095,6 +2214,18 @@ class TestProviderGetSessionId:
         provider.session_id = "ses_opencode_abc"
         assert provider.get_session_id() == "ses_opencode_abc"
 
+    def test_kimi_provider_returns_session_id(self):
+        """Kimi provider returns session_id when set."""
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+
+        # Initially None
+        assert provider.get_session_id() is None
+
+        # After setting session_id
+        provider.session_id = "ses_kimi_xyz"
+        assert provider.get_session_id() == "ses_kimi_xyz"
+
 
 class TestProviderUsageReporting:
     """Tests for provider usage reporting capabilities."""
@@ -2136,6 +2267,12 @@ class TestProviderUsageReporting:
         """OpenCode provider supports usage percentage reporting via local session files."""
         config = ModelConfig(provider="opencode", model_name="default")
         provider = OpenCodeProvider(config)
+        assert provider.supports_usage_reporting() is True
+
+    def test_kimi_provider_supports_usage_reporting(self):
+        """Kimi provider supports usage percentage reporting via local session files."""
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
         assert provider.supports_usage_reporting() is True
 
 
@@ -2416,6 +2553,84 @@ class TestUsagePercentageCalculation:
 
         with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
             result = _get_opencode_usage_percentage("testaccount")
+            # Only 1 valid request counted
+            assert result == pytest.approx(0.05, abs=0.01)
+
+    def test_kimi_usage_not_configured(self, tmp_path):
+        """Kimi returns None when config doesn't exist."""
+        from chad.util.providers import _get_kimi_usage_percentage
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_kimi_usage_percentage("")
+            assert result is None
+
+    def test_kimi_usage_configured_no_sessions(self, tmp_path):
+        """Kimi returns 0% when configured but no session files exist."""
+        from chad.util.providers import _get_kimi_usage_percentage
+
+        kimi_dir = tmp_path / ".kimi"
+        kimi_dir.mkdir()
+        (kimi_dir / "config.toml").write_text('[providers]\ndefault = "kimi"')
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_kimi_usage_percentage("")
+            assert result == 0.0
+
+    def test_kimi_usage_counts_today_requests(self, tmp_path):
+        """Kimi correctly counts today's requests from jsonl session files."""
+        import json
+        from datetime import datetime, timezone
+        from chad.util.providers import _get_kimi_usage_percentage
+
+        # Create config and session directory structure for account
+        kimi_dir = tmp_path / ".chad" / "kimi-homes" / "testaccount" / ".kimi"
+        kimi_dir.mkdir(parents=True)
+        (kimi_dir / "config.toml").write_text('[providers]\ndefault = "kimi"')
+
+        sessions_dir = kimi_dir / "sessions"
+        sessions_dir.mkdir()
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        yesterday = "2020-01-01T12:00:00.000Z"
+
+        # Write jsonl format (one JSON object per line)
+        lines = [
+            json.dumps({"type": "assistant", "timestamp": today}),
+            json.dumps({"type": "assistant", "timestamp": today}),
+            json.dumps({"type": "assistant", "timestamp": today}),
+            json.dumps({"type": "assistant", "timestamp": yesterday}),  # Not today
+            json.dumps({"type": "user", "timestamp": today}),  # Not assistant
+        ]
+        (sessions_dir / "session.jsonl").write_text("\n".join(lines))
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_kimi_usage_percentage("testaccount")
+            # 3 requests today out of 2000 limit = 0.15%
+            assert result == pytest.approx(0.15, abs=0.01)
+
+    def test_kimi_usage_handles_malformed_jsonl(self, tmp_path):
+        """Kimi gracefully handles malformed jsonl lines."""
+        import json
+        from datetime import datetime, timezone
+        from chad.util.providers import _get_kimi_usage_percentage
+
+        kimi_dir = tmp_path / ".chad" / "kimi-homes" / "testaccount" / ".kimi"
+        kimi_dir.mkdir(parents=True)
+        (kimi_dir / "config.toml").write_text('[providers]\ndefault = "kimi"')
+
+        sessions_dir = kimi_dir / "sessions"
+        sessions_dir.mkdir()
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        lines = [
+            "not valid json",
+            json.dumps({"type": "assistant", "timestamp": today}),
+            "{malformed",
+        ]
+        (sessions_dir / "session.jsonl").write_text("\n".join(lines))
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_kimi_usage_percentage("testaccount")
             # Only 1 valid request counted
             assert result == pytest.approx(0.05, abs=0.01)
 
