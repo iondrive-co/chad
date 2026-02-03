@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 
 from .event_log import ContextCondensedEvent, EventLog
+from .message_converter import extract_conversation_from_events, format_for_provider
 
 
 # Patterns indicating credit/quota exhaustion across different providers.
@@ -168,6 +169,7 @@ def extract_progress_from_events(event_log: EventLog, since_seq: int = 0) -> dic
 def build_handoff_summary(
     original_task: str,
     event_log: EventLog,
+    target_provider: str = "generic",
     since_seq: int = 0,
     remaining_work: str = "",
 ) -> str:
@@ -175,6 +177,7 @@ def build_handoff_summary(
 
     Creates a structured summary that includes:
     - The original task description
+    - Full conversation history (formatted for target provider)
     - Files created and modified
     - Key commands that were run
     - Any remaining work to be done
@@ -182,6 +185,8 @@ def build_handoff_summary(
     Args:
         original_task: The original task description
         event_log: The EventLog instance to extract progress from
+        target_provider: The provider type to format conversation for
+            (anthropic, openai, gemini, qwen, mistral)
         since_seq: Only consider events after this sequence number
         remaining_work: Optional description of work still to be done
 
@@ -190,11 +195,20 @@ def build_handoff_summary(
     """
     progress = extract_progress_from_events(event_log, since_seq)
 
-    parts = ["# Session Handoff Context\n"]
+    parts = ["<previous_session>"]
     parts.append(f"## Original Task\n{original_task}\n")
 
+    # Extract and format conversation history
+    turns = extract_conversation_from_events(event_log, since_seq)
+    if turns:
+        conversation_text = format_for_provider(turns, target_provider)
+        if conversation_text:
+            parts.append("## Conversation History")
+            parts.append(conversation_text)
+            parts.append("")
+
     if progress["files_changed"] or progress["files_created"]:
-        parts.append("## Work Completed")
+        parts.append("## Files Modified")
         for f in progress["files_created"]:
             parts.append(f"- Created: `{f}`")
         for f in progress["files_changed"]:
@@ -210,6 +224,8 @@ def build_handoff_summary(
     if remaining_work:
         parts.append(f"## Remaining Work\n{remaining_work}\n")
 
+    parts.append("</previous_session>")
+
     return "\n".join(parts)
 
 
@@ -218,6 +234,7 @@ def log_handoff_checkpoint(
     original_task: str,
     provider_session_id: str | None = None,
     remaining_work: str = "",
+    target_provider: str = "generic",
 ) -> int:
     """Log a ContextCondensedEvent with handoff data.
 
@@ -231,12 +248,15 @@ def log_handoff_checkpoint(
         provider_session_id: Native session ID from the old provider
             (thread_id for Codex, session_id for Gemini/Qwen)
         remaining_work: Optional description of work still to do
+        target_provider: The provider type to format conversation for
 
     Returns:
         The sequence number of the logged event
     """
     progress = extract_progress_from_events(event_log)
-    summary = build_handoff_summary(original_task, event_log, remaining_work=remaining_work)
+    summary = build_handoff_summary(
+        original_task, event_log, target_provider=target_provider, remaining_work=remaining_work
+    )
 
     event = ContextCondensedEvent(
         replaces_seq_range=(0, event_log.get_latest_seq()),
@@ -253,42 +273,38 @@ def log_handoff_checkpoint(
     return event.seq
 
 
-def build_resume_prompt(event_log: EventLog, new_message: str | None = None) -> str:
+def build_resume_prompt(
+    event_log: EventLog,
+    new_message: str | None = None,
+    target_provider: str = "generic",
+) -> str:
     """Build a prompt for resuming a session from the event log.
 
     Looks for the latest ContextCondensedEvent with policy="provider_handoff"
     and uses its summary. If none exists, builds a fresh summary from
-    the event log.
+    the event log formatted for the target provider.
 
     Args:
         event_log: The EventLog instance to read from
         new_message: Optional new instructions to append
+        target_provider: The provider type to format conversation for
 
     Returns:
         A prompt string containing context and optionally new instructions
     """
-    events = event_log.get_events(event_types=["context_condensed"])
+    # Always build fresh summary for the target provider to ensure proper formatting
+    # Find original task from session_started
+    started = event_log.get_events(event_types=["session_started"])
+    task = ""
+    if started:
+        task = started[0].get("task_description", "")
+    if not task:
+        task = "Continue previous work"
 
-    # Find the latest handoff checkpoint
-    context = ""
-    for event in reversed(events):
-        if event.get("policy") == "provider_handoff":
-            context = event.get("summary_text", "")
-            break
-
-    if not context:
-        # No checkpoint - build from scratch
-        # Find original task from session_started
-        started = event_log.get_events(event_types=["session_started"])
-        task = ""
-        if started:
-            task = started[0].get("task_description", "")
-        if not task:
-            task = "Continue previous work"
-        context = build_handoff_summary(task, event_log)
+    context = build_handoff_summary(task, event_log, target_provider=target_provider)
 
     if new_message:
-        return f"{context}\n# New Instructions\n\n{new_message}"
+        return f"{context}\n\nContinue with: {new_message}"
     return context
 
 

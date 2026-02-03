@@ -7,7 +7,7 @@ Repo map and next step field in initial update
 
 v0.11 Slip Slop Slap
 
-Use of /agents
+Session branching and resume session at startup
 Repeated failures
 Task list - wait until limit expires and feed in more. User inputs a list of bugs/features, these are async run through
 phases ANALYZE, IMPLEMENT <-> REVIEW (prove with screenshot)

@@ -10,6 +10,8 @@ from chad.util.event_log import (
     SessionStartedEvent,
     ToolCallStartedEvent,
     ContextCondensedEvent,
+    UserMessageEvent,
+    AssistantMessageEvent,
 )
 from chad.util.handoff import (
     extract_progress_from_events,
@@ -125,10 +127,11 @@ class TestBuildHandoffSummary:
 
         summary = build_handoff_summary("Add authentication feature", event_log)
 
-        assert "# Session Handoff Context" in summary
+        assert "<previous_session>" in summary
+        assert "</previous_session>" in summary
         assert "## Original Task" in summary
         assert "Add authentication feature" in summary
-        assert "## Work Completed" in summary
+        assert "## Files Modified" in summary
         assert "Created: `/src/new.py`" in summary
         assert "Modified: `/src/main.py`" in summary
 
@@ -156,12 +159,77 @@ class TestBuildHandoffSummary:
         """Test summary with no files or commands."""
         summary = build_handoff_summary("Do something", event_log)
 
-        assert "# Session Handoff Context" in summary
+        assert "<previous_session>" in summary
         assert "## Original Task" in summary
         assert "Do something" in summary
-        # Should not have Work Completed or Commands Run sections
-        assert "## Work Completed" not in summary
+        # Should not have Files Modified or Commands Run sections
+        assert "## Files Modified" not in summary
         assert "## Commands Run" not in summary
+
+    def test_summary_with_conversation_history(self, event_log):
+        """Test that conversation history is included in summary."""
+        event_log.log(UserMessageEvent(content="Add a logout button"))
+        event_log.log(AssistantMessageEvent(
+            blocks=[
+                {"kind": "text", "content": "I'll add the logout button."},
+            ]
+        ))
+
+        summary = build_handoff_summary("Add a logout button", event_log)
+
+        assert "## Conversation History" in summary
+        assert "Add a logout button" in summary
+        assert "logout button" in summary
+
+    def test_summary_formats_for_claude(self, event_log):
+        """Test that Claude format omits thinking blocks."""
+        event_log.log(UserMessageEvent(content="Help me"))
+        event_log.log(AssistantMessageEvent(
+            blocks=[
+                {"kind": "thinking", "content": "Let me think about this..."},
+                {"kind": "text", "content": "Here is my answer."},
+            ]
+        ))
+
+        summary = build_handoff_summary("Help me", event_log, target_provider="anthropic")
+
+        assert "## Conversation History" in summary
+        assert "Here is my answer" in summary
+        # Claude format omits thinking
+        assert "Let me think about this" not in summary
+
+    def test_summary_formats_for_codex(self, event_log):
+        """Test that Codex format includes reasoning."""
+        event_log.log(UserMessageEvent(content="Help me"))
+        event_log.log(AssistantMessageEvent(
+            blocks=[
+                {"kind": "thinking", "content": "Let me think about this..."},
+                {"kind": "text", "content": "Here is my answer."},
+            ]
+        ))
+
+        summary = build_handoff_summary("Help me", event_log, target_provider="openai")
+
+        assert "## Conversation History" in summary
+        assert "[Reasoning]: Let me think about this..." in summary
+        assert "Here is my answer" in summary
+
+    def test_summary_formats_for_generic(self, event_log):
+        """Test that generic format uses XML tags."""
+        event_log.log(UserMessageEvent(content="Help me"))
+        event_log.log(AssistantMessageEvent(
+            blocks=[
+                {"kind": "thinking", "content": "Let me think..."},
+                {"kind": "text", "content": "Done."},
+            ]
+        ))
+
+        summary = build_handoff_summary("Help me", event_log, target_provider="gemini")
+
+        assert "## Conversation History" in summary
+        assert '<turn role="user">' in summary
+        assert "<thinking>" in summary
+        assert "<response>" in summary
 
 
 class TestLogHandoffCheckpoint:
@@ -212,56 +280,94 @@ class TestLogHandoffCheckpoint:
 
         events = event_log.get_events(event_types=["context_condensed"])
         summary = events[0]["summary_text"]
-        assert "# Session Handoff Context" in summary
+        assert "<previous_session>" in summary
         assert "Create new module" in summary
+
+    def test_checkpoint_with_target_provider(self, event_log):
+        """Test that checkpoint uses target provider for formatting."""
+        event_log.log(UserMessageEvent(content="Test message"))
+        event_log.log(AssistantMessageEvent(
+            blocks=[{"kind": "thinking", "content": "Thinking..."}]
+        ))
+
+        log_handoff_checkpoint(event_log, "Test", target_provider="openai")
+
+        events = event_log.get_events(event_types=["context_condensed"])
+        summary = events[0]["summary_text"]
+        # Codex format should include reasoning
+        assert "[Reasoning]:" in summary
 
 
 class TestBuildResumePrompt:
     """Tests for build_resume_prompt function."""
 
-    def test_resume_from_checkpoint(self, event_log):
-        """Test building resume prompt from existing checkpoint."""
+    def test_resume_from_session_start(self, event_log):
+        """Test building resume prompt from session started event."""
+        event_log.log(SessionStartedEvent(task_description="Fix the bug"))
         event_log.log(ToolCallStartedEvent(tool="edit", path="/src/main.py"))
-        log_handoff_checkpoint(event_log, "Fix the bug")
 
         prompt = build_resume_prompt(event_log, "Continue fixing")
 
-        assert "# Session Handoff Context" in prompt
+        assert "<previous_session>" in prompt
         assert "Fix the bug" in prompt
-        assert "# New Instructions" in prompt
-        assert "Continue fixing" in prompt
+        assert "Continue with: Continue fixing" in prompt
 
     def test_resume_without_new_message(self, event_log):
         """Test resume prompt without new instructions."""
-        log_handoff_checkpoint(event_log, "Original task")
+        event_log.log(SessionStartedEvent(task_description="Original task"))
 
         prompt = build_resume_prompt(event_log)
 
-        assert "# Session Handoff Context" in prompt
+        assert "<previous_session>" in prompt
         assert "Original task" in prompt
-        assert "# New Instructions" not in prompt
+        assert "Continue with:" not in prompt
 
-    def test_resume_builds_fresh_when_no_checkpoint(self, event_log):
-        """Test that resume builds fresh summary when no checkpoint exists."""
+    def test_resume_builds_from_session_started(self, event_log):
+        """Test that resume builds from session_started event."""
         event_log.log(SessionStartedEvent(task_description="Build feature X"))
         event_log.log(ToolCallStartedEvent(tool="write", path="/src/feature.py"))
 
         prompt = build_resume_prompt(event_log, "Add tests")
 
-        assert "# Session Handoff Context" in prompt
+        assert "<previous_session>" in prompt
         assert "Build feature X" in prompt
-        assert "# New Instructions" in prompt
-        assert "Add tests" in prompt
+        assert "Continue with: Add tests" in prompt
 
-    def test_resume_uses_latest_checkpoint(self, event_log):
-        """Test that resume uses the most recent checkpoint."""
-        log_handoff_checkpoint(event_log, "First task")
-        event_log.log(ToolCallStartedEvent(tool="write", path="/new_file.py"))
-        log_handoff_checkpoint(event_log, "Second task")
+    def test_resume_formats_for_target_provider(self, event_log):
+        """Test that resume formats for the target provider."""
+        event_log.log(SessionStartedEvent(task_description="Test task"))
+        event_log.log(UserMessageEvent(content="Hello"))
+        event_log.log(AssistantMessageEvent(
+            blocks=[{"kind": "thinking", "content": "Thinking..."}]
+        ))
 
-        prompt = build_resume_prompt(event_log)
+        # Codex should include reasoning
+        prompt_codex = build_resume_prompt(event_log, target_provider="openai")
+        assert "[Reasoning]:" in prompt_codex
 
-        assert "Second task" in prompt
+        # Claude should omit thinking
+        prompt_claude = build_resume_prompt(event_log, target_provider="anthropic")
+        assert "[Reasoning]:" not in prompt_claude
+
+    def test_resume_includes_conversation_history(self, event_log):
+        """Test that resume includes conversation history."""
+        event_log.log(SessionStartedEvent(task_description="Add feature"))
+        event_log.log(UserMessageEvent(content="First request"))
+        event_log.log(AssistantMessageEvent(
+            blocks=[{"kind": "text", "content": "First response"}]
+        ))
+        event_log.log(UserMessageEvent(content="Second request"))
+        event_log.log(AssistantMessageEvent(
+            blocks=[{"kind": "text", "content": "Second response"}]
+        ))
+
+        prompt = build_resume_prompt(event_log, "Continue")
+
+        assert "## Conversation History" in prompt
+        assert "First request" in prompt
+        assert "First response" in prompt
+        assert "Second request" in prompt
+        assert "Second response" in prompt
 
 
 class TestGetLastCheckpointProviderSessionId:
@@ -408,9 +514,10 @@ class TestEventLogPersistence:
         """Test that resume prompt works with reloaded event log."""
         session_id = "resume-test"
 
-        # Create log and add checkpoint
+        # Create log with session started event (needed for resume)
         log1 = EventLog(session_id, base_dir=temp_log_dir)
-        log_handoff_checkpoint(log1, "Original task")
+        log1.log(SessionStartedEvent(task_description="Original task"))
+        log1.close()
 
         # Reload and build resume
         log2 = EventLog(session_id, base_dir=temp_log_dir)
@@ -418,3 +525,252 @@ class TestEventLogPersistence:
 
         assert "Original task" in prompt
         assert "Continue" in prompt
+
+
+class TestConversationHandoff:
+    """Tests for rich conversation context handoff."""
+
+    def test_full_conversation_preserved(self, event_log):
+        """Test that full conversation with tool calls is preserved."""
+        event_log.log(SessionStartedEvent(task_description="Add logout button"))
+        event_log.log(UserMessageEvent(content="Add a logout button to the header"))
+        event_log.log(AssistantMessageEvent(
+            blocks=[
+                {"kind": "thinking", "content": "I need to find the header component..."},
+                {"kind": "tool_call", "tool": "Read", "args": {"file_path": "/src/Header.tsx"}},
+                {"kind": "tool_result", "content": "export function Header() { return <div>...</div> }"},
+                {"kind": "text", "content": "I've added the logout button to the header."},
+            ]
+        ))
+
+        # Build for Codex (includes reasoning)
+        prompt = build_resume_prompt(event_log, "Now add click handler", target_provider="openai")
+
+        assert "Add logout button" in prompt
+        assert "[User]: Add a logout button" in prompt
+        assert "[Reasoning]: I need to find the header component" in prompt
+        assert "[Tool: Read] /src/Header.tsx" in prompt
+        assert "[Result]:" in prompt
+        assert "I've added the logout button" in prompt
+        assert "Continue with: Now add click handler" in prompt
+
+    def test_multiple_turns_preserved(self, event_log):
+        """Test that multiple conversation turns are preserved."""
+        event_log.log(SessionStartedEvent(task_description="Build feature"))
+
+        # First turn
+        event_log.log(UserMessageEvent(content="Step 1"))
+        event_log.log(AssistantMessageEvent(blocks=[{"kind": "text", "content": "Done with step 1"}]))
+
+        # Second turn
+        event_log.log(UserMessageEvent(content="Step 2"))
+        event_log.log(AssistantMessageEvent(blocks=[{"kind": "text", "content": "Done with step 2"}]))
+
+        # Third turn
+        event_log.log(UserMessageEvent(content="Step 3"))
+        event_log.log(AssistantMessageEvent(blocks=[{"kind": "text", "content": "Done with step 3"}]))
+
+        prompt = build_resume_prompt(event_log, target_provider="anthropic")
+
+        assert "Step 1" in prompt
+        assert "Done with step 1" in prompt
+        assert "Step 2" in prompt
+        assert "Done with step 2" in prompt
+        assert "Step 3" in prompt
+        assert "Done with step 3" in prompt
+
+    def test_provider_specific_xml_format(self, event_log):
+        """Test XML format for generic providers."""
+        event_log.log(SessionStartedEvent(task_description="Test"))
+        event_log.log(UserMessageEvent(content="Hello"))
+        event_log.log(AssistantMessageEvent(
+            blocks=[
+                {"kind": "thinking", "content": "Analyzing..."},
+                {"kind": "text", "content": "Response here"},
+            ]
+        ))
+
+        prompt = build_resume_prompt(event_log, target_provider="gemini")
+
+        assert '<turn role="user">Hello</turn>' in prompt
+        assert '<turn role="assistant">' in prompt
+        assert '<thinking>Analyzing...</thinking>' in prompt
+        assert '<response>Response here</response>' in prompt
+        assert '</turn>' in prompt
+
+
+class TestMockProviderHandoffIntegration:
+    """Tests for handoff using MockProvider quota simulation.
+
+    These tests verify that the handoff system correctly preserves
+    conversation context when a provider exhausts its quota.
+    """
+
+    def test_quota_error_triggers_handoff_with_context(self, temp_log_dir):
+        """Test that quota error from MockProvider triggers handoff with full context."""
+        from chad.util.providers import MockProvider, MockProviderQuotaError, ModelConfig
+
+        # Set up event log with conversation history
+        event_log = EventLog("quota-handoff-test", base_dir=temp_log_dir)
+        event_log.log(SessionStartedEvent(task_description="Add feature X"))
+        event_log.log(UserMessageEvent(content="Please add a new feature"))
+        event_log.log(AssistantMessageEvent(
+            blocks=[
+                {"kind": "thinking", "content": "I'll analyze the codebase first..."},
+                {"kind": "tool_call", "tool": "Read", "args": {"file_path": "/src/main.py"}},
+                {"kind": "tool_result", "content": "def main(): pass"},
+                {"kind": "text", "content": "I found the entry point. Let me add the feature."},
+            ]
+        ))
+        event_log.log(ToolCallStartedEvent(tool="edit", path="/src/main.py"))
+
+        # Create MockProvider with quota simulation
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-mock-account",
+        )
+        provider = MockProvider(model_config)
+        provider._simulate_quota = True
+        provider._get_remaining_usage = lambda: 0.0  # Quota exhausted
+
+        # Start session and trigger quota error
+        provider.start_session(str(temp_log_dir))
+        provider.send_message("Continue working")
+
+        # Verify quota error is raised
+        with pytest.raises(MockProviderQuotaError) as exc_info:
+            provider.get_response()
+
+        # Verify error matches handoff detection
+        assert is_quota_exhaustion_error(str(exc_info.value))
+
+        # Build handoff context for new provider (e.g., switching to Codex)
+        handoff_summary = build_handoff_summary(
+            "Add feature X",
+            event_log,
+            target_provider="openai",  # Switching to Codex
+        )
+
+        # Verify conversation history is preserved in handoff
+        assert "<previous_session>" in handoff_summary
+        assert "Add feature X" in handoff_summary
+        assert "## Conversation History" in handoff_summary
+        assert "[User]: Please add a new feature" in handoff_summary
+        assert "[Reasoning]: I'll analyze the codebase" in handoff_summary
+        assert "[Tool: Read] /src/main.py" in handoff_summary
+        assert "I found the entry point" in handoff_summary
+        assert "## Files Modified" in handoff_summary
+        assert "/src/main.py" in handoff_summary
+
+    def test_handoff_preserves_context_across_provider_switch(self, temp_log_dir):
+        """Test full handoff flow: quota exhaustion -> checkpoint -> resume."""
+        from chad.util.providers import MockProvider, MockProviderQuotaError, ModelConfig
+
+        # Create event log with multi-turn conversation
+        event_log = EventLog("full-handoff-test", base_dir=temp_log_dir)
+        event_log.log(SessionStartedEvent(task_description="Implement logout button"))
+
+        # Turn 1: Initial request
+        event_log.log(UserMessageEvent(content="Add logout button to header"))
+        event_log.log(AssistantMessageEvent(
+            blocks=[
+                {"kind": "thinking", "content": "I need to find the Header component..."},
+                {"kind": "tool_call", "tool": "Glob", "args": {"pattern": "**/Header*"}},
+                {"kind": "tool_result", "content": "src/components/Header.tsx"},
+                {"kind": "tool_call", "tool": "Read", "args": {"file_path": "src/components/Header.tsx"}},
+                {"kind": "tool_result", "content": "export function Header() { return <header>...</header> }"},
+                {"kind": "text", "content": "Found the Header component. Adding logout button..."},
+            ]
+        ))
+        event_log.log(ToolCallStartedEvent(tool="edit", path="src/components/Header.tsx"))
+
+        # Turn 2: Follow-up
+        event_log.log(UserMessageEvent(content="Also add a click handler"))
+        event_log.log(AssistantMessageEvent(
+            blocks=[
+                {"kind": "text", "content": "I'll add an onClick handler that calls the logout API."},
+            ]
+        ))
+
+        # Simulate quota exhaustion on the original provider
+        model_config = ModelConfig(provider="mock", model_name="default", account_name="exhausted-account")
+        old_provider = MockProvider(model_config)
+        old_provider._simulate_quota = True
+        old_provider._get_remaining_usage = lambda: 0.0
+
+        old_provider.start_session(str(temp_log_dir))
+        old_provider.send_message("Continue implementation")
+
+        # Capture the error
+        quota_error = None
+        try:
+            old_provider.get_response()
+        except MockProviderQuotaError as e:
+            quota_error = str(e)
+
+        assert quota_error is not None
+        assert is_quota_exhaustion_error(quota_error)
+
+        # Log handoff checkpoint before switching
+        log_handoff_checkpoint(
+            event_log,
+            "Implement logout button",
+            provider_session_id="mock-session-123",
+            target_provider="anthropic",  # Switching to Claude
+        )
+
+        # Build resume prompt for new provider
+        resume_prompt = build_resume_prompt(
+            event_log,
+            new_message="Continue adding the click handler",
+            target_provider="anthropic",
+        )
+
+        # Verify resume prompt has all the context
+        assert "<previous_session>" in resume_prompt
+        assert "Implement logout button" in resume_prompt
+        assert "## Conversation History" in resume_prompt
+
+        # Claude format: no thinking blocks shown
+        assert "[User]: Add logout button to header" in resume_prompt
+        assert "[Tool: Glob]" in resume_prompt
+        assert "[Tool: Read]" in resume_prompt
+        assert "Found the Header component" in resume_prompt
+        assert "[User]: Also add a click handler" in resume_prompt
+        assert "onClick handler" in resume_prompt
+
+        # Verify the new message is included
+        assert "Continue with: Continue adding the click handler" in resume_prompt
+
+        # Verify files modified section
+        assert "## Files Modified" in resume_prompt
+        assert "src/components/Header.tsx" in resume_prompt
+
+    def test_handoff_format_differs_by_provider(self, temp_log_dir):
+        """Test that handoff format correctly adapts to target provider."""
+        # Create event log with thinking content
+        event_log = EventLog("format-diff-test", base_dir=temp_log_dir)
+        event_log.log(SessionStartedEvent(task_description="Test task"))
+        event_log.log(UserMessageEvent(content="Do something"))
+        event_log.log(AssistantMessageEvent(
+            blocks=[
+                {"kind": "thinking", "content": "Let me think about this carefully..."},
+                {"kind": "text", "content": "Here's what I'll do."},
+            ]
+        ))
+
+        # Build for Claude (omits thinking)
+        claude_prompt = build_resume_prompt(event_log, target_provider="anthropic")
+        assert "Let me think about this carefully" not in claude_prompt
+        assert "Here's what I'll do" in claude_prompt
+
+        # Build for Codex (includes reasoning)
+        codex_prompt = build_resume_prompt(event_log, target_provider="openai")
+        assert "[Reasoning]: Let me think about this carefully" in codex_prompt
+        assert "Here's what I'll do" in codex_prompt
+
+        # Build for Gemini (XML format)
+        gemini_prompt = build_resume_prompt(event_log, target_provider="gemini")
+        assert "<thinking>Let me think about this carefully...</thinking>" in gemini_prompt
+        assert "<response>Here's what I'll do.</response>" in gemini_prompt

@@ -4401,6 +4401,9 @@ class ChadWebUI:
         handoff_needed = provider_changed or pref_changed or provider_reconnect_needed
 
         if handoff_needed:
+            # Get new provider type first (needed for formatting handoff context)
+            coding_provider_type = accounts[coding_agent]
+
             # Log handoff checkpoint to event log before stopping old provider
             old_provider_type = ""
             old_model = ""
@@ -4413,6 +4416,7 @@ class ChadWebUI:
                     session.event_log,
                     session.task_description or "",
                     provider_session_id,
+                    target_provider=coding_provider_type,
                 )
 
                 # Track old provider info for ProviderSwitchedEvent
@@ -4430,7 +4434,6 @@ class ChadWebUI:
                 session.active = False
 
             # Start new provider
-            coding_provider_type = accounts[coding_agent]
             coding_config = ModelConfig(
                 provider=coding_provider_type,
                 model_name=requested_model,
@@ -4492,7 +4495,9 @@ class ChadWebUI:
 
             # Build resume prompt from event log if available
             if session.event_log:
-                followup_message = build_resume_prompt(session.event_log, followup_message)
+                followup_message = build_resume_prompt(
+                    session.event_log, followup_message, target_provider=coding_provider_type
+                )
             else:
                 # Fallback to old method
                 context_summary = self._build_handoff_context(chat_history)
@@ -4643,8 +4648,11 @@ class ChadWebUI:
                 yield make_followup_yield(chat_history, "→ Retrying with fallback provider...", working=True, merge_updates=merge_no_change)
 
                 # Build resume prompt and retry
+                new_provider_type = session.config.provider if session.config else "generic"
                 if session.event_log:
-                    retry_message = build_resume_prompt(session.event_log, followup_message)
+                    retry_message = build_resume_prompt(
+                        session.event_log, followup_message, target_provider=new_provider_type
+                    )
                 else:
                     retry_message = followup_message
 
@@ -5540,6 +5548,7 @@ class ChadWebUI:
                 session.event_log,
                 session.task_description or "",
                 provider_session_id,
+                target_provider=next_provider_type,
             )
 
         # Track old provider info
