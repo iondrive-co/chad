@@ -31,6 +31,9 @@ class Session:
     worktree_base_commit: str | None = None
     has_worktree_changes: bool = False
     merge_conflicts: list[MergeConflict] | None = None
+    # Provider session tracking for handoffs
+    provider_session_id: str | None = None  # Native session ID (thread_id, session_id, etc.)
+    provider_type: str | None = None  # Provider type (anthropic, openai, gemini, etc.)
     # Timestamps
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
