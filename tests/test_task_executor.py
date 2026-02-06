@@ -277,8 +277,8 @@ def test_task_executor_times_out_hung_agent(tmp_path, monkeypatch):
     assert get_pty_stream_service().list_sessions() == []
 
 
-def test_terminal_output_is_batched_and_decoded(tmp_path, monkeypatch):
-    """Terminal output is batched for readability and includes decoded text."""
+def test_terminal_output_is_periodically_flushed_and_decoded(tmp_path, monkeypatch):
+    """Terminal output flushes during a run and stores decoded text snapshots."""
     repo_path = tmp_path / "repo"
     _init_git_repo(repo_path)
 
@@ -299,7 +299,7 @@ def test_terminal_output_is_batched_and_decoded(tmp_path, monkeypatch):
 
     import chad.server.services.task_executor as te
 
-    script = "/usr/bin/env python3 -c \"import sys,time;[sys.stdout.write(f'line {i}\\n') or sys.stdout.flush() or time.sleep(0.05) for i in range(5)]\""
+    script = "/usr/bin/env python3 -c \"import sys,time;[sys.stdout.write(f'line {i}\\n') or sys.stdout.flush() or time.sleep(0.12) for i in range(5)]\""
 
     def noisy_command(provider, account_name, project_path, task_description=None, screenshots=None, phase="combined", exploration_output=None):
         return ["bash", "-c", script], {}, None
@@ -321,10 +321,8 @@ def test_terminal_output_is_batched_and_decoded(tmp_path, monkeypatch):
     # Terminal output now stores human-readable text in 'data' field (not base64)
     combined_text = "\n".join([e.get("data", "") or "" for e in terminal_events])
     assert "line 0" in combined_text and "line 4" in combined_text
-    # Batching should combine multiple lines into single events (check first event has multiple lines)
-    if terminal_events:
-        first_event_lines = terminal_events[0].get("data", "").count("\n")
-        assert first_event_lines >= 4, "Batching should combine multiple lines into single event"
+    # With periodic flush enabled, long-running output should produce multiple snapshots.
+    assert len(terminal_events) >= 2, "Expected multiple terminal_output snapshots during run"
 
 
 def test_continuation_loop_waits_for_completion_json(tmp_path, monkeypatch):
