@@ -165,6 +165,14 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         source_file="chad/web_ui.py",
         keywords=["accept & merge", "merge section", "discard changes", "conflict resolution", "clear task"],
     ),
+    "PROMPT_ACCORDIONS": UIComponent(
+        tab="run",
+        component="prompt-accordion",
+        tests=["TestChadWebUI"],
+        source_file="chad/web_ui.py",
+        keywords=["exploration prompt", "implementation prompt", "verification prompt",
+                  "prompt accordion", "prompt display", "coding prompt"],
+    ),
     # --- Setup Tab (formerly Providers) ---
     "PROVIDER_CARD": UIComponent(
         tab="setup",

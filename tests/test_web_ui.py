@@ -568,7 +568,8 @@ class TestChadWebUI:
 
         assert len(updates) == 1
         update = updates[0]
-        assert len(update) == 22
+        # 24 elements: 18 base + 6 prompt accordions (exploration, implementation, verification x 2)
+        assert len(update) == 24
         assert "already running" in update[2].get("value", "").lower()
         assert update[5].get("interactive") is True
         assert update[6].get("interactive") is False

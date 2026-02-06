@@ -43,13 +43,18 @@ from chad.util.providers import ModelConfig, parse_codex_output, create_provider
 from chad.util.model_catalog import ModelCatalog
 from chad.util.prompts import (
     build_exploration_prompt,
+    build_implementation_prompt,
     extract_coding_summary,
     extract_progress_update,
     check_verification_mentioned,
     get_verification_prompt,
+    get_verification_exploration_prompt,
     parse_verification_response,
     ProgressUpdate,
     VerificationParseError,
+    EXPLORATION_PROMPT,
+    IMPLEMENTATION_PROMPT,
+    VERIFICATION_EXPLORATION_PROMPT,
 )
 from chad.util.project_setup import (
     detect_verification_commands,
@@ -88,7 +93,8 @@ class Session:
     has_worktree_changes: bool = False
     merge_conflicts: list[MergeConflict] | None = None
     # Prompt tracking for display
-    last_coding_prompt: str | None = None
+    last_exploration_prompt: str | None = None
+    last_implementation_prompt: str | None = None
     last_verification_prompt: str | None = None
     # Live stream DOM patching support - track if initial render is done
     has_initial_live_render: bool = False
@@ -3169,8 +3175,10 @@ class ChadWebUI:
                         gr.update(),  # diff_full_content
                         "",  # merge_section_header
                         "",  # live_patch_trigger
-                        gr.update(),  # coding_prompt_accordion
-                        gr.update(),  # coding_prompt_content
+                        gr.update(),  # exploration_prompt_accordion
+                        gr.update(),  # exploration_prompt_content
+                        gr.update(),  # implementation_prompt_accordion
+                        gr.update(),  # implementation_prompt_content
                         gr.update(),  # verification_prompt_accordion
                         gr.update(),  # verification_prompt_content
                     )
@@ -3196,7 +3204,8 @@ class ChadWebUI:
             live_patch: tuple[str, str] | None = None,
             task_state: str | None = None,
             task_ended: bool = False,
-            coding_prompt: str | None = None,
+            exploration_prompt: str | None = None,
+            implementation_prompt: str | None = None,
             verification_prompt: str | None = None,
             verification_account: str | None = None,
         ):
@@ -3277,10 +3286,12 @@ class ChadWebUI:
                 gr.update(value=diff_full),  # Full diff content
                 header_text,  # merge_section_header - dynamic header
                 patch_html,  # live_patch_trigger - JS reads this to patch content
-                # Prompt accordions - show when prompts are provided
+                # Prompt accordions - all three visible, update content when provided
                 # Prompts are rendered as markdown directly since they contain markdown content
-                gr.update(visible=True) if coding_prompt else gr.update(),
-                gr.update(value=coding_prompt) if coding_prompt else gr.update(),
+                gr.update(visible=True) if exploration_prompt else gr.update(),
+                gr.update(value=exploration_prompt) if exploration_prompt else gr.update(),
+                gr.update(visible=True) if implementation_prompt else gr.update(),
+                gr.update(value=implementation_prompt) if implementation_prompt else gr.update(),
                 gr.update(visible=True) if verification_prompt else gr.update(),
                 gr.update(value=verification_prompt) if verification_prompt else gr.update(),
             )
@@ -3401,15 +3412,27 @@ class ChadWebUI:
             chat_history.append({"role": "user", "content": f"**Task**\n\n{task_description}"})
             session.event_log.log(UserMessageEvent(content=task_description))
 
-            # Build the exploration prompt for display (Phase 1 of phased execution)
+            # Build the exploration and implementation prompts for display
             project_docs = self._read_project_docs(path_obj)
-            display_coding_prompt = build_exploration_prompt(task_description, project_docs, str(path_obj))
-            session.last_coding_prompt = display_coding_prompt
+            display_exploration_prompt = build_exploration_prompt(
+                task_description, project_docs, str(path_obj)
+            )
+            # Build implementation prompt with placeholder exploration output
+            display_implementation_prompt = build_implementation_prompt(
+                task_description,
+                "{exploration_output}",  # Placeholder until exploration completes
+                project_docs,
+                str(path_obj),
+            )
+            session.last_exploration_prompt = display_exploration_prompt
+            session.last_implementation_prompt = display_implementation_prompt
 
             initial_status = f"{status_prefix}⏳ Initializing session..."
             yield make_yield(
                 chat_history, initial_status, summary=initial_status, interactive=False,
-                task_state="running", coding_prompt=display_coding_prompt,
+                task_state="running",
+                exploration_prompt=display_exploration_prompt,
+                implementation_prompt=display_implementation_prompt,
             )
 
             # Use the streaming API to run the task
@@ -3805,7 +3828,7 @@ class ChadWebUI:
                     coding_summary = extract_coding_summary(last_coding_output)
                     change_summary = coding_summary.change_summary if coding_summary else None
                     trimmed_output = _truncate_verification_output(last_coding_output)
-                    display_verification_prompt = get_verification_prompt(
+                    display_verification_prompt = get_verification_exploration_prompt(
                         trimmed_output, task_description, change_summary
                     )
                     session.last_verification_prompt = display_verification_prompt
@@ -6122,29 +6145,44 @@ class ChadWebUI:
                 type="messages",  # Use OpenAI-style dicts with 'role' and 'content' keys
             )
 
-            # Prompt display accordions (collapsed by default, visible after task starts)
+            # Prompt display accordions - show all three prompts from the start
+            # Initial display shows raw templates with placeholders like {task}
+            # These get updated with actual values when the task runs
             with gr.Accordion(
-                "Coding Agent Prompt",
+                "Exploration Prompt",
                 open=False,
                 visible=True,
-                key=f"coding-prompt-accordion-{session_id}",
+                key=f"exploration-prompt-accordion-{session_id}",
                 elem_classes=["prompt-accordion"],
-            ) as coding_prompt_accordion:
-                coding_prompt_display = gr.Markdown(
-                    "*Run a task to see the coding prompt*",
-                    key=f"coding-prompt-display-{session_id}",
+            ) as exploration_prompt_accordion:
+                exploration_prompt_display = gr.Markdown(
+                    EXPLORATION_PROMPT,
+                    key=f"exploration-prompt-display-{session_id}",
                     elem_classes=["prompt-display"],
                 )
 
             with gr.Accordion(
-                "Verification Agent Prompt",
+                "Implementation Prompt",
+                open=False,
+                visible=True,
+                key=f"implementation-prompt-accordion-{session_id}",
+                elem_classes=["prompt-accordion"],
+            ) as implementation_prompt_accordion:
+                implementation_prompt_display = gr.Markdown(
+                    IMPLEMENTATION_PROMPT,
+                    key=f"implementation-prompt-display-{session_id}",
+                    elem_classes=["prompt-display"],
+                )
+
+            with gr.Accordion(
+                "Verification Prompt",
                 open=False,
                 visible=True,
                 key=f"verification-prompt-accordion-{session_id}",
                 elem_classes=["prompt-accordion"],
             ) as verification_prompt_accordion:
                 verification_prompt_display = gr.Markdown(
-                    "*Run a task to see the verification prompt*",
+                    VERIFICATION_EXPLORATION_PROMPT,
                     key=f"verification-prompt-display-{session_id}",
                     elem_classes=["prompt-display"],
                 )
@@ -6507,8 +6545,10 @@ class ChadWebUI:
                 diff_content,
                 merge_section_header,
                 live_patch_trigger,
-                coding_prompt_accordion,
-                coding_prompt_display,
+                exploration_prompt_accordion,
+                exploration_prompt_display,
+                implementation_prompt_accordion,
+                implementation_prompt_display,
                 verification_prompt_accordion,
                 verification_prompt_display,
             ],
