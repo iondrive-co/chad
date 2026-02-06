@@ -9,6 +9,7 @@ from chad.server.services.task_executor import (
     TaskState,
     build_agent_command,
     ClaudeStreamJsonParser,
+    _strip_binary_garbage,
 )
 from chad.util.config_manager import ConfigManager
 
@@ -237,7 +238,7 @@ def test_task_executor_times_out_hung_agent(tmp_path, monkeypatch):
 
     import chad.server.services.task_executor as te
 
-    def sleepy_command(provider, account_name, project_path, task_description=None, screenshots=None, phase="combined", exploration_output=None):
+    def sleepy_command(provider, account_name, project_path, task_description=None, screenshots=None, phase="combined", exploration_output=None, **kwargs):
         return ["bash", "-c", "sleep 5"], {}, None
 
     monkeypatch.setattr(te, "build_agent_command", sleepy_command)
@@ -301,7 +302,7 @@ def test_terminal_output_is_periodically_flushed_and_decoded(tmp_path, monkeypat
 
     script = "/usr/bin/env python3 -c \"import sys,time;[sys.stdout.write(f'line {i}\\n') or sys.stdout.flush() or time.sleep(0.12) for i in range(5)]\""
 
-    def noisy_command(provider, account_name, project_path, task_description=None, screenshots=None, phase="combined", exploration_output=None):
+    def noisy_command(provider, account_name, project_path, task_description=None, screenshots=None, phase="combined", exploration_output=None, **kwargs):
         return ["bash", "-c", script], {}, None
 
     monkeypatch.setattr(te, "build_agent_command", noisy_command)
@@ -350,7 +351,7 @@ def test_continuation_loop_waits_for_completion_json(tmp_path, monkeypatch):
     # Track which runs have occurred
     run_count = [0]
 
-    def mock_command(provider, account_name, project_path, task_description=None, screenshots=None, phase="combined", exploration_output=None):
+    def mock_command(provider, account_name, project_path, task_description=None, screenshots=None, phase="combined", exploration_output=None, **kwargs):
         run_count[0] += 1
 
         if run_count[0] == 1:
@@ -384,3 +385,117 @@ def test_continuation_loop_waits_for_completion_json(tmp_path, monkeypatch):
     ended_events = [e for e in events if e.get("type") == "session_ended"]
     assert ended_events, "Expected session_ended event"
     assert ended_events[-1].get("success") is True
+
+
+class TestModelPassThrough:
+    """Tests that model and reasoning_effort are forwarded to provider CLIs."""
+
+    def test_anthropic_model_flag(self, tmp_path):
+        """Anthropic provider passes --model flag when model is specified."""
+        cmd, env, _ = build_agent_command(
+            "anthropic", "test", tmp_path, "fix bug", model="claude-opus-4-6"
+        )
+        assert "--model" in cmd
+        idx = cmd.index("--model")
+        assert cmd[idx + 1] == "claude-opus-4-6"
+
+    def test_openai_model_and_reasoning(self, tmp_path):
+        """OpenAI provider passes -m and -c flags for model and reasoning."""
+        cmd, env, _ = build_agent_command(
+            "openai", "test", tmp_path, "fix bug",
+            model="gpt-5.3-codex", reasoning_effort="high"
+        )
+        assert "-m" in cmd
+        idx = cmd.index("-m")
+        assert cmd[idx + 1] == "gpt-5.3-codex"
+        assert "-c" in cmd
+        idx_c = cmd.index("-c")
+        assert "model_reasoning_effort" in cmd[idx_c + 1]
+        assert "high" in cmd[idx_c + 1]
+
+    def test_gemini_model_flag(self, tmp_path):
+        """Gemini provider passes -m flag."""
+        cmd, env, _ = build_agent_command(
+            "gemini", "test", tmp_path, "fix bug", model="gemini-2.5-pro"
+        )
+        assert "-m" in cmd
+        idx = cmd.index("-m")
+        assert cmd[idx + 1] == "gemini-2.5-pro"
+
+    def test_qwen_model_flag(self, tmp_path):
+        """Qwen provider passes -m flag."""
+        cmd, env, _ = build_agent_command(
+            "qwen", "test", tmp_path, "fix bug", model="qwen3-coder"
+        )
+        assert "-m" in cmd
+        idx = cmd.index("-m")
+        assert cmd[idx + 1] == "qwen3-coder"
+
+    def test_mistral_model_flag(self, tmp_path):
+        """Mistral provider passes --model flag."""
+        cmd, env, _ = build_agent_command(
+            "mistral", "test", tmp_path, "fix bug", model="mistral-large"
+        )
+        assert "--model" in cmd
+        idx = cmd.index("--model")
+        assert cmd[idx + 1] == "mistral-large"
+
+    def test_default_model_omitted(self, tmp_path):
+        """Model 'default' is not passed as a flag."""
+        cmd, env, _ = build_agent_command(
+            "anthropic", "test", tmp_path, "fix bug", model="default"
+        )
+        assert "--model" not in cmd
+
+    def test_no_model_no_flag(self, tmp_path):
+        """No model flag when model is None."""
+        cmd, env, _ = build_agent_command(
+            "openai", "test", tmp_path, "fix bug", model=None
+        )
+        assert "-m" not in cmd
+
+
+class TestBinaryGarbageFilter:
+    """Tests for _strip_binary_garbage."""
+
+    def test_strips_long_garbage_runs(self):
+        """Runs of 10+ @#%*&^ characters are stripped."""
+        text = "Hello @@@@@@@@@@@@@@@ World"
+        result = _strip_binary_garbage(text)
+        assert result == "Hello  World"
+
+    def test_preserves_short_runs(self):
+        """Short runs under 10 chars are kept."""
+        text = "user@host# prompt"
+        result = _strip_binary_garbage(text)
+        assert result == "user@host# prompt"
+
+    def test_strips_codex_garbage_pattern(self):
+        """Real Codex garbage pattern is stripped."""
+        garbage = "@@@@@@@%#%%#@@@%#####%@@%%%%#%%%%@@%#%#%%%%%@@@" * 3
+        text = f"Normal text\n{garbage}\nMore text"
+        result = _strip_binary_garbage(text)
+        assert "@@@@" not in result
+        assert "Normal text" in result
+        assert "More text" in result
+
+    def test_empty_string(self):
+        """Empty string returns empty."""
+        assert _strip_binary_garbage("") == ""
+
+
+class TestCaptureProviderCommand:
+    """Tests for capture_provider_command test helper with model support."""
+
+    def test_model_forwarded(self, tmp_path):
+        """capture_provider_command forwards model to build_agent_command."""
+        import sys
+        import os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+        from test_helpers import capture_provider_command
+        result = capture_provider_command(
+            "anthropic", "test", tmp_path, "fix bug", model="claude-opus-4-6"
+        )
+        assert "--model" in result.cmd
+        idx = result.cmd.index("--model")
+        assert result.cmd[idx + 1] == "claude-opus-4-6"

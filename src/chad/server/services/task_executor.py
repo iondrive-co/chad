@@ -340,6 +340,17 @@ class Task:
     _last_terminal_snapshot: str = field(default="", repr=False)
 
 
+_BINARY_GARBAGE_RE = re.compile(r'[@#%*&^]{10,}')
+
+
+def _strip_binary_garbage(text: str) -> str:
+    """Remove runs of binary-like garbage characters from terminal output.
+
+    Codex can emit sixel/image data that renders as @@@###%%% runs.
+    """
+    return _BINARY_GARBAGE_RE.sub('', text)
+
+
 def build_agent_command(
     provider: str,
     account_name: str,
@@ -348,6 +359,8 @@ def build_agent_command(
     screenshots: list[str] | None = None,
     phase: str = "exploration",
     exploration_output: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> tuple[list[str], dict[str, str], str | None]:
     """Build CLI command and environment for a provider.
 
@@ -359,6 +372,8 @@ def build_agent_command(
         screenshots: Optional list of screenshot file paths for agent reference
         phase: Execution phase - "exploration", "implementation", or "continuation"
         exploration_output: For implementation/continuation phase, the previous output context
+        model: Optional model name override (e.g., 'gpt-5.3-codex', 'claude-opus-4-6')
+        reasoning_effort: Optional reasoning effort level (e.g., 'low', 'medium', 'high')
 
     Returns:
         Tuple of (command_list, environment_dict, initial_input)
@@ -411,6 +426,8 @@ def build_agent_command(
             "--permission-mode",
             "bypassPermissions",
         ]
+        if model and model != "default":
+            cmd.extend(["--model", model])
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
         # Provide prompt as positional argument (required with -p when stdin is a TTY)
         if full_prompt:
@@ -430,6 +447,10 @@ def build_agent_command(
             str(project_path),
             "-",  # Read prompt from stdin
         ]
+        if model and model != "default":
+            cmd.extend(["-m", model])
+        if reasoning_effort and reasoning_effort != "default":
+            cmd.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
         env["HOME"] = str(codex_home)
         if full_prompt:
             initial_input = full_prompt + "\n"
@@ -437,6 +458,8 @@ def build_agent_command(
     elif provider == "gemini":
         # Gemini CLI in YOLO mode
         cmd = [resolve_tool("gemini"), "-y"]
+        if model and model != "default":
+            cmd.extend(["-m", model])
         if full_prompt:
             initial_input = full_prompt + "\n"
 
@@ -446,12 +469,16 @@ def build_agent_command(
         # before we can send data via PTY. With subprocess.Popen(shell=False),
         # there's no shell escaping issues, just OS argv limits (~128KB on Linux).
         cmd = [resolve_tool("qwen"), "-y", "--output-format", "stream-json"]
+        if model and model != "default":
+            cmd.extend(["-m", model])
         if full_prompt:
             cmd.extend(["-p", full_prompt])
 
     elif provider == "mistral":
         # Vibe CLI (Mistral)
         cmd = [resolve_tool("vibe")]
+        if model and model != "default":
+            cmd.extend(["--model", model])
         if full_prompt:
             initial_input = full_prompt + "\n"
 
@@ -551,6 +578,52 @@ class TaskExecutor:
         # don't ignore heavy Read/Grep usage with no terminal writes.
         self._activity_times: dict[str, float] = {}
         self._lock = threading.RLock()
+
+    def _check_provider_threshold(
+        self,
+        coding_account: str,
+        coding_provider: str,
+        emit: Callable,
+    ) -> tuple[str, str, str | None]:
+        """Check usage/context thresholds and switch provider if needed.
+
+        Returns:
+            (account, provider, switched_from) - switched_from is set if a switch happened.
+        """
+        try:
+            # Check usage threshold
+            usage_threshold = self.config_manager.get_usage_switch_threshold()
+            if usage_threshold < 100:
+                remaining = self.config_manager.get_mock_remaining_usage(coding_account)
+                used_pct = (1.0 - remaining) * 100
+                if used_pct >= usage_threshold:
+                    next_account = self.config_manager.get_next_fallback_provider(coding_account)
+                    if next_account:
+                        accounts = self.config_manager.list_accounts()
+                        next_info = accounts.get(next_account)
+                        if next_info:
+                            next_provider = next_info.get("provider", coding_provider)
+                            emit("status", status=f"Switching from {coding_account} to {next_account} (usage threshold)")
+                            return next_account, next_provider, coding_account
+
+            # Check context threshold
+            context_threshold = self.config_manager.get_context_switch_threshold()
+            if context_threshold < 100:
+                ctx_remaining = self.config_manager.get_mock_context_remaining(coding_account)
+                ctx_used_pct = (1.0 - ctx_remaining) * 100
+                if ctx_used_pct >= context_threshold:
+                    next_account = self.config_manager.get_next_fallback_provider(coding_account)
+                    if next_account:
+                        accounts = self.config_manager.list_accounts()
+                        next_info = accounts.get(next_account)
+                        if next_info:
+                            next_provider = next_info.get("provider", coding_provider)
+                            emit("status", status=f"Switching from {coding_account} to {next_account} (context threshold)")
+                            return next_account, next_provider, coding_account
+        except Exception:
+            pass  # Don't fail the task if threshold checking fails
+
+        return coding_account, coding_provider, None
 
     def start_task(
         self,
@@ -657,6 +730,8 @@ class TaskExecutor:
         cols: int,
         emit: Callable,
         git_mgr: GitWorktreeManager,
+        coding_model: str | None = None,
+        coding_reasoning: str | None = None,
     ) -> tuple[int, str]:
         """Execute a single phase of the task.
 
@@ -731,6 +806,8 @@ class TaskExecutor:
             screenshots,
             phase=phase,
             exploration_output=exploration_output,
+            model=coding_model,
+            reasoning_effort=coding_reasoning,
         )
 
         # Use stdin pipe for Codex to avoid prompt echo in output
@@ -835,6 +912,7 @@ class TaskExecutor:
                                     agent_output = ""
                             codex_past_prompt_echo = True
                             codex_output_buffer = ""
+                            agent_output = _strip_binary_garbage(agent_output)
                             if agent_output.strip():
                                 encoded = base64.b64encode(agent_output.encode()).decode()
                                 emit("stream", chunk=encoded)
@@ -848,7 +926,7 @@ class TaskExecutor:
                             # Keep buffering to catch the marker
                             if len(codex_output_buffer) > 2000:
                                 # No marker found - emit what we have and keep looking
-                                to_emit = codex_output_buffer[:-500]
+                                to_emit = _strip_binary_garbage(codex_output_buffer[:-500])
                                 codex_output_buffer = codex_output_buffer[-500:]
                                 if to_emit.strip():
                                     encoded = base64.b64encode(to_emit.encode()).decode()
@@ -858,11 +936,15 @@ class TaskExecutor:
                                     captured_output.append(to_emit)
                         return
 
-                    # Past prompt echo - emit normally
-                    emit("stream", chunk=event.data)
-                    with terminal_lock:
-                        terminal_buffer.extend(chunk_bytes)
-                    captured_output.append(decoded)
+                    # Past prompt echo - emit after stripping binary garbage
+                    cleaned = _strip_binary_garbage(decoded)
+                    if cleaned.strip():
+                        cleaned_bytes = cleaned.encode()
+                        encoded = base64.b64encode(cleaned_bytes).decode()
+                        emit("stream", chunk=encoded)
+                        with terminal_lock:
+                            terminal_buffer.extend(cleaned_bytes)
+                        captured_output.append(cleaned)
 
         # Start PTY session
         stream_id = pty_service.start_pty_session(
@@ -1027,6 +1109,8 @@ class TaskExecutor:
                 cols=cols,
                 emit=emit,
                 git_mgr=git_mgr,
+                coding_model=coding_model,
+                coding_reasoning=coding_reasoning,
             )
             accumulated_output = exploration_output
             final_exit_code = exit_code
@@ -1063,6 +1147,13 @@ class TaskExecutor:
                 # Agent completed during exploration - skip to completion
                 pass
             elif exit_code == 0:
+                # Check provider thresholds before implementation phase
+                coding_account, coding_provider, switched = self._check_provider_threshold(
+                    coding_account, coding_provider, emit
+                )
+                if switched:
+                    session.coding_account = coding_account
+
                 # Phase 2: Implementation - agent continues with implementation
                 emit("status", status="Phase 2: Implementing changes...")
                 exit_code, impl_output = self._run_phase(
@@ -1079,6 +1170,8 @@ class TaskExecutor:
                     cols=cols,
                     emit=emit,
                     git_mgr=git_mgr,
+                    coding_model=coding_model,
+                    coding_reasoning=coding_reasoning,
                 )
                 accumulated_output += "\n" + impl_output
                 final_exit_code = exit_code
@@ -1110,6 +1203,12 @@ class TaskExecutor:
                 # Continuation loop if agent exited without completion
                 if summary is None and exit_code == 0:
                     for attempt in range(max_continuation_attempts):
+                        # Check provider thresholds before each continuation
+                        coding_account, coding_provider, switched = self._check_provider_threshold(
+                            coding_account, coding_provider, emit
+                        )
+                        if switched:
+                            session.coding_account = coding_account
                         emit("status", status=f"Agent continuing (attempt {attempt + 1})...")
                         exit_code, cont_output = self._run_phase(
                             task=task,
@@ -1125,6 +1224,8 @@ class TaskExecutor:
                             cols=cols,
                             emit=emit,
                             git_mgr=git_mgr,
+                            coding_model=coding_model,
+                            coding_reasoning=coding_reasoning,
                         )
                         accumulated_output += "\n" + cont_output
                         final_exit_code = exit_code

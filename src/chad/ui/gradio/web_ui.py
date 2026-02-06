@@ -2080,6 +2080,8 @@ class ChadWebUI:
         self._session_dropdowns: dict[str, dict] = {}
         # Store live patch triggers for tab rehydration
         self._session_live_patches: dict[str, gr.HTML] = {}
+        # Store live stream components for direct tab-switch restoration
+        self._session_live_streams: dict[str, gr.HTML] = {}
         # Store provider card delete events for chaining dropdown updates
         self._provider_delete_events: list = []
         # Stream client for API-based task execution (same method as CLI)
@@ -3645,6 +3647,15 @@ class ChadWebUI:
 
                     elif msg_type == "session_id":
                         session.server_session_id = msg[1]
+                        # Fetch worktree info now that task is starting
+                        try:
+                            wt_status = self.api_client.get_worktree_status(msg[1])
+                            if wt_status and wt_status.exists:
+                                session.worktree_path = Path(wt_status.path) if wt_status.path else None
+                                session.worktree_branch = wt_status.branch
+                                session.worktree_base_commit = wt_status.base_commit
+                        except Exception:
+                            pass
                         yield make_yield(
                             chat_history,
                             current_status,
@@ -3663,6 +3674,16 @@ class ChadWebUI:
                     elif msg_type == "stream":
                         chunk = msg[1]
                         html_chunk = msg[2] if len(msg) > 2 else None
+                        # Fetch worktree path on first stream if not yet known
+                        if not session.worktree_path and session.server_session_id:
+                            try:
+                                wt_status = self.api_client.get_worktree_status(session.server_session_id)
+                                if wt_status and wt_status.exists:
+                                    session.worktree_path = Path(wt_status.path) if wt_status.path else None
+                                    session.worktree_branch = wt_status.branch
+                                    session.worktree_base_commit = wt_status.base_commit
+                            except Exception:
+                                pass
                         if html_chunk:
                             latest_pyte_html = html_chunk  # Track for activity/empty handlers
                         if chunk.strip():
@@ -6277,6 +6298,8 @@ class ChadWebUI:
         )
         # Track trigger for cross-tab rehydration
         self._session_live_patches[session_id] = live_patch_trigger
+        # Track live stream component for direct tab-switch restoration
+        self._session_live_streams[session_id] = live_stream
 
         with gr.Row(visible=False, key=f"followup-row-{session_id}") as followup_row:
             followup_input = gr.MultimodalTextbox(
@@ -8173,16 +8196,18 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
 
             # Refresh dropdowns when switching to any task tab (after adding providers)
             def on_tab_select(evt: gr.SelectData):
-                """Refresh agent dropdowns when switching to a task tab."""
+                """Refresh agent dropdowns and restore live view when switching to a task tab."""
                 # Only refresh for task tabs (id 1-MAX_TASKS, not providers tab id=0 or add tab)
                 add_tab_id = MAX_TASKS + 1
+                n_dropdowns = len(self._session_dropdowns) * 2
+                n_patches = len(self._session_live_patches)
+                n_streams = len(self._session_live_streams)
+                total = n_dropdowns + n_patches + n_streams
                 if evt.index == 0 or evt.index == add_tab_id:
-                    total = (len(self._session_dropdowns) * 2) + len(self._session_live_patches)
                     return [gr.update() for _ in range(total)]
                 # Also guard against out-of-bounds indices
                 session_index = evt.index - 1
                 if session_index < 0 or session_index >= len(all_sessions):
-                    total = (len(self._session_dropdowns) * 2) + len(self._session_live_patches)
                     return [gr.update() for _ in range(total)]
 
                 # Get current account choices
@@ -8204,7 +8229,7 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                 for session_id in self._session_dropdowns:
                     updates.append(gr.update(choices=account_choices))  # coding_agent
                     updates.append(gr.update(choices=verification_choices))  # verification_agent
-                # Also push a live patch for the selected tab to rehydrate live view
+                # Push a live patch for the selected tab to rehydrate live view
                 selected_session = all_sessions[session_index]
                 live_stream_id = f"live-{selected_session.id}"
                 patch_html = ""
@@ -8216,19 +8241,25 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
 
                 for sess in all_sessions:
                     if sess.id == selected_session.id:
-                        # Only update if we have content to restore; otherwise leave current
-                        # content intact to avoid showing "Waiting for agent output" prematurely
                         if patch_html:
                             updates.append(gr.update(value=patch_html))
                         else:
                             updates.append(gr.update())
                     else:
                         updates.append(gr.update())
+                # Directly restore live stream content for selected tab to avoid
+                # the brief "waiting for agent output" flash before JS patching
+                for sess in all_sessions:
+                    if sess.id == selected_session.id and selected_session.last_live_stream:
+                        updates.append(gr.update(value=selected_session.last_live_stream))
+                    else:
+                        updates.append(gr.update())
                 return updates
 
-            # Collect outputs for the select handler (dropdowns + live patch triggers)
+            # Collect outputs for the select handler (dropdowns + live patch triggers + live streams)
             all_dropdown_outputs = []
             live_patch_outputs = []
+            live_stream_outputs = []
             for sess in all_sessions:
                 session_id = sess.id
                 dropdowns = self._session_dropdowns.get(session_id)
@@ -8238,11 +8269,14 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                 trigger = self._session_live_patches.get(session_id)
                 if trigger:
                     live_patch_outputs.append(trigger)
+                stream = self._session_live_streams.get(session_id)
+                if stream:
+                    live_stream_outputs.append(stream)
 
-            if all_dropdown_outputs or live_patch_outputs:
+            if all_dropdown_outputs or live_patch_outputs or live_stream_outputs:
                 main_tabs.select(
                     on_tab_select,
-                    outputs=all_dropdown_outputs + live_patch_outputs,
+                    outputs=all_dropdown_outputs + live_patch_outputs + live_stream_outputs,
                 )
 
             # Chain dropdown refresh to provider delete events
