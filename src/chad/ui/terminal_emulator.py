@@ -127,7 +127,7 @@ class TerminalEmulator:
     and renders to HTML with proper styling.
     """
 
-    def __init__(self, cols: int = TERMINAL_COLS, rows: int = TERMINAL_ROWS, history: int = 10000):
+    def __init__(self, cols: int = TERMINAL_COLS, rows: int = TERMINAL_ROWS, history: int = 100000):
         """Initialize the terminal emulator.
 
         Args:

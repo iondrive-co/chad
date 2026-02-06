@@ -42,7 +42,7 @@ from chad.util.handoff import (
 from chad.util.providers import ModelConfig, parse_codex_output, create_provider
 from chad.util.model_catalog import ModelCatalog
 from chad.util.prompts import (
-    build_coding_prompt,
+    build_exploration_prompt,
     extract_coding_summary,
     extract_progress_update,
     check_verification_mentioned,
@@ -623,6 +623,13 @@ body, .gradio-container, .gradio-container * {
   font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
   font-size: 13px;
   line-height: 1.4;
+}
+
+/* Prevent nested elements from creating their own scrollbars (causes double scrollbar issue) */
+#live-stream-box .live-output-content *,
+.live-stream-box .live-output-content * {
+  overflow: visible !important;
+  max-height: none !important;
 }
 
 /* Syntax highlighting colors for live stream */
@@ -2208,6 +2215,33 @@ class ChadWebUI:
         accumulated_text: list[str] = []
         terminal = None if json_parser else TerminalEmulator(cols=effective_cols, rows=TERMINAL_ROWS)
 
+        # Detect provider for Codex prompt echo filtering
+        is_codex = False
+        try:
+            for acc in accounts:
+                if acc.name == coding_account and acc.provider == "openai":
+                    is_codex = True
+                    break
+        except Exception:
+            pass
+
+        # Codex prompt echo filtering state
+        # Codex echoes stdin after the header. The structure is:
+        #   [banner] OpenAI Codex v0.92.0...
+        #   --------
+        #   [header] workdir, model, etc
+        #   --------
+        #   [36muser[0m  (or just "user" - ANSI colored)
+        #   [prompt text - this is what we want to filter]
+        #   [36mmcp startup:[0m no servers
+        #   [agent work starts here]
+        #
+        # We keep everything up to the colored "user" line, filter the prompt,
+        # and show everything after "mcp startup:"
+        codex_in_prompt_echo = False  # True when we're in the echoed prompt section
+        codex_past_prompt_echo = False  # True when we've seen "mcp startup:" and are done
+        codex_output_buffer = ""
+
         try:
             for event in stream_client.stream_events(server_session_id, include_terminal=True):
                 if event.event_type == "terminal":
@@ -2234,11 +2268,89 @@ class ChadWebUI:
                             message_queue.put(("stream", readable_text, html_output))
                         # If no complete lines yet, don't emit anything
                     else:
-                        # Non-anthropic: pass through raw PTY output with terminal emulation
+                        decoded = raw_bytes.decode("utf-8", errors="replace")
+
+                        # Filter Codex prompt echo
+                        # Codex output structure:
+                        #   [banner]
+                        #   --------
+                        #   [header info]
+                        #   --------
+                        #   user  (or [36muser[0m with ANSI)
+                        #   [prompt - FILTER THIS]
+                        #   mcp startup: ...
+                        #   [agent work - KEEP THIS]
+                        if is_codex and not codex_past_prompt_echo:
+                            codex_output_buffer += decoded
+                            normalized = codex_output_buffer.replace("\r\n", "\n").replace("\r", "\n")
+
+                            # Strip ANSI codes for pattern matching
+                            import re
+                            ansi_pattern = re.compile(r'\x1b\[[0-9;]*m')
+                            stripped = ansi_pattern.sub('', normalized)
+
+                            # Look for "user" on its own line (after second --------)
+                            # This marks the start of the echoed prompt
+                            user_line_match = re.search(r'\n--------\nuser\n', stripped)
+
+                            # Check if we're entering the prompt echo section
+                            if not codex_in_prompt_echo and user_line_match:
+                                # Found start of prompt echo - emit content before it
+                                # Find the position in the original (non-stripped) string
+                                # by finding the pattern with ANSI codes
+                                user_pattern = re.compile(r'\n--------\n(?:\x1b\[[0-9;]*m)*user(?:\x1b\[[0-9;]*m)*\n')
+                                match = user_pattern.search(normalized)
+                                if match:
+                                    pre_echo = normalized[:match.start()]
+                                    if pre_echo.strip():
+                                        terminal.feed(pre_echo.encode("utf-8"))
+                                        html_output = terminal.render_html()
+                                        message_queue.put(("stream", pre_echo, html_output))
+                                    # Now in prompt echo section - update buffer
+                                    codex_in_prompt_echo = True
+                                    codex_output_buffer = normalized[match.end():]
+                                    normalized = codex_output_buffer
+                                    stripped = ansi_pattern.sub('', normalized)
+
+                            # Check if we've passed the prompt echo section
+                            if codex_in_prompt_echo and "mcp startup:" in stripped.lower():
+                                # Found end of prompt echo - extract agent output after marker
+                                mcp_pattern = re.compile(r'(?:\x1b\[[0-9;]*m)*mcp startup:(?:\x1b\[[0-9;]*m)*[^\n]*\n', re.IGNORECASE)
+                                match = mcp_pattern.search(normalized)
+                                if match:
+                                    agent_output = normalized[match.end():]
+                                else:
+                                    # Fallback: find in stripped and estimate position
+                                    marker_pos = stripped.lower().find("mcp startup:")
+                                    newline_after = stripped.find("\n", marker_pos)
+                                    if newline_after != -1:
+                                        agent_output = normalized[newline_after + 1:]
+                                    else:
+                                        agent_output = ""
+                                codex_past_prompt_echo = True
+                                codex_output_buffer = ""
+                                if agent_output.strip():
+                                    terminal.feed(agent_output.encode("utf-8"))
+                                    html_output = terminal.render_html()
+                                    message_queue.put(("stream", agent_output, html_output))
+                                continue
+
+                            # If not in prompt echo yet, emit normally but keep buffer small
+                            if not codex_in_prompt_echo:
+                                if len(codex_output_buffer) > 2000:
+                                    # No marker found - emit older content and keep looking
+                                    to_emit = codex_output_buffer[:-500]
+                                    codex_output_buffer = codex_output_buffer[-500:]
+                                    if to_emit.strip():
+                                        terminal.feed(to_emit.encode("utf-8"))
+                                        html_output = terminal.render_html()
+                                        message_queue.put(("stream", to_emit, html_output))
+                            continue
+
+                        # Past prompt echo - pass through raw PTY output with terminal emulation
                         terminal.feed(raw_bytes)
-                        text_chunk = raw_bytes.decode("utf-8", errors="replace")
                         html_output = terminal.render_html()
-                        message_queue.put(("stream", text_chunk, html_output))
+                        message_queue.put(("stream", decoded, html_output))
 
                 elif event.event_type == "complete":
                     exit_code = event.data.get("exit_code", 0)
@@ -3264,9 +3376,9 @@ class ChadWebUI:
             chat_history.append({"role": "user", "content": f"**Task**\n\n{task_description}"})
             session.event_log.log(UserMessageEvent(content=task_description))
 
-            # Build the coding prompt for display
+            # Build the exploration prompt for display (Phase 1 of phased execution)
             project_docs = self._read_project_docs(path_obj)
-            display_coding_prompt = build_coding_prompt(task_description, project_docs, str(path_obj))
+            display_coding_prompt = build_exploration_prompt(task_description, project_docs, str(path_obj))
             session.last_coding_prompt = display_coding_prompt
 
             initial_status = f"{status_prefix}⏳ Initializing session..."
@@ -7436,6 +7548,9 @@ function initializeLiveStreamScrollTracking() {
 
         // Watch for DOM changes (content replacement)
         const observer = new MutationObserver(() => {
+            // Skip if another operation (like patchLiveContent) is managing scroll
+            if (state.settingScroll) return;
+
             const content = parent.querySelector('.live-output-content');
             if (!content) return;
 
@@ -7446,22 +7561,29 @@ function initializeLiveStreamScrollTracking() {
             requestAnimationFrame(() => {
                 requestAnimationFrame(() => {
                     const newScrollHeight = content.scrollHeight;
+                    const currentScrollTop = content.scrollTop;
                     const contentGrew = newScrollHeight > state.lastScrollHeight;
 
-                    // Check if user was at bottom BEFORE content grew (using old height)
-                    const wasAtBottomBeforeGrowth = state.savedScrollTop + content.clientHeight >= state.lastScrollHeight - 10;
+                    // Use CURRENT scroll position for bottom detection, not stale state
+                    // This handles cases where scroll was set externally (e.g., test setup)
+                    const isCurrentlyAtBottom = currentScrollTop + content.clientHeight >= newScrollHeight - 10;
+                    const wasAtBottomBeforeGrowth = state.lastScrollHeight > 0
+                        ? (state.savedScrollTop + content.clientHeight >= state.lastScrollHeight - 10)
+                        : isCurrentlyAtBottom;
 
+                    // Update state with current position
+                    state.savedScrollTop = currentScrollTop;
                     state.lastScrollHeight = newScrollHeight;
                     state.settingScroll = true;
 
-                    if (contentGrew && wasAtBottomBeforeGrowth) {
-                        // User was at bottom before content grew - auto-scroll to new bottom
+                    if (contentGrew && wasAtBottomBeforeGrowth && isCurrentlyAtBottom && !state.userScrolledUp) {
+                        // User was at bottom and is still at bottom and hasn't scrolled up - auto-scroll
                         content.scrollTop = newScrollHeight;
                         state.savedScrollTop = newScrollHeight;
                         state.userScrolledUp = false;
-                    } else if (state.userScrolledUp) {
-                        // Restore saved position when user has scrolled up
-                        content.scrollTop = state.savedScrollTop;
+                    } else if (!isCurrentlyAtBottom) {
+                        // User is mid-scroll - preserve current position
+                        state.userScrolledUp = true;
                     }
 
                     requestAnimationFrame(() => {
@@ -7592,10 +7714,21 @@ function initializeLiveDomPatching() {
         const content = wrapper.querySelector('.live-output-content');
         if (!content) return false;
 
-        // Save scroll position
+        // Find the parent container and get shared scroll state
+        const parent = wrapper.closest('#live-stream-box, .live-stream-box');
+        const parentId = parent ? getParentId(parent) : null;
+        const state = parentId ? getState(parentId) : null;
+
+        // Save scroll position to shared state
         const scrollTop = content.scrollTop;
         const scrollHeight = content.scrollHeight;
         const isAtBottom = scrollTop + content.clientHeight >= scrollHeight - 10;
+
+        if (state) {
+            // Mark that we're doing a programmatic update - MutationObserver should not interfere
+            state.settingScroll = true;
+            state.savedScrollTop = scrollTop;
+        }
 
         // Parse new HTML to extract just the content portion
         const temp = document.createElement('div');
@@ -7608,16 +7741,34 @@ function initializeLiveDomPatching() {
             content.innerHTML = newContent.innerHTML;
         }
 
-        // Restore scroll position
+        // Restore scroll position using shared state
         requestAnimationFrame(() => {
-            const newScrollHeight = content.scrollHeight;
-            if (isAtBottom) {
-                // Was at bottom, stay at bottom
-                content.scrollTop = newScrollHeight;
-            } else {
-                // Restore previous position
-                content.scrollTop = scrollTop;
-            }
+            requestAnimationFrame(() => {
+                const newScrollHeight = content.scrollHeight;
+                if (state) {
+                    state.lastScrollHeight = newScrollHeight;
+                }
+
+                if (isAtBottom && (!state || !state.userScrolledUp)) {
+                    // Was at bottom and hasn't scrolled up, stay at bottom
+                    content.scrollTop = newScrollHeight;
+                    if (state) {
+                        state.savedScrollTop = newScrollHeight;
+                        state.userScrolledUp = false;
+                    }
+                } else {
+                    // Restore previous position
+                    content.scrollTop = scrollTop;
+                    if (state) {
+                        state.userScrolledUp = true;
+                    }
+                }
+
+                // Release the lock after scroll is restored
+                requestAnimationFrame(() => {
+                    if (state) state.settingScroll = false;
+                });
+            });
         });
 
         return true;
@@ -7847,8 +7998,8 @@ initializeLiveDomPatching();
                             state.lastScrollHeight = newScrollHeight;
                             state.settingScroll = true;
 
-                            if (contentGrew && wasAtBottomBeforeGrowth) {
-                              // User was at bottom before content grew - auto-scroll to new bottom
+                            if (contentGrew && wasAtBottomBeforeGrowth && !state.userScrolledUp) {
+                              // User was at bottom before content grew and hasn't scrolled up - auto-scroll
                               content.scrollTop = newScrollHeight;
                               state.savedScrollTop = newScrollHeight;
                               state.userScrolledUp = false;
@@ -8205,8 +8356,14 @@ initializeLiveDomPatching();
             # Refresh dropdowns when switching to any task tab (after adding providers)
             def on_tab_select(evt: gr.SelectData):
                 """Refresh agent dropdowns when switching to a task tab."""
-                # Only refresh for task tabs (id >= 1, not providers tab id=0)
-                if evt.index == 0:
+                # Only refresh for task tabs (id 1-MAX_TASKS, not providers tab id=0 or add tab)
+                add_tab_id = MAX_TASKS + 1
+                if evt.index == 0 or evt.index == add_tab_id:
+                    total = (len(self._session_dropdowns) * 2) + len(self._session_live_patches)
+                    return [gr.update() for _ in range(total)]
+                # Also guard against out-of-bounds indices
+                session_index = evt.index - 1
+                if session_index < 0 or session_index >= len(all_sessions):
                     total = (len(self._session_dropdowns) * 2) + len(self._session_live_patches)
                     return [gr.update() for _ in range(total)]
 
@@ -8230,7 +8387,7 @@ initializeLiveDomPatching();
                     updates.append(gr.update(choices=account_choices))  # coding_agent
                     updates.append(gr.update(choices=verification_choices))  # verification_agent
                 # Also push a live patch for the selected tab to rehydrate live view
-                selected_session = all_sessions[evt.index - 1]
+                selected_session = all_sessions[session_index]
                 live_stream_id = f"live-{selected_session.id}"
                 patch_html = ""
                 if selected_session.last_live_stream:

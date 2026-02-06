@@ -831,8 +831,9 @@ class TestClaudeJsonParsingIntegration:
         mock_session.id = "server-sess-456"
         mock_api_client.create_session.return_value = mock_session
 
-        # Raw terminal output (not JSON)
-        raw_output = b"Working on task...\nDone!"
+        # Realistic Codex output with prompt echo
+        # Codex outputs: banner, --------, header, --------, user (colored), prompt, mcp startup:
+        raw_output = b"OpenAI Codex v0.92.0\n--------\nworkdir: /tmp\nmodel: gpt-5\n--------\n\x1b[36muser\x1b[0m\nTask prompt here\n\x1b[36mmcp startup:\x1b[0m 0 servers\nWorking on task...\nDone!"
 
         mock_stream_event = Mock()
         mock_stream_event.event_type = "terminal"
@@ -866,6 +867,66 @@ class TestClaudeJsonParsingIntegration:
         # Verify raw output was passed through
         combined = "".join(stream_messages)
         assert "Working on task" in combined
+        assert "Done!" in combined
+
+    def test_codex_prompt_echo_keeps_content_before_user_marker(self, web_ui, mock_api_client, git_repo):
+        """Codex filter should keep content BEFORE '-------- user' marker."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        # Configure mock to return non-anthropic account
+        mock_api_client.list_accounts.return_value = [
+            Account(name="codex", provider="openai", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        # Mock create_session
+        mock_session = Mock()
+        mock_session.id = "server-sess-789"
+        mock_api_client.create_session.return_value = mock_session
+
+        # Realistic Codex output with header info preserved, prompt filtered
+        # Structure: banner, --------, header (keep), --------, user, prompt (filter), mcp startup, agent work (keep)
+        raw_output = b"OpenAI Codex v0.92.0\n--------\nworkdir: /home/user/project\nmodel: gpt-5.1-codex\n--------\n\x1b[36muser\x1b[0m\nTask prompt here\n\x1b[36mmcp startup:\x1b[0m 0 servers\nActual agent output\nDone!"
+
+        mock_stream_event = Mock()
+        mock_stream_event.event_type = "terminal"
+        mock_stream_event.data = {"data": base64.b64encode(raw_output).decode()}
+
+        mock_complete_event = Mock()
+        mock_complete_event.event_type = "complete"
+        mock_complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        # Run the task
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="codex",
+            message_queue=message_queue,
+        )
+
+        # Collect stream messages
+        stream_messages = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "stream":
+                stream_messages.append(msg[1])
+
+        combined = "".join(stream_messages)
+        # Header info (before "user" marker) should be kept
+        assert "OpenAI Codex" in combined
+        assert "workdir:" in combined
+        # Content between "user" and "mcp startup:" should be filtered
+        assert "Task prompt here" not in combined
+        # Content after "mcp startup:" should be shown
+        assert "Actual agent output" in combined
         assert "Done!" in combined
 
 
@@ -3106,9 +3167,9 @@ class TestPreferredVerificationModel:
 class TestScreenshotUpload:
     """Tests for screenshot upload functionality."""
 
-    def test_build_coding_prompt_includes_screenshot_paths(self, tmp_path):
-        """build_coding_prompt should include screenshot file paths when provided."""
-        from chad.util.prompts import build_coding_prompt
+    def test_exploration_prompt_includes_screenshot_paths(self, tmp_path):
+        """build_exploration_prompt should include screenshot file paths when provided."""
+        from chad.util.prompts import build_exploration_prompt
 
         # Create test screenshot files
         screenshot1 = tmp_path / "screenshot1.png"
@@ -3116,7 +3177,7 @@ class TestScreenshotUpload:
         screenshot1.write_bytes(b"PNG mock data 1")
         screenshot2.write_bytes(b"PNG mock data 2")
 
-        prompt = build_coding_prompt(
+        prompt = build_exploration_prompt(
             task="Fix the UI layout",
             screenshots=[str(screenshot1), str(screenshot2)],
         )
@@ -3127,25 +3188,27 @@ class TestScreenshotUpload:
         # Should have a screenshots section
         assert "Screenshot" in prompt or "screenshot" in prompt
 
-    def test_build_coding_prompt_works_without_screenshots(self):
-        """build_coding_prompt should work without screenshots (backwards compatible)."""
-        from chad.util.prompts import build_coding_prompt
+    def test_exploration_prompt_works_without_screenshots(self):
+        """build_exploration_prompt should work without screenshots (backwards compatible)."""
+        from chad.util.prompts import build_exploration_prompt
 
-        prompt = build_coding_prompt(task="Simple task")
+        prompt = build_exploration_prompt(task="Simple task")
 
         assert "Simple task" in prompt
         # No screenshot references should be present
         assert "Screenshot" not in prompt
 
-    def test_coding_prompt_frontloads_progress_update(self):
-        """Coding prompt should require initial exploration and progress update."""
-        from chad.util.prompts import build_coding_prompt
+    def test_exploration_prompt_includes_phase_info(self):
+        """Exploration prompt should include Phase 1 and progress JSON requirement."""
+        from chad.util.prompts import build_exploration_prompt
 
-        prompt = build_coding_prompt(task="Do thing")
-        assert "exploration" in prompt
-        assert "progress" in prompt
-        # Progress instructions should appear after the Task section (as part of sequence)
-        assert "progress update" in prompt
+        prompt = build_exploration_prompt(task="Do thing")
+        # Should have Phase 1 marker
+        assert "Phase 1" in prompt
+        # Progress update requirement should be present
+        assert "progress" in prompt.lower()
+        # Time constraint should be present (60 seconds for exploration)
+        assert "60 seconds" in prompt or "within" in prompt.lower()
 
     def test_progress_is_extracted_correctly(self):
         """Progress JSON should be correctly extracted from agent output.

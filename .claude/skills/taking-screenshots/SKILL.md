@@ -8,6 +8,10 @@ allowed-tools: Bash, Read
 
 This skill covers screenshots for BOTH the Gradio web UI AND the CLI terminal interface.
 
+**IMPORTANT**: ALWAYS use the project's screenshot scripts (`screenshot_ui.py` for Gradio, `screenshot_cli.py` for CLI).
+DO NOT write custom screenshot code using PIL, Pillow, pyautogui, or any other library. The project scripts handle all
+the complexity including headless browser automation, proper rendering, and terminal emulation.
+
 ## Gradio UI Screenshots
 
 Capture silently (default – light mode only, does not open browser)

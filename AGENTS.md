@@ -102,7 +102,7 @@ Pydantic models for request/response validation: SessionCreate, TaskCreate, Acco
 
 ## Before making changes
 
-When exploring the codebase, note that ripgrep (`rg`) is not installed here. Use `grep -R`, `find`, or language-aware 
+When exploring the codebase, note that ripgrep (`rg`) is not installed here. Use `grep -R`, `find`, or language-aware
 tools instead—do not invoke `rg`.
 
 When designing new code, never make fallback code to handle paths other than the happy one, instead spend as much effort
@@ -110,6 +110,10 @@ as necessary to make sure that everyone using your feature sees the same happy p
 config options, instead decide which option makes the most sense and implement that without writing code to handle other
 options. Keep code simple rather than using abstractions, and find and delete unused or redundant code and tests as
 part of your change. Don't worry about backwards compatibility.
+
+**Provider Prompt Parity**: All providers MUST use the same prompts. Never create provider-specific prompt variants or
+customize prompts based on provider type. If a provider has different execution characteristics (e.g., terminates on
+certain output), handle that by restructuring the task execution phases rather than modifying prompts.
 
 When fixing bugs, first describe the behavior of the software in detail, and then describe how the code makes that 
 happen. From that description generate plausible theories for the bug, then use tests and research to eliminate 

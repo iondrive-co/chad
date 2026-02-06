@@ -135,8 +135,8 @@ class TestClaudeStreamJsonParser:
 class TestBuildAgentCommand:
     """Tests for build_agent_command function."""
 
-    def test_anthropic_uses_stream_json_and_stdin_prompt(self, tmp_path):
-        """Anthropic provider sends task via stdin in stream-json mode."""
+    def test_anthropic_uses_stream_json_and_exploration_prompt(self, tmp_path):
+        """Anthropic provider sends exploration prompt via argv in stream-json mode."""
         cmd, env, initial_input = build_agent_command(
             "anthropic", "test-account", tmp_path, "Fix the bug"
         )
@@ -145,8 +145,10 @@ class TestBuildAgentCommand:
         assert "-p" in cmd
         assert "--output-format" in cmd and "stream-json" in cmd
         assert "--permission-mode" in cmd
-        # The task must be in argv (stdin is TTY with -p)
-        assert any("Fix the bug" in arg for arg in cmd)
+        # The exploration prompt must include the task and phase info
+        prompt_arg = [arg for arg in cmd if "Fix the bug" in arg]
+        assert len(prompt_arg) == 1
+        assert "Phase 1: Exploration" in prompt_arg[0]
         assert initial_input is None
 
     def test_anthropic_without_task(self, tmp_path):
@@ -174,6 +176,35 @@ class TestBuildAgentCommand:
         assert result.returncode == 0
         assert "Mock Agent" in result.stdout
         assert initial_input is None
+
+    def test_continuation_phase_uses_continuation_prompt(self, tmp_path):
+        """Continuation phase uses the continuation prompt when agent exits early."""
+        previous_output = "Found the bug in src/main.py:42"
+        cmd, env, initial_input = build_agent_command(
+            "openai", "test-account", tmp_path, "Fix the bug",
+            phase="continuation",
+            exploration_output=previous_output
+        )
+
+        # The prompt should tell the agent to continue
+        assert initial_input is not None
+        assert "continue" in initial_input.lower()
+        assert "progress update" in initial_input.lower() or "completion" in initial_input.lower()
+
+    def test_implementation_phase_uses_implementation_prompt(self, tmp_path):
+        """Implementation phase uses the implementation prompt with exploration context."""
+        exploration_output = "Found the bug in src/main.py - missing null check"
+        cmd, env, initial_input = build_agent_command(
+            "openai", "test-account", tmp_path, "Fix the bug",
+            phase="implementation",
+            exploration_output=exploration_output
+        )
+
+        # The prompt should have Phase 2 markers and include exploration output
+        assert initial_input is not None
+        assert "Phase 2: Implementation" in initial_input
+        assert "Previous Exploration" in initial_input
+        assert exploration_output in initial_input
 
 
 def _init_git_repo(repo_path: Path) -> None:
@@ -206,7 +237,7 @@ def test_task_executor_times_out_hung_agent(tmp_path, monkeypatch):
 
     import chad.server.services.task_executor as te
 
-    def sleepy_command(provider, account_name, project_path, task_description=None):
+    def sleepy_command(provider, account_name, project_path, task_description=None, screenshots=None, phase="combined", exploration_output=None):
         return ["bash", "-c", "sleep 5"], {}, None
 
     monkeypatch.setattr(te, "build_agent_command", sleepy_command)
@@ -270,7 +301,7 @@ def test_terminal_output_is_batched_and_decoded(tmp_path, monkeypatch):
 
     script = "/usr/bin/env python3 -c \"import sys,time;[sys.stdout.write(f'line {i}\\n') or sys.stdout.flush() or time.sleep(0.05) for i in range(5)]\""
 
-    def noisy_command(provider, account_name, project_path, task_description=None):
+    def noisy_command(provider, account_name, project_path, task_description=None, screenshots=None, phase="combined", exploration_output=None):
         return ["bash", "-c", script], {}, None
 
     monkeypatch.setattr(te, "build_agent_command", noisy_command)
@@ -287,8 +318,70 @@ def test_terminal_output_is_batched_and_decoded(tmp_path, monkeypatch):
     terminal_events = [
         e for e in task.event_log.get_events() if e.get("type") == "terminal_output"
     ]
-    # Should be fewer events than individual lines because of batching
-    assert len(terminal_events) < 5
     # Terminal output now stores human-readable text in 'data' field (not base64)
     combined_text = "\n".join([e.get("data", "") or "" for e in terminal_events])
     assert "line 0" in combined_text and "line 4" in combined_text
+    # Batching should combine multiple lines into single events (check first event has multiple lines)
+    if terminal_events:
+        first_event_lines = terminal_events[0].get("data", "").count("\n")
+        assert first_event_lines >= 4, "Batching should combine multiple lines into single event"
+
+
+def test_continuation_loop_waits_for_completion_json(tmp_path, monkeypatch):
+    """Task executor continues running until completion JSON is found."""
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"accounts": {"test": {"provider": "mock"}}}), encoding="utf-8")
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+    session_manager = SessionManager()
+    session = session_manager.create_session(project_path=str(repo_path), name="continuation-test")
+
+    executor = TaskExecutor(
+        ConfigManager(),
+        session_manager,
+        inactivity_timeout=30.0,
+    )
+
+    import chad.server.services.task_executor as te
+
+    # Track which runs have occurred
+    run_count = [0]
+
+    def mock_command(provider, account_name, project_path, task_description=None, screenshots=None, phase="combined", exploration_output=None):
+        run_count[0] += 1
+
+        if run_count[0] == 1:
+            # First run: output progress JSON but no completion
+            script = '''echo '{"type": "progress", "summary": "Found the issue", "location": "src/main.py:42", "next_step": "Implementing fix"}' '''
+        else:
+            # Continuation: output completion JSON
+            script = '''echo '```json'; echo '{"change_summary": "Fixed the bug", "files_changed": ["src/main.py"], "completion_status": "success"}'; echo '```' '''
+
+        return ["bash", "-c", script], {}, None
+
+    monkeypatch.setattr(te, "build_agent_command", mock_command)
+
+    task = executor.start_task(
+        session_id=session.id,
+        project_path=str(repo_path),
+        task_description="Fix the bug",
+        coding_account="test",
+    )
+
+    task._thread.join(timeout=10)
+
+    # Should have run twice - initial combined and continuation
+    assert run_count[0] >= 2, f"Expected at least 2 runs, got {run_count[0]}"
+
+    # Task should be completed (not failed)
+    assert task.state == TaskState.COMPLETED, f"Task state was {task.state}, error: {task.error}"
+
+    # Event log should contain session_ended with success
+    events = task.event_log.get_events()
+    ended_events = [e for e in events if e.get("type") == "session_ended"]
+    assert ended_events, "Expected session_ended event"
+    assert ended_events[-1].get("success") is True

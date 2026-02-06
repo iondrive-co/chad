@@ -54,6 +54,34 @@ CODEX_THINKING_TIMEOUT = _get_env_float("CODEX_THINKING_TIMEOUT", 60.0)
 CODEX_MAX_EXPLORATION_WITHOUT_IMPL = int(_get_env_float("CODEX_MAX_EXPLORATION_WITHOUT_IMPL", 40.0))
 
 
+def _codex_needs_continuation(agent_message: str) -> bool:
+    """Check if a Codex agent message indicates incomplete work needing continuation.
+
+    Detects when the model outputs a progress checkpoint (progress markers without
+    completion summary), which in exec mode causes early session termination.
+
+    Args:
+        agent_message: The text from the agent_message item
+
+    Returns:
+        True if the message looks like an incomplete checkpoint that needs continuation
+    """
+    if not agent_message:
+        return False
+
+    # Progress markers that indicate the model intended to continue
+    progress_markers = ["**Progress:**", "**Location:**", "**Next:**"]
+    has_progress = any(marker in agent_message for marker in progress_markers)
+
+    # Completion markers that indicate the task is done
+    # These come from the JSON summary block at the end of a completed task
+    completion_markers = ['"change_summary"', '"completion_status"', '"files_changed"']
+    has_completion = any(marker in agent_message for marker in completion_markers)
+
+    # Needs continuation if has progress markers but no completion markers
+    return has_progress and not has_completion
+
+
 def find_cli_executable(name: str) -> str:
     """Find a CLI executable, checking common locations if not in PATH.
 
@@ -1862,18 +1890,43 @@ class OpenAICodexProvider(AIProvider):
 
             # Extract response from JSON events
             response_parts = []
+            agent_message_parts = []  # Track agent messages separately for checkpoint detection
             for event in json_events:
                 if event.get("type") == "item.completed":
                     item = event.get("item", {})
                     if item.get("type") == "agent_message":
-                        response_parts.append(item.get("text", ""))
+                        text = item.get("text", "")
+                        response_parts.append(text)
+                        agent_message_parts.append(text)
                     elif item.get("type") == "reasoning":
                         text = item.get("text", "")
                         if text:
                             response_parts.insert(0, f"*Thinking: {text}*\n\n")
 
             if response_parts:
-                return "".join(response_parts).strip()
+                full_response = "".join(response_parts).strip()
+
+                # Check for progress checkpoint: model output progress markers but no completion
+                # This indicates the model wanted to continue but exec mode terminated the session
+                # Note: This logic is primarily for direct provider usage. The task executor
+                # handles checkpoint detection separately for PTY-based execution.
+                agent_message_text = "\n".join(agent_message_parts)
+                if self.thread_id and not _is_recovery and _codex_needs_continuation(agent_message_text):
+                    self._notify_activity(
+                        "stream",
+                        "\033[33m• Progress checkpoint detected, continuing task...\033[0m\n"
+                    )
+                    self.current_message = (
+                        "Continue with the next steps you outlined. Complete the remaining work "
+                        "and end with the JSON summary block containing change_summary, "
+                        "files_changed, and completion_status."
+                    )
+                    # Recursively call with recovery flag to prevent infinite loops
+                    continuation_response = self.get_response(timeout=timeout, _is_recovery=True)
+                    # Combine the progress checkpoint with the continuation response
+                    return f"{full_response}\n\n---\n\n{continuation_response}"
+
+                return full_response
 
             # Fallback to raw output if no JSON events parsed
             output = _strip_ansi_codes(output)

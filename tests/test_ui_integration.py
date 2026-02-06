@@ -999,10 +999,12 @@ Line 4: Fourth line"""
     const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
     if (!box) return false;
     const container = box.querySelector('.live-output-content') || box;
-    // Simulate user scrolling to top: scrollTop=0 and savedScrollTop=0 (not null)
+    // Simulate user scrolling to top: scrollTop=0
     container.scrollTop = 0;
-    if (window._liveStreamScroll && window._liveStreamScroll.has(container)) {
-        const state = window._liveStreamScroll.get(container);
+    // Update the scroll state using the current API (keyed by parent ID)
+    const parentId = box.id || box.dataset.scrollTrackId;
+    if (parentId && window._liveStreamScrollState && window._liveStreamScrollState[parentId]) {
+        const state = window._liveStreamScrollState[parentId];
         state.userScrolledUp = true;  // User actively scrolled away from bottom
         state.savedScrollTop = 0;  // User's scroll position (0 = top of content)
     }
