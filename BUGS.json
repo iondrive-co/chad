@@ -152,16 +152,17 @@
     "title": "Missing exploration prompt accordion - only coding and verification shown",
     "description": "The prompt display area only has two accordions: Coding Agent Prompt and Verification Agent Prompt. There should be three: Exploration, Coding, and Verification. All three should be visible from the start with template variables unfilled (showing the raw prompt templates), then updated with actual values once task variables are populated during execution.",
     "hypothesis": "The UI at web_ui.py:6125-6150 only creates two accordion widgets. A third accordion for the exploration prompt was never added. The prompt update logic only fills in prompts once variables are available rather than showing templates early.",
-    "status": "unfixed",
+    "status": "unverified",
+    "fix": "Already fixed in a previous change. Three accordions exist: Exploration Prompt, Implementation Prompt, and Verification Prompt (web_ui.py:6221-6258). Each is initialized with the raw prompt template (EXPLORATION_PROMPT, IMPLEMENTATION_PROMPT, VERIFICATION_EXPLORATION_PROMPT) and updated with actual values via make_yield during task execution.",
     "files": [
-      "src/chad/ui/gradio/web_ui.py:6125-6150"
+      "src/chad/ui/gradio/web_ui.py:6221-6258"
     ],
     "reproduction_steps": [
       "1. Launch Gradio UI: `chad --ui gradio`",
       "2. Navigate to the Run Task tab",
       "3. Scroll down to the prompt display area below the live stream panel",
       "4. Count the number of prompt accordion widgets visible",
-      "5. EXPECTED: Three accordions labeled 'Exploration Agent Prompt', 'Coding Agent Prompt', and 'Verification Agent Prompt', all visible with raw template text showing placeholder variables like {task_description}, {project_docs}",
+      "5. EXPECTED: Three accordions labeled 'Exploration Prompt', 'Implementation Prompt', and 'Verification Prompt', all visible with raw template text showing placeholder variables like {task}, {project_docs}",
       "6. ACTUAL: Only two accordions: 'Coding Agent Prompt' and 'Verification Agent Prompt'; the exploration prompt accordion is missing entirely"
     ]
   },
@@ -169,9 +170,10 @@
     "title": "Live view resets to 'waiting for agent output' on tab switch",
     "description": "When navigating away from a task tab (e.g., to Setup) and back during an active session, the live view briefly shows 'waiting for agent output' before suddenly restoring the full output on the next update. Reproduced with Claude, Qwen, and Codex providers - not provider-specific. The session tracks last_live_stream and has_initial_live_render for tab-switch restoration, but the restoration doesn't happen immediately on tab re-entry.",
     "hypothesis": "The has_initial_live_render flag gets cleared or the Gradio component re-renders its default value when the tab becomes visible again. The live stream content is only restored on the next polling update rather than immediately on tab selection. Need to hook into the tab select event to immediately restore last_live_stream.",
-    "status": "unfixed",
+    "status": "unverified",
+    "fix": "Added _session_live_streams dict to store live stream HTML components per session. Updated on_tab_select handler to directly update the live_stream component value (in addition to the existing JS patch mechanism), so the content is restored immediately via Gradio's value update without waiting for the JS MutationObserver cycle. The live_stream components are now included as outputs of the tab select handler.",
     "files": [
-      "src/chad/ui/gradio/web_ui.py:94-96,2473-2486,3475,3595-3626"
+      "src/chad/ui/gradio/web_ui.py:2082-2084,8179-8260"
     ],
     "reproduction_steps": [
       "1. Launch Gradio UI: `chad --ui gradio`",
@@ -188,9 +190,10 @@
     "title": "Git worktree path not always shown in agent status panel",
     "description": "The agent status panel (showing provider, usage remaining, etc.) should always display the git worktree path. The worktree path is included in format_role_status() but may be missing if the worktree hasn't been created yet at render time or if status updates don't re-render with the path once it becomes available.",
     "hypothesis": "The role_status markdown is rendered once at session creation with whatever worktree_path is available (often None). Subsequent status updates may not re-render the role status with the worktree path once it's created during task execution.",
-    "status": "unfixed",
+    "status": "unverified",
+    "fix": "Added worktree info fetching at two points during task streaming: (1) when receiving the session_id event from the API, and (2) on first stream chunk if worktree_path is still None. This ensures session.worktree_path is populated before the first status render during task execution, so format_role_status includes the path.",
     "files": [
-      "src/chad/ui/gradio/web_ui.py:6020-6028,2899-2910"
+      "src/chad/ui/gradio/web_ui.py:3648-3660,3674-3685"
     ],
     "reproduction_steps": [
       "1. Via API: Create a session: POST /api/v1/sessions with {name: 'test', project_path: '/path/to/git/repo'}",
@@ -207,9 +210,10 @@
     "title": "Codex live view shows garbled ASCII art output",
     "description": "Codex sometimes renders garbage output with @@@, ###, %%% characters resembling corrupted image data or ASCII art. Example: '@@@@@@@%#%%#@@@%#####%@@%%%%#%%%%@@%#%#%%%%%@@@%%%%#%@%%%%#%%%%######%%@@%#%%#%@@#*%@@%%%#%%%%@@##*#@@@%*#####%@@%%%%%%@'. This is different from the system prompt leak - it appears to be binary/image data being rendered as text.",
     "hypothesis": "The Codex prompt echo filtering (task_executor.py:687-857) splits large buffered content (>2000 bytes) into 500-byte chunks (lines 841-851) which can break mid-ANSI sequence, causing regex-based filtering to fail and emit raw terminal noise. May also be sixel graphics or image data from codex being passed through the terminal emulator as text.",
-    "status": "unfixed",
+    "status": "unverified",
+    "fix": "Added _strip_binary_garbage() function that uses regex to remove runs of 10+ consecutive @#%*&^ characters. Applied to all three Codex output emission points: (1) after mcp startup marker detection, (2) buffer overflow emission, and (3) normal post-prompt-echo emission. Only non-empty stripped output is emitted.",
     "files": [
-      "src/chad/server/services/task_executor.py:687-857,841-851"
+      "src/chad/server/services/task_executor.py:343-353,848-855,862-871,872-878"
     ],
     "reproduction_steps": [
       "1. Via provider output simulator: Configure a simulated Codex PTY output that includes a large (>2000 byte) chunk containing mixed ANSI escape sequences and binary-like data (simulating sixel graphics or image data that codex may emit)",
@@ -225,10 +229,11 @@
     "title": "Selected model ignored - model mismatch between dropdown and execution",
     "description": "When selecting a model (e.g., gpt-5.3-codex) from the dropdown, the live view shows a different model (e.g., gpt-5.1-codex-max). The coding_model parameter flows from the API schema through TaskExecutor but build_agent_command() never receives or uses it. The model used is whatever is configured in the account config, ignoring per-task model selection. Confirmed via session log 95f4e87e.jsonl which records coding_model: 'gpt-5.3-codex' but the agent ran with the account default.",
     "hypothesis": "build_agent_command() (task_executor.py:342-467) has no model parameter. The coding_model is accepted by TaskExecutor.start_task() and passed through _run_task() but never forwarded to build_agent_command() or used to set a --model flag on any provider CLI. Need to add model parameter to build_agent_command and pass it as a CLI flag (e.g., codex exec --model X).",
-    "status": "unfixed",
+    "status": "unverified",
+    "fix": "Added model and reasoning_effort parameters to build_agent_command(). Added provider-specific CLI flags: anthropic uses --model, openai uses -m and -c for reasoning, gemini/qwen use -m, mistral uses --model. Threaded coding_model and coding_reasoning through _run_phase() and all three _run_phase call sites in _run_task(). Updated test_helpers.capture_provider_command to accept model/reasoning_effort.",
     "files": [
-      "src/chad/server/services/task_executor.py:342-467,560,630,934,989",
-      "src/chad/server/api/schemas/task.py:17"
+      "src/chad/server/services/task_executor.py:354-490,672-690,755-765,1052-1070,1106-1124,1154-1172",
+      "tests/test_helpers.py:291-316"
     ],
     "reproduction_steps": [
       "1. Via API: Create a mock account: POST /api/v1/accounts {name: 'mock-agent', provider: 'mock'}",
@@ -264,11 +269,10 @@
     "title": "Usage-based and context-window-based provider handover not implemented",
     "description": "Config options exist for usage_switch_threshold, context_switch_threshold, and provider_fallback_order but there is no actual handover logic. When a provider hits its usage limit or context window limit during a task, the task should automatically hand over to the next provider in the fallback order. Currently these config values are stored and exposed in UI but never read by the task executor to trigger a switch.",
     "hypothesis": "The config_manager stores these thresholds and the fallback order, and the Gradio UI exposes them in the setup panel, but task_executor.py has no logic to monitor usage/context consumption during a task and trigger a provider switch. Need to add monitoring in the task execution loop that checks remaining usage/context against thresholds and, when exceeded, saves state and restarts the task phase with the next provider from the fallback order.",
-    "status": "confirmed unfixed",
-    "fix": "Not yet implemented. Config infrastructure exists but execution-time handover logic is missing from task_executor.py.",
+    "status": "unverified",
+    "fix": "Added _check_provider_threshold() method to TaskExecutor that reads usage_switch_threshold and context_switch_threshold from config_manager, compares against mock_remaining_usage/mock_context_remaining, and returns the next fallback provider if threshold is exceeded. Called between exploration→implementation phase transition and before each continuation attempt. Updates session.coding_account on switch.",
     "files": [
-      "src/chad/server/services/task_executor.py",
-      "src/chad/util/config_manager.py"
+      "src/chad/server/services/task_executor.py:582-622,1149-1155,1207-1213"
     ],
     "reproduction_steps": [
       "1. Via API: Create two mock accounts: POST /api/v1/accounts for 'mock-primary' and 'mock-fallback'",

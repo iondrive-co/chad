@@ -296,6 +296,8 @@ def capture_provider_command(
     screenshots: list[str] | None = None,
     phase: str = "exploration",
     exploration_output: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> CapturedCommand:
     """Call ``build_agent_command()`` directly and return the result.
 
@@ -311,6 +313,8 @@ def capture_provider_command(
         screenshots=screenshots,
         phase=phase,
         exploration_output=exploration_output,
+        model=model,
+        reasoning_effort=reasoning_effort,
     )
     return CapturedCommand(cmd=cmd, env=env, initial_input=initial_input)
 
