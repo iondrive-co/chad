@@ -992,12 +992,14 @@ body, .gradio-container, .gradio-container * {
 #workspace-display,
 .workspace-display {
   margin: 0 !important;
-  min-width: 220px;
-  max-width: 640px;
+  min-width: 0 !important;
+  max-width: 230px;
+  width: auto !important;
+  overflow: hidden !important;
 }
 
-#workspace-display p,
-.workspace-display p {
+#workspace-display .workspace-inline,
+.workspace-display .workspace-inline {
   margin: 0 !important;
   font-size: 12px;
   color: #cdd6f4;
@@ -2506,8 +2508,22 @@ class ChadWebUI:
         elif session.project_path:
             workspace_path = str(session.project_path)
         if workspace_path:
-            return f"Workspace: `{workspace_path}`"
-        return "Workspace: _Not set_"
+            return f"Workspace: {workspace_path}"
+        return "Workspace: Not set"
+
+    def _workspace_html(self, session: Session) -> str:
+        """Render workspace label as compact inline HTML."""
+        workspace_path = ""
+        if session.worktree_path:
+            workspace_path = str(session.worktree_path)
+        elif session.project_path:
+            workspace_path = str(session.project_path)
+        tooltip = workspace_path if workspace_path else "Not set"
+        return (
+            f'<div class="workspace-inline" title="{html.escape(tooltip)}">'
+            f"{html.escape(self._workspace_label(session))}"
+            "</div>"
+        )
 
     @staticmethod
     def _compute_live_stream_updates(
@@ -3278,7 +3294,7 @@ class ChadWebUI:
                 value=str(session.log_path) if session.log_path else None,
                 visible=session.log_path is not None,
             )
-            workspace_update = gr.update(value=self._workspace_label(session))
+            workspace_update = gr.update(value=self._workspace_html(session))
             display_history = history
             if history and isinstance(history[0], dict):
                 content = history[0].get("content", "")
@@ -6145,8 +6161,8 @@ class ChadWebUI:
                     elem_id="session-log-btn" if is_first else None,
                     elem_classes=["session-log-btn"],
                 )
-                workspace_display = gr.Markdown(
-                    self._workspace_label(session),
+                workspace_display = gr.HTML(
+                    self._workspace_html(session),
                     key=f"workspace-display-{session_id}",
                     elem_id="workspace-display" if is_first else None,
                     elem_classes=["workspace-display"],

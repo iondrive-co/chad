@@ -585,6 +585,16 @@ class TestChadWebUI:
         assert "Workspace:" in label
         assert "/repo/.chad-worktrees/abcd1234" in label
 
+    def test_workspace_html_escapes_label_and_sets_tooltip(self, web_ui):
+        """Workspace HTML should escape path text and include it in tooltip."""
+        session = web_ui.create_session("workspace-html")
+        session.project_path = '/tmp/repo/<unsafe>"path'
+
+        html_output = web_ui._workspace_html(session)
+
+        assert 'title="/tmp/repo/&lt;unsafe&gt;&quot;path"' in html_output
+        assert "Workspace: /tmp/repo/&lt;unsafe&gt;&quot;path" in html_output
+
     def test_cancel_preserves_live_stream(self, monkeypatch, web_ui, git_repo):
         """Cancelling should not clear the live output panel."""
 
