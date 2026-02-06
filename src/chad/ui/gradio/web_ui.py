@@ -7483,346 +7483,6 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
   setInterval(wirePlus, 400);
   setTimeout(wirePlus, 80);
 })();
-
-// Live view scroll tracking to prevent auto-scroll when user has scrolled up
-// State is stored by parent container ID since .live-output-content gets recreated on updates
-// NOTE: scroll events don't bubble, so we must attach listeners directly to the scrollable element
-window._liveStreamScrollState = window._liveStreamScrollState || {};
-window._liveStreamTrackedParents = window._liveStreamTrackedParents || new WeakSet();
-window._liveStreamTrackedContents = window._liveStreamTrackedContents || new WeakSet();
-
-function initializeLiveStreamScrollTracking() {
-    const getRoot = () => {
-        const app = document.querySelector('gradio-app');
-        return (app && app.shadowRoot) ? app.shadowRoot : document;
-    };
-
-    // Generate a stable ID for a parent container
-    function getParentId(parent) {
-        if (parent.id) return parent.id;
-        if (!parent.dataset.scrollTrackId) {
-            parent.dataset.scrollTrackId = 'scroll-' + Math.random().toString(36).substr(2, 9);
-        }
-        return parent.dataset.scrollTrackId;
-    }
-
-    // Get or create state for a parent container
-    function getState(parentId) {
-        if (!window._liveStreamScrollState[parentId]) {
-            window._liveStreamScrollState[parentId] = {
-                userScrolledUp: false,
-                savedScrollTop: 0,
-                lastScrollHeight: 0,
-                settingScroll: false
-            };
-        }
-        return window._liveStreamScrollState[parentId];
-    }
-
-    // Attach scroll listener directly to a content element
-    function attachScrollListener(content, state) {
-        if (window._liveStreamTrackedContents.has(content)) return;
-        window._liveStreamTrackedContents.add(content);
-
-        content.addEventListener('scroll', () => {
-            if (state.settingScroll) return;
-
-            const scrollTop = content.scrollTop;
-            const previousScrollTop = state.savedScrollTop;
-            const isAtBottom = scrollTop + content.clientHeight >= content.scrollHeight - 10;
-            const scrolledDown = scrollTop > previousScrollTop;
-
-            state.savedScrollTop = scrollTop;
-
-            if (isAtBottom && scrolledDown) {
-                state.userScrolledUp = false;
-            } else if (!isAtBottom) {
-                state.userScrolledUp = true;
-            }
-        });
-    }
-
-    // Setup scroll tracking on a parent container (stable element)
-    function setupParentTracking(parent) {
-        if (window._liveStreamTrackedParents.has(parent)) {
-            return;
-        }
-        window._liveStreamTrackedParents.add(parent);
-
-        const parentId = getParentId(parent);
-        const state = getState(parentId);
-
-        // Initial attachment if content exists
-        const initialContent = parent.querySelector('.live-output-content');
-        if (initialContent) {
-            attachScrollListener(initialContent, state);
-            state.lastScrollHeight = initialContent.scrollHeight;
-        }
-
-        // Watch for DOM changes (content replacement)
-        const observer = new MutationObserver(() => {
-            // Skip if another operation (like patchLiveContent) is managing scroll
-            if (state.settingScroll) return;
-
-            const content = parent.querySelector('.live-output-content');
-            if (!content) return;
-
-            // Attach scroll listener to new content element
-            attachScrollListener(content, state);
-
-            // Double requestAnimationFrame ensures Gradio DOM reconciliation is complete
-            requestAnimationFrame(() => {
-                requestAnimationFrame(() => {
-                    const newScrollHeight = content.scrollHeight;
-                    const currentScrollTop = content.scrollTop;
-                    const contentGrew = newScrollHeight > state.lastScrollHeight;
-
-                    // Use CURRENT scroll position for bottom detection, not stale state
-                    // This handles cases where scroll was set externally (e.g., test setup)
-                    const isCurrentlyAtBottom = currentScrollTop + content.clientHeight >= newScrollHeight - 10;
-                    const wasAtBottomBeforeGrowth = state.lastScrollHeight > 0
-                        ? (state.savedScrollTop + content.clientHeight >= state.lastScrollHeight - 10)
-                        : isCurrentlyAtBottom;
-
-                    // Update state with current position
-                    state.savedScrollTop = currentScrollTop;
-                    state.lastScrollHeight = newScrollHeight;
-                    state.settingScroll = true;
-
-                    if (contentGrew && wasAtBottomBeforeGrowth && isCurrentlyAtBottom && !state.userScrolledUp) {
-                        // User was at bottom and is still at bottom and hasn't scrolled up - auto-scroll
-                        content.scrollTop = newScrollHeight;
-                        state.savedScrollTop = newScrollHeight;
-                        state.userScrolledUp = false;
-                    } else if (!isCurrentlyAtBottom) {
-                        // User is mid-scroll - preserve current position
-                        state.userScrolledUp = true;
-                    }
-
-                    requestAnimationFrame(() => {
-                        state.settingScroll = false;
-                    });
-                });
-            });
-        });
-
-        observer.observe(parent, {
-            childList: true,
-            subtree: true
-        });
-    }
-
-    function findAndSetupParents() {
-        const root = getRoot();
-        const parents = [
-            root.querySelector('#live-stream-box'),
-            ...root.querySelectorAll('.live-stream-box')
-        ].filter(Boolean);
-
-        parents.forEach(parent => setupParentTracking(parent));
-    }
-
-    setInterval(findAndSetupParents, 500);
-    setTimeout(findAndSetupParents, 100);
-}
-
-initializeLiveStreamScrollTracking();
-
-// Dynamic terminal column calculation based on live-stream-box width
-function initializeTerminalColumnTracking() {
-    const CHAR_WIDTH = 8;  // Approximate width per character at 13px monospace font
-    const PADDING = 24;    // Total horizontal padding (12px * 2)
-    const SCROLLBAR = 20;  // Reserved for scrollbar
-    const MIN_COLS = 80;
-    const MAX_COLS = 300;
-
-    function getRoot() {
-        const app = document.querySelector('gradio-app');
-        return (app && app.shadowRoot) ? app.shadowRoot : document;
-    }
-
-    function calculateCols(width) {
-        const usableWidth = width - PADDING - SCROLLBAR;
-        const cols = Math.floor(usableWidth / CHAR_WIDTH);
-        return Math.min(MAX_COLS, Math.max(MIN_COLS, cols));
-    }
-
-    function updateTerminalCols(cols) {
-        const root = getRoot();
-        // Find the hidden number input for terminal columns
-        const inputs = [
-            root.querySelector('#terminal-cols-state input[type="number"]'),
-            ...root.querySelectorAll('.terminal-cols-state input[type="number"]')
-        ].filter(Boolean);
-
-        inputs.forEach(input => {
-            if (input && parseInt(input.value) !== cols) {
-                input.value = cols;
-                // Trigger input event so Gradio picks up the change
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-            }
-        });
-    }
-
-    function setupResizeObserver(element) {
-        if (element._terminalResizeSetup) return;
-        element._terminalResizeSetup = true;
-
-        const resizeObserver = new ResizeObserver(entries => {
-            for (const entry of entries) {
-                const width = entry.contentRect.width;
-                if (width > 0) {
-                    const cols = calculateCols(width);
-                    updateTerminalCols(cols);
-                }
-            }
-        });
-
-        resizeObserver.observe(element);
-
-        // Initial calculation
-        const width = element.getBoundingClientRect().width;
-        if (width > 0) {
-            updateTerminalCols(calculateCols(width));
-        }
-    }
-
-    function findAndSetupContainers() {
-        const root = getRoot();
-        const containers = [
-            root.querySelector('#live-stream-box'),
-            ...root.querySelectorAll('.live-stream-box')
-        ].filter(Boolean);
-
-        containers.forEach(setupResizeObserver);
-    }
-
-    setInterval(findAndSetupContainers, 500);
-    setTimeout(findAndSetupContainers, 100);
-}
-
-initializeTerminalColumnTracking();
-
-// Live DOM patching to preserve scroll position and text selection
-// Watches live_patch_trigger elements and patches live stream content in-place
-function initializeLiveDomPatching() {
-    const getRoot = () => {
-        const app = document.querySelector('gradio-app');
-        return (app && app.shadowRoot) ? app.shadowRoot : document;
-    };
-
-    // Simple HTML decoder
-    function decodeHtml(html) {
-        const txt = document.createElement('textarea');
-        txt.innerHTML = html;
-        return txt.value;
-    }
-
-    // Patch live stream content by updating innerHTML of existing container
-    function patchLiveContent(liveId, newHtml) {
-        const root = getRoot();
-        const wrapper = root.querySelector(`[data-live-id="${liveId}"]`);
-        if (!wrapper) return false;
-
-        const content = wrapper.querySelector('.live-output-content');
-        if (!content) return false;
-
-        // Find the parent container and get shared scroll state
-        const parent = wrapper.closest('#live-stream-box, .live-stream-box');
-        const parentId = parent ? getParentId(parent) : null;
-        const state = parentId ? getState(parentId) : null;
-
-        // Save scroll position to shared state
-        const scrollTop = content.scrollTop;
-        const scrollHeight = content.scrollHeight;
-        const isAtBottom = scrollTop + content.clientHeight >= scrollHeight - 10;
-
-        if (state) {
-            // Mark that we're doing a programmatic update - MutationObserver should not interfere
-            state.settingScroll = true;
-            state.savedScrollTop = scrollTop;
-        }
-
-        // Parse new HTML to extract just the content portion
-        const temp = document.createElement('div');
-        temp.innerHTML = newHtml;
-        const newWrapper = temp.querySelector('.live-output-wrapper') || temp;
-        const newContent = newWrapper.querySelector('.live-output-content');
-
-        if (newContent) {
-            // Update only the inner content, preserving the container
-            content.innerHTML = newContent.innerHTML;
-        }
-
-        // Restore scroll position using shared state
-        requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-                const newScrollHeight = content.scrollHeight;
-                if (state) {
-                    state.lastScrollHeight = newScrollHeight;
-                }
-
-                if (isAtBottom && (!state || !state.userScrolledUp)) {
-                    // Was at bottom and hasn't scrolled up, stay at bottom
-                    content.scrollTop = newScrollHeight;
-                    if (state) {
-                        state.savedScrollTop = newScrollHeight;
-                        state.userScrolledUp = false;
-                    }
-                } else {
-                    // Restore previous position
-                    content.scrollTop = scrollTop;
-                    if (state) {
-                        state.userScrolledUp = true;
-                    }
-                }
-
-                // Release the lock after scroll is restored
-                requestAnimationFrame(() => {
-                    if (state) state.settingScroll = false;
-                });
-            });
-        });
-
-        return true;
-    }
-
-    // Watch for changes to live_patch_trigger elements
-    function setupPatchTriggerWatcher() {
-        const root = getRoot();
-        const triggers = root.querySelectorAll('.live-patch-trigger');
-
-        triggers.forEach(trigger => {
-            if (trigger._patchObserverSetup) return;
-            trigger._patchObserverSetup = true;
-
-            const observer = new MutationObserver(() => {
-                // Find the data-live-patch element inside the trigger
-                const patchEl = trigger.querySelector('[data-live-patch]');
-                if (!patchEl) return;
-
-                const liveId = patchEl.dataset.livePatch;
-                const escapedHtml = patchEl.textContent || '';
-                if (!liveId || !escapedHtml) return;
-
-                // Decode the HTML and patch the live stream
-                const html = decodeHtml(escapedHtml);
-                patchLiveContent(liveId, html);
-            });
-
-            observer.observe(trigger, {
-                childList: true,
-                subtree: true,
-                characterData: true
-            });
-        });
-    }
-
-    setInterval(setupPatchTriggerWatcher, 500);
-    setTimeout(setupPatchTriggerWatcher, 100);
-}
-
-initializeLiveDomPatching();
 </script>
 """
             )
@@ -7837,6 +7497,27 @@ initializeLiveDomPatching();
                   const getRoot = () => {
                     const app = document.querySelector('gradio-app');
                     return (app && app.shadowRoot) ? app.shadowRoot : document;
+                  };
+                  window._liveStreamScrollState = window._liveStreamScrollState || {};
+                  window._liveStreamTrackedParents = window._liveStreamTrackedParents || new WeakSet();
+                  window._liveStreamTrackedContents = window._liveStreamTrackedContents || new WeakSet();
+                  const getParentId = (parent) => {
+                    if (parent.id) return parent.id;
+                    if (!parent.dataset.scrollTrackId) {
+                      parent.dataset.scrollTrackId = 'scroll-' + Math.random().toString(36).substr(2, 9);
+                    }
+                    return parent.dataset.scrollTrackId;
+                  };
+                  const getState = (parentId) => {
+                    if (!window._liveStreamScrollState[parentId]) {
+                      window._liveStreamScrollState[parentId] = {
+                        userScrolledUp: false,
+                        savedScrollTop: 0,
+                        lastScrollHeight: 0,
+                        settingScroll: false
+                      };
+                    }
+                    return window._liveStreamScrollState[parentId];
                   };
                   const isPlus = (el) => ((el.textContent || el.getAttribute('aria-label') || '').trim() === '➕');
                   const hideButton = (btn) => {
@@ -7875,9 +7556,18 @@ initializeLiveDomPatching();
                       const content = wrapper.querySelector('.live-output-content');
                       if (!content) return false;
 
+                      const parent = wrapper.closest('#live-stream-box, .live-stream-box');
+                      const parentId = parent ? getParentId(parent) : null;
+                      const state = parentId ? getState(parentId) : null;
+
                       const scrollTop = content.scrollTop;
                       const scrollHeight = content.scrollHeight;
                       const isAtBottom = scrollTop + content.clientHeight >= scrollHeight - 10;
+
+                      if (state) {
+                        state.settingScroll = true;
+                        state.savedScrollTop = scrollTop;
+                      }
 
                       const temp = document.createElement('div');
                       temp.innerHTML = newHtml;
@@ -7889,12 +7579,26 @@ initializeLiveDomPatching();
                       }
 
                       requestAnimationFrame(() => {
-                        const newScrollHeight = content.scrollHeight;
-                        if (isAtBottom) {
-                          content.scrollTop = newScrollHeight;
-                        } else {
-                          content.scrollTop = scrollTop;
-                        }
+                        requestAnimationFrame(() => {
+                          const newScrollHeight = content.scrollHeight;
+                          if (state) {
+                            state.lastScrollHeight = newScrollHeight;
+                          }
+
+                          if (isAtBottom && (!state || !state.userScrolledUp)) {
+                            content.scrollTop = newScrollHeight;
+                            if (state) {
+                              state.savedScrollTop = newScrollHeight;
+                              state.userScrolledUp = false;
+                            }
+                          } else {
+                            content.scrollTop = scrollTop;
+                          }
+
+                          requestAnimationFrame(() => {
+                            if (state) state.settingScroll = false;
+                          });
+                        });
                       });
 
                       return true;
@@ -7933,30 +7637,6 @@ initializeLiveDomPatching();
                   };
 
                   const initializeLiveStreamScrollTracking = () => {
-                    window._liveStreamScrollState = window._liveStreamScrollState || {};
-                    window._liveStreamTrackedParents = window._liveStreamTrackedParents || new WeakSet();
-                    window._liveStreamTrackedContents = window._liveStreamTrackedContents || new WeakSet();
-
-                    const getParentId = (parent) => {
-                      if (parent.id) return parent.id;
-                      if (!parent.dataset.scrollTrackId) {
-                        parent.dataset.scrollTrackId = 'scroll-' + Math.random().toString(36).substr(2, 9);
-                      }
-                      return parent.dataset.scrollTrackId;
-                    };
-
-                    const getState = (parentId) => {
-                      if (!window._liveStreamScrollState[parentId]) {
-                        window._liveStreamScrollState[parentId] = {
-                          userScrolledUp: false,
-                          savedScrollTop: 0,
-                          lastScrollHeight: 0,
-                          settingScroll: false
-                        };
-                      }
-                      return window._liveStreamScrollState[parentId];
-                    };
-
                     const attachScrollListener = (content, state) => {
                       if (window._liveStreamTrackedContents.has(content)) return;
                       window._liveStreamTrackedContents.add(content);
@@ -7995,6 +7675,8 @@ initializeLiveDomPatching();
                       }
 
                       const observer = new MutationObserver(() => {
+                        if (state.settingScroll) return;
+
                         const content = parent.querySelector('.live-output-content');
                         if (!content) return;
 
