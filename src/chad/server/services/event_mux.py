@@ -195,18 +195,28 @@ class EventMultiplexer:
                         # which closes it and causes StopAsyncIteration on next call.
                         pty_event = await pty_iter.__anext__()
                     except StopAsyncIteration:
-                        # PTY stream ended without explicit exit event - emit a complete
-                        # event to avoid "Stream ended unexpectedly" on the client side.
-                        # Try to get the exit code from the PTY session if it's available.
+                        # PTY stream ended - but the task may have continuation phases
+                        # that run in sequence. Wait for session_ended event before
+                        # emitting complete to avoid premature verification.
                         self._sync_seq_with_log()
-                        if include_events:
+                        exit_code = pty_session.exit_code if pty_session else None
+
+                        if include_events and self.event_log:
                             for event in self._drain_event_log(skip_terminal=True):
                                 yield event
+                                if event.data.get("type") == "session_ended":
+                                    yield MuxEvent(
+                                        type="complete",
+                                        data={"exit_code": exit_code},
+                                        seq=self._next_seq(),
+                                    )
+                                    return
 
-                        exit_code = None
-                        if pty_session:
-                            exit_code = pty_session.exit_code
+                            # No session_ended yet - fall through to EventLog polling
+                            # to wait for continuation phases to complete
+                            break
 
+                        # No event_log to poll - emit complete immediately
                         yield MuxEvent(
                             type="complete",
                             data={"exit_code": exit_code},
@@ -236,11 +246,24 @@ class EventMultiplexer:
 
                     elif pty_event.type == "exit":
                         self._sync_seq_with_log()
-                        # Drain remaining EventLog events before completion
-                        if include_events:
+                        # Drain remaining EventLog events - wait for session_ended
+                        # to handle continuation phases properly
+                        if include_events and self.event_log:
                             for event in self._drain_event_log(skip_terminal=True):
                                 yield event
+                                if event.data.get("type") == "session_ended":
+                                    yield MuxEvent(
+                                        type="complete",
+                                        data={"exit_code": pty_event.exit_code},
+                                        seq=self._next_seq(),
+                                    )
+                                    return
 
+                            # No session_ended yet - fall through to EventLog polling
+                            # to wait for continuation phases to complete
+                            break
+
+                        # No event_log to poll - emit complete immediately
                         yield MuxEvent(
                             type="complete",
                             data={"exit_code": pty_event.exit_code},
@@ -265,6 +288,118 @@ class EventMultiplexer:
                 )
                 return
 
+            # PTY ended but no session_ended event yet - continue polling EventLog
+            # This handles continuation phases where multiple PTY sessions run sequentially
+            exit_code = pty_session.exit_code if pty_session else None
+            old_stream_id = pty_session.stream_id if pty_session else None
+
+            # Safety check: only poll if we have an event_log to poll
+            if not self.event_log:
+                yield MuxEvent(
+                    type="complete",
+                    data={"exit_code": exit_code},
+                    seq=self._next_seq(),
+                )
+                return
+
+            while True:
+                # Check if a new PTY session has started (continuation phase)
+                new_pty_session = pty_service.get_session_by_session_id(self.session_id)
+                if new_pty_session and new_pty_session.stream_id != old_stream_id:
+                    # New PTY session started - switch to streaming from it
+                    pty_session = new_pty_session
+                    old_stream_id = pty_session.stream_id
+                    try:
+                        subscriber = pty_service.subscribe(pty_session.stream_id)
+                        pty_iter = subscriber.__aiter__()
+
+                        while True:
+                            if self._should_ping():
+                                yield self._create_ping()
+
+                            try:
+                                pty_event = await pty_iter.__anext__()
+                            except StopAsyncIteration:
+                                # This PTY ended - check for session_ended or more continuation
+                                self._sync_seq_with_log()
+                                exit_code = pty_session.exit_code if pty_session else None
+
+                                if include_events and self.event_log:
+                                    for event in self._drain_event_log(skip_terminal=True):
+                                        yield event
+                                        if event.data.get("type") == "session_ended":
+                                            yield MuxEvent(
+                                                type="complete",
+                                                data={"exit_code": exit_code},
+                                                seq=self._next_seq(),
+                                            )
+                                            return
+                                # Break inner loop to check for another continuation
+                                break
+
+                            if pty_event.type == "output":
+                                if self.event_log:
+                                    self._sync_seq_with_log()
+                                yield MuxEvent(
+                                    type="terminal",
+                                    data={
+                                        "data": pty_event.data,
+                                        "has_ansi": pty_event.has_ansi,
+                                    },
+                                    seq=self._seq or self._next_seq(),
+                                )
+                                if include_events:
+                                    for event in self._drain_event_log(skip_terminal=True):
+                                        yield event
+                            elif pty_event.type == "exit":
+                                self._sync_seq_with_log()
+                                exit_code = pty_event.exit_code
+                                if include_events and self.event_log:
+                                    for event in self._drain_event_log(skip_terminal=True):
+                                        yield event
+                                        if event.data.get("type") == "session_ended":
+                                            yield MuxEvent(
+                                                type="complete",
+                                                data={"exit_code": exit_code},
+                                                seq=self._next_seq(),
+                                            )
+                                            return
+                                # Break inner loop to check for another continuation
+                                break
+                            elif pty_event.type == "error":
+                                self._sync_seq_with_log()
+                                yield MuxEvent(
+                                    type="error",
+                                    data={"error": pty_event.error},
+                                    seq=self._next_seq(),
+                                )
+                                return
+
+                    except Exception as e:
+                        yield MuxEvent(
+                            type="error",
+                            data={"error": str(e)},
+                            seq=self._next_seq(),
+                        )
+                        return
+
+                if include_events:
+                    events = self._drain_event_log(skip_terminal=True)
+                    for event in events:
+                        yield event
+                        if event.data.get("type") == "session_ended":
+                            yield MuxEvent(
+                                type="complete",
+                                data={"exit_code": exit_code},
+                                seq=self._next_seq(),
+                            )
+                            return
+
+                if self._should_ping():
+                    yield self._create_ping()
+
+                await asyncio.sleep(0.1)
+
         else:
             # Fallback path: Poll EventLog only (no active PTY)
             while True:
@@ -273,7 +408,12 @@ class EventMultiplexer:
                     for event in events:
                         yield event
                         # Check for completion events
-                        if event.data.get("type") in ("session_ended",):
+                        if event.data.get("type") == "session_ended":
+                            yield MuxEvent(
+                                type="complete",
+                                data={"exit_code": None},
+                                seq=self._next_seq(),
+                            )
                             return
 
                 # Send ping if needed

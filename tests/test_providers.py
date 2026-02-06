@@ -225,6 +225,92 @@ def test_strip_ansi_codes_helper():
     assert _strip_ansi_codes(colored) == "Error message"
 
 
+class TestCodexNeedsContinuation:
+    """Test cases for _codex_needs_continuation helper."""
+
+    def test_empty_message_returns_false(self):
+        from chad.util.providers import _codex_needs_continuation
+
+        assert _codex_needs_continuation("") is False
+        assert _codex_needs_continuation(None) is False
+
+    def test_progress_without_completion_needs_continuation(self):
+        """Progress markers without completion markers should trigger continuation."""
+        from chad.util.providers import _codex_needs_continuation
+
+        # Progress update only (incomplete checkpoint)
+        message = """**Progress:** Found the relevant files in src/api/
+**Location:** src/api/client.py:45
+**Next:** Will implement the retry logic now"""
+        assert _codex_needs_continuation(message) is True
+
+    def test_progress_with_completion_does_not_need_continuation(self):
+        """Progress markers with completion markers should NOT trigger continuation."""
+        from chad.util.providers import _codex_needs_continuation
+
+        # Full response with both progress and completion
+        message = """**Progress:** Implemented retry logic
+**Location:** src/api/client.py:45
+**Next:** Done
+
+```json
+{
+  "change_summary": "Added retry logic to API client",
+  "files_changed": ["src/api/client.py"],
+  "completion_status": "success"
+}
+```"""
+        assert _codex_needs_continuation(message) is False
+
+    def test_completion_only_does_not_need_continuation(self):
+        """Completion markers without progress should NOT trigger continuation."""
+        from chad.util.providers import _codex_needs_continuation
+
+        message = """Task complete.
+
+```json
+{
+  "change_summary": "Fixed the bug",
+  "files_changed": ["src/bug.py"],
+  "completion_status": "success"
+}
+```"""
+        assert _codex_needs_continuation(message) is False
+
+    def test_plain_message_does_not_need_continuation(self):
+        """Plain messages without any markers should NOT trigger continuation."""
+        from chad.util.providers import _codex_needs_continuation
+
+        message = "I've completed the task. The changes look good."
+        assert _codex_needs_continuation(message) is False
+
+    def test_partial_progress_markers(self):
+        """Messages with only some progress markers should still trigger continuation."""
+        from chad.util.providers import _codex_needs_continuation
+
+        # Only **Next:** marker
+        message = "**Next:** Will write the tests now"
+        assert _codex_needs_continuation(message) is True
+
+        # Only **Progress:** marker
+        message = "**Progress:** Found 3 relevant files to modify"
+        assert _codex_needs_continuation(message) is True
+
+    def test_partial_completion_markers_block_continuation(self):
+        """Any completion marker should block continuation."""
+        from chad.util.providers import _codex_needs_continuation
+
+        # Progress with just change_summary
+        message = '''**Progress:** Done
+{"change_summary": "Fixed it"}'''
+        assert _codex_needs_continuation(message) is False
+
+        # Progress with just completion_status
+        message = '''**Progress:** Done
+{"completion_status": "success"}'''
+        assert _codex_needs_continuation(message) is False
+
+
 def test_parse_codex_output_preserves_multiline_content():
     """Test that multiline response content is preserved, thinking is consolidated."""
     raw_output = """thinking
@@ -1386,6 +1472,154 @@ class TestCodexJsonEventParsing:
         # by checking is_alive returns True with thread_id set
         assert provider.is_alive() is True
         assert provider.thread_id is not None
+
+
+class TestCodexProgressCheckpointResume:
+    """Test cases for auto-resume on progress checkpoint detection."""
+
+    def test_progress_checkpoint_triggers_resume(self):
+        """Progress checkpoint without completion markers should trigger auto-resume."""
+        import json
+        import os
+        import tempfile
+
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            provider.project_path = tmpdir
+            provider.cli_path = "/bin/echo"  # Use echo as a placeholder
+
+            # Simulate first call returning progress checkpoint
+            progress_events = [
+                {"type": "thread.started", "thread_id": "test-thread-123"},
+                {"type": "turn.started"},
+                {"type": "item.completed", "item": {
+                    "type": "agent_message",
+                    "text": "**Progress:** Found relevant files\n**Location:** src/api/\n**Next:** Will implement now"
+                }},
+                {"type": "turn.completed"},
+            ]
+
+            # Simulate second call (resume) returning completion
+            completion_events = [
+                {"type": "thread.started", "thread_id": "test-thread-456"},
+                {"type": "turn.started"},
+                {"type": "item.completed", "item": {
+                    "type": "agent_message",
+                    "text": '```json\n{"change_summary": "Implemented feature", "files_changed": ["src/api/client.py"], "completion_status": "success"}\n```'
+                }},
+                {"type": "turn.completed"},
+            ]
+
+            # Create pipes for both calls
+            read_fd1, write_fd1 = os.pipe()
+            read_fd2, write_fd2 = os.pipe()
+
+            # Write events to first pipe
+            for event in progress_events:
+                os.write(write_fd1, (json.dumps(event) + "\n").encode())
+            os.close(write_fd1)
+
+            # Write events to second pipe
+            for event in completion_events:
+                os.write(write_fd2, (json.dumps(event) + "\n").encode())
+            os.close(write_fd2)
+
+            # Track which pipe to use
+            pipes_used = [read_fd1, read_fd2]
+            pipe_index = [0]
+
+            def mock_start_pty(cmd, cwd=None, env=None):
+                mock_process = Mock()
+                mock_process.poll.return_value = 0
+                mock_process.stdin = Mock()
+                mock_process.pid = 12345 + pipe_index[0]
+                mock_process.returncode = 0
+                mock_process.wait.return_value = 0
+                fd = pipes_used[pipe_index[0]]
+                pipe_index[0] += 1
+                return mock_process, fd
+
+            activity_notifications = []
+
+            def mock_notify(activity_type, data=""):
+                activity_notifications.append((activity_type, data))
+
+            provider._notify_activity = mock_notify
+
+            with patch("chad.util.providers._start_pty_process", side_effect=mock_start_pty):
+                provider.send_message("Do the task")
+                response = provider.get_response(timeout=10.0)
+
+            # Should have detected checkpoint and resumed
+            assert provider.thread_id == "test-thread-456"  # Updated after resume
+            assert "**Progress:**" in response  # Original progress is included
+            assert '"change_summary"' in response  # Completion is included
+            assert "---" in response  # Separator between progress and completion
+
+            # Check that checkpoint notification was sent
+            stream_notifications = [n for n in activity_notifications if n[0] == "stream"]
+            checkpoint_found = any("checkpoint detected" in n[1].lower() for n in stream_notifications)
+            assert checkpoint_found, "Should notify about checkpoint detection"
+
+    def test_completion_does_not_trigger_resume(self):
+        """Messages with completion markers should NOT trigger auto-resume."""
+        import json
+        import os
+        import tempfile
+
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            provider.project_path = tmpdir
+            provider.cli_path = "/bin/echo"
+
+            # Events with both progress AND completion (should not trigger resume)
+            events = [
+                {"type": "thread.started", "thread_id": "test-thread-123"},
+                {"type": "turn.started"},
+                {"type": "item.completed", "item": {
+                    "type": "agent_message",
+                    "text": '**Progress:** Done\n\n```json\n{"change_summary": "Fixed it", "files_changed": ["a.py"], "completion_status": "success"}\n```'
+                }},
+                {"type": "turn.completed"},
+            ]
+
+            read_fd, write_fd = os.pipe()
+            for event in events:
+                os.write(write_fd, (json.dumps(event) + "\n").encode())
+            os.close(write_fd)
+
+            def mock_start_pty(cmd, cwd=None, env=None):
+                mock_process = Mock()
+                mock_process.poll.return_value = 0
+                mock_process.stdin = Mock()
+                mock_process.pid = 12345
+                mock_process.returncode = 0
+                mock_process.wait.return_value = 0
+                return mock_process, read_fd
+
+            activity_notifications = []
+
+            def mock_notify(activity_type, data=""):
+                activity_notifications.append((activity_type, data))
+
+            provider._notify_activity = mock_notify
+
+            with patch("chad.util.providers._start_pty_process", side_effect=mock_start_pty):
+                provider.send_message("Do the task")
+                response = provider.get_response(timeout=10.0)
+
+            # Should NOT have tried to resume (completion markers present)
+            assert '"change_summary"' in response
+            assert "---" not in response  # No separator means no resume happened
+
+            # Check that no checkpoint notification was sent
+            stream_notifications = [n for n in activity_notifications if n[0] == "stream"]
+            checkpoint_found = any("checkpoint detected" in n[1].lower() for n in stream_notifications)
+            assert not checkpoint_found, "Should NOT notify about checkpoint when completion present"
 
 
 class TestCodexLiveViewFormatting:

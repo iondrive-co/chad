@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import queue
+import re
 import threading
 import time
 import uuid
@@ -21,7 +22,13 @@ from chad.util.event_log import (
     TerminalOutputEvent,
     SessionEndedEvent,
 )
-from chad.util.prompts import build_coding_prompt
+from chad.util.prompts import (
+    build_exploration_prompt,
+    build_implementation_prompt,
+    extract_coding_summary,
+    extract_progress_update,
+    get_continuation_prompt,
+)
 from chad.util.installer import AIToolInstaller
 from chad.server.services.pty_stream import get_pty_stream_service, PTYEvent
 from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS, TerminalEmulator
@@ -338,6 +345,8 @@ def build_agent_command(
     project_path: Path,
     task_description: str | None = None,
     screenshots: list[str] | None = None,
+    phase: str = "exploration",
+    exploration_output: str | None = None,
 ) -> tuple[list[str], dict[str, str], str | None]:
     """Build CLI command and environment for a provider.
 
@@ -347,6 +356,8 @@ def build_agent_command(
         project_path: Path to the project/worktree
         task_description: Optional task to send as initial input
         screenshots: Optional list of screenshot file paths for agent reference
+        phase: Execution phase - "exploration", "implementation", or "continuation"
+        exploration_output: For implementation/continuation phase, the previous output context
 
     Returns:
         Tuple of (command_list, environment_dict, initial_input)
@@ -369,11 +380,23 @@ def build_agent_command(
 
     initial_input: str | None = None
 
-    # Build full prompt with project docs and instructions (including progress update format)
+    # Build full prompt based on phase
     full_prompt: str | None = None
     if task_description:
         project_docs = _read_project_docs(project_path)
-        full_prompt = build_coding_prompt(task_description, project_docs, project_path, screenshots)
+        if phase == "exploration":
+            # Phase 1: Explore codebase and output progress JSON
+            full_prompt = build_exploration_prompt(
+                task_description, project_docs, project_path, screenshots
+            )
+        elif phase == "implementation":
+            # Phase 2: Continue with implementation using exploration output
+            full_prompt = build_implementation_prompt(
+                task_description, exploration_output or "", project_docs, project_path
+            )
+        elif phase == "continuation":
+            # Agent exited early without completion - send continuation prompt
+            full_prompt = get_continuation_prompt(exploration_output or "")
 
     if provider == "anthropic":
         # Claude Code CLI
@@ -618,6 +641,283 @@ class TaskExecutor:
 
         return task
 
+    def _run_phase(
+        self,
+        task: Task,
+        session,
+        worktree_path: Path,
+        task_description: str,
+        coding_account: str,
+        coding_provider: str,
+        screenshots: list[str] | None,
+        phase: str,
+        exploration_output: str | None,
+        rows: int,
+        cols: int,
+        emit: Callable,
+        git_mgr: GitWorktreeManager,
+    ) -> tuple[int, str]:
+        """Execute a single phase of the task.
+
+        Args:
+            task: The task being executed
+            session: The session object
+            worktree_path: Path to the worktree
+            task_description: The task description
+            coding_account: Account name
+            coding_provider: Provider type
+            screenshots: Optional screenshot paths
+            phase: "exploration", "implementation", or "combined"
+            exploration_output: Output from exploration (for implementation phase)
+            rows: Terminal rows
+            cols: Terminal cols
+            emit: Event emitter function
+            git_mgr: Git worktree manager
+
+        Returns:
+            Tuple of (exit_code, captured_output)
+        """
+        last_output_time = time.time()
+        last_warning_time = 0.0
+        terminal_buffer = bytearray()
+        terminal_lock = threading.Lock()
+        first_stream_chunk_seen = False
+        captured_output: list[str] = []
+
+        # For Codex, track prompt echo filtering state
+        # Codex echoes the stdin prompt in format: "-------- user" + prompt + "mcp startup:"
+        # We keep content BEFORE "-------- user", filter BETWEEN that and "mcp startup:",
+        # and show content AFTER "mcp startup:"
+        codex_in_prompt_echo = False  # True when we're in the echoed prompt section
+        codex_past_prompt_echo = False  # True when we've seen "mcp startup:" and are done
+        codex_output_buffer = ""  # Buffer to detect markers
+
+        # Terminal emulator for extracting meaningful text from PTY output
+        log_emulator = TerminalEmulator(cols=cols, rows=rows)
+        last_logged_text = ""
+        pty_service = get_pty_stream_service()
+
+        def flush_terminal_buffer():
+            nonlocal last_logged_text
+            with terminal_lock:
+                if not terminal_buffer:
+                    return
+                data_bytes = bytes(terminal_buffer)
+                terminal_buffer.clear()
+
+            # Feed data to terminal emulator and extract visible text
+            log_emulator.feed(data_bytes)
+            current_text = log_emulator.get_text()
+
+            # Only log if there's meaningful new content
+            if current_text != last_logged_text and current_text.strip():
+                if task.event_log:
+                    task.event_log.log(TerminalOutputEvent(data=current_text))
+                last_logged_text = current_text
+
+        # Build agent command for this phase
+        cmd, env, initial_input = build_agent_command(
+            coding_provider,
+            coding_account,
+            worktree_path,
+            task_description,
+            screenshots,
+            phase=phase,
+            exploration_output=exploration_output,
+        )
+
+        # Use stdin pipe for Codex to avoid prompt echo in output
+        use_stdin_pipe = coding_provider == "openai"
+
+        # Create JSON parser for providers that use stream-json output
+        json_parser = ClaudeStreamJsonParser() if coding_provider in ("anthropic", "qwen") else None
+
+        def log_pty_event(event: PTYEvent):
+            nonlocal last_output_time
+            nonlocal first_stream_chunk_seen
+            nonlocal codex_in_prompt_echo
+            nonlocal codex_past_prompt_echo
+            nonlocal codex_output_buffer
+            if event.type == "output":
+                last_output_time = time.time()
+                with self._lock:
+                    self._activity_times[task.id] = last_output_time
+
+                try:
+                    chunk_bytes = base64.b64decode(event.data)
+                except Exception:
+                    chunk_bytes = b""
+
+                # Suppress the provider launch banner
+                if not first_stream_chunk_seen:
+                    first_stream_chunk_seen = True
+                    decoded = chunk_bytes.decode(errors="ignore")
+                    if "OpenAI Codex" in decoded or ("model:" in decoded and "directory:" in decoded):
+                        return
+
+                # For anthropic/qwen, parse stream-json and convert to readable text
+                if json_parser:
+                    text_chunks = json_parser.feed(chunk_bytes)
+                    if text_chunks:
+                        readable_text = "\n".join(text_chunks)
+                        encoded = base64.b64encode(readable_text.encode()).decode()
+                        emit("stream", chunk=encoded)
+                        with terminal_lock:
+                            terminal_buffer.extend(readable_text.encode())
+                        captured_output.append(readable_text)
+                else:
+                    # Non-anthropic (Codex): filter out prompt echo
+                    # Codex output structure:
+                    #   [banner]
+                    #   --------
+                    #   [header info]
+                    #   --------
+                    #   user  (or [36muser[0m with ANSI)
+                    #   [prompt - FILTER THIS]
+                    #   mcp startup: ...
+                    #   [agent work - KEEP THIS]
+                    decoded = chunk_bytes.decode(errors="replace")
+
+                    if coding_provider == "openai" and not codex_past_prompt_echo:
+                        # Buffer output to detect markers
+                        codex_output_buffer += decoded
+
+                        # Normalize line endings for matching
+                        normalized = codex_output_buffer.replace("\r\n", "\n").replace("\r", "\n")
+
+                        # Strip ANSI codes for pattern matching
+                        ansi_pattern = re.compile(r'\x1b\[[0-9;]*m')
+                        stripped = ansi_pattern.sub('', normalized)
+
+                        # Look for "user" on its own line (after second --------)
+                        user_line_match = re.search(r'\n--------\nuser\n', stripped)
+
+                        # Check if we're entering the prompt echo section
+                        if not codex_in_prompt_echo and user_line_match:
+                            # Found start of prompt echo - emit content before it
+                            user_pattern = re.compile(r'\n--------\n(?:\x1b\[[0-9;]*m)*user(?:\x1b\[[0-9;]*m)*\n')
+                            match = user_pattern.search(normalized)
+                            if match:
+                                pre_echo = normalized[:match.start()]
+                                if pre_echo.strip():
+                                    encoded = base64.b64encode(pre_echo.encode()).decode()
+                                    emit("stream", chunk=encoded)
+                                    with terminal_lock:
+                                        terminal_buffer.extend(pre_echo.encode())
+                                    captured_output.append(pre_echo)
+                                # Now in prompt echo section - update buffer
+                                codex_in_prompt_echo = True
+                                codex_output_buffer = normalized[match.end():]
+                                normalized = codex_output_buffer
+                                stripped = ansi_pattern.sub('', normalized)
+
+                        # Check if we've passed the prompt echo section
+                        if codex_in_prompt_echo and "mcp startup:" in stripped.lower():
+                            # Found end of prompt echo - extract agent output after marker
+                            mcp_pattern = re.compile(r'(?:\x1b\[[0-9;]*m)*mcp startup:(?:\x1b\[[0-9;]*m)*[^\n]*\n', re.IGNORECASE)
+                            match = mcp_pattern.search(normalized)
+                            if match:
+                                agent_output = normalized[match.end():]
+                            else:
+                                # Fallback
+                                marker_pos = stripped.lower().find("mcp startup:")
+                                newline_after = stripped.find("\n", marker_pos)
+                                if newline_after != -1:
+                                    agent_output = normalized[newline_after + 1:]
+                                else:
+                                    agent_output = ""
+                            codex_past_prompt_echo = True
+                            codex_output_buffer = ""
+                            if agent_output.strip():
+                                encoded = base64.b64encode(agent_output.encode()).decode()
+                                emit("stream", chunk=encoded)
+                                with terminal_lock:
+                                    terminal_buffer.extend(agent_output.encode())
+                                captured_output.append(agent_output)
+                            return
+
+                        # If not in prompt echo yet, emit normally (content before markers)
+                        if not codex_in_prompt_echo:
+                            # Keep buffering to catch the marker
+                            if len(codex_output_buffer) > 2000:
+                                # No marker found - emit what we have and keep looking
+                                to_emit = codex_output_buffer[:-500]
+                                codex_output_buffer = codex_output_buffer[-500:]
+                                if to_emit.strip():
+                                    encoded = base64.b64encode(to_emit.encode()).decode()
+                                    emit("stream", chunk=encoded)
+                                    with terminal_lock:
+                                        terminal_buffer.extend(to_emit.encode())
+                                    captured_output.append(to_emit)
+                        return
+
+                    # Past prompt echo - emit normally
+                    emit("stream", chunk=event.data)
+                    with terminal_lock:
+                        terminal_buffer.extend(chunk_bytes)
+                    captured_output.append(decoded)
+
+        # Start PTY session
+        stream_id = pty_service.start_pty_session(
+            session_id=task.session_id,
+            cmd=cmd,
+            cwd=worktree_path,
+            env=env,
+            rows=rows,
+            cols=cols,
+            log_callback=log_pty_event,
+            stdin_pipe=use_stdin_pipe,
+        )
+        task.stream_id = stream_id
+        session.active = True
+        session.coding_account = coding_account
+
+        # Send initial input if needed
+        if initial_input:
+            time.sleep(0.2)
+            pty_service.send_input(stream_id, initial_input.encode(), close_stdin=use_stdin_pipe)
+
+        # Wait for PTY to complete
+        pty_session = pty_service.get_session(stream_id)
+
+        while pty_session and pty_session.active:
+            # Check for cancellation
+            if task.cancel_requested:
+                pty_service.terminate(stream_id)
+                pty_service.cleanup_session(stream_id)
+                return -1, ""
+
+            # Inactivity timeout
+            if self.inactivity_timeout is not None:
+                now = time.time()
+                with self._lock:
+                    last_any_activity = self._activity_times.get(task.id, last_output_time)
+
+                idle_secs = now - last_any_activity
+                warn_after = self.inactivity_timeout * 0.8
+                if idle_secs > warn_after and (now - last_warning_time) > 5.0:
+                    emit("status", status=f"⚠️ Agent idle for {int(idle_secs)}s — will time out at {int(self.inactivity_timeout)}s")
+                    last_warning_time = now
+
+                if idle_secs > self.inactivity_timeout:
+                    flush_terminal_buffer()
+                    pty_service.terminate(stream_id)
+                    pty_service.cleanup_session(stream_id)
+                    return -2, ""  # -2 indicates timeout
+
+            time.sleep(0.1)
+            pty_session = pty_service.get_session(stream_id)
+
+        # Get final exit code
+        exit_code = 0
+        if pty_session:
+            exit_code = pty_session.exit_code or 0
+
+        flush_terminal_buffer()
+        pty_service.cleanup_session(stream_id)
+
+        return exit_code, "\n".join(captured_output)
+
     def _run_task(
         self,
         task: Task,
@@ -634,49 +934,19 @@ class TaskExecutor:
         terminal_cols: int | None,
         screenshots: list[str] | None,
     ):
-        """Execute the task in a background thread using PTY."""
-        # Use provided dimensions or fall back to defaults
+        """Execute the task in a background thread using PTY.
+
+        Uses a 3-phase approach:
+        1. Exploration - Agent explores codebase and outputs progress JSON
+        2. Implementation - Agent implements the fix using exploration context
+        3. Verification - Separate verification agent (handled by UI)
+        """
         rows = terminal_rows if terminal_rows else TERMINAL_ROWS
         cols = terminal_cols if terminal_cols else TERMINAL_COLS
-
-        last_output_time = time.time()
-        last_warning_time = 0.0
-        terminal_buffer = bytearray()
-        terminal_lock = threading.Lock()
-        last_log_flush = time.time()
-        first_stream_chunk_seen = False
-
-        # Terminal emulator for extracting meaningful text from PTY output
-        log_emulator = TerminalEmulator(cols=cols, rows=rows)
-        last_logged_text = ""
-        stream_id: str | None = None
-        pty_service = get_pty_stream_service()
-
-        def flush_terminal_buffer():
-            nonlocal last_log_flush, last_logged_text
-            with terminal_lock:
-                if not terminal_buffer:
-                    return
-                data_bytes = bytes(terminal_buffer)
-                terminal_buffer.clear()
-
-            # Feed data to terminal emulator and extract visible text
-            log_emulator.feed(data_bytes)
-            current_text = log_emulator.get_text()
-
-            # Only log if there's meaningful new content
-            # Compare with last logged text to avoid logging cursor movement / redraws
-            if current_text != last_logged_text and current_text.strip():
-                # Log the current screen content for handoff
-                if task.event_log:
-                    task.event_log.log(TerminalOutputEvent(data=current_text))
-                last_logged_text = current_text
-            last_log_flush = time.time()
 
         def emit(event_type: str, **data):
             event = StreamEvent(type=event_type, data=data)
             task._event_queue.put(event)
-            # Count any emitted event as activity (covers status/progress when no PTY output yet)
             try:
                 self._touch_activity(task.id)
             except Exception:
@@ -717,214 +987,197 @@ class TaskExecutor:
                 task.event_log.start_turn()
                 task.event_log.log(UserMessageEvent(content=task_description))
 
-            # Build agent command
+            # All providers use phased execution: exploration → implementation → continuation
             emit("status", status=f"Starting {coding_provider} agent...")
-            if screenshots:
-                cmd, env, initial_input = build_agent_command(
-                    coding_provider,
-                    coding_account,
-                    worktree_path,
-                    task_description,
-                    screenshots,
-                )
-            else:
-                cmd, env, initial_input = build_agent_command(
-                    coding_provider,
-                    coding_account,
-                    worktree_path,
-                    task_description,
-                )
-
-            # Use stdin pipe for Codex to avoid prompt echo in output
-            # (Codex exec reads from stdin with -, PTY echo would show the prompt)
-            use_stdin_pipe = coding_provider == "openai"
-
-            # Create JSON parser for providers that use stream-json output
-            # Both Claude and Qwen use similar JSON formats
-            json_parser = ClaudeStreamJsonParser() if coding_provider in ("anthropic", "qwen") else None
-
-            # Set up logging callback for EventLog persistence
-            # This callback is called synchronously for every PTY event
-            # and doesn't compete with client subscriber queues
-            def log_pty_event(event: PTYEvent):
-                nonlocal last_output_time
-                nonlocal first_stream_chunk_seen
-                if event.type == "output":
-                    last_output_time = time.time()
-                    with self._lock:
-                        self._activity_times[task.id] = last_output_time
-
-                    try:
-                        chunk_bytes = base64.b64decode(event.data)
-                    except Exception:
-                        chunk_bytes = b""
-
-                    # Suppress the provider launch banner (e.g., OpenAI Codex header) from live view
-                    # Note: this only affects the emit() call below - SSE subscribers still receive
-                    # the raw PTY events via _dispatch_event which runs before this callback.
-                    if not first_stream_chunk_seen:
-                        first_stream_chunk_seen = True
-                        decoded = chunk_bytes.decode(errors="ignore")
-                        if "OpenAI Codex" in decoded or ("model:" in decoded and "directory:" in decoded):
-                            return
-
-                    # For anthropic, parse stream-json and convert to readable text
-                    if json_parser:
-                        text_chunks = json_parser.feed(chunk_bytes)
-                        if text_chunks:
-                            # Join parsed text and encode for streaming
-                            readable_text = "\n".join(text_chunks)
-                            encoded = base64.b64encode(readable_text.encode()).decode()
-                            emit("stream", chunk=encoded)
-                            with terminal_lock:
-                                terminal_buffer.extend(readable_text.encode())
-                        # If no complete lines yet, don't emit anything
-                    else:
-                        # Non-anthropic: pass through raw PTY output
-                        emit("stream", chunk=event.data)
-                        with terminal_lock:
-                            terminal_buffer.extend(chunk_bytes)
-
-            # Start PTY session with logging callback
-            # Use the same geometry as the terminal emulator for consistent rendering
-            stream_id = pty_service.start_pty_session(
-                session_id=task.session_id,
-                cmd=cmd,
-                cwd=worktree_path,
-                env=env,
-                rows=rows,
-                cols=cols,
-                log_callback=log_pty_event,
-                stdin_pipe=use_stdin_pipe,
-            )
-            task.stream_id = stream_id
-            session.active = True
-            session.coding_account = coding_account
-
             emit("message_start", speaker="CODING AI")
 
-            # Send initial input if needed (for prompt)
-            if initial_input:
-                time.sleep(0.2)  # Brief delay for process to start
-                # Close stdin after sending when using pipe mode (signals EOF to process)
-                pty_service.send_input(stream_id, initial_input.encode(), close_stdin=use_stdin_pipe)
+            accumulated_output = ""
+            final_exit_code = 0
+            max_continuation_attempts = 3
 
-            # Wait for PTY to complete
-            # The logging callback handles emitting events and persisting to EventLog
-            pty_session = pty_service.get_session(stream_id)
+            # Phase 1: Exploration - agent explores codebase and outputs progress JSON
+            emit("status", status="Phase 1: Exploring codebase...")
+            exit_code, exploration_output = self._run_phase(
+                task=task,
+                session=session,
+                worktree_path=worktree_path,
+                task_description=task_description,
+                coding_account=coding_account,
+                coding_provider=coding_provider,
+                screenshots=screenshots,
+                phase="exploration",
+                exploration_output=None,
+                rows=rows,
+                cols=cols,
+                emit=emit,
+                git_mgr=git_mgr,
+            )
+            accumulated_output = exploration_output
+            final_exit_code = exit_code
 
-            while pty_session and pty_session.active:
-                # Check for cancellation
-                if task.cancel_requested:
-                    pty_service.terminate(stream_id)
+            # Handle cancellation/timeout from exploration phase
+            if task.cancel_requested or exit_code == -1:
+                emit("status", status="Task cancelled")
+                task.state = TaskState.CANCELLED
+                task.completed_at = datetime.now(timezone.utc)
+                if task.event_log:
+                    task.event_log.log(SessionEndedEvent(success=False, reason="cancelled"))
+                return
+
+            if exit_code == -2:
+                emit("complete", success=False, message="Agent timed out during exploration", exit_code=-1)
+                emit("message_complete", speaker="CODING AI", content="Task timed out")
+                task.state = TaskState.FAILED
+                task.error = "Agent timed out during exploration"
+                task.completed_at = datetime.now(timezone.utc)
+                session.active = False
+                session.has_worktree_changes = git_mgr.has_changes(task.session_id)
+                if task.event_log:
+                    task.event_log.log(SessionEndedEvent(success=False, reason="timeout"))
+                return
+
+            # Extract progress update from exploration phase
+            progress = extract_progress_update(exploration_output)
+            if progress:
+                emit("progress", summary=progress.summary, location=progress.location, next_step=progress.next_step)
+
+            # Check if agent already completed during exploration (rare but possible)
+            summary = extract_coding_summary(exploration_output)
+            if summary is not None:
+                # Agent completed during exploration - skip to completion
+                pass
+            elif exit_code == 0:
+                # Phase 2: Implementation - agent continues with implementation
+                emit("status", status="Phase 2: Implementing changes...")
+                exit_code, impl_output = self._run_phase(
+                    task=task,
+                    session=session,
+                    worktree_path=worktree_path,
+                    task_description=task_description,
+                    coding_account=coding_account,
+                    coding_provider=coding_provider,
+                    screenshots=None,  # Screenshots already shown in exploration
+                    phase="implementation",
+                    exploration_output=exploration_output,
+                    rows=rows,
+                    cols=cols,
+                    emit=emit,
+                    git_mgr=git_mgr,
+                )
+                accumulated_output += "\n" + impl_output
+                final_exit_code = exit_code
+
+                # Handle cancellation/timeout from implementation phase
+                if task.cancel_requested or exit_code == -1:
                     emit("status", status="Task cancelled")
                     task.state = TaskState.CANCELLED
                     task.completed_at = datetime.now(timezone.utc)
-
                     if task.event_log:
-                        task.event_log.log(SessionEndedEvent(
-                            success=False,
-                            reason="cancelled",
-                        ))
+                        task.event_log.log(SessionEndedEvent(success=False, reason="cancelled"))
                     return
 
-                # Inactivity timeout to catch hung agents
-                if self.inactivity_timeout is not None:
-                    now = time.time()
-                    last_any_activity = last_output_time
-                    with self._lock:
-                        last_any_activity = self._activity_times.get(task.id, last_output_time)
+                if exit_code == -2:
+                    emit("complete", success=False, message="Agent timed out during implementation", exit_code=-1)
+                    emit("message_complete", speaker="CODING AI", content="Task timed out")
+                    task.state = TaskState.FAILED
+                    task.error = "Agent timed out during implementation"
+                    task.completed_at = datetime.now(timezone.utc)
+                    session.active = False
+                    session.has_worktree_changes = git_mgr.has_changes(task.session_id)
+                    if task.event_log:
+                        task.event_log.log(SessionEndedEvent(success=False, reason="timeout"))
+                    return
 
-                    idle_secs = now - last_any_activity
-                    warn_after = self.inactivity_timeout * 0.8
-                    if idle_secs > warn_after and (now - last_warning_time) > 5.0:
-                        emit("status", status=f"⚠️ Agent idle for {int(idle_secs)}s — will time out at {int(self.inactivity_timeout)}s")
-                        last_warning_time = now
+                # Check if agent completed after implementation
+                summary = extract_coding_summary(accumulated_output)
 
-                    if idle_secs > self.inactivity_timeout:
-                        flush_terminal_buffer()
-                        pty_service.terminate(stream_id)
-                        emit(
-                            "complete",
-                            success=False,
-                            message="Agent timed out due to inactivity",
-                            exit_code=-1,
+                # Continuation loop if agent exited without completion
+                if summary is None and exit_code == 0:
+                    for attempt in range(max_continuation_attempts):
+                        emit("status", status=f"Agent continuing (attempt {attempt + 1})...")
+                        exit_code, cont_output = self._run_phase(
+                            task=task,
+                            session=session,
+                            worktree_path=worktree_path,
+                            task_description=task_description,
+                            coding_account=coding_account,
+                            coding_provider=coding_provider,
+                            screenshots=None,
+                            phase="continuation",
+                            exploration_output=accumulated_output,
+                            rows=rows,
+                            cols=cols,
+                            emit=emit,
+                            git_mgr=git_mgr,
                         )
-                        task.state = TaskState.FAILED
-                        task.error = "Agent timed out due to inactivity"
-                        task.completed_at = datetime.now(timezone.utc)
-                        session.active = False
-                        session.has_worktree_changes = git_mgr.has_changes(task.session_id)
+                        accumulated_output += "\n" + cont_output
+                        final_exit_code = exit_code
 
-                        if task.event_log:
-                            task.event_log.log(SessionEndedEvent(
-                                success=False,
-                                reason="timeout",
-                            ))
+                        # Handle cancellation
+                        if task.cancel_requested or exit_code == -1:
+                            emit("status", status="Task cancelled")
+                            task.state = TaskState.CANCELLED
+                            task.completed_at = datetime.now(timezone.utc)
+                            if task.event_log:
+                                task.event_log.log(SessionEndedEvent(success=False, reason="cancelled"))
+                            return
 
-                        # Also emit a message_complete so UI closes the live slot
-                        emit("message_complete", speaker="CODING AI", content="Task timed out due to inactivity")
+                        # Handle timeout
+                        if exit_code == -2:
+                            emit("complete", success=False, message="Agent timed out", exit_code=-1)
+                            emit("message_complete", speaker="CODING AI", content="Task timed out")
+                            task.state = TaskState.FAILED
+                            task.error = "Agent timed out"
+                            task.completed_at = datetime.now(timezone.utc)
+                            session.active = False
+                            session.has_worktree_changes = git_mgr.has_changes(task.session_id)
+                            if task.event_log:
+                                task.event_log.log(SessionEndedEvent(success=False, reason="timeout"))
+                            return
 
-                        pty_service.cleanup_session(stream_id)
-                        return
+                        # Check if agent completed
+                        summary = extract_coding_summary(accumulated_output)
+                        if summary is not None:
+                            break
 
-                time.sleep(0.1)
-                pty_session = pty_service.get_session(stream_id)
-                # Note: We no longer log terminal output periodically during the session.
-                # The terminal is still streamed to clients via PTY events in real-time.
-                # For handoff, we only log the final terminal state at session end,
-                # which dramatically reduces log size while still supporting handoff.
-                # The terminal buffer is still being filled by log_pty_event callback.
-
-            # Get final exit code
-            exit_code = 0
-            if pty_session:
-                exit_code = pty_session.exit_code or 0
+                        # Only continue if exit was clean
+                        if exit_code != 0:
+                            break
 
             # Emit completion
             emit("message_complete", speaker="CODING AI", content="Task completed")
 
-            if exit_code == 0:
+            if final_exit_code == 0:
                 task.state = TaskState.COMPLETED
                 task.result = "Task completed successfully"
-
-                # Check for changes
                 session.has_worktree_changes = git_mgr.has_changes(task.session_id)
-
                 emit(
                     "complete",
                     success=True,
                     message="Task completed successfully",
                     has_changes=session.has_worktree_changes,
-                    exit_code=exit_code,
+                    exit_code=final_exit_code,
                 )
             else:
                 task.state = TaskState.FAILED
-                task.error = f"Agent exited with code {exit_code}"
+                task.error = f"Agent exited with code {final_exit_code}"
                 emit(
                     "complete",
                     success=False,
-                    message=f"Agent exited with code {exit_code}",
-                    exit_code=exit_code,
+                    message=f"Agent exited with code {final_exit_code}",
+                    exit_code=final_exit_code,
                 )
-
-                # Ensure UI gets a final assistant bubble when we fail without one
-                if exit_code != -1:
-                    emit("message_complete", speaker="CODING AI", content=f"Task failed (exit {exit_code})")
+                emit("message_complete", speaker="CODING AI", content=f"Task failed (exit {final_exit_code})")
 
             task.completed_at = datetime.now(timezone.utc)
             session.active = False
 
             # Log session end
             if task.event_log:
-                flush_terminal_buffer()
                 task.event_log.log(SessionEndedEvent(
                     success=task.state == TaskState.COMPLETED,
                     reason="completed" if exit_code == 0 else f"exit_code_{exit_code}",
                 ))
-
-            # Cleanup PTY session
-            pty_service.cleanup_session(stream_id)
 
         except Exception as e:
             emit("error", error=str(e))
@@ -939,15 +1192,11 @@ class TaskExecutor:
                 ))
         finally:
             try:
-                flush_terminal_buffer()
-            except Exception:
-                pass
-            try:
                 if task.stream_id:
+                    pty_service = get_pty_stream_service()
                     pty_service.cleanup_session(task.stream_id)
             except Exception:
                 pass
-            # Drop activity tracker entry to avoid stale references
             with self._lock:
                 self._activity_times.pop(task.id, None)
 
