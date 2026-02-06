@@ -1298,6 +1298,16 @@ class TestChadWebUIInterface:
         assert all(kwargs.get("file_types") == ["image"] for kwargs in multimodal_calls)
         assert all(kwargs.get("file_count") == "multiple" for kwargs in multimodal_calls)
 
+    def test_provider_fallback_order_saves_on_submit_not_change(self):
+        """Fallback order should save on Enter/submit to avoid per-keystroke API calls."""
+        import inspect
+
+        import chad.ui.gradio.web_ui as web_ui
+
+        source = inspect.getsource(web_ui)
+        assert "fallback_order_input.submit(" in source
+        assert "fallback_order_input.change(" not in source
+
 
 class TestLaunchWebUI:
     """Test cases for launch_web_ui function."""
