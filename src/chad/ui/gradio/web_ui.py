@@ -7183,7 +7183,7 @@ class ChadWebUI:
                     label="Provider Fallback Order",
                     placeholder="e.g., work-claude, backup-gpt, gemini-free",
                     value=fallback_order_str,
-                    info="Comma-separated account names in priority order",
+                    info="Comma-separated account names in priority order (press Enter to save)",
                 )
             with gr.Row():
                 usage_threshold_input = gr.Slider(
@@ -7391,7 +7391,7 @@ class ChadWebUI:
             except Exception as exc:
                 return f"❌ {exc}"
 
-        fallback_order_input.change(
+        fallback_order_input.submit(
             on_fallback_order_change,
             inputs=[fallback_order_input],
             outputs=[config_status],

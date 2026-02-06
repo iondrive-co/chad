@@ -1,6 +1,6 @@
 """Configuration management endpoints."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from chad.server.api.schemas import (
@@ -274,7 +274,10 @@ async def set_provider_fallback_order(
     Accounts not in this list will not be used for automatic switching.
     """
     config_mgr = get_config_manager()
-    config_mgr.set_provider_fallback_order(request.order)
+    try:
+        config_mgr.set_provider_fallback_order(request.order)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return ProviderFallbackOrderResponse(order=request.order)
 
