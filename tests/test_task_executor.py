@@ -387,6 +387,66 @@ def test_continuation_loop_waits_for_completion_json(tmp_path, monkeypatch):
     assert ended_events[-1].get("success") is True
 
 
+def test_exploration_summary_does_not_skip_implementation_phase(tmp_path, monkeypatch):
+    """Exploration output containing completion JSON must still run implementation."""
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"accounts": {"test": {"provider": "mock"}}}), encoding="utf-8")
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+    session_manager = SessionManager()
+    session = session_manager.create_session(project_path=str(repo_path), name="phase-transition-test")
+
+    executor = TaskExecutor(
+        ConfigManager(),
+        session_manager,
+        inactivity_timeout=30.0,
+    )
+
+    import chad.server.services.task_executor as te
+
+    phases: list[str] = []
+
+    def mock_command(provider, account_name, project_path, task_description=None, screenshots=None, phase="combined", exploration_output=None, **kwargs):
+        phases.append(phase)
+        if phase == "exploration":
+            # Exploration includes progress + accidental completion JSON.
+            script = (
+                "echo '{\"type\":\"progress\",\"summary\":\"Investigating\",\"location\":\"src/main.py:1\",\"next_step\":\"Implementing\"}'; "
+                "echo '```json'; "
+                "echo '{\"change_summary\":\"Premature summary from exploration\",\"files_changed\":[\"src/main.py\"],\"completion_status\":\"success\"}'; "
+                "echo '```'"
+            )
+        elif phase == "implementation":
+            script = (
+                "echo '```json'; "
+                "echo '{\"change_summary\":\"Implemented actual fix\",\"files_changed\":[\"src/main.py\"],\"completion_status\":\"success\"}'; "
+                "echo '```'"
+            )
+        else:
+            script = "echo 'unexpected phase'"
+
+        return ["bash", "-c", script], {}, None
+
+    monkeypatch.setattr(te, "build_agent_command", mock_command)
+
+    task = executor.start_task(
+        session_id=session.id,
+        project_path=str(repo_path),
+        task_description="Fix phase transition bug",
+        coding_account="test",
+    )
+
+    task._thread.join(timeout=10)
+
+    assert task.state == TaskState.COMPLETED, f"Task state was {task.state}, error: {task.error}"
+    assert "exploration" in phases
+    assert "implementation" in phases, f"Expected implementation phase, got phases: {phases}"
+
+
 class TestModelPassThrough:
     """Tests that model and reasoning_effort are forwarded to provider CLIs."""
 
