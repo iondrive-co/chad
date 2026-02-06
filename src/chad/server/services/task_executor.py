@@ -260,9 +260,16 @@ class ClaudeStreamJsonParser:
 
         # Other tools not in categories above
         categorized = {"Read", "Edit", "Write", "Glob", "Grep", "Bash", "Task", "WebSearch", "WebFetch"}
-        other = sum(c for t, c in self._tool_counts.items() if t not in categorized)
-        if other:
-            parts.append(f"{other} other")
+        other_tools = [(t, c) for t, c in self._tool_counts.items() if t not in categorized]
+        if other_tools:
+            # Show actual tool names instead of generic "X other"
+            other_descriptions = []
+            for tool_name, count in other_tools:
+                if count == 1:
+                    other_descriptions.append(tool_name)
+                else:
+                    other_descriptions.append(f"{count} {tool_name}")
+            parts.append(", ".join(other_descriptions))
 
         if not parts:
             return ""
