@@ -224,44 +224,56 @@ class TestCodingAgentLayout:
     """Ensure the coding agent selector and controls are properly laid out."""
 
     def test_status_row_below_config_panel(self, page: Page):
-        """Status row with buttons should sit below the config panel at full width."""
+        """Action buttons should sit under the agent selectors on the right."""
         top_row = page.locator("#run-top-row")
         status_row = page.locator("#role-status-row")
         role_status = page.locator("#role-config-status")
+        coding_agent = page.get_by_label("Coding Agent")
+        verification_agent = page.get_by_label("Verification Agent")
         cancel_btn = page.locator("#cancel-task-btn")
         expect(top_row).to_be_visible()
         expect(status_row).to_be_visible()
         expect(role_status).to_be_visible()
+        expect(coding_agent).to_be_visible()
+        expect(verification_agent).to_be_visible()
         expect(cancel_btn).to_be_visible()
 
         row_box = top_row.bounding_box()
         status_line_box = role_status.bounding_box()
         button_row_box = status_row.bounding_box()
+        coding_box = coding_agent.bounding_box()
+        verification_box = verification_agent.bounding_box()
 
         assert row_box and status_line_box and button_row_box, (
             "Missing bounding box data for layout assertions"
         )
+        assert coding_box and verification_box
 
-        # Status line should be below the config panel (top row)
+        # Status line remains beneath config row and anchored left
         assert (
             status_line_box["y"] >= row_box["y"] + row_box["height"] - 10
         ), "Status line should appear below the config panel"
-
-        # Button row should be below the status line
         assert (
-            button_row_box["y"] >= status_line_box["y"] + status_line_box["height"] - 10
-        ), "Button row should appear below the status line"
+            status_line_box["x"] < coding_box["x"] - 40
+        ), "Status line should anchor to the left column"
 
-        # Status line should be near full width (starts near left edge of config panel)
+        # Action row should sit under agent selectors on the right
         assert (
-            status_line_box["x"] < row_box["x"] + 50
-        ), "Status line should start near the left edge"
+            button_row_box["y"] >= row_box["y"] + row_box["height"] - 10
+        ), "Button row should appear below the config panel"
+        assert (
+            button_row_box["x"] >= coding_box["x"] - 10
+        ), "Buttons should start around the agent selector columns"
+        assert (
+            button_row_box["x"] <= verification_box["x"] + verification_box["width"] + 30
+        ), "Buttons should align with the right-side agent panel"
 
     def test_run_top_controls_stack_with_matching_widths(self, page: Page):
-        """Model/Reasoning controls should stack under matching agent selectors with aligned widths."""
+        """Model/Reasoning controls should stack under agents and action row stays right."""
         project_path = page.get_by_label("Project Path")
         status = page.locator("#role-config-status")
         session_log = page.locator("#session-log-btn")
+        status_row = page.locator("#role-status-row")
         coding_agent = page.get_by_label("Coding Agent")
         coding_model = page.get_by_label("Model", exact=True)
         coding_reasoning = page.get_by_label("Reasoning Effort", exact=True)
@@ -272,6 +284,7 @@ class TestCodingAgentLayout:
         expect(project_path).to_be_visible()
         expect(status).to_be_visible()
         expect(session_log).to_be_visible()
+        expect(status_row).to_be_visible()
         expect(coding_agent).to_be_visible()
         expect(coding_model).to_be_visible()
         expect(coding_reasoning).to_be_visible()
@@ -282,6 +295,7 @@ class TestCodingAgentLayout:
         project_box = project_path.bounding_box()
         status_box = status.bounding_box()
         log_box = session_log.bounding_box()
+        status_row_box = status_row.bounding_box()
         coding_box = coding_agent.bounding_box()
         model_box = coding_model.bounding_box()
         coding_reasoning_box = coding_reasoning.bounding_box()
@@ -293,6 +307,7 @@ class TestCodingAgentLayout:
             project_box
             and status_box
             and log_box
+            and status_row_box
             and coding_box
             and model_box
             and coding_reasoning_box
@@ -305,8 +320,11 @@ class TestCodingAgentLayout:
             status_box["y"] >= project_box["y"] + project_box["height"] - 2
         ), "Status should appear beneath the Project Path field"
         assert (
-            log_box["y"] >= project_box["y"] + project_box["height"] - 2
-        ), "Session log button should appear beneath the Project Path field"
+            log_box["y"] >= status_row_box["y"] - 4
+        ), "Session log button should align with the action row"
+        assert (
+            log_box["x"] >= coding_box["x"] - 10
+        ), "Session log button should sit in the right-hand action cluster"
 
         assert (
             model_box["y"] >= coding_box["y"] + coding_box["height"] - 2

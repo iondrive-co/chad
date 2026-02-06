@@ -943,14 +943,24 @@ body, .gradio-container, .gradio-container * {
   border-radius: 0;
 }
 
-/* Role status row: keep status and session log button on one line, aligned with button row below */
-#role-status-row {
+/* Container that anchors action controls to the right under agent selectors */
+#role-status-row-container,
+.role-status-row-container {
   display: flex;
+  justify-content: flex-end;
+  width: 100%;
+}
+
+/* Action row: compact inline controls */
+#role-status-row,
+.role-status-row {
+  display: inline-flex !important;
   align-items: center;
   gap: 8px;
-  width: 100%;
+  flex-wrap: nowrap;
+  width: auto !important;
+  flex: 0 0 auto;
   max-width: 100%;
-  overflow: hidden;
 }
 
 #role-config-status {
@@ -6060,43 +6070,50 @@ class ChadWebUI:
             elem_classes=["task-status-header"],
         )
 
-        # Buttons placed beneath the status line
+        # Action buttons: right-aligned beneath the agent selector columns
         with gr.Row(
-            elem_id="role-status-row" if is_first else None,
-            elem_classes=["role-status-row"],
+            elem_id="role-status-row-container" if is_first else None,
+            elem_classes=["role-status-row-container"],
+            equal_height=True,
         ):
-            cancel_btn = gr.Button(
-                "Cancel",
-                variant="stop",
-                interactive=False,
-                key=f"cancel-btn-{session_id}",
-                elem_id="cancel-task-btn" if is_first else None,
-                elem_classes=["cancel-task-btn"],
-                min_width=80,
-                scale=0,
-            )
-            project_save_btn = gr.Button(
-                "Save",
-                variant="primary",
-                size="sm",
-                key=f"project-save-{session_id}",
-                elem_classes=["project-save-btn"],
-                min_width=80,
-                scale=0,
-            )
-            log_path = session.log_path
-            session_log_btn = gr.DownloadButton(
-                label="Session Log" if not log_path else log_path.name,
-                value=str(log_path) if log_path else None,
-                visible=log_path is not None,
-                variant="secondary",
-                size="sm",
-                scale=0,
-                min_width=140,
-                key=f"log-btn-{session_id}",
-                elem_id="session-log-btn" if is_first else None,
-                elem_classes=["session-log-btn"],
-            )
+            with gr.Row(
+                elem_id="role-status-row" if is_first else None,
+                elem_classes=["role-status-row"],
+                variant="compact",
+                equal_height=True,
+            ):
+                cancel_btn = gr.Button(
+                    "Cancel",
+                    variant="stop",
+                    interactive=False,
+                    key=f"cancel-btn-{session_id}",
+                    elem_id="cancel-task-btn" if is_first else None,
+                    elem_classes=["cancel-task-btn"],
+                    min_width=80,
+                    scale=0,
+                )
+                project_save_btn = gr.Button(
+                    "Save",
+                    variant="primary",
+                    size="sm",
+                    key=f"project-save-{session_id}",
+                    elem_classes=["project-save-btn"],
+                    min_width=80,
+                    scale=0,
+                )
+                log_path = session.log_path
+                session_log_btn = gr.DownloadButton(
+                    label="Session Log" if not log_path else log_path.name,
+                    value=str(log_path) if log_path else None,
+                    visible=log_path is not None,
+                    variant="secondary",
+                    size="sm",
+                    scale=0,
+                    min_width=140,
+                    key=f"log-btn-{session_id}",
+                    elem_id="session-log-btn" if is_first else None,
+                    elem_classes=["session-log-btn"],
+                )
 
         # Agent communication view
         with gr.Column(elem_classes=["agent-panel"]):
