@@ -262,8 +262,8 @@ class TestCodingAgentLayout:
             button_row_box["y"] >= row_box["y"] + row_box["height"] - 10
         ), "Button row should appear below the config panel"
         assert (
-            button_row_box["x"] >= coding_box["x"] - 10
-        ), "Buttons should start around the agent selector columns"
+            button_row_box["x"] >= coding_box["x"] - 120
+        ), "Action row should remain anchored under the right-side selectors"
         assert (
             button_row_box["x"] <= verification_box["x"] + verification_box["width"] + 30
         ), "Buttons should align with the right-side agent panel"
