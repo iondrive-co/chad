@@ -1,50 +1,57 @@
 [
   {
     "title": "Live stream autoscroll not sticking to bottom",
-    "description": "When watching live updates in the Gradio live-stream box, the viewport stops at an old offset even if the user was at the bottom; new output arrives but the log no longer auto-pins to the new bottom.",
+    "description": "When watching live updates in the Gradio live-stream box, the viewport stops at an old offset even if the user was at the bottom; new output arrives but the log no longer auto-pins to the new bottom. Over time the scroll position drifts upward as new content arrives, losing auto-follow behavior. Likely a race between DOM patching and scroll position checks, or the isAtBottom threshold is too tight.",
     "hypothesis": "The custom autoscroll logic in initializeLiveStreamScrollTracking (src/chad/ui/gradio/web_ui.py) restores saved scrollTop when MutationObserver fires because userScrolledUp is set and lastScrollHeight isn't refreshed for live DOM patches, so height growth isn't treated as contentGrew; detect 'near bottom' before patching and always set scrollTop to scrollHeight in that case.",
     "status": "unverified",
     "fix": "Modified the MutationObserver callback in initializeLiveStreamScrollTracking to check if the user was at the bottom BEFORE content grew (using lastScrollHeight), and if so, always auto-scroll to the new bottom and reset userScrolledUp to false. This prevents the stale scroll state from blocking autoscroll when new content arrives.",
-    "screenshot": "N/A - behavioral fix during live streaming, cannot be captured in static screenshot"
+    "screenshot": "N/A - behavioral fix during live streaming, cannot be captured in static screenshot",
+    "files": [
+      "src/chad/ui/gradio/web_ui.py:7514-7718"
+    ]
   },
   {
     "title": "CLI settings omit new config options",
-    "description": "The CLI UI settings menu only exposes accounts, cleanup days, and a verification toggle, leaving verification settings, preferred verification model, provider fallback order, usage/context thresholds, mock usage/context, UI mode, and other config values unviewable/uneditable from the CLI.",
+    "description": "The CLI UI settings menu only exposes 9 config options but is missing set_account_model and set_account_reasoning which are available in ConfigManager. There is no automated mechanism to ensure new config options are added to the CLI UI when they're added to ConfigManager. The existing TestConfigUIParity test only checks Gradio keys, not CLI keys.",
     "hypothesis": "Settings are hard-coded in src/chad/ui/cli/app.py with no shared schema from config_manager/routes/config.py, so any new config key is easy to forget; drive the CLI menu from the server config metadata (CONFIG_BASE_KEYS or a config schema endpoint) to force parity and fail when a new key isn't rendered.",
     "status": "unverified",
-    "fix": "Expanded run_settings_menu in src/chad/ui/cli/app.py to expose all config options via the APIClient: verification agent, preferred verification model, provider fallback order, usage switch threshold, context switch threshold, and UI mode. The menu now displays current values for all settings and provides options [4]-[8] to edit them.",
-    "screenshots": {
-      "cli": "/tmp/claude-1000/-home-miles-chad/8c47b01c-c463-4652-8ab3-794535b78a26/scratchpad/bug-screenshots/cli-settings-menu.png",
-      "gradio": "/tmp/claude-1000/-home-miles-chad/8c47b01c-c463-4652-8ab3-794535b78a26/scratchpad/bug-screenshots/gradio-config-expanded.png"
-    }
+    "fix": "Expanded run_settings_menu in src/chad/ui/cli/app.py to expose all config options via the APIClient: verification agent, preferred verification model, provider fallback order, usage switch threshold, context switch threshold, and UI mode. The menu now displays current values for all settings and provides options [4]-[8] to edit them. Still missing: account model and account reasoning settings, and CLI parity enforcement in tests.",
+    "files": [
+      "src/chad/ui/cli/app.py:280-290",
+      "src/chad/util/config_manager.py:322-366",
+      "tests/test_config_manager.py"
+    ]
   },
   {
     "title": "Cannot set verification agent in CLI",
-    "description": "Choosing a verification agent in the CLI has no effect—tasks run without a verifier and the selection is not persisted.",
+    "description": "Choosing a verification agent in the CLI has no effect - tasks run without a verifier and the selection is not persisted.",
     "hypothesis": "run_settings_menu uses set_account_role('VERIFICATION') but start_task never passes verification_agent/model/reasoning to the API and the CLI ignores /config/verification-agent; wire the CLI to get/set verification agent via APIClient and include it in start_task payloads.",
     "status": "unverified",
     "fix": "Updated run_settings_menu to use client.set_verification_agent() API instead of role assignment. Added verification_account lookup via client.get_verification_agent() in the main menu loop, and passed it to run_task_with_streaming which now includes verification_agent in the start_task payload.",
-    "screenshots": {
-      "cli": "/tmp/claude-1000/-home-miles-chad/8c47b01c-c463-4652-8ab3-794535b78a26/scratchpad/bug-screenshots/cli-settings-menu.png",
-      "gradio": "/tmp/claude-1000/-home-miles-chad/8c47b01c-c463-4652-8ab3-794535b78a26/scratchpad/bug-screenshots/gradio-config-expanded.png"
-    }
+    "files": [
+      "src/chad/ui/cli/app.py:321-344"
+    ]
   },
   {
     "title": "Run Task header layout shows raw JSON and misaligned controls",
-    "description": "The run-task area shows raw JSON fragments in the live output and the Cancel/Save/Session Log buttons render on the far left while the \"✓ Ready — Coding\" status is squeezed; there is extra gap between command inputs and the instruction/architecture path fields.",
+    "description": "The run-task area shows raw JSON fragments in the live output and the Cancel/Save/Session Log buttons render on the far left instead of under the coding agent and verification agent panels. The status line is squeezed; there is extra gap between command inputs and the instruction/architecture path fields. The CLI also shows raw JSON event data (type/message/content blocks) instead of human-readable status updates.",
     "hypothesis": "The role-status row in src/chad/ui/gradio/web_ui.py is outside the status column with button scales set to 0, forcing them to the left, and live stream rendering is piping raw event dicts instead of formatted text; restructure the row under the status Markdown and sanitize stream events before rendering.",
-    "status": "in progress"
+    "status": "in progress",
+    "files": [
+      "src/chad/ui/gradio/web_ui.py:6040-6076",
+      "src/chad/ui/cli/app.py:609-729"
+    ]
   },
   {
     "title": "Verification attempts hardcoded to 3",
-    "description": "Verification stops after three tries; product wants a global setting (visible in Setup/global config) defaulting to five attempts instead of being hardcoded.",
+    "description": "The continuation attempt loop (when the coding agent exits without completion) is hardcoded to max_continuation_attempts = 3 at task_executor.py:1000. The verification retry count is separately configurable via ConfigManager with a default of 5. The continuation attempts should also be configurable rather than hardcoded, and both should be exposed in the global config (Setup tab in Gradio UI).",
     "hypothesis": "web_ui verification loop sets max_verification_attempts = 3 (src/chad/ui/gradio/web_ui.py ~3619) with no config hook; add a config_manager + API field for max attempts (default 5) and read it where the loop is defined.",
     "status": "unverified",
-    "fix": "Added max_verification_attempts to CONFIG_BASE_KEYS and ConfigManager with get/set methods (default 5). Created API endpoint /config/max-verification-attempts for GET/PUT. Added APIClient method get_max_verification_attempts. Updated both verification loops in web_ui.py (start_chad_task and send_followup) to use self.api_client.get_max_verification_attempts() instead of hardcoded 3. Added setting to CLI settings menu as option [5].",
-    "screenshots": {
-      "cli": "/tmp/claude-1000/-home-miles-chad/8c47b01c-c463-4652-8ab3-794535b78a26/scratchpad/bug-screenshots/cli-settings-menu.png",
-      "gradio": "/tmp/claude-1000/-home-miles-chad/8c47b01c-c463-4652-8ab3-794535b78a26/scratchpad/bug-screenshots/gradio-config-expanded.png"
-    }
+    "fix": "Added max_verification_attempts to CONFIG_BASE_KEYS and ConfigManager with get/set methods (default 5). Created API endpoint /config/max-verification-attempts for GET/PUT. Added APIClient method get_max_verification_attempts. Updated both verification loops in web_ui.py (start_chad_task and send_followup) to use self.api_client.get_max_verification_attempts() instead of hardcoded 3. Added setting to CLI settings menu as option [5]. Still unfixed: continuation attempts at task_executor.py:1000 remain hardcoded to 3.",
+    "files": [
+      "src/chad/server/services/task_executor.py:1000,1100",
+      "src/chad/util/config_manager.py"
+    ]
   },
   {
     "title": "Qwen outputs duplicated",
@@ -77,5 +84,83 @@
     "status": "unverified",
     "fix": "Added session.has_initial_live_render = False reset before yielding verification and revision placeholders in start_chad_task and send_followup. This forces a full re-render of the live stream container instead of attempting DOM patches when switching between coding and verification phases.",
     "screenshot": "N/A - behavioral fix during live streaming phase transitions"
+  },
+  {
+    "title": "Missing exploration prompt accordion - only coding and verification shown",
+    "description": "The prompt display area only has two accordions: Coding Agent Prompt and Verification Agent Prompt. There should be three: Exploration, Coding, and Verification. All three should be visible from the start with template variables unfilled (showing the raw prompt templates), then updated with actual values once task variables are populated during execution.",
+    "hypothesis": "The UI at web_ui.py:6125-6150 only creates two accordion widgets. A third accordion for the exploration prompt was never added. The prompt update logic only fills in prompts once variables are available rather than showing templates early.",
+    "status": "unfixed",
+    "files": [
+      "src/chad/ui/gradio/web_ui.py:6125-6150"
+    ]
+  },
+  {
+    "title": "Live view resets to 'waiting for agent output' on tab switch",
+    "description": "When navigating away from a task tab (e.g., to Setup) and back during an active session, the live view briefly shows 'waiting for agent output' before suddenly restoring the full output on the next update. Reproduced with Claude, Qwen, and Codex providers - not provider-specific. The session tracks last_live_stream and has_initial_live_render for tab-switch restoration, but the restoration doesn't happen immediately on tab re-entry.",
+    "hypothesis": "The has_initial_live_render flag gets cleared or the Gradio component re-renders its default value when the tab becomes visible again. The live stream content is only restored on the next polling update rather than immediately on tab selection. Need to hook into the tab select event to immediately restore last_live_stream.",
+    "status": "unfixed",
+    "files": [
+      "src/chad/ui/gradio/web_ui.py:94-96,2473-2486,3475,3595-3626"
+    ]
+  },
+  {
+    "title": "Git worktree path not always shown in agent status panel",
+    "description": "The agent status panel (showing provider, usage remaining, etc.) should always display the git worktree path. The worktree path is included in format_role_status() but may be missing if the worktree hasn't been created yet at render time or if status updates don't re-render with the path once it becomes available.",
+    "hypothesis": "The role_status markdown is rendered once at session creation with whatever worktree_path is available (often None). Subsequent status updates may not re-render the role status with the worktree path once it's created during task execution.",
+    "status": "unfixed",
+    "files": [
+      "src/chad/ui/gradio/web_ui.py:6020-6028,2899-2910"
+    ]
+  },
+  {
+    "title": "Codex live view shows garbled ASCII art output",
+    "description": "Codex sometimes renders garbage output with @@@, ###, %%% characters resembling corrupted image data or ASCII art. Example: '@@@@@@@%#%%#@@@%#####%@@%%%%#%%%%@@%#%#%%%%%@@@%%%%#%@%%%%#%%%%######%%@@%#%%#%@@#*%@@%%%#%%%%@@##*#@@@%*#####%@@%%%%%%@'. This is different from the system prompt leak - it appears to be binary/image data being rendered as text.",
+    "hypothesis": "The Codex prompt echo filtering (task_executor.py:687-857) splits large buffered content (>2000 bytes) into 500-byte chunks (lines 841-851) which can break mid-ANSI sequence, causing regex-based filtering to fail and emit raw terminal noise. May also be sixel graphics or image data from codex being passed through the terminal emulator as text.",
+    "status": "unfixed",
+    "files": [
+      "src/chad/server/services/task_executor.py:687-857,841-851"
+    ]
+  },
+  {
+    "title": "Selected model ignored - model mismatch between dropdown and execution",
+    "description": "When selecting a model (e.g., gpt-5.3-codex) from the dropdown, the live view shows a different model (e.g., gpt-5.1-codex-max). The coding_model parameter flows from the API schema through TaskExecutor but build_agent_command() never receives or uses it. The model used is whatever is configured in the account config, ignoring per-task model selection. Confirmed via session log 95f4e87e.jsonl which records coding_model: 'gpt-5.3-codex' but the agent ran with the account default.",
+    "hypothesis": "build_agent_command() (task_executor.py:342-467) has no model parameter. The coding_model is accepted by TaskExecutor.start_task() and passed through _run_task() but never forwarded to build_agent_command() or used to set a --model flag on any provider CLI. Need to add model parameter to build_agent_command and pass it as a CLI flag (e.g., codex exec --model X).",
+    "status": "unfixed",
+    "files": [
+      "src/chad/server/services/task_executor.py:342-467,560,630,934,989",
+      "src/chad/server/api/schemas/task.py:17"
+    ]
+  },
+  {
+    "title": "Live view not showing for verification agent or coding agent revisions",
+    "description": "In the Gradio UI, the live view panel shows no output during the verification agent phase and during subsequent coding agent revision rounds. The has_initial_live_render flag and live stream state are not properly reset between phase transitions. The verification phase creates a new PTY stream but the live view component still references the old stream_id, so updates from the verification agent's PTY never reach the display.",
+    "hypothesis": "When transitioning from coding to verification (and back for revisions), session.has_initial_live_render is not reset to False, causing _compute_live_stream_updates to attempt DOM patching against stale content. The live_stream_id also needs to be updated to the new PTY stream for each phase. The fix in the existing 'Live view not showing during verification' bug (resetting has_initial_live_render) may partially address this but the stream_id binding also needs updating.",
+    "status": "unverified",
+    "fix": "Reset session.has_initial_live_render = False before yielding verification and revision placeholders in start_chad_task and send_followup. Forces full re-render of live stream container instead of DOM patches when switching phases.",
+    "files": [
+      "src/chad/ui/gradio/web_ui.py"
+    ]
+  },
+  {
+    "title": "Usage-based and context-window-based provider handover not implemented",
+    "description": "Config options exist for usage_switch_threshold, context_switch_threshold, and provider_fallback_order but there is no actual handover logic. When a provider hits its usage limit or context window limit during a task, the task should automatically hand over to the next provider in the fallback order. Currently these config values are stored and exposed in UI but never read by the task executor to trigger a switch.",
+    "hypothesis": "The config_manager stores these thresholds and the fallback order, and the Gradio UI exposes them in the setup panel, but task_executor.py has no logic to monitor usage/context consumption during a task and trigger a provider switch. Need to add monitoring in the task execution loop that checks remaining usage/context against thresholds and, when exceeded, saves state and restarts the task phase with the next provider from the fallback order.",
+    "status": "unverified",
+    "fix": "Not yet implemented. Config infrastructure exists but execution-time handover logic is missing from task_executor.py.",
+    "files": [
+      "src/chad/server/services/task_executor.py",
+      "src/chad/util/config_manager.py"
+    ]
+  },
+  {
+    "title": "Error when cancelling a task and restarting",
+    "description": "After cancelling a running task and attempting to start a new one, the user gets an error. The cancellation doesn't fully clean up session state - the PTY process may still be running or the session's task reference is stale. The cancel handler in web_ui.py calls task_executor.cancel_task() but the session may retain references to the old task's stream_id, and subsequent task creation may conflict with leftover PTY state.",
+    "hypothesis": "cancel_task() in task_executor.py terminates the PTY process but doesn't fully reset the session's task state (task object, stream_id, phase tracking). When a new task is started, the session still references the old cancelled task and the executor either tries to reuse stale state or rejects the new task because the old one appears still active. Need to ensure cancel fully resets session task state and waits for PTY cleanup before allowing a new task.",
+    "status": "unverified",
+    "fix": "Not yet verified. Cancel logic exists but session state cleanup after cancellation may be incomplete.",
+    "files": [
+      "src/chad/server/services/task_executor.py",
+      "src/chad/ui/gradio/web_ui.py"
+    ]
   }
 ]

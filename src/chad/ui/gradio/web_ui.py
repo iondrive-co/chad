@@ -2241,6 +2241,13 @@ class ChadWebUI:
         codex_in_prompt_echo = False  # True when we're in the echoed prompt section
         codex_past_prompt_echo = False  # True when we've seen "mcp startup:" and are done
         codex_output_buffer = ""
+        codex_ansi_pattern = re.compile(r'\x1b\[[0-9;]*m')
+        codex_user_line_pattern = re.compile(r'\n--------\nuser\n')
+        codex_user_pattern = re.compile(r'\n--------\n(?:\x1b\[[0-9;]*m)*user(?:\x1b\[[0-9;]*m)*\n')
+        codex_mcp_pattern = re.compile(
+            r'(?:\x1b\[[0-9;]*m)*mcp startup:(?:\x1b\[[0-9;]*m)*[^\n]*\n',
+            re.IGNORECASE,
+        )
 
         try:
             for event in stream_client.stream_events(server_session_id, include_terminal=True):
@@ -2270,6 +2277,16 @@ class ChadWebUI:
                     else:
                         decoded = raw_bytes.decode("utf-8", errors="replace")
 
+                        # Each task phase starts a new Codex process. If we see a fresh
+                        # Codex banner while in passthrough mode, restart prompt filtering
+                        # so the implementation prompt gets stripped too.
+                        if is_codex and codex_past_prompt_echo:
+                            banner_probe = codex_ansi_pattern.sub('', decoded).lower()
+                            if "openai codex" in banner_probe and "--------" in banner_probe:
+                                codex_past_prompt_echo = False
+                                codex_in_prompt_echo = False
+                                codex_output_buffer = ""
+
                         # Filter Codex prompt echo
                         # Codex output structure:
                         #   [banner]
@@ -2285,21 +2302,18 @@ class ChadWebUI:
                             normalized = codex_output_buffer.replace("\r\n", "\n").replace("\r", "\n")
 
                             # Strip ANSI codes for pattern matching
-                            import re
-                            ansi_pattern = re.compile(r'\x1b\[[0-9;]*m')
-                            stripped = ansi_pattern.sub('', normalized)
+                            stripped = codex_ansi_pattern.sub('', normalized)
 
                             # Look for "user" on its own line (after second --------)
                             # This marks the start of the echoed prompt
-                            user_line_match = re.search(r'\n--------\nuser\n', stripped)
+                            user_line_match = codex_user_line_pattern.search(stripped)
 
                             # Check if we're entering the prompt echo section
                             if not codex_in_prompt_echo and user_line_match:
                                 # Found start of prompt echo - emit content before it
                                 # Find the position in the original (non-stripped) string
                                 # by finding the pattern with ANSI codes
-                                user_pattern = re.compile(r'\n--------\n(?:\x1b\[[0-9;]*m)*user(?:\x1b\[[0-9;]*m)*\n')
-                                match = user_pattern.search(normalized)
+                                match = codex_user_pattern.search(normalized)
                                 if match:
                                     pre_echo = normalized[:match.start()]
                                     if pre_echo.strip():
@@ -2311,13 +2325,12 @@ class ChadWebUI:
                                     codex_in_prompt_echo = True
                                     codex_output_buffer = normalized[match.end():]
                                     normalized = codex_output_buffer
-                                    stripped = ansi_pattern.sub('', normalized)
+                                    stripped = codex_ansi_pattern.sub('', normalized)
 
                             # Check if we've passed the prompt echo section
                             if codex_in_prompt_echo and "mcp startup:" in stripped.lower():
                                 # Found end of prompt echo - extract agent output after marker
-                                mcp_pattern = re.compile(r'(?:\x1b\[[0-9;]*m)*mcp startup:(?:\x1b\[[0-9;]*m)*[^\n]*\n', re.IGNORECASE)
-                                match = mcp_pattern.search(normalized)
+                                match = codex_mcp_pattern.search(normalized)
                                 if match:
                                     agent_output = normalized[match.end():]
                                 else:
@@ -3137,26 +3150,25 @@ class ChadWebUI:
                         "⚠️ A task is already running on this session.\n\n"
                         "Please wait for it to complete or cancel it before starting a new task."
                     )
-                    # We need to define make_yield before using it, so just return early
-                    # with a simple error
                     yield (
-                        [],  # chatbot
-                        error_msg,  # task_status
                         gr.update(),  # live_stream
+                        [],  # chatbot
+                        gr.update(value=error_msg),  # task_status
                         gr.update(),  # project_path
                         gr.update(),  # task_description
                         gr.update(interactive=True),  # start_btn
                         gr.update(interactive=False),  # cancel_btn
                         gr.update(),  # role_status
-                        gr.update(),  # summary
+                        gr.update(),  # session_log_btn
+                        gr.update(),  # followup_input
                         gr.update(),  # followup_row
-                        gr.update(),  # followup_btn
-                        gr.update(),  # merge_row
-                        gr.update(),  # merge_summary
-                        gr.update(),  # branch_dropdown
+                        gr.update(),  # send_followup_btn
+                        gr.update(),  # merge_section_group
+                        gr.update(),  # changes_summary
+                        gr.update(),  # merge_target_branch
                         gr.update(),  # diff_full_content
-                        gr.update(),  # merge_section_header
-                        gr.update(),  # live_patch_trigger
+                        "",  # merge_section_header
+                        "",  # live_patch_trigger
                         gr.update(),  # coding_prompt_accordion
                         gr.update(),  # coding_prompt_content
                         gr.update(),  # verification_prompt_accordion

@@ -558,6 +558,21 @@ class TestChadWebUI:
         assert "🛑" in live_stream_update.get("value", "")
         assert session.cancel_requested is True
 
+    def test_start_task_rejects_when_server_session_is_still_active(self, web_ui, git_repo):
+        """Starting a new task with an active server task should return one full Gradio update tuple."""
+        session = web_ui.create_session("test")
+        session.server_session_id = "server-session-1"
+        web_ui.api_client.get_session.return_value = Mock(active=True)
+
+        updates = list(web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+
+        assert len(updates) == 1
+        update = updates[0]
+        assert len(update) == 22
+        assert "already running" in update[2].get("value", "").lower()
+        assert update[5].get("interactive") is True
+        assert update[6].get("interactive") is False
+
     def test_cancel_preserves_live_stream(self, monkeypatch, web_ui, git_repo):
         """Cancelling should not clear the live output panel."""
 
@@ -929,6 +944,63 @@ class TestClaudeJsonParsingIntegration:
         assert "Actual agent output" in combined
         assert "Done!" in combined
 
+    def test_codex_prompt_echo_filtered_after_phase_restart(self, web_ui, mock_api_client, git_repo):
+        """Codex prompt echo filtering should restart for implementation phase output."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="codex", provider="openai", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-phase"
+        mock_api_client.create_session.return_value = mock_session
+
+        phase_one = (
+            b"OpenAI Codex v0.92.0\n--------\nworkdir: /tmp\nmodel: gpt-5\n--------\n"
+            b"\x1b[36muser\x1b[0m\nExploration prompt should be hidden\n"
+            b"\x1b[36mmcp startup:\x1b[0m 0 servers\nExploration output kept\n"
+        )
+        phase_two = (
+            b"OpenAI Codex v0.92.0\n--------\nworkdir: /tmp\nmodel: gpt-5\n--------\n"
+            b"\x1b[36muser\x1b[0m\nImplementation prompt should be hidden\n"
+            b"\x1b[36mmcp startup:\x1b[0m 0 servers\nImplementation output kept\nDone!\n"
+        )
+
+        phase_one_event = Mock()
+        phase_one_event.event_type = "terminal"
+        phase_one_event.data = {"data": base64.b64encode(phase_one).decode()}
+
+        phase_two_event = Mock()
+        phase_two_event.event_type = "terminal"
+        phase_two_event.data = {"data": base64.b64encode(phase_two).decode()}
+
+        complete_event = Mock()
+        complete_event.event_type = "complete"
+        complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([phase_one_event, phase_two_event, complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="codex",
+            message_queue=message_queue,
+        )
+
+        assert success
+        assert "Exploration prompt should be hidden" not in output
+        assert "Implementation prompt should be hidden" not in output
+        assert "Exploration output kept" in output
+        assert "Implementation output kept" in output
+        assert "Done!" in output
 
     def test_long_codex_output_fully_captured(self, web_ui, mock_api_client, git_repo):
         """Long Codex output should be fully captured in final_output, not just last screenful."""
