@@ -153,7 +153,7 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
     "LIVE_STREAM": UIComponent(
         tab="run",
         component="live-view",  # Dedicated live stream panel (bottom of run tab)
-        tests=["TestLiveViewFormat", "TestRealisticLiveContent", "TestLiveActivityFormat"],
+        tests=["TestLiveViewFormat", "TestRealisticLiveContent", "TestLiveActivityFormat", "TestLiveStreamScrollPreservation"],
         source_file="chad/web_ui.py",
         keywords=["live view", "activity", "stream", "output", "live activity", "live stream panel",
                   "verification live", "verification stream", "verification output"],
@@ -339,6 +339,7 @@ VISUAL_TEST_MAP: dict[str, list[str]] = {
         "TestSubtaskTabs",
         "TestLiveViewFormat",
         "TestRealisticLiveContent",
+        "TestLiveStreamScrollPreservation",
         "TestNoStatusBox",
         "TestScreenshots",
         "TestProviderTwoColumnLayout",

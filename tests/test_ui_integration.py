@@ -1186,6 +1186,173 @@ class TestLiveStreamScrollPreservation:
             f"Scroll position should be preserved. Before={before['top']}, After={after['top']}"
         )
 
+    def test_no_javascript_errors_during_live_patching(self, page: Page):
+        """Live patching should not throw ReferenceErrors or other JS errors."""
+        errors = []
+        page.on("pageerror", lambda err: errors.append(str(err)))
+
+        live_id = "live-jserror-test"
+
+        # Set up content and trigger a patch
+        page.evaluate(
+            """
+({ liveId }) => {
+  const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+  if (!box) return;
+  box.innerHTML = `<div class="live-output-wrapper" data-live-id="${liveId}"><div class="live-output-content" style="height:200px; overflow:auto; white-space:pre">Initial content</div></div>`;
+}
+""",
+            {"liveId": live_id},
+        )
+
+        page.evaluate(
+            """
+({ liveId }) => {
+  const trigger = document.querySelector('.live-patch-trigger');
+  if (!trigger) return;
+  const newHtml = `<div class="live-output-wrapper" data-live-id="${liveId}"><div class="live-output-content" style="height:200px; overflow:auto; white-space:pre">Patched content line 1\\nPatched content line 2</div></div>`;
+  const escapeHtml = (str) => str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  trigger.innerHTML = `<div data-live-patch="${liveId}" style="display:none">${escapeHtml(newHtml)}</div>`;
+}
+""",
+            {"liveId": live_id},
+        )
+
+        page.wait_for_timeout(500)
+
+        assert len(errors) == 0, (
+            f"JavaScript errors during live patching: {errors}"
+        )
+
+    def test_rapid_patches_respect_user_scroll_up(self, page: Page):
+        """User scroll-up should be sticky across rapid patches."""
+        live_id = "live-rapid-test"
+
+        # Create initial content and scroll to middle
+        setup = page.evaluate(
+            """
+({ liveId }) => {
+  const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+  if (!box) return null;
+  const lines = Array.from({length: 200}, (_, i) => `Line ${i + 1}`).join('\\n');
+  box.innerHTML = `<div class="live-output-wrapper" data-live-id="${liveId}"><div class="live-output-content" style="height:420px; overflow:auto; white-space:pre">${lines}</div></div>`;
+  const content = box.querySelector('.live-output-content');
+  content.scrollTop = 500;
+  // Set shared state: user has scrolled up
+  const parentId = box.id || box.dataset.scrollTrackId;
+  if (parentId && window._liveStreamScrollState && window._liveStreamScrollState[parentId]) {
+    const state = window._liveStreamScrollState[parentId];
+    state.userScrolledUp = true;
+    state.savedScrollTop = 500;
+  }
+  return { top: content.scrollTop, height: content.scrollHeight };
+}
+""",
+            {"liveId": live_id},
+        )
+        assert setup is not None, "Setup should succeed"
+
+        # Fire 10 rapid patches at ~100ms intervals
+        for i in range(10):
+            page.evaluate(
+                """
+({ liveId, iteration }) => {
+  const trigger = document.querySelector('.live-patch-trigger');
+  if (!trigger) return;
+  const lines = Array.from({length: 200 + iteration * 5}, (_, j) => `Rapid ${iteration} line ${j + 1}`).join('\\n');
+  const newHtml = `<div class="live-output-wrapper" data-live-id="${liveId}"><div class="live-output-content" style="height:420px; overflow:auto; white-space:pre">${lines}</div></div>`;
+  const escapeHtml = (str) => str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  trigger.innerHTML = `<div data-live-patch="${liveId}" style="display:none">${escapeHtml(newHtml)}</div>`;
+}
+""",
+                {"liveId": live_id, "iteration": i},
+            )
+            page.wait_for_timeout(100)
+
+        page.wait_for_timeout(300)
+
+        after = page.evaluate(
+            """
+({ liveId }) => {
+  const content = document.querySelector(`[data-live-id="${liveId}"] .live-output-content`);
+  if (!content) return null;
+  return { top: content.scrollTop, height: content.scrollHeight };
+}
+""",
+            {"liveId": live_id},
+        )
+
+        assert after is not None, "Content should exist after rapid patches"
+        assert after["height"] > setup["height"], "Content should have grown"
+        assert abs(after["top"] - setup["top"]) <= 20, (
+            f"Scroll should stay near original position during rapid patches. "
+            f"Before={setup['top']}, After={after['top']}"
+        )
+
+    def test_auto_scroll_works_when_user_at_bottom(self, page: Page):
+        """Auto-scroll should follow new content when user is at the bottom."""
+        live_id = "live-autoscroll-test"
+
+        # Create content and scroll to bottom
+        setup = page.evaluate(
+            """
+({ liveId }) => {
+  const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+  if (!box) return null;
+  const lines = Array.from({length: 100}, (_, i) => `Line ${i + 1}`).join('\\n');
+  box.innerHTML = `<div class="live-output-wrapper" data-live-id="${liveId}"><div class="live-output-content" style="height:420px; overflow:auto; white-space:pre">${lines}</div></div>`;
+  const content = box.querySelector('.live-output-content');
+  content.scrollTop = content.scrollHeight;
+  // Ensure state reflects at-bottom
+  const parentId = box.id || box.dataset.scrollTrackId;
+  if (parentId && window._liveStreamScrollState && window._liveStreamScrollState[parentId]) {
+    const state = window._liveStreamScrollState[parentId];
+    state.userScrolledUp = false;
+    state.savedScrollTop = content.scrollTop;
+  }
+  return { top: content.scrollTop, height: content.scrollHeight };
+}
+""",
+            {"liveId": live_id},
+        )
+        assert setup is not None, "Setup should succeed"
+
+        # Patch with more content
+        page.evaluate(
+            """
+({ liveId }) => {
+  const trigger = document.querySelector('.live-patch-trigger');
+  if (!trigger) return;
+  const lines = Array.from({length: 150}, (_, i) => `Extended ${i + 1}`).join('\\n');
+  const newHtml = `<div class="live-output-wrapper" data-live-id="${liveId}"><div class="live-output-content" style="height:420px; overflow:auto; white-space:pre">${lines}</div></div>`;
+  const escapeHtml = (str) => str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  trigger.innerHTML = `<div data-live-patch="${liveId}" style="display:none">${escapeHtml(newHtml)}</div>`;
+}
+""",
+            {"liveId": live_id},
+        )
+
+        page.wait_for_timeout(400)
+
+        after = page.evaluate(
+            """
+({ liveId }) => {
+  const content = document.querySelector(`[data-live-id="${liveId}"] .live-output-content`);
+  if (!content) return null;
+  const isAtBottom = content.scrollTop + content.clientHeight >= content.scrollHeight - 10;
+  return { top: content.scrollTop, height: content.scrollHeight, atBottom: isAtBottom };
+}
+""",
+            {"liveId": live_id},
+        )
+
+        assert after is not None, "Content should exist after patch"
+        assert after["height"] > setup["height"], "Content should have grown"
+        assert after["atBottom"], (
+            f"Should auto-scroll to bottom when user was at bottom. "
+            f"scrollTop={after['top']}, scrollHeight={after['height']}"
+        )
+
 
 class TestTUIContentRendering:
     """Test that TUI-style content (boxes, cursor positioning) renders correctly.
