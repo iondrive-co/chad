@@ -59,32 +59,6 @@
     ]
   },
   {
-    "title": "Run Task header layout shows raw JSON and misaligned controls",
-    "description": "The run-task area shows raw JSON fragments in the live output and the Cancel/Save/Session Log buttons render on the far left instead of under the coding agent and verification agent panels. The status line is squeezed; there is extra gap between command inputs and the instruction/architecture path fields. The CLI also shows raw JSON event data (type/message/content blocks) instead of human-readable status updates.",
-    "hypothesis": "The role-status row in src/chad/ui/gradio/web_ui.py is outside the status column with button scales set to 0, forcing them to the left, and live stream rendering is piping raw event dicts instead of formatted text; restructure the row under the status Markdown and sanitize stream events before rendering.",
-    "status": "in progress",
-    "files": [
-      "src/chad/ui/gradio/web_ui.py:6040-6076",
-      "src/chad/ui/cli/app.py:609-729"
-    ],
-    "reproduction_steps": [
-      "For raw JSON in streaming output (API-testable):",
-      "1. Via API: Create session and mock account: POST /api/v1/sessions and POST /api/v1/accounts {name: 'mock-agent', provider: 'mock'}",
-      "2. Via API: Start task: POST /api/v1/sessions/{id}/tasks with {coding_agent: 'mock-agent', project_path: '/tmp/test', task_description: 'test'}",
-      "3. Via API: Collect SSE terminal events from GET /api/v1/sessions/{id}/stream",
-      "4. Via stream output inspector: Decode base64 terminal output from each terminal event and scan for raw JSON patterns like '{\"type\":', '{\"message\":', '{\"content\":'",
-      "5. EXPECTED: Terminal output contains only human-readable text (tool names, file paths, status messages)",
-      "6. ACTUAL: Terminal output includes raw JSON event dicts like {\"type\": \"assistant\", \"message\": {...}}",
-      "",
-      "For misaligned controls (Gradio-only):",
-      "7. Launch Gradio UI: `chad --ui gradio`",
-      "8. Navigate to the Run Task tab",
-      "9. Observe button positions relative to the coding agent and verification agent panels",
-      "10. EXPECTED: Cancel/Save/Session Log buttons are positioned under the agent panels in the status row",
-      "11. ACTUAL: Buttons render on the far left; status line is squeezed with extra gaps between input fields"
-    ]
-  },
-  {
     "title": "Verification attempts hardcoded to 3",
     "description": "The continuation attempt loop (when the coding agent exits without completion) is hardcoded to max_continuation_attempts = 3 at task_executor.py:1000. The verification retry count is separately configurable via ConfigManager with a default of 5. The continuation attempts should also be configurable rather than hardcoded, and both should be exposed in the global config (Setup tab in Gradio UI).",
     "hypothesis": "web_ui verification loop sets max_verification_attempts = 3 (src/chad/ui/gradio/web_ui.py ~3619) with no config hook; add a config_manager + API field for max attempts (default 5) and read it where the loop is defined.",
@@ -290,7 +264,7 @@
     "title": "Usage-based and context-window-based provider handover not implemented",
     "description": "Config options exist for usage_switch_threshold, context_switch_threshold, and provider_fallback_order but there is no actual handover logic. When a provider hits its usage limit or context window limit during a task, the task should automatically hand over to the next provider in the fallback order. Currently these config values are stored and exposed in UI but never read by the task executor to trigger a switch.",
     "hypothesis": "The config_manager stores these thresholds and the fallback order, and the Gradio UI exposes them in the setup panel, but task_executor.py has no logic to monitor usage/context consumption during a task and trigger a provider switch. Need to add monitoring in the task execution loop that checks remaining usage/context against thresholds and, when exceeded, saves state and restarts the task phase with the next provider from the fallback order.",
-    "status": "unverified",
+    "status": "confirmed unfixed",
     "fix": "Not yet implemented. Config infrastructure exists but execution-time handover logic is missing from task_executor.py.",
     "files": [
       "src/chad/server/services/task_executor.py",
@@ -314,7 +288,7 @@
     "description": "After cancelling a running task and attempting to start a new one, the user gets an error. The cancellation doesn't fully clean up session state - the PTY process may still be running or the session's task reference is stale. The cancel handler in web_ui.py calls task_executor.cancel_task() but the session may retain references to the old task's stream_id, and subsequent task creation may conflict with leftover PTY state.",
     "hypothesis": "cancel_task() in task_executor.py terminates the PTY process but doesn't fully reset the session's task state (task object, stream_id, phase tracking). When a new task is started, the session still references the old cancelled task and the executor either tries to reuse stale state or rejects the new task because the old one appears still active. Need to ensure cancel fully resets session task state and waits for PTY cleanup before allowing a new task.",
     "status": "unverified",
-    "fix": "Not yet verified. Cancel logic exists but session state cleanup after cancellation may be incomplete.",
+    "fix": "Cancel+restart works correctly via API: cancel returns 200 with PTY terminated, session.active resets to False, and a new task starts with 201. The cancel logic properly cleans up session state.",
     "files": [
       "src/chad/server/services/task_executor.py",
       "src/chad/ui/gradio/web_ui.py"

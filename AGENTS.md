@@ -319,6 +319,39 @@ Tests are organized by module and marked for efficient targeting:
 
 Use `-m "not visual"` to skip browser tests for faster iteration.
 
+## Test Utility Tools
+
+Reusable helpers in `tests/test_helpers.py` for bug reproduction and feature verification.
+Import them in any test file or use interactively via `pytest` fixtures.
+
+| Tool | Signature | Description |
+|------|-----------|-------------|
+| `collect_stream_events` | `(client, session_id, timeout=10, poll_interval=0.3, wait_for_completion=True) → CollectedEvents` | Polls `GET /api/v1/sessions/{id}/events` until `session_ended` or timeout. Returns `.all_events`, `.terminal_events`, `.structured_events`, `.decoded_output`. |
+| `ProviderOutputSimulator` | `(monkeypatch, scenario)` | Monkeypatches `build_agent_command()` to emit canned byte sequences. Scenarios: `qwen_duplicate`, `codex_system_prompt`, `codex_tool_calls_only`, `codex_garbled_binary`. |
+| `TaskPhaseMonitor` | `(events) → .phases, .phase_names(), .terminal_counts_by_phase()` | Scans events for phase transitions (coding → verification → continuation). Detects structured markers and text-based "Phase N:" markers. |
+| `capture_provider_command` | `(provider, account_name, project_path, ...) → CapturedCommand` | Calls `build_agent_command()` directly. Returns `.cmd`, `.env`, `.initial_input`. No monkeypatching needed. |
+| `cli_config_parity_check` | `() → ConfigParityResult` | Checks which user-editable config keys are missing from `cli/app.py`. Returns `.api_keys`, `.cli_keys`, `.missing_from_cli`. |
+| `get_formatted_status` | `(accounts=None, task_state=None, worktree_path=None, ...) → str` | Renders `ProviderUIManager.format_role_status()` with mock data. Returns markdown status string. |
+| `inspect_stream_output` | `(decoded_output) → StreamInspection` | Scans decoded terminal text for raw JSON patterns and binary garbage. Returns `.has_raw_json`, `.json_fragments`, `.has_binary_data`, `.binary_fragments`. |
+
+### Usage Examples
+
+```python
+from test_helpers import collect_stream_events, inspect_stream_output, ProviderOutputSimulator
+
+# Collect events from a running task
+events = collect_stream_events(client, session_id, timeout=15)
+assert len(events.terminal_events) > 0
+
+# Check for raw JSON leaking into terminal output
+inspection = inspect_stream_output(events.decoded_output)
+assert not inspection.has_raw_json, f"Raw JSON in output: {inspection.json_fragments}"
+
+# Simulate a provider scenario
+sim = ProviderOutputSimulator(monkeypatch, "qwen_duplicate")
+# Now start a task via the API — it will run the simulated output
+```
+
 ## Virtual Environment
 
 The project uses `.venv` (not `venv`). Worktrees automatically symlink to the main project's `.venv` so agents don't
