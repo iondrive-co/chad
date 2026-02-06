@@ -2304,6 +2304,7 @@ class ChadWebUI:
                                     pre_echo = normalized[:match.start()]
                                     if pre_echo.strip():
                                         terminal.feed(pre_echo.encode("utf-8"))
+                                        accumulated_text.append(pre_echo)
                                         html_output = terminal.render_html()
                                         message_queue.put(("stream", pre_echo, html_output))
                                     # Now in prompt echo section - update buffer
@@ -2331,6 +2332,7 @@ class ChadWebUI:
                                 codex_output_buffer = ""
                                 if agent_output.strip():
                                     terminal.feed(agent_output.encode("utf-8"))
+                                    accumulated_text.append(agent_output)
                                     html_output = terminal.render_html()
                                     message_queue.put(("stream", agent_output, html_output))
                                 continue
@@ -2343,18 +2345,26 @@ class ChadWebUI:
                                     codex_output_buffer = codex_output_buffer[-500:]
                                     if to_emit.strip():
                                         terminal.feed(to_emit.encode("utf-8"))
+                                        accumulated_text.append(to_emit)
                                         html_output = terminal.render_html()
                                         message_queue.put(("stream", to_emit, html_output))
                             continue
 
                         # Past prompt echo - pass through raw PTY output with terminal emulation
                         terminal.feed(raw_bytes)
+                        accumulated_text.append(decoded)
                         html_output = terminal.render_html()
                         message_queue.put(("stream", decoded, html_output))
 
                 elif event.event_type == "complete":
                     exit_code = event.data.get("exit_code", 0)
                     got_complete_event = True
+                    # Flush any remaining Codex output buffer
+                    if is_codex and codex_output_buffer.strip():
+                        if terminal:
+                            terminal.feed(codex_output_buffer.encode("utf-8"))
+                        accumulated_text.append(codex_output_buffer)
+                        codex_output_buffer = ""
                     break
 
                 elif event.event_type == "error":
@@ -2409,11 +2419,14 @@ class ChadWebUI:
             return False, "Stream ended unexpectedly", server_session_id, work_done
 
         # Get plain text for final output
-        if terminal:
+        # Always prefer accumulated_text (captures full session) over terminal.get_text()
+        # (which only returns the visible screen buffer, losing scrollback history)
+        if accumulated_text:
+            final_output = "\n".join(accumulated_text)
+        elif terminal:
             final_output = terminal.get_text()
         else:
-            # For anthropic JSON parsing, use accumulated text
-            final_output = "\n".join(accumulated_text)
+            final_output = ""
 
         # Emit completion
         if exit_code == 0:
