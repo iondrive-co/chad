@@ -1,26 +1,5 @@
 [
   {
-    "title": "Live stream autoscroll not sticking to bottom",
-    "description": "When watching live updates in the Gradio live-stream box, the viewport stops at an old offset even if the user was at the bottom; new output arrives but the log no longer auto-pins to the new bottom. Over time the scroll position drifts upward as new content arrives, losing auto-follow behavior. Likely a race between DOM patching and scroll position checks, or the isAtBottom threshold is too tight.",
-    "hypothesis": "The custom autoscroll logic in initializeLiveStreamScrollTracking (src/chad/ui/gradio/web_ui.py) restores saved scrollTop when MutationObserver fires because userScrolledUp is set and lastScrollHeight isn't refreshed for live DOM patches, so height growth isn't treated as contentGrew; detect 'near bottom' before patching and always set scrollTop to scrollHeight in that case.",
-    "status": "unverified",
-    "fix": "Modified the MutationObserver callback in initializeLiveStreamScrollTracking to check if the user was at the bottom BEFORE content grew (using lastScrollHeight), and if so, always auto-scroll to the new bottom and reset userScrolledUp to false. This prevents the stale scroll state from blocking autoscroll when new content arrives.",
-    "screenshot": "N/A - behavioral fix during live streaming, cannot be captured in static screenshot",
-    "files": [
-      "src/chad/ui/gradio/web_ui.py:7514-7718"
-    ],
-    "reproduction_steps": [
-      "1. Launch Gradio UI: `chad --ui gradio`",
-      "2. Configure a mock account and select it as coding agent",
-      "3. Start a long-running task (e.g. 'Refactor all test files to use pytest fixtures') to generate substantial streaming output",
-      "4. Observe the live stream output panel as content streams in - confirm autoscroll is following new output",
-      "5. Scroll up briefly in the live stream panel to read earlier output, then immediately scroll back to the very bottom",
-      "6. Wait for several more lines of output to arrive (5-10 seconds)",
-      "7. EXPECTED: Output should continue auto-scrolling to show new content since the user returned to the bottom",
-      "8. ACTUAL: Scroll position stays fixed at the point you scrolled back to; new content arrives below the visible area and the viewport drifts upward relative to the stream"
-    ]
-  },
-  {
     "title": "CLI settings omit new config options",
     "description": "The CLI UI settings menu only exposes 9 config options but is missing set_account_model and set_account_reasoning which are available in ConfigManager. There is no automated mechanism to ensure new config options are added to the CLI UI when they're added to ConfigManager. The existing TestConfigUIParity test only checks Gradio keys, not CLI keys.",
     "hypothesis": "Settings are hard-coded in src/chad/ui/cli/app.py with no shared schema from config_manager/routes/config.py, so any new config key is easy to forget; drive the CLI menu from the server config metadata (CONFIG_BASE_KEYS or a config schema endpoint) to force parity and fail when a new key isn't rendered.",
@@ -59,78 +38,6 @@
     ]
   },
   {
-    "title": "Verification attempts hardcoded to 3",
-    "description": "The continuation attempt loop (when the coding agent exits without completion) is hardcoded to max_continuation_attempts = 3 at task_executor.py:1000. The verification retry count is separately configurable via ConfigManager with a default of 5. The continuation attempts should also be configurable rather than hardcoded, and both should be exposed in the global config (Setup tab in Gradio UI).",
-    "hypothesis": "web_ui verification loop sets max_verification_attempts = 3 (src/chad/ui/gradio/web_ui.py ~3619) with no config hook; add a config_manager + API field for max attempts (default 5) and read it where the loop is defined.",
-    "status": "unverified",
-    "fix": "Added max_verification_attempts to CONFIG_BASE_KEYS and ConfigManager with get/set methods (default 5). Created API endpoint /config/max-verification-attempts for GET/PUT. Added APIClient method get_max_verification_attempts. Updated both verification loops in web_ui.py (start_chad_task and send_followup) to use self.api_client.get_max_verification_attempts() instead of hardcoded 3. Added setting to CLI settings menu as option [5]. Still unfixed: continuation attempts at task_executor.py:1000 remain hardcoded to 3.",
-    "files": [
-      "src/chad/server/services/task_executor.py:1000,1100",
-      "src/chad/util/config_manager.py"
-    ],
-    "reproduction_steps": [
-      "1. Via API: Set max verification attempts to 7: PUT /api/v1/config/max-verification-attempts with {attempts: 7}",
-      "2. Via API: Confirm it persisted: GET /api/v1/config/max-verification-attempts should return 7",
-      "3. Via API: Create session and start task with mock provider configured to always fail verification: POST /api/v1/sessions/{id}/tasks with {coding_agent: 'mock-agent', verification_agent: 'mock-verifier', ...}",
-      "4. Via task phase monitor: Monitor structured events from GET /api/v1/sessions/{id}/events filtering for event_type='verification_attempt'",
-      "5. Wait for task to complete (mock provider is fast)",
-      "6. Count the total number of verification_attempt events",
-      "7. EXPECTED: 7 verification attempts (matching the configured value)",
-      "8. ACTUAL: Only 3 attempts for the continuation loop (task_executor.py:1012 hardcodes max_continuation_attempts = 3), verification loop in web_ui.py correctly reads the config value but task_executor.py ignores it"
-    ]
-  },
-  {
-    "title": "Qwen outputs duplicated",
-    "description": "Streaming responses from the Qwen provider repeat the same text blocks, so the user sees duplicate output lines.",
-    "hypothesis": "QwenCodeProvider.get_response (src/chad/util/providers.py) appends content from both 'message' events and 'assistant' events emitted by stream-json, but Qwen sends the same text in both, leading to duplicates; capture only one event type or de-dupe by message id/content before appending.",
-    "status": "unverified",
-    "fix": "Removed the handler for 'message' events with role='assistant' in QwenCodeProvider.get_response, keeping only the 'assistant' type handler which uses structured content blocks. This eliminates the duplicate content from the two event types.",
-    "screenshot": "N/A - behavioral fix during streaming output, requires live Qwen provider to demonstrate",
-    "reproduction_steps": [
-      "1. Via provider output simulator: Configure a simulated Qwen stream-json output that emits both a 'message' event with role='assistant' and an 'assistant' type event containing identical text content (this mirrors real Qwen CLI behavior)",
-      "2. Via API: Create a qwen account and session: POST /api/v1/accounts {name: 'qwen-test', provider: 'qwen'}",
-      "3. Via API: Start task: POST /api/v1/sessions/{id}/tasks with {coding_agent: 'qwen-test', ...}",
-      "4. Via stream event collector: Collect all terminal events from the SSE endpoint GET /api/v1/sessions/{id}/stream",
-      "5. Decode and concatenate all terminal output chunks",
-      "6. Scan the concatenated output for repeated consecutive lines or text blocks",
-      "7. EXPECTED: Each line of assistant output appears exactly once",
-      "8. ACTUAL: Lines appear twice because both the 'message' event handler and the 'assistant' event handler in QwenCodeProvider.get_response emit the same content"
-    ]
-  },
-  {
-    "title": "Codex shows system prompt before user-visible output",
-    "description": "When using the Codex/OpenAI provider, the live stream begins by printing the full system prompt instead of starting with the assistant's first response.",
-    "hypothesis": "The Codex provider streaming handler isn't filtering out system-role messages before forwarding events; the stream JSON decoder (likely in src/chad/util/providers.py or stream_client) forwards all roles verbatim, so the first chunk renders the system prompt.",
-    "status": "unverified",
-    "fix": "Added filtering in OpenAICodexProvider.format_json_event_as_text to skip events with role 'user' or 'system', and item.completed events with item_type 'user_message', 'system_message', or 'input_message', or items with role 'user'/'system'. This prevents the system prompt from being displayed in the live stream.",
-    "screenshot": "N/A - behavioral fix during streaming output, requires live Codex provider to demonstrate",
-    "reproduction_steps": [
-      "1. Via provider output simulator: Configure a simulated Codex stream-json output sequence that begins with a system message event (role='system', content='You are a coding assistant...') followed by assistant response events (mimicking real codex exec output)",
-      "2. Via API: Create a codex account and session: POST /api/v1/accounts {name: 'codex-test', provider: 'openai'}",
-      "3. Via API: Start task: POST /api/v1/sessions/{id}/tasks with {coding_agent: 'codex-test', ...}",
-      "4. Via stream event collector: Collect the first 10 terminal events from the SSE endpoint",
-      "5. Decode and inspect the initial terminal output chunks",
-      "6. EXPECTED: First visible output is the assistant's response to the task (e.g. 'I'll start by reading the project files...')",
-      "7. ACTUAL: First visible output contains the full system prompt text ('You are a coding assistant...' or similar) which should be hidden from the user"
-    ]
-  },
-  {
-    "title": "Codex only outputs tool calls with no explanations",
-    "description": "After the initial system prompt, subsequent Codex output renders raw tool call payloads without any plain-language explanation for the user.",
-    "hypothesis": "Tool call events from the Codex provider are forwarded directly without the accompanying assistant commentary; the tool/assistant event merge logic in the Codex provider (src/chad/util/providers.py) or the live stream renderer drops assistant text blocks and only surfaces tool call JSON.",
-    "status": "unverified",
-    "fix": "Enhanced the mcp_tool_call handler in format_json_event_as_text to extract and display reasoning/thought/explanation fields from tool call items before showing the tool operation. Also added handlers for other tool call item types (tool_call, function_call, tool_use) to ensure all tool invocation formats are properly formatted instead of shown as raw JSON.",
-    "screenshot": "N/A - behavioral fix during streaming output, requires live Codex provider to demonstrate",
-    "reproduction_steps": [
-      "1. Via provider output simulator: Configure a simulated Codex stream-json output that includes: (a) an assistant text event with reasoning ('I need to read the file first'), (b) a tool_call/mcp_tool_call event with raw JSON payload ({name: 'read_file', arguments: {path: '/src/main.py'}}), (c) a tool result event",
-      "2. Via API: Create codex account and session, start task as in the 'Codex shows system prompt' bug",
-      "3. Via stream event collector: Collect all terminal events from the SSE endpoint after the initial output",
-      "4. Decode terminal output and inspect for presence of both human-readable explanations AND tool call summaries",
-      "5. EXPECTED: Output shows 'I need to read the file first' followed by a formatted tool summary like 'Reading /src/main.py...'",
-      "6. ACTUAL: Output shows only raw JSON like {\"type\": \"function_call\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"/src/main.py\\\"}\"} with no preceding explanation text"
-    ]
-  },
-  {
     "title": "Live view not showing during verification or subsequent coding rounds",
     "description": "After initial coding completes, the live view panel shows nothing during verification and subsequent revision rounds, even though output is being generated.",
     "hypothesis": "The has_initial_live_render flag is not reset when transitioning between coding and verification phases, causing the live patch mechanism to fail because it tries to patch content that no longer exists in the DOM.",
@@ -146,83 +53,6 @@
       "6. Count terminal events received AFTER the verification phase begins",
       "7. EXPECTED: Terminal events continue flowing during verification phase with verification agent output",
       "8. ACTUAL: Terminal events stop after coding phase completes; the verification agent's PTY output is generated but not routed to the SSE stream because has_initial_live_render is stale and the stream_id references the old coding PTY"
-    ]
-  },
-  {
-    "title": "Missing exploration prompt accordion - only coding and verification shown",
-    "description": "The prompt display area only has two accordions: Coding Agent Prompt and Verification Agent Prompt. There should be three: Exploration, Coding, and Verification. All three should be visible from the start with template variables unfilled (showing the raw prompt templates), then updated with actual values once task variables are populated during execution.",
-    "hypothesis": "The UI at web_ui.py:6125-6150 only creates two accordion widgets. A third accordion for the exploration prompt was never added. The prompt update logic only fills in prompts once variables are available rather than showing templates early.",
-    "status": "unverified",
-    "fix": "Already fixed in a previous change. Three accordions exist: Exploration Prompt, Implementation Prompt, and Verification Prompt (web_ui.py:6221-6258). Each is initialized with the raw prompt template (EXPLORATION_PROMPT, IMPLEMENTATION_PROMPT, VERIFICATION_EXPLORATION_PROMPT) and updated with actual values via make_yield during task execution.",
-    "files": [
-      "src/chad/ui/gradio/web_ui.py:6221-6258"
-    ],
-    "reproduction_steps": [
-      "1. Launch Gradio UI: `chad --ui gradio`",
-      "2. Navigate to the Run Task tab",
-      "3. Scroll down to the prompt display area below the live stream panel",
-      "4. Count the number of prompt accordion widgets visible",
-      "5. EXPECTED: Three accordions labeled 'Exploration Prompt', 'Implementation Prompt', and 'Verification Prompt', all visible with raw template text showing placeholder variables like {task}, {project_docs}",
-      "6. ACTUAL: Only two accordions: 'Coding Agent Prompt' and 'Verification Agent Prompt'; the exploration prompt accordion is missing entirely"
-    ]
-  },
-  {
-    "title": "Live view resets to 'waiting for agent output' on tab switch",
-    "description": "When navigating away from a task tab (e.g., to Setup) and back during an active session, the live view briefly shows 'waiting for agent output' before suddenly restoring the full output on the next update. Reproduced with Claude, Qwen, and Codex providers - not provider-specific. The session tracks last_live_stream and has_initial_live_render for tab-switch restoration, but the restoration doesn't happen immediately on tab re-entry.",
-    "hypothesis": "The has_initial_live_render flag gets cleared or the Gradio component re-renders its default value when the tab becomes visible again. The live stream content is only restored on the next polling update rather than immediately on tab selection. Need to hook into the tab select event to immediately restore last_live_stream.",
-    "status": "unverified",
-    "fix": "Added _session_live_streams dict to store live stream HTML components per session. Updated on_tab_select handler to directly update the live_stream component value (in addition to the existing JS patch mechanism), so the content is restored immediately via Gradio's value update without waiting for the JS MutationObserver cycle. The live_stream components are now included as outputs of the tab select handler.",
-    "files": [
-      "src/chad/ui/gradio/web_ui.py:2082-2084,8179-8260"
-    ],
-    "reproduction_steps": [
-      "1. Launch Gradio UI: `chad --ui gradio`",
-      "2. Configure a mock account and start a task to generate streaming output",
-      "3. Wait until at least 20-30 lines of output have appeared in the live stream panel",
-      "4. Click on the 'Setup' tab to navigate away from the Run Task tab",
-      "5. Wait 2-3 seconds on the Setup tab",
-      "6. Click back on the 'Run Task' tab",
-      "7. EXPECTED: Live view immediately shows the accumulated output from the running task",
-      "8. ACTUAL: Live view briefly shows 'waiting for agent output...' placeholder text for ~1-2 seconds before the content is restored on the next SSE polling update"
-    ]
-  },
-  {
-    "title": "Git worktree path not always shown in agent status panel",
-    "description": "The agent status panel (showing provider, usage remaining, etc.) should always display the git worktree path. The worktree path is included in format_role_status() but may be missing if the worktree hasn't been created yet at render time or if status updates don't re-render with the path once it becomes available.",
-    "hypothesis": "The role_status markdown is rendered once at session creation with whatever worktree_path is available (often None). Subsequent status updates may not re-render the role status with the worktree path once it's created during task execution.",
-    "status": "unverified",
-    "fix": "Added worktree info fetching at two points during task streaming: (1) when receiving the session_id event from the API, and (2) on first stream chunk if worktree_path is still None. This ensures session.worktree_path is populated before the first status render during task execution, so format_role_status includes the path.",
-    "files": [
-      "src/chad/ui/gradio/web_ui.py:3648-3660,3674-3685"
-    ],
-    "reproduction_steps": [
-      "1. Via API: Create a session: POST /api/v1/sessions with {name: 'test', project_path: '/path/to/git/repo'}",
-      "2. Via API: Create mock account: POST /api/v1/accounts {name: 'mock-agent', provider: 'mock'}",
-      "3. Via API: Start a task: POST /api/v1/sessions/{id}/tasks with {coding_agent: 'mock-agent', ...}",
-      "4. Via API: Immediately check worktree status: GET /api/v1/sessions/{id}/worktree - note it may not be created yet at this point",
-      "5. Via API: Wait 2-3 seconds, then check worktree status again - it should now exist with a path",
-      "6. Via formatted status inspector: Call format_role_status(task_state='running', worktree_path=<path from step 5>) and inspect the returned markdown string",
-      "7. EXPECTED: The status markdown always includes the worktree path once it's been created, and UI re-renders with the path",
-      "8. ACTUAL: The initial render of the role status panel occurs before the worktree is created (worktree_path=None), and subsequent status updates do not always re-render with the worktree path, leaving it absent from the panel"
-    ]
-  },
-  {
-    "title": "Codex live view shows garbled ASCII art output",
-    "description": "Codex sometimes renders garbage output with @@@, ###, %%% characters resembling corrupted image data or ASCII art. Example: '@@@@@@@%#%%#@@@%#####%@@%%%%#%%%%@@%#%#%%%%%@@@%%%%#%@%%%%#%%%%######%%@@%#%%#%@@#*%@@%%%#%%%%@@##*#@@@%*#####%@@%%%%%%@'. This is different from the system prompt leak - it appears to be binary/image data being rendered as text.",
-    "hypothesis": "The Codex prompt echo filtering (task_executor.py:687-857) splits large buffered content (>2000 bytes) into 500-byte chunks (lines 841-851) which can break mid-ANSI sequence, causing regex-based filtering to fail and emit raw terminal noise. May also be sixel graphics or image data from codex being passed through the terminal emulator as text.",
-    "status": "unverified",
-    "fix": "Added _strip_binary_garbage() function that uses regex to remove runs of 10+ consecutive @#%*&^ characters. Applied to all three Codex output emission points: (1) after mcp startup marker detection, (2) buffer overflow emission, and (3) normal post-prompt-echo emission. Only non-empty stripped output is emitted.",
-    "files": [
-      "src/chad/server/services/task_executor.py:343-353,848-855,862-871,872-878"
-    ],
-    "reproduction_steps": [
-      "1. Via provider output simulator: Configure a simulated Codex PTY output that includes a large (>2000 byte) chunk containing mixed ANSI escape sequences and binary-like data (simulating sixel graphics or image data that codex may emit)",
-      "2. Via API: Create codex account and session, start task as in the other Codex bugs",
-      "3. Via stream event collector: Collect all terminal events from the SSE endpoint",
-      "4. Decode terminal output and pass it through the prompt echo filter (task_executor.py:687-857) in isolation",
-      "5. Inspect the filtered output for garbled characters: scan for runs of @, #, %, * characters that exceed 10 consecutive non-alphanumeric characters",
-      "6. EXPECTED: All binary/image data is filtered out; only clean text output reaches the terminal emulator",
-      "7. ACTUAL: The 500-byte chunk splitting at task_executor.py:841-851 breaks mid-ANSI sequence, causing the regex filter to miss binary data, which then passes through as garbled @@@###%%% characters"
     ]
   },
   {
@@ -243,26 +73,6 @@
       "5. EXPECTED: The command includes '--model gpt-5.3-codex' (or provider-equivalent flag like claude's --model)",
       "6. ACTUAL: build_agent_command() signature has no model parameter (only provider, account_name, project_path, task_description, screenshots, phase, exploration_output); the coding_model value from the API request is accepted by TaskExecutor.start_task() but never forwarded to build_agent_command(), so the CLI runs with whatever model is in the account's default config",
       "7. Verify via event log: GET /api/v1/sessions/{id}/events and check the session_started event - it records coding_model: 'gpt-5.3-codex' proving the API received it, but the agent CLI was never told to use it"
-    ]
-  },
-  {
-    "title": "Live view not showing for verification agent or coding agent revisions",
-    "description": "In the Gradio UI, the live view panel shows no output during the verification agent phase and during subsequent coding agent revision rounds. The has_initial_live_render flag and live stream state are not properly reset between phase transitions. The verification phase creates a new PTY stream but the live view component still references the old stream_id, so updates from the verification agent's PTY never reach the display.",
-    "hypothesis": "When transitioning from coding to verification (and back for revisions), session.has_initial_live_render is not reset to False, causing _compute_live_stream_updates to attempt DOM patching against stale content. The live_stream_id also needs to be updated to the new PTY stream for each phase. The fix in the existing 'Live view not showing during verification' bug (resetting has_initial_live_render) may partially address this but the stream_id binding also needs updating.",
-    "status": "unverified",
-    "fix": "Reset session.has_initial_live_render = False before yielding verification and revision placeholders in start_chad_task and send_followup. Forces full re-render of live stream container instead of DOM patches when switching phases.",
-    "files": [
-      "src/chad/ui/gradio/web_ui.py"
-    ],
-    "reproduction_steps": [
-      "1. Via API: Create session with mock-coder and mock-verifier accounts (mock-verifier configured to reject first verification attempt, triggering a coding revision round)",
-      "2. Via API: Start task: POST /api/v1/sessions/{id}/tasks with both agents",
-      "3. Via stream event collector: Subscribe to SSE stream and collect events with timestamps, partitioned by phase",
-      "4. Via task phase monitor: Track phase transitions: coding → verification → revision (coding round 2) → verification round 2",
-      "5. For each phase transition, record whether terminal events continue flowing in the SSE stream",
-      "6. Count terminal events per phase: {coding_1: N, verification_1: M, revision_1: P, verification_2: Q}",
-      "7. EXPECTED: All phases have non-zero terminal event counts (coding_1 > 0, verification_1 > 0, revision_1 > 0, verification_2 > 0)",
-      "8. ACTUAL: Terminal events flow during coding_1 but drop to zero during verification_1 and subsequent phases because the SSE multiplexer's stream_id is still bound to the coding PTY, not the new verification/revision PTYs"
     ]
   },
   {

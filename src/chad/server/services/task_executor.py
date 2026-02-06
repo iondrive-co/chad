@@ -1141,12 +1141,9 @@ class TaskExecutor:
             if progress:
                 emit("progress", summary=progress.summary, location=progress.location, next_step=progress.next_step)
 
-            # Check if agent already completed during exploration (rare but possible)
-            summary = extract_coding_summary(exploration_output)
-            if summary is not None:
-                # Agent completed during exploration - skip to completion
-                pass
-            elif exit_code == 0:
+            # Never treat exploration output as task completion. Exploration should
+            # always hand off into implementation after a clean exit.
+            if exit_code == 0:
                 # Check provider thresholds before implementation phase
                 coding_account, coding_provider, switched = self._check_provider_threshold(
                     coding_account, coding_provider, emit
