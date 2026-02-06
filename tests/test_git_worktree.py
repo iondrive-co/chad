@@ -1,6 +1,8 @@
 """Tests for git worktree management."""
 
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -531,6 +533,57 @@ class TestGitWorktreeManager:
         assert "# Worktree changes" in content
         # The user's uncommitted changes are preserved in "Stashed changes" section
         assert "# Uncommitted local changes" in content
+
+    def test_concurrent_merges_avoid_index_lock_errors(self, git_repo, monkeypatch):
+        """Concurrent merges on one repo should not race on .git/index.lock."""
+        mgr = GitWorktreeManager(git_repo)
+        task_one = "merge-a"
+        task_two = "merge-b"
+
+        worktree_one, _ = mgr.create_worktree(task_one)
+        worktree_two, _ = mgr.create_worktree(task_two)
+        (worktree_one / "feature_a.txt").write_text("feature a\n")
+        (worktree_two / "feature_b.txt").write_text("feature b\n")
+
+        original_run_git = mgr._run_git
+        index_lock_gate = threading.Lock()
+
+        def guarded_run_git(*args, cwd=None, check=True):
+            in_main_repo = cwd is None or Path(cwd).resolve() == mgr.project_path.resolve()
+            touches_index = bool(args) and args[0] in {"checkout", "merge", "commit", "stash", "reset"}
+            if in_main_repo and touches_index:
+                acquired = index_lock_gate.acquire(blocking=False)
+                if not acquired:
+                    return subprocess.CompletedProcess(
+                        args=["git", *args],
+                        returncode=128,
+                        stdout="",
+                        stderr="error: Unable to create '.git/index.lock': File exists.",
+                    )
+                try:
+                    # Keep overlap windows open long enough to expose races.
+                    time.sleep(0.05)
+                    return original_run_git(*args, cwd=cwd, check=check)
+                finally:
+                    index_lock_gate.release()
+            return original_run_git(*args, cwd=cwd, check=check)
+
+        monkeypatch.setattr(mgr, "_run_git", guarded_run_git)
+
+        results = {}
+
+        def run_merge(task_id):
+            results[task_id] = mgr.merge_to_main(task_id, target_branch="main")
+
+        t1 = threading.Thread(target=run_merge, args=(task_one,))
+        t2 = threading.Thread(target=run_merge, args=(task_two,))
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        assert set(results) == {task_one, task_two}
+        assert all(r[0] for r in results.values()), f"Expected both merges to succeed, got: {results}"
 
     def test_resolve_all_conflicts_ours(self, git_repo):
         """Test resolving all conflicts with ours (original)."""

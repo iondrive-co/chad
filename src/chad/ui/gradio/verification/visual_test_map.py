@@ -165,6 +165,13 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         source_file="chad/web_ui.py",
         keywords=["accept & merge", "merge section", "discard changes", "conflict resolution", "clear task"],
     ),
+    "WORKSPACE_DISPLAY": UIComponent(
+        tab="run",
+        component="project-path",
+        tests=["TestCodingAgentLayout", "TestChadWebUI"],
+        source_file="chad/web_ui.py",
+        keywords=["workspace", "worktree path", "session log row", "jsonl button"],
+    ),
     "PROMPT_ACCORDIONS": UIComponent(
         tab="run",
         component="prompt-accordion",

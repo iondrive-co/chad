@@ -989,6 +989,23 @@ body, .gradio-container, .gradio-container * {
   gap: 6px !important;
 }
 
+#workspace-display,
+.workspace-display {
+  margin: 0 !important;
+  min-width: 220px;
+  max-width: 640px;
+}
+
+#workspace-display p,
+.workspace-display p {
+  margin: 0 !important;
+  font-size: 12px;
+  color: #cdd6f4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Agent communication chatbot - preserve scroll position */
 .chatbot-container, [data-testid="chatbot"] {
   scroll-behavior: auto !important;
@@ -2481,6 +2498,17 @@ class ChadWebUI:
         session = self.get_session(session_id)
         return session.server_session_id or session_id
 
+    def _workspace_label(self, session: Session) -> str:
+        """Format the workspace path label shown next to the session log button."""
+        workspace_path = ""
+        if session.worktree_path:
+            workspace_path = str(session.worktree_path)
+        elif session.project_path:
+            workspace_path = str(session.project_path)
+        if workspace_path:
+            return f"Workspace: `{workspace_path}`"
+        return "Workspace: _Not set_"
+
     @staticmethod
     def _compute_live_stream_updates(
         live_stream: str,
@@ -3176,6 +3204,7 @@ class ChadWebUI:
                         gr.update(interactive=False),  # cancel_btn
                         gr.update(),  # role_status
                         gr.update(),  # session_log_btn
+                        gr.update(),  # workspace_display
                         gr.update(),  # followup_input
                         gr.update(),  # followup_row
                         gr.update(),  # send_followup_btn
@@ -3249,6 +3278,7 @@ class ChadWebUI:
                 value=str(session.log_path) if session.log_path else None,
                 visible=session.log_path is not None,
             )
+            workspace_update = gr.update(value=self._workspace_label(session))
             display_history = history
             if history and isinstance(history[0], dict):
                 content = history[0].get("content", "")
@@ -3287,6 +3317,7 @@ class ChadWebUI:
                 gr.update(interactive=cancel_btn_interactive),
                 gr.update(value=display_role_status),
                 log_btn_update,
+                workspace_update,
                 gr.update(value=""),  # Clear followup input
                 gr.update(visible=show_followup),  # Show/hide followup row
                 gr.update(interactive=show_followup),  # Enable/disable send button
@@ -6114,6 +6145,12 @@ class ChadWebUI:
                     elem_id="session-log-btn" if is_first else None,
                     elem_classes=["session-log-btn"],
                 )
+                workspace_display = gr.Markdown(
+                    self._workspace_label(session),
+                    key=f"workspace-display-{session_id}",
+                    elem_id="workspace-display" if is_first else None,
+                    elem_classes=["workspace-display"],
+                )
 
         # Agent communication view
         with gr.Column(elem_classes=["agent-panel"]):
@@ -6553,6 +6590,7 @@ class ChadWebUI:
                 cancel_btn,
                 role_status,
                 session_log_btn,
+                workspace_display,
                 followup_input,
                 followup_row,
                 send_followup_btn,
