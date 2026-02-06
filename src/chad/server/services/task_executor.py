@@ -337,6 +337,7 @@ class Task:
     _thread: threading.Thread | None = field(default=None, repr=False)
     _event_queue: queue.Queue = field(default_factory=queue.Queue, repr=False)
     _provider: Any = field(default=None, repr=False)
+    _last_terminal_snapshot: str = field(default="", repr=False)
 
 
 def build_agent_command(
@@ -695,7 +696,9 @@ class TaskExecutor:
 
         # Terminal emulator for extracting meaningful text from PTY output
         log_emulator = TerminalEmulator(cols=cols, rows=rows)
-        last_logged_text = ""
+        # Persist dedupe baseline across phases to avoid duplicate terminal_output
+        # rows when a new phase starts with an unchanged screen.
+        last_logged_text = task._last_terminal_snapshot
         pty_service = get_pty_stream_service()
 
         def flush_terminal_buffer():
@@ -716,6 +719,7 @@ class TaskExecutor:
                 if task.event_log:
                     task.event_log.log(TerminalOutputEvent(data=current_text))
                 last_logged_text = current_text
+                task._last_terminal_snapshot = current_text
             last_log_flush = time.time()
 
         # Build agent command for this phase

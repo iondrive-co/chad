@@ -8,6 +8,16 @@
     "screenshot": "N/A - behavioral fix during live streaming, cannot be captured in static screenshot",
     "files": [
       "src/chad/ui/gradio/web_ui.py:7514-7718"
+    ],
+    "reproduction_steps": [
+      "1. Launch Gradio UI: `chad --ui gradio`",
+      "2. Configure a mock account and select it as coding agent",
+      "3. Start a long-running task (e.g. 'Refactor all test files to use pytest fixtures') to generate substantial streaming output",
+      "4. Observe the live stream output panel as content streams in - confirm autoscroll is following new output",
+      "5. Scroll up briefly in the live stream panel to read earlier output, then immediately scroll back to the very bottom",
+      "6. Wait for several more lines of output to arrive (5-10 seconds)",
+      "7. EXPECTED: Output should continue auto-scrolling to show new content since the user returned to the bottom",
+      "8. ACTUAL: Scroll position stays fixed at the point you scrolled back to; new content arrives below the visible area and the viewport drifts upward relative to the stream"
     ]
   },
   {
@@ -20,6 +30,13 @@
       "src/chad/ui/cli/app.py:280-290",
       "src/chad/util/config_manager.py:322-366",
       "tests/test_config_manager.py"
+    ],
+    "reproduction_steps": [
+      "1. Via API: Query all user-editable config keys by inspecting CONFIG_BASE_KEYS from config_manager.py, filtering out internal keys (password_hash, encryption_salt, accounts, role_assignments, projects, mock_remaining_usage, mock_context_remaining)",
+      "2. Via API: For each user-editable key, verify a corresponding GET/PUT endpoint exists under /api/v1/config/",
+      "3. Via CLI config parity checker: Run `cli_config_parity_check(api_client)` which lists all config endpoints from the server and cross-references them against the menu options rendered by run_settings_menu",
+      "4. EXPECTED: Every user-editable config key has a corresponding CLI menu option",
+      "5. ACTUAL: set_account_model and set_account_reasoning have API endpoints (PUT /api/v1/accounts/{name}/model, PUT /api/v1/accounts/{name}/reasoning) but no CLI menu entries"
     ]
   },
   {
@@ -30,6 +47,15 @@
     "fix": "Updated run_settings_menu to use client.set_verification_agent() API instead of role assignment. Added verification_account lookup via client.get_verification_agent() in the main menu loop, and passed it to run_task_with_streaming which now includes verification_agent in the start_task payload.",
     "files": [
       "src/chad/ui/cli/app.py:321-344"
+    ],
+    "reproduction_steps": [
+      "1. Via API: Create two mock accounts: POST /api/v1/accounts with {name: 'mock-coder', provider: 'mock'} and {name: 'mock-verifier', provider: 'mock'}",
+      "2. Via API: Set verification agent: PUT /api/v1/config/verification-agent with {account_name: 'mock-verifier'}",
+      "3. Via API: Confirm it's set: GET /api/v1/config/verification-agent should return 'mock-verifier'",
+      "4. Via API: Create a session and start a task: POST /api/v1/sessions/{id}/tasks with {coding_agent: 'mock-coder', verification_agent: 'mock-verifier', ...}",
+      "5. Via API: Collect SSE events from GET /api/v1/sessions/{id}/stream and check for verification phase events",
+      "6. EXPECTED: Structured events include verification_attempt entries showing mock-verifier was used",
+      "7. ACTUAL (CLI path): The CLI's run_settings_menu sets the role via set_account_role('VERIFICATION') which doesn't persist to /config/verification-agent, and start_task payload omits verification_agent entirely, so verification never runs"
     ]
   },
   {
@@ -40,6 +66,22 @@
     "files": [
       "src/chad/ui/gradio/web_ui.py:6040-6076",
       "src/chad/ui/cli/app.py:609-729"
+    ],
+    "reproduction_steps": [
+      "For raw JSON in streaming output (API-testable):",
+      "1. Via API: Create session and mock account: POST /api/v1/sessions and POST /api/v1/accounts {name: 'mock-agent', provider: 'mock'}",
+      "2. Via API: Start task: POST /api/v1/sessions/{id}/tasks with {coding_agent: 'mock-agent', project_path: '/tmp/test', task_description: 'test'}",
+      "3. Via API: Collect SSE terminal events from GET /api/v1/sessions/{id}/stream",
+      "4. Via stream output inspector: Decode base64 terminal output from each terminal event and scan for raw JSON patterns like '{\"type\":', '{\"message\":', '{\"content\":'",
+      "5. EXPECTED: Terminal output contains only human-readable text (tool names, file paths, status messages)",
+      "6. ACTUAL: Terminal output includes raw JSON event dicts like {\"type\": \"assistant\", \"message\": {...}}",
+      "",
+      "For misaligned controls (Gradio-only):",
+      "7. Launch Gradio UI: `chad --ui gradio`",
+      "8. Navigate to the Run Task tab",
+      "9. Observe button positions relative to the coding agent and verification agent panels",
+      "10. EXPECTED: Cancel/Save/Session Log buttons are positioned under the agent panels in the status row",
+      "11. ACTUAL: Buttons render on the far left; status line is squeezed with extra gaps between input fields"
     ]
   },
   {
@@ -51,6 +93,16 @@
     "files": [
       "src/chad/server/services/task_executor.py:1000,1100",
       "src/chad/util/config_manager.py"
+    ],
+    "reproduction_steps": [
+      "1. Via API: Set max verification attempts to 7: PUT /api/v1/config/max-verification-attempts with {attempts: 7}",
+      "2. Via API: Confirm it persisted: GET /api/v1/config/max-verification-attempts should return 7",
+      "3. Via API: Create session and start task with mock provider configured to always fail verification: POST /api/v1/sessions/{id}/tasks with {coding_agent: 'mock-agent', verification_agent: 'mock-verifier', ...}",
+      "4. Via task phase monitor: Monitor structured events from GET /api/v1/sessions/{id}/events filtering for event_type='verification_attempt'",
+      "5. Wait for task to complete (mock provider is fast)",
+      "6. Count the total number of verification_attempt events",
+      "7. EXPECTED: 7 verification attempts (matching the configured value)",
+      "8. ACTUAL: Only 3 attempts for the continuation loop (task_executor.py:1012 hardcodes max_continuation_attempts = 3), verification loop in web_ui.py correctly reads the config value but task_executor.py ignores it"
     ]
   },
   {
@@ -59,7 +111,17 @@
     "hypothesis": "QwenCodeProvider.get_response (src/chad/util/providers.py) appends content from both 'message' events and 'assistant' events emitted by stream-json, but Qwen sends the same text in both, leading to duplicates; capture only one event type or de-dupe by message id/content before appending.",
     "status": "unverified",
     "fix": "Removed the handler for 'message' events with role='assistant' in QwenCodeProvider.get_response, keeping only the 'assistant' type handler which uses structured content blocks. This eliminates the duplicate content from the two event types.",
-    "screenshot": "N/A - behavioral fix during streaming output, requires live Qwen provider to demonstrate"
+    "screenshot": "N/A - behavioral fix during streaming output, requires live Qwen provider to demonstrate",
+    "reproduction_steps": [
+      "1. Via provider output simulator: Configure a simulated Qwen stream-json output that emits both a 'message' event with role='assistant' and an 'assistant' type event containing identical text content (this mirrors real Qwen CLI behavior)",
+      "2. Via API: Create a qwen account and session: POST /api/v1/accounts {name: 'qwen-test', provider: 'qwen'}",
+      "3. Via API: Start task: POST /api/v1/sessions/{id}/tasks with {coding_agent: 'qwen-test', ...}",
+      "4. Via stream event collector: Collect all terminal events from the SSE endpoint GET /api/v1/sessions/{id}/stream",
+      "5. Decode and concatenate all terminal output chunks",
+      "6. Scan the concatenated output for repeated consecutive lines or text blocks",
+      "7. EXPECTED: Each line of assistant output appears exactly once",
+      "8. ACTUAL: Lines appear twice because both the 'message' event handler and the 'assistant' event handler in QwenCodeProvider.get_response emit the same content"
+    ]
   },
   {
     "title": "Codex shows system prompt before user-visible output",
@@ -67,7 +129,16 @@
     "hypothesis": "The Codex provider streaming handler isn't filtering out system-role messages before forwarding events; the stream JSON decoder (likely in src/chad/util/providers.py or stream_client) forwards all roles verbatim, so the first chunk renders the system prompt.",
     "status": "unverified",
     "fix": "Added filtering in OpenAICodexProvider.format_json_event_as_text to skip events with role 'user' or 'system', and item.completed events with item_type 'user_message', 'system_message', or 'input_message', or items with role 'user'/'system'. This prevents the system prompt from being displayed in the live stream.",
-    "screenshot": "N/A - behavioral fix during streaming output, requires live Codex provider to demonstrate"
+    "screenshot": "N/A - behavioral fix during streaming output, requires live Codex provider to demonstrate",
+    "reproduction_steps": [
+      "1. Via provider output simulator: Configure a simulated Codex stream-json output sequence that begins with a system message event (role='system', content='You are a coding assistant...') followed by assistant response events (mimicking real codex exec output)",
+      "2. Via API: Create a codex account and session: POST /api/v1/accounts {name: 'codex-test', provider: 'openai'}",
+      "3. Via API: Start task: POST /api/v1/sessions/{id}/tasks with {coding_agent: 'codex-test', ...}",
+      "4. Via stream event collector: Collect the first 10 terminal events from the SSE endpoint",
+      "5. Decode and inspect the initial terminal output chunks",
+      "6. EXPECTED: First visible output is the assistant's response to the task (e.g. 'I'll start by reading the project files...')",
+      "7. ACTUAL: First visible output contains the full system prompt text ('You are a coding assistant...' or similar) which should be hidden from the user"
+    ]
   },
   {
     "title": "Codex only outputs tool calls with no explanations",
@@ -75,7 +146,15 @@
     "hypothesis": "Tool call events from the Codex provider are forwarded directly without the accompanying assistant commentary; the tool/assistant event merge logic in the Codex provider (src/chad/util/providers.py) or the live stream renderer drops assistant text blocks and only surfaces tool call JSON.",
     "status": "unverified",
     "fix": "Enhanced the mcp_tool_call handler in format_json_event_as_text to extract and display reasoning/thought/explanation fields from tool call items before showing the tool operation. Also added handlers for other tool call item types (tool_call, function_call, tool_use) to ensure all tool invocation formats are properly formatted instead of shown as raw JSON.",
-    "screenshot": "N/A - behavioral fix during streaming output, requires live Codex provider to demonstrate"
+    "screenshot": "N/A - behavioral fix during streaming output, requires live Codex provider to demonstrate",
+    "reproduction_steps": [
+      "1. Via provider output simulator: Configure a simulated Codex stream-json output that includes: (a) an assistant text event with reasoning ('I need to read the file first'), (b) a tool_call/mcp_tool_call event with raw JSON payload ({name: 'read_file', arguments: {path: '/src/main.py'}}), (c) a tool result event",
+      "2. Via API: Create codex account and session, start task as in the 'Codex shows system prompt' bug",
+      "3. Via stream event collector: Collect all terminal events from the SSE endpoint after the initial output",
+      "4. Decode terminal output and inspect for presence of both human-readable explanations AND tool call summaries",
+      "5. EXPECTED: Output shows 'I need to read the file first' followed by a formatted tool summary like 'Reading /src/main.py...'",
+      "6. ACTUAL: Output shows only raw JSON like {\"type\": \"function_call\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"/src/main.py\\\"}\"} with no preceding explanation text"
+    ]
   },
   {
     "title": "Live view not showing during verification or subsequent coding rounds",
@@ -83,7 +162,17 @@
     "hypothesis": "The has_initial_live_render flag is not reset when transitioning between coding and verification phases, causing the live patch mechanism to fail because it tries to patch content that no longer exists in the DOM.",
     "status": "unverified",
     "fix": "Added session.has_initial_live_render = False reset before yielding verification and revision placeholders in start_chad_task and send_followup. This forces a full re-render of the live stream container instead of attempting DOM patches when switching between coding and verification phases.",
-    "screenshot": "N/A - behavioral fix during live streaming phase transitions"
+    "screenshot": "N/A - behavioral fix during live streaming phase transitions",
+    "reproduction_steps": [
+      "1. Via API: Create session and two mock accounts (coding + verification): POST /api/v1/accounts for 'mock-coder' and 'mock-verifier'",
+      "2. Via API: Start a task with both agents: POST /api/v1/sessions/{id}/tasks with {coding_agent: 'mock-coder', verification_agent: 'mock-verifier', ...}",
+      "3. Via stream event collector: Subscribe to SSE stream at GET /api/v1/sessions/{id}/stream and collect events in order",
+      "4. Via task phase monitor: Wait for the coding phase to complete (look for structured event indicating coding done / verification starting)",
+      "5. After the phase transition to verification, continue collecting terminal events",
+      "6. Count terminal events received AFTER the verification phase begins",
+      "7. EXPECTED: Terminal events continue flowing during verification phase with verification agent output",
+      "8. ACTUAL: Terminal events stop after coding phase completes; the verification agent's PTY output is generated but not routed to the SSE stream because has_initial_live_render is stale and the stream_id references the old coding PTY"
+    ]
   },
   {
     "title": "Missing exploration prompt accordion - only coding and verification shown",
@@ -92,6 +181,14 @@
     "status": "unfixed",
     "files": [
       "src/chad/ui/gradio/web_ui.py:6125-6150"
+    ],
+    "reproduction_steps": [
+      "1. Launch Gradio UI: `chad --ui gradio`",
+      "2. Navigate to the Run Task tab",
+      "3. Scroll down to the prompt display area below the live stream panel",
+      "4. Count the number of prompt accordion widgets visible",
+      "5. EXPECTED: Three accordions labeled 'Exploration Agent Prompt', 'Coding Agent Prompt', and 'Verification Agent Prompt', all visible with raw template text showing placeholder variables like {task_description}, {project_docs}",
+      "6. ACTUAL: Only two accordions: 'Coding Agent Prompt' and 'Verification Agent Prompt'; the exploration prompt accordion is missing entirely"
     ]
   },
   {
@@ -101,6 +198,16 @@
     "status": "unfixed",
     "files": [
       "src/chad/ui/gradio/web_ui.py:94-96,2473-2486,3475,3595-3626"
+    ],
+    "reproduction_steps": [
+      "1. Launch Gradio UI: `chad --ui gradio`",
+      "2. Configure a mock account and start a task to generate streaming output",
+      "3. Wait until at least 20-30 lines of output have appeared in the live stream panel",
+      "4. Click on the 'Setup' tab to navigate away from the Run Task tab",
+      "5. Wait 2-3 seconds on the Setup tab",
+      "6. Click back on the 'Run Task' tab",
+      "7. EXPECTED: Live view immediately shows the accumulated output from the running task",
+      "8. ACTUAL: Live view briefly shows 'waiting for agent output...' placeholder text for ~1-2 seconds before the content is restored on the next SSE polling update"
     ]
   },
   {
@@ -110,6 +217,16 @@
     "status": "unfixed",
     "files": [
       "src/chad/ui/gradio/web_ui.py:6020-6028,2899-2910"
+    ],
+    "reproduction_steps": [
+      "1. Via API: Create a session: POST /api/v1/sessions with {name: 'test', project_path: '/path/to/git/repo'}",
+      "2. Via API: Create mock account: POST /api/v1/accounts {name: 'mock-agent', provider: 'mock'}",
+      "3. Via API: Start a task: POST /api/v1/sessions/{id}/tasks with {coding_agent: 'mock-agent', ...}",
+      "4. Via API: Immediately check worktree status: GET /api/v1/sessions/{id}/worktree - note it may not be created yet at this point",
+      "5. Via API: Wait 2-3 seconds, then check worktree status again - it should now exist with a path",
+      "6. Via formatted status inspector: Call format_role_status(task_state='running', worktree_path=<path from step 5>) and inspect the returned markdown string",
+      "7. EXPECTED: The status markdown always includes the worktree path once it's been created, and UI re-renders with the path",
+      "8. ACTUAL: The initial render of the role status panel occurs before the worktree is created (worktree_path=None), and subsequent status updates do not always re-render with the worktree path, leaving it absent from the panel"
     ]
   },
   {
@@ -119,6 +236,15 @@
     "status": "unfixed",
     "files": [
       "src/chad/server/services/task_executor.py:687-857,841-851"
+    ],
+    "reproduction_steps": [
+      "1. Via provider output simulator: Configure a simulated Codex PTY output that includes a large (>2000 byte) chunk containing mixed ANSI escape sequences and binary-like data (simulating sixel graphics or image data that codex may emit)",
+      "2. Via API: Create codex account and session, start task as in the other Codex bugs",
+      "3. Via stream event collector: Collect all terminal events from the SSE endpoint",
+      "4. Decode terminal output and pass it through the prompt echo filter (task_executor.py:687-857) in isolation",
+      "5. Inspect the filtered output for garbled characters: scan for runs of @, #, %, * characters that exceed 10 consecutive non-alphanumeric characters",
+      "6. EXPECTED: All binary/image data is filtered out; only clean text output reaches the terminal emulator",
+      "7. ACTUAL: The 500-byte chunk splitting at task_executor.py:841-851 breaks mid-ANSI sequence, causing the regex filter to miss binary data, which then passes through as garbled @@@###%%% characters"
     ]
   },
   {
@@ -129,6 +255,15 @@
     "files": [
       "src/chad/server/services/task_executor.py:342-467,560,630,934,989",
       "src/chad/server/api/schemas/task.py:17"
+    ],
+    "reproduction_steps": [
+      "1. Via API: Create a mock account: POST /api/v1/accounts {name: 'mock-agent', provider: 'mock'}",
+      "2. Via API: Create a session: POST /api/v1/sessions with {name: 'model-test'}",
+      "3. Via API: Start task with a specific model override: POST /api/v1/sessions/{id}/tasks with {coding_agent: 'mock-agent', coding_model: 'gpt-5.3-codex', project_path: '/tmp/test', task_description: 'test'}",
+      "4. Via command inspector: Intercept the command array returned by build_agent_command() and inspect for a --model flag",
+      "5. EXPECTED: The command includes '--model gpt-5.3-codex' (or provider-equivalent flag like claude's --model)",
+      "6. ACTUAL: build_agent_command() signature has no model parameter (only provider, account_name, project_path, task_description, screenshots, phase, exploration_output); the coding_model value from the API request is accepted by TaskExecutor.start_task() but never forwarded to build_agent_command(), so the CLI runs with whatever model is in the account's default config",
+      "7. Verify via event log: GET /api/v1/sessions/{id}/events and check the session_started event - it records coding_model: 'gpt-5.3-codex' proving the API received it, but the agent CLI was never told to use it"
     ]
   },
   {
@@ -139,6 +274,16 @@
     "fix": "Reset session.has_initial_live_render = False before yielding verification and revision placeholders in start_chad_task and send_followup. Forces full re-render of live stream container instead of DOM patches when switching phases.",
     "files": [
       "src/chad/ui/gradio/web_ui.py"
+    ],
+    "reproduction_steps": [
+      "1. Via API: Create session with mock-coder and mock-verifier accounts (mock-verifier configured to reject first verification attempt, triggering a coding revision round)",
+      "2. Via API: Start task: POST /api/v1/sessions/{id}/tasks with both agents",
+      "3. Via stream event collector: Subscribe to SSE stream and collect events with timestamps, partitioned by phase",
+      "4. Via task phase monitor: Track phase transitions: coding → verification → revision (coding round 2) → verification round 2",
+      "5. For each phase transition, record whether terminal events continue flowing in the SSE stream",
+      "6. Count terminal events per phase: {coding_1: N, verification_1: M, revision_1: P, verification_2: Q}",
+      "7. EXPECTED: All phases have non-zero terminal event counts (coding_1 > 0, verification_1 > 0, revision_1 > 0, verification_2 > 0)",
+      "8. ACTUAL: Terminal events flow during coding_1 but drop to zero during verification_1 and subsequent phases because the SSE multiplexer's stream_id is still bound to the coding PTY, not the new verification/revision PTYs"
     ]
   },
   {
@@ -150,6 +295,18 @@
     "files": [
       "src/chad/server/services/task_executor.py",
       "src/chad/util/config_manager.py"
+    ],
+    "reproduction_steps": [
+      "1. Via API: Create two mock accounts: POST /api/v1/accounts for 'mock-primary' and 'mock-fallback'",
+      "2. Via API: Set provider fallback order: PUT /api/v1/config/provider-fallback-order with {account_names: ['mock-primary', 'mock-fallback']}",
+      "3. Via API: Set usage switch threshold to 10%: PUT /api/v1/config/usage-switch-threshold with {threshold: 10}",
+      "4. Via API: Set mock remaining usage for primary to below threshold: PUT /api/v1/config/mock-remaining-usage/mock-primary with {remaining: 0.05} (5%, below the 10% threshold)",
+      "5. Via API: Set mock remaining usage for fallback to healthy: PUT /api/v1/config/mock-remaining-usage/mock-fallback with {remaining: 0.80}",
+      "6. Via API: Create session and start task: POST /api/v1/sessions/{id}/tasks with {coding_agent: 'mock-primary', ...}",
+      "7. Via stream event collector: Monitor SSE events for a provider switch event or for the task to complete",
+      "8. Via API: Check task status and session events for evidence of which provider actually executed the task",
+      "9. EXPECTED: Task executor detects mock-primary is below the usage threshold, consults the fallback order, and automatically switches to mock-fallback mid-task or before starting",
+      "10. ACTUAL: Task runs entirely on mock-primary regardless of usage level; task_executor.py never reads usage_switch_threshold, context_switch_threshold, or provider_fallback_order from config during execution"
     ]
   },
   {
@@ -161,6 +318,17 @@
     "files": [
       "src/chad/server/services/task_executor.py",
       "src/chad/ui/gradio/web_ui.py"
+    ],
+    "reproduction_steps": [
+      "1. Via API: Create a session and mock account: POST /api/v1/sessions and POST /api/v1/accounts {name: 'mock-agent', provider: 'mock'}",
+      "2. Via API: Start a task: POST /api/v1/sessions/{id}/tasks with {coding_agent: 'mock-agent', project_path: '/tmp/test', task_description: 'a long running task'}",
+      "3. Via API: Immediately cancel the task (while it's still running): POST /api/v1/sessions/{id}/cancel",
+      "4. Verify cancel succeeded: response should have {cancel_requested: true}",
+      "5. Wait 1-2 seconds for PTY cleanup",
+      "6. Via API: Check session state: GET /api/v1/sessions/{id} - verify active is false",
+      "7. Via API: Start a new task on the same session: POST /api/v1/sessions/{id}/tasks with {coding_agent: 'mock-agent', project_path: '/tmp/test', task_description: 'second task'}",
+      "8. EXPECTED: New task starts cleanly with status 201 and begins execution",
+      "9. ACTUAL: Returns an error (likely 409 Conflict or 500 Internal Server Error) because the session still references the old task's PTY stream_id, or the session.active flag was not properly reset, or the TaskExecutor rejects the task because it thinks one is still running"
     ]
   }
 ]
