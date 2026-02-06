@@ -930,6 +930,99 @@ class TestClaudeJsonParsingIntegration:
         assert "Done!" in combined
 
 
+    def test_long_codex_output_fully_captured(self, web_ui, mock_api_client, git_repo):
+        """Long Codex output should be fully captured in final_output, not just last screenful."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="codex", provider="openai", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-long"
+        mock_api_client.create_session.return_value = mock_session
+
+        # Header + prompt echo + mcp startup
+        header = b"OpenAI Codex v0.92.0\n--------\nworkdir: /tmp\nmodel: gpt-5\n--------\n\x1b[36muser\x1b[0m\nTask prompt\n\x1b[36mmcp startup:\x1b[0m 0 servers\n"
+        # Simulate long agent output (many lines that would overflow terminal screen buffer)
+        long_lines = "\n".join(f"Agent output line {i}" for i in range(200))
+        raw_output = header + long_lines.encode("utf-8")
+
+        mock_stream_event = Mock()
+        mock_stream_event.event_type = "terminal"
+        mock_stream_event.data = {"data": base64.b64encode(raw_output).decode()}
+
+        mock_complete_event = Mock()
+        mock_complete_event.event_type = "complete"
+        mock_complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="codex",
+            message_queue=message_queue,
+        )
+
+        assert success
+        # Final output must contain ALL lines, not just the last screenful
+        assert "Agent output line 0" in output
+        assert "Agent output line 100" in output
+        assert "Agent output line 199" in output
+
+    def test_codex_output_buffer_flushed_on_completion(self, web_ui, mock_api_client, git_repo):
+        """Codex output buffer should be flushed when stream completes, even without mcp marker."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="codex", provider="openai", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-flush"
+        mock_api_client.create_session.return_value = mock_session
+
+        # Output without mcp startup marker - buffer won't be drained by normal filtering
+        # This simulates incomplete Codex output (e.g., early termination)
+        raw_output = b"Some initial output without markers\nImportant content here"
+
+        mock_stream_event = Mock()
+        mock_stream_event.event_type = "terminal"
+        mock_stream_event.data = {"data": base64.b64encode(raw_output).decode()}
+
+        mock_complete_event = Mock()
+        mock_complete_event.event_type = "complete"
+        mock_complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="codex",
+            message_queue=message_queue,
+        )
+
+        assert success
+        # The buffered content should be flushed and included in final output
+        assert "Important content here" in output
+
+
 class TestLiveStreamPresentation:
     """Formatting and styling tests for the live activity stream."""
 

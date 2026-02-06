@@ -913,6 +913,10 @@ class TaskExecutor:
         if pty_session:
             exit_code = pty_session.exit_code or 0
 
+        # Flush any remaining Codex output buffer that wasn't emitted
+        if codex_output_buffer:
+            captured_output.append(codex_output_buffer)
+
         flush_terminal_buffer()
         pty_service.cleanup_session(stream_id)
 

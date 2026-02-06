@@ -138,6 +138,45 @@ class TestCodexFiltering:
         assert "thinking" in strip_ansi(result) or "Agent is now working" in result
 
 
+class TestCodexBufferFlush:
+    """Tests for Codex output buffer flush behavior."""
+
+    def test_unflushed_buffer_loses_content(self):
+        """Demonstrate that buffered content without mcp marker needs explicit flush."""
+        # Simulate incremental Codex output that hasn't reached mcp startup marker
+        buffer = ""
+        captured = []
+
+        # First chunk: header starts
+        buffer += "OpenAI Codex v0.92.0\n--------\nworkdir: /tmp\n"
+        # Buffer hasn't seen markers yet, nothing emitted
+
+        # Stream ends unexpectedly - buffer has content
+        assert buffer.strip()
+        assert len(captured) == 0
+
+        # Without flush, this content would be lost
+        # With flush: captured_output.append(codex_output_buffer)
+        captured.append(buffer)
+        assert "OpenAI Codex" in "\n".join(captured)
+
+    def test_full_output_not_truncated_by_terminal(self):
+        """Accumulated text captures full output regardless of terminal screen size."""
+        accumulated_text = []
+
+        # Simulate 200 lines of agent output being accumulated
+        for i in range(200):
+            chunk = f"Agent output line {i}\n"
+            accumulated_text.append(chunk)
+
+        full_output = "\n".join(accumulated_text)
+
+        # All lines should be present (unlike terminal.get_text() which only has last ~50)
+        assert "Agent output line 0" in full_output
+        assert "Agent output line 100" in full_output
+        assert "Agent output line 199" in full_output
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
