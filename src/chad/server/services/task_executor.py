@@ -679,6 +679,7 @@ class TaskExecutor:
         """
         last_output_time = time.time()
         last_warning_time = 0.0
+        last_log_flush = time.time()
         terminal_buffer = bytearray()
         terminal_lock = threading.Lock()
         first_stream_chunk_seen = False
@@ -698,9 +699,10 @@ class TaskExecutor:
         pty_service = get_pty_stream_service()
 
         def flush_terminal_buffer():
-            nonlocal last_logged_text
+            nonlocal last_logged_text, last_log_flush
             with terminal_lock:
                 if not terminal_buffer:
+                    last_log_flush = time.time()
                     return
                 data_bytes = bytes(terminal_buffer)
                 terminal_buffer.clear()
@@ -714,6 +716,7 @@ class TaskExecutor:
                 if task.event_log:
                     task.event_log.log(TerminalOutputEvent(data=current_text))
                 last_logged_text = current_text
+            last_log_flush = time.time()
 
         # Build agent command for this phase
         cmd, env, initial_input = build_agent_command(
@@ -904,6 +907,11 @@ class TaskExecutor:
                     pty_service.terminate(stream_id)
                     pty_service.cleanup_session(stream_id)
                     return -2, ""  # -2 indicates timeout
+
+            # Periodically flush decoded terminal snapshots to EventLog so
+            # long-running sessions are observable before process exit.
+            if time.time() - last_log_flush >= self.terminal_flush_interval:
+                flush_terminal_buffer()
 
             time.sleep(0.1)
             pty_session = pty_service.get_session(stream_id)
