@@ -6118,26 +6118,6 @@ class ChadWebUI:
                             interactive=verif_state.interactive,
                         )
 
-        # Full-width status line below the config panel
-        wt_path = str(session.worktree_path) if session.worktree_path else None
-        proj_path = session.project_path
-        role_status = gr.Markdown(
-            self.format_role_status(worktree_path=wt_path, project_path=proj_path),
-            key=f"role-status-{session_id}",
-            elem_id="role-config-status" if is_first else None,
-            elem_classes=["role-config-status"],
-        )
-
-        # Task status header - always in DOM but CSS hides when empty
-        # This ensures JavaScript can find it for merge section visibility logic
-        task_status = gr.Markdown(
-            "",
-            visible=True,
-            key=f"task-status-{session_id}",
-            elem_id="task-status-header" if is_first else None,
-            elem_classes=["task-status-header"],
-        )
-
         # Action buttons: right-aligned beneath the agent selector columns
         with gr.Row(
             elem_id="role-status-row-container" if is_first else None,
@@ -6188,6 +6168,26 @@ class ChadWebUI:
                     elem_id="workspace-display" if is_first else None,
                     elem_classes=["workspace-display"],
                 )
+
+        # Full-width status line below the config panel
+        wt_path = str(session.worktree_path) if session.worktree_path else None
+        proj_path = session.project_path
+        role_status = gr.Markdown(
+            self.format_role_status(worktree_path=wt_path, project_path=proj_path),
+            key=f"role-status-{session_id}",
+            elem_id="role-config-status" if is_first else None,
+            elem_classes=["role-config-status"],
+        )
+
+        # Task status header - always in DOM but CSS hides when empty
+        # This ensures JavaScript can find it for merge section visibility logic
+        task_status = gr.Markdown(
+            "",
+            visible=True,
+            key=f"task-status-{session_id}",
+            elem_id="task-status-header" if is_first else None,
+            elem_classes=["task-status-header"],
+        )
 
         # Agent communication view
         with gr.Column(elem_classes=["agent-panel"]):
