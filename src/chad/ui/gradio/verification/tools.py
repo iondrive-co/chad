@@ -25,6 +25,20 @@ def _failure(message: str) -> Dict[str, object]:
     return {"success": False, "error": message}
 
 
+def _get_verify_pytest_timeout() -> int:
+    """Return timeout for the full pytest phase in verify()."""
+    raw = os.environ.get("CHAD_VERIFY_PYTEST_TIMEOUT")
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    # Full suite (including visual tests) commonly exceeds two minutes.
+    return 1800
+
+
 def verify(lint_only: bool = False, project_root: str | None = None) -> Dict[str, object]:
     """Run linting and ALL tests (unit + integration + visual) to verify no regressions.
 
@@ -168,7 +182,7 @@ def verify(lint_only: bool = False, project_root: str | None = None) -> Dict[str
             errors="replace",
             cwd=str(root),
             env=env,
-            timeout=120,
+            timeout=_get_verify_pytest_timeout(),
         )
 
         combined_output = test_result.stdout or ""

@@ -8,8 +8,6 @@ Usage:
     CODEX_HOME=~/.chad/codex-homes/codex-home .venv/bin/python scripts/test_codex_integration.py
 """
 
-import asyncio
-import base64
 import os
 import subprocess
 import sys
@@ -17,13 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
-from chad.server.services.task_executor import TaskExecutor, build_agent_command
-from chad.server.services.session_manager import SessionManager
-from chad.server.services.pty_stream import get_pty_stream_service
-from chad.util.config_manager import ConfigManager
+from chad.server.services.task_executor import build_agent_command
 
 
 def test_codex_command_build():
