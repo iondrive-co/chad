@@ -273,6 +273,7 @@ class TestCodingAgentLayout:
         project_path = page.get_by_label("Project Path")
         status = page.locator("#role-config-status")
         session_log = page.locator("#session-log-btn")
+        workspace = page.locator("#workspace-display")
         status_row = page.locator("#role-status-row")
         coding_agent = page.get_by_label("Coding Agent")
         coding_model = page.get_by_label("Model", exact=True)
@@ -284,6 +285,7 @@ class TestCodingAgentLayout:
         expect(project_path).to_be_visible()
         expect(status).to_be_visible()
         expect(session_log).to_be_visible()
+        expect(workspace).to_be_visible()
         expect(status_row).to_be_visible()
         expect(coding_agent).to_be_visible()
         expect(coding_model).to_be_visible()
@@ -295,6 +297,7 @@ class TestCodingAgentLayout:
         project_box = project_path.bounding_box()
         status_box = status.bounding_box()
         log_box = session_log.bounding_box()
+        workspace_box = workspace.bounding_box()
         status_row_box = status_row.bounding_box()
         coding_box = coding_agent.bounding_box()
         model_box = coding_model.bounding_box()
@@ -307,6 +310,7 @@ class TestCodingAgentLayout:
             project_box
             and status_box
             and log_box
+            and workspace_box
             and status_row_box
             and coding_box
             and model_box
@@ -325,6 +329,9 @@ class TestCodingAgentLayout:
         assert (
             log_box["x"] >= coding_box["x"] - 10
         ), "Session log button should sit in the right-hand action cluster"
+        assert (
+            workspace_box["x"] >= log_box["x"] - 4
+        ), "Workspace label should sit with the action cluster next to session log"
 
         assert (
             model_box["y"] >= coding_box["y"] + coding_box["height"] - 2

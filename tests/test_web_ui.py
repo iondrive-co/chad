@@ -568,11 +568,22 @@ class TestChadWebUI:
 
         assert len(updates) == 1
         update = updates[0]
-        # 24 elements: 18 base + 6 prompt accordions (exploration, implementation, verification x 2)
-        assert len(update) == 24
+        # 25 elements: 19 base (includes workspace display) + 6 prompt outputs
+        assert len(update) == 25
         assert "already running" in update[2].get("value", "").lower()
         assert update[5].get("interactive") is True
         assert update[6].get("interactive") is False
+
+    def test_workspace_label_prefers_worktree_over_project(self, web_ui):
+        """Workspace label should show active worktree path when available."""
+        session = web_ui.create_session("workspace")
+        session.project_path = "/repo"
+        session.worktree_path = Path("/repo/.chad-worktrees/abcd1234")
+
+        label = web_ui._workspace_label(session)
+
+        assert "Workspace:" in label
+        assert "/repo/.chad-worktrees/abcd1234" in label
 
     def test_cancel_preserves_live_stream(self, monkeypatch, web_ui, git_repo):
         """Cancelling should not clear the live output panel."""
