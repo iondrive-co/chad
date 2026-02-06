@@ -132,6 +132,21 @@ class TestClaudeStreamJsonParser:
         results = parser.feed(data)
         assert results == []
 
+    def test_other_tools_show_actual_names(self):
+        """Parser shows actual tool names instead of generic 'other' count."""
+        parser = ClaudeStreamJsonParser()
+        # Add some categorized tools
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}\n')
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{}}]}}\n')
+        # Add uncategorized tools
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","input":{}}]}}\n')
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{}}]}}\n')
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{}}]}}\n')
+
+        summary = parser.get_tool_summary()
+        # Should show actual tool names, not "3 other"
+        assert summary == "• 1 file read, 1 edit, AskUserQuestion, 2 TodoWrite"
+
 
 class TestBuildAgentCommand:
     """Tests for build_agent_command function."""
