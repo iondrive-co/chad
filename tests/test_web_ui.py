@@ -574,6 +574,57 @@ class TestChadWebUI:
         assert update[5].get("interactive") is True
         assert update[6].get("interactive") is False
 
+    def test_start_task_after_cancel_requests_server_cancel_and_continues(self, web_ui, git_repo, monkeypatch):
+        """Restart right after cancel should request server cancel and continue once inactive."""
+        session = web_ui.create_session("test")
+        session.server_session_id = "server-session-1"
+        session.cancel_requested = True
+
+        calls = {"count": 0}
+
+        def get_session_side_effect(_session_id):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return Mock(active=True)
+            return Mock(active=False)
+
+        web_ui.api_client.get_session.side_effect = get_session_side_effect
+
+        started = {"value": False}
+
+        def fake_run_task_via_api(
+            session_id,
+            project_path,
+            task_description,
+            coding_account,
+            message_queue,
+            **kwargs,
+        ):
+            started["value"] = True
+            message_queue.put(("message_complete", "CODING AI", "done"))
+            return True, "done", "server-session-2", {
+                "files_modified": [],
+                "files_created": [],
+                "commands_run": [],
+                "total_tool_calls": 0,
+            }
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        updates = list(
+            web_ui.start_chad_task(
+                session.id,
+                str(git_repo),
+                "do something",
+                "claude",
+                verification_agent=web_ui.VERIFICATION_NONE,
+            )
+        )
+
+        assert started["value"] is True
+        web_ui.api_client.cancel_session.assert_called_once_with("server-session-1")
+        assert all("already running" not in (u[2].get("value", "").lower()) for u in updates)
+
     def test_workspace_label_prefers_worktree_over_project(self, web_ui):
         """Workspace label should show active worktree path when available."""
         session = web_ui.create_session("workspace")
@@ -2073,6 +2124,35 @@ class TestClaudeMultiAccount:
 
         assert "Logged in" in result
         assert "PRO" in result
+
+    @patch("pathlib.Path.home")
+    @patch("requests.get")
+    def test_claude_usage_extra_credits_are_displayed_as_dollars(self, mock_get, mock_home, web_ui, tmp_path):
+        """Claude extra credit values are cents and should render as dollars."""
+        import json
+
+        mock_home.return_value = tmp_path
+
+        config_dir = tmp_path / ".chad" / "claude-configs" / "claude-1"
+        config_dir.mkdir(parents=True)
+        creds = {"claudeAiOauth": {"accessToken": "test-token", "subscriptionType": "PRO"}}
+        (config_dir / ".credentials.json").write_text(json.dumps(creds))
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "extra_usage": {
+                "is_enabled": True,
+                "used_credits": 1499,
+                "monthly_limit": 4000,
+                "utilization": 37.5,
+            }
+        }
+        mock_get.return_value = mock_response
+
+        result = web_ui.provider_ui._get_claude_usage("claude-1")
+
+        assert "$14.99 / $40.00 (37.5%)" in result
 
     @patch("pathlib.Path.home")
     def test_check_provider_login_uses_isolated_config(self, mock_home, web_ui, tmp_path):

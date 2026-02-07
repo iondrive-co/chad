@@ -3,7 +3,7 @@
 import threading
 import pytest
 from dataclasses import dataclass
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock, patch
 
 from chad.ui.gradio.web_ui import ChadWebUI, Session
 from chad.ui.client.api_client import Account
@@ -126,6 +126,46 @@ class TestCancelTask:
         merge_section_update = result[8]
         assert isinstance(merge_section_update, dict), "merge_section_group update should be a dict"
         assert merge_section_update.get("visible") is False, "merge_section_group should be hidden after cancel"
+
+    def test_cancel_requests_server_session_cancellation(self, web_ui):
+        """Cancel should propagate to the server when an API session is active."""
+        session = Session(
+            id="test-session",
+            name="Test Session",
+            active=True,
+            cancel_requested=False,
+            provider=MagicMock(),
+            config={"test": "config"},
+            server_session_id="server-session-1",
+        )
+        web_ui.sessions["test-session"] = session
+        web_ui.api_client.get_session.return_value = Mock(active=False)
+
+        web_ui.cancel_task("test-session")
+
+        web_ui.api_client.cancel_session.assert_called_once_with("server-session-1")
+
+    @patch("chad.ui.gradio.web_ui.GitWorktreeManager")
+    def test_cancel_skips_worktree_delete_if_server_still_active(self, mock_git_mgr_class, web_ui, tmp_path):
+        """Don't delete worktree while server cancellation is still in-flight."""
+        session = Session(
+            id="test-session",
+            name="Test Session",
+            active=True,
+            cancel_requested=False,
+            provider=MagicMock(),
+            config={"test": "config"},
+            server_session_id="server-session-1",
+            project_path=str(tmp_path),
+            worktree_path=tmp_path / "worktree",
+        )
+        web_ui.sessions["test-session"] = session
+
+        web_ui._request_server_cancel = MagicMock(return_value=False)
+
+        web_ui.cancel_task("test-session")
+
+        mock_git_mgr_class.return_value.delete_worktree.assert_not_called()
 
     def test_final_yield_after_cancel_enables_start_button(self, web_ui, tmp_path, monkeypatch):
         """Final yield from start_chad_task should enable start button after cancel.

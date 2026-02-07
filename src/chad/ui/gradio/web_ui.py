@@ -2505,6 +2505,33 @@ class ChadWebUI:
         session = self.get_session(session_id)
         return session.server_session_id or session_id
 
+    def _wait_for_server_session_inactive(
+        self,
+        server_session_id: str,
+        timeout_seconds: float = 3.0,
+        poll_interval: float = 0.1,
+    ) -> bool:
+        """Wait until a server-side session is inactive or gone."""
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            try:
+                server_session = self.api_client.get_session(server_session_id)
+            except Exception:
+                # Missing session is equivalent to inactive for restart purposes
+                return True
+            if not server_session or not getattr(server_session, "active", False):
+                return True
+            time.sleep(poll_interval)
+        return False
+
+    def _request_server_cancel(self, server_session_id: str, timeout_seconds: float = 3.0) -> bool:
+        """Request cancellation of a server-side session and wait for shutdown."""
+        try:
+            self.api_client.cancel_session(server_session_id)
+        except Exception:
+            return False
+        return self._wait_for_server_session_inactive(server_session_id, timeout_seconds=timeout_seconds)
+
     def _workspace_label(self, session: Session) -> str:
         """Format the workspace path label shown next to the session log button."""
         workspace_path = ""
@@ -3034,6 +3061,14 @@ class ChadWebUI:
         session = self.get_session(session_id)
         session.cancel_requested = True
         session.active = False  # Mark session as inactive to allow restart
+        server_shutdown_confirmed = True
+        if session.server_session_id:
+            # Cancel the server-side task too; otherwise it keeps running in the background
+            # and restart attempts will be blocked by the "already running" guard.
+            server_shutdown_confirmed = self._request_server_cancel(
+                session.server_session_id,
+                timeout_seconds=3.0,
+            )
         if session.provider:
             session.provider.stop_session()
             session.provider = None
@@ -3046,7 +3081,7 @@ class ChadWebUI:
             pass  # Best effort cleanup
 
         # Clean up worktree if it exists
-        if session.worktree_path and session.project_path:
+        if session.worktree_path and session.project_path and server_shutdown_confirmed:
             try:
                 git_mgr = GitWorktreeManager(Path(session.project_path))
                 git_mgr.delete_worktree(self._worktree_id(session_id))
@@ -3223,6 +3258,7 @@ class ChadWebUI:
         session = self.get_session(session_id)
         chat_history = []
         message_queue = queue.Queue()
+        prior_cancel_requested = session.cancel_requested
         session.cancel_requested = False
         session.config = None
 
@@ -3231,40 +3267,48 @@ class ChadWebUI:
         if session.server_session_id:
             try:
                 server_session = self.api_client.get_session(session.server_session_id)
-                if server_session and server_session.active:
-                    # Task is still running - cancel it first or warn user
-                    error_msg = (
-                        "⚠️ A task is already running on this session.\n\n"
-                        "Please wait for it to complete or cancel it before starting a new task."
-                    )
-                    yield (
-                        gr.update(),  # live_stream
-                        [],  # chatbot
-                        gr.update(value=error_msg),  # task_status
-                        gr.update(),  # project_path
-                        gr.update(),  # task_description
-                        gr.update(interactive=True),  # start_btn
-                        gr.update(interactive=False),  # cancel_btn
-                        gr.update(),  # role_status
-                        gr.update(),  # session_log_btn
-                        gr.update(),  # workspace_display
-                        gr.update(),  # followup_input
-                        gr.update(),  # followup_row
-                        gr.update(),  # send_followup_btn
-                        gr.update(),  # merge_section_group
-                        gr.update(),  # changes_summary
-                        gr.update(),  # merge_target_branch
-                        gr.update(),  # diff_full_content
-                        "",  # merge_section_header
-                        "",  # live_patch_trigger
-                        gr.update(),  # exploration_prompt_accordion
-                        gr.update(),  # exploration_prompt_content
-                        gr.update(),  # implementation_prompt_accordion
-                        gr.update(),  # implementation_prompt_content
-                        gr.update(),  # verification_prompt_accordion
-                        gr.update(),  # verification_prompt_content
-                    )
-                    return
+                if server_session and getattr(server_session, "active", False):
+                    # User just cancelled and immediately restarted: complete server-side
+                    # cancellation first so restart can proceed on the happy path.
+                    if prior_cancel_requested:
+                        cancelled = self._request_server_cancel(session.server_session_id, timeout_seconds=3.0)
+                        if cancelled:
+                            server_session = self.api_client.get_session(session.server_session_id)
+
+                    if server_session and getattr(server_session, "active", False):
+                        # Task is still running - cancel it first or warn user
+                        error_msg = (
+                            "⚠️ A task is already running on this session.\n\n"
+                            "Please wait for it to complete or cancel it before starting a new task."
+                        )
+                        yield (
+                            gr.update(),  # live_stream
+                            [],  # chatbot
+                            gr.update(value=error_msg),  # task_status
+                            gr.update(),  # project_path
+                            gr.update(),  # task_description
+                            gr.update(interactive=True),  # start_btn
+                            gr.update(interactive=False),  # cancel_btn
+                            gr.update(),  # role_status
+                            gr.update(),  # session_log_btn
+                            gr.update(),  # workspace_display
+                            gr.update(),  # followup_input
+                            gr.update(),  # followup_row
+                            gr.update(),  # send_followup_btn
+                            gr.update(),  # merge_section_group
+                            gr.update(),  # changes_summary
+                            gr.update(),  # merge_target_branch
+                            gr.update(),  # diff_full_content
+                            "",  # merge_section_header
+                            "",  # live_patch_trigger
+                            gr.update(),  # exploration_prompt_accordion
+                            gr.update(),  # exploration_prompt_content
+                            gr.update(),  # implementation_prompt_accordion
+                            gr.update(),  # implementation_prompt_content
+                            gr.update(),  # verification_prompt_accordion
+                            gr.update(),  # verification_prompt_content
+                        )
+                        return
             except Exception:
                 # Session might not exist on server yet, which is fine
                 pass
