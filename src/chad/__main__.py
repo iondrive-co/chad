@@ -204,7 +204,6 @@ def run_unified(
         from chad.ui.cli import launch_cli_ui
         launch_cli_ui(api_base_url=api_base_url, password=main_password)
     else:
-        print("Loading web interface...", flush=True)
         from chad.ui.gradio.web_ui import launch_web_ui
         launch_web_ui(api_base_url=api_base_url, port=ui_port, dev_mode=dev_mode)
 

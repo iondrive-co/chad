@@ -115,6 +115,11 @@ part of your change. Don't worry about backwards compatibility.
 customize prompts based on provider type. If a provider has different execution characteristics (e.g., terminates on
 certain output), handle that by restructuring the task execution phases rather than modifying prompts.
 
+**Dev-only Logging**: Diagnostic output (timing, internal state) must only appear when `--dev` is passed. In the Gradio
+UI, `ChadWebUI` has `self.dev_mode` and a `_startup_log(msg)` helper that checks it. In `launch_web_ui()`, gate prints
+behind the local `dev_mode` parameter. Never add unconditional `print()` for diagnostic info — user-visible output
+should be limited to essential status messages (e.g. "Loading web interface...", port conflicts).
+
 When fixing bugs, first describe the behavior of the software in detail, and then describe how the code makes that 
 happen. From that description generate plausible theories for the bug, then use tests and research to eliminate 
 candidates. Define the failure as a binary, assertable condition and aim to build a single reliable reproducer case 
