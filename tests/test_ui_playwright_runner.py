@@ -98,6 +98,19 @@ def test_run_screenshot_subprocess_builds_output(monkeypatch, tmp_path):
 class TestProcessCleanup:
     """Test cases for ProcessRegistry-based cleanup mechanism."""
 
+    def test_wait_for_port_accepts_gradio_local_url_log_format(self):
+        """_wait_for_port should parse Gradio startup log lines."""
+        from chad.ui.gradio.verification import ui_playwright_runner as upr
+
+        mock_process = Mock()
+        mock_process.stdout.readline.side_effect = [
+            "It is 2026-02-07 20:08 and Chad is online\n",
+            "Running on local URL:  http://127.0.0.1:43123\n",
+        ]
+        mock_process.poll.return_value = None
+
+        assert upr._wait_for_port(mock_process, timeout=1) == 43123
+
     def test_registry_created_on_first_call(self, monkeypatch, tmp_path):
         """_get_test_registry should create a registry on first call."""
         from chad.ui.gradio.verification import ui_playwright_runner as upr
