@@ -249,18 +249,24 @@ class TestCodingAgentLayout:
         )
         assert coding_box and verification_box
 
-        # Status line remains beneath config row and anchored left
+        # Status line should stay inside the top panel and anchored left.
         assert (
-            status_line_box["y"] >= row_box["y"] + row_box["height"] - 10
-        ), "Status line should appear below the config panel"
+            status_line_box["y"] >= row_box["y"] - 2
+        ), "Status line should remain inside the top panel"
+        assert (
+            status_line_box["y"] <= row_box["y"] + row_box["height"] + 2
+        ), "Status line should remain inside the top panel"
         assert (
             status_line_box["x"] < coding_box["x"] - 40
         ), "Status line should anchor to the left column"
 
-        # Action row should sit under agent selectors on the right
+        # Action row should sit under agent selectors on the right.
         assert (
-            button_row_box["y"] >= row_box["y"] + row_box["height"] - 10
-        ), "Button row should appear below the config panel"
+            button_row_box["y"] >= row_box["y"] - 2
+        ), "Button row should remain inside the top panel"
+        assert (
+            button_row_box["y"] <= row_box["y"] + row_box["height"] + 2
+        ), "Button row should remain inside the top panel"
         assert (
             button_row_box["x"] >= coding_box["x"] - 120
         ), "Action row should remain anchored under the right-side selectors"
@@ -354,6 +360,45 @@ class TestCodingAgentLayout:
         assert abs(verification_model_box["width"] - verification_box["width"]) <= 4
         assert abs(verification_reasoning_box["x"] - verification_box["x"]) <= 4
         assert abs(verification_reasoning_box["width"] - verification_box["width"]) <= 4
+
+    def test_status_sits_directly_under_doc_paths_without_compact_action_row(self, page: Page):
+        """Ready status should sit under doc paths while action row stays non-compact on the right."""
+        instructions = page.get_by_label("Agent Instructions Path")
+        architecture = page.get_by_label("Architecture Doc Path")
+        doc_paths_row = page.locator(".doc-paths-row")
+        status = page.locator("#role-config-status")
+        status_row = page.locator("#role-status-row")
+        coding_agent = page.get_by_label("Coding Agent")
+
+        expect(instructions).to_be_visible()
+        expect(architecture).to_be_visible()
+        expect(doc_paths_row).to_be_visible()
+        expect(status).to_be_visible()
+        expect(status_row).to_be_visible()
+        expect(coding_agent).to_be_visible()
+
+        doc_paths_box = doc_paths_row.bounding_box()
+        status_box = status.bounding_box()
+        action_box = status_row.bounding_box()
+        coding_box = coding_agent.bounding_box()
+
+        assert doc_paths_box and status_box and action_box and coding_box
+
+        doc_bottom = doc_paths_box["y"] + doc_paths_box["height"]
+        assert (
+            status_box["y"] <= doc_bottom + 8
+        ), "Ready status should be directly under doc path fields with no visible gap"
+        assert (
+            status_box["x"] + status_box["width"] <= coding_box["x"] + 40
+        ), "Ready status should stay in the left panel"
+        assert (
+            action_box["x"] >= coding_box["x"] - 20
+        ), "Action row should stay in the right panel under agent selectors"
+
+        classes = page.evaluate(
+            "() => document.querySelector('#role-status-row')?.className || ''"
+        )
+        assert "compact" not in classes.split(), "Action row should not use compact variant styling"
 
     def test_cancel_button_in_status_row(self, page: Page):
         """Cancel button should be in the status row, to the left of the save button."""

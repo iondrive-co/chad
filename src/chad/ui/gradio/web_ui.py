@@ -302,6 +302,7 @@ body, .gradio-container, .gradio-container * {
   gap: 8px !important;
   margin-top: 0 !important;
   padding-top: 0 !important;
+  margin-bottom: 0 !important;
 }
 
 
@@ -964,11 +965,17 @@ body, .gradio-container, .gradio-container * {
   width: auto !important;
   flex: 0 0 auto;
   max-width: 100%;
+  background: transparent !important;
 }
 
 #role-config-status {
   width: 100%;
   margin: 0;
+  padding-top: 0 !important;
+}
+
+#role-config-status p {
+  margin: 0 !important;
 }
 
 .role-status-row button,
@@ -6182,6 +6189,15 @@ class ChadWebUI:
                                 key=f"architecture-path-{session_id}",
                                 elem_classes=["doc-path-input", "architecture-path-input"],
                             )
+                        # Ready status belongs on the left under the doc-path fields.
+                        wt_path = str(session.worktree_path) if session.worktree_path else None
+                        proj_path = session.project_path
+                        role_status = gr.Markdown(
+                            self.format_role_status(worktree_path=wt_path, project_path=proj_path, accounts=accounts),
+                            key=f"role-status-{session_id}",
+                            elem_id="role-config-status" if is_first else None,
+                            elem_classes=["role-config-status"],
+                        )
                     with gr.Column(scale=1, min_width=200, elem_classes=["agent-config"]):
                         coding_agent = gr.Dropdown(
                             choices=account_choices,
@@ -6240,58 +6256,50 @@ class ChadWebUI:
                             key=f"verification-reasoning-{session_id}",
                             interactive=verif_state.interactive,
                         )
-        # Action buttons: compact row beneath the agent selector columns, right-aligned
-        with gr.Row(variant="compact", equal_height=True):
-            # Empty column to push buttons to the right
-            with gr.Column(scale=1, min_width=0):
-                gr.HTML("")
-            cancel_btn = gr.Button(
-                "Cancel",
-                variant="stop",
-                interactive=False,
-                key=f"cancel-btn-{session_id}",
-                elem_id="cancel-task-btn" if is_first else None,
-                elem_classes=["cancel-task-btn"],
-                min_width=80,
-                scale=0,
-            )
-            project_save_btn = gr.Button(
-                "Save",
-                variant="primary",
-                size="sm",
-                key=f"project-save-{session_id}",
-                elem_classes=["project-save-btn"],
-                min_width=80,
-                scale=0,
-            )
-            log_path = session.log_path
-            session_log_btn = gr.DownloadButton(
-                label="Session Log" if not log_path else log_path.name,
-                value=str(log_path) if log_path else None,
-                visible=log_path is not None,
-                variant="secondary",
-                size="sm",
-                scale=0,
-                min_width=140,
-                key=f"log-btn-{session_id}",
-                elem_id="session-log-btn" if is_first else None,
-                elem_classes=["session-log-btn"],
-            )
-            workspace_display = gr.HTML(
-                self._workspace_html(session),
-                key=f"workspace-display-{session_id}",
-                elem_id="workspace-display" if is_first else None,
-                elem_classes=["workspace-display"],
-            )
-        # Role status directly below action buttons
-        wt_path = str(session.worktree_path) if session.worktree_path else None
-        proj_path = session.project_path
-        role_status = gr.Markdown(
-            self.format_role_status(worktree_path=wt_path, project_path=proj_path, accounts=accounts),
-            key=f"role-status-{session_id}",
-            elem_id="role-config-status" if is_first else None,
-            elem_classes=["role-config-status"],
-        )
+                        # Action row belongs on the right under agent selectors.
+                        with gr.Row(
+                            equal_height=True,
+                            elem_id="role-status-row" if is_first else None,
+                            elem_classes=["role-status-row"],
+                        ):
+                            cancel_btn = gr.Button(
+                                "Cancel",
+                                variant="stop",
+                                interactive=False,
+                                key=f"cancel-btn-{session_id}",
+                                elem_id="cancel-task-btn" if is_first else None,
+                                elem_classes=["cancel-task-btn"],
+                                min_width=80,
+                                scale=0,
+                            )
+                            project_save_btn = gr.Button(
+                                "Save",
+                                variant="primary",
+                                size="sm",
+                                key=f"project-save-{session_id}",
+                                elem_classes=["project-save-btn"],
+                                min_width=80,
+                                scale=0,
+                            )
+                            log_path = session.log_path
+                            session_log_btn = gr.DownloadButton(
+                                label="Session Log" if not log_path else log_path.name,
+                                value=str(log_path) if log_path else None,
+                                visible=log_path is not None,
+                                variant="secondary",
+                                size="sm",
+                                scale=0,
+                                min_width=140,
+                                key=f"log-btn-{session_id}",
+                                elem_id="session-log-btn" if is_first else None,
+                                elem_classes=["session-log-btn"],
+                            )
+                            workspace_display = gr.HTML(
+                                self._workspace_html(session),
+                                key=f"workspace-display-{session_id}",
+                                elem_id="workspace-display" if is_first else None,
+                                elem_classes=["workspace-display"],
+                            )
         # Task status header - always in DOM but CSS hides when empty
         # This ensures JavaScript can find it for merge section visibility logic
         task_status = gr.Markdown(
@@ -8570,6 +8578,9 @@ def launch_web_ui(
     port, ephemeral, conflicted = _resolve_port(port)
     screenshot_mode = os.environ.get("CHAD_SCREENSHOT_MODE") == "1"
     open_browser = not screenshot_mode
+    if screenshot_mode:
+        # Playwright utilities wait for this explicit startup marker.
+        print(f"CHAD_PORT={port}", flush=True)
     if conflicted:
         print(f"Port {requested_port} already in use; launching on ephemeral port {port}")
 
