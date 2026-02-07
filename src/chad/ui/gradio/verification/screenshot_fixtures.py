@@ -74,7 +74,7 @@ MOCK_ACCOUNTS = {
         "usage": {
             "five_hour": {"utilization": 8, "resets_hours": 4.5},
             "seven_day": {"utilization": 31, "resets_days": 5},
-            "extra_usage": {"used_credits": 12, "monthly_limit": 100},
+            "extra_usage": {"used_credits": 1200, "monthly_limit": 10000},
         },
     },
     "claude-team": {
@@ -126,6 +126,11 @@ def _progress_bar(utilization_pct: float, width: int = 20) -> str:
     """Create a text progress bar."""
     filled = int(max(0.0, min(100.0, utilization_pct)) / (100 / width))
     return "█" * filled + "░" * (width - filled)
+
+
+def _format_usd_from_cents(value: float | int) -> str:
+    """Format a cents value as USD."""
+    return f"${(float(value) / 100.0):.2f}"
 
 
 def generate_codex_usage(account_data: dict) -> str:
@@ -201,7 +206,7 @@ def generate_claude_usage(account_data: dict) -> str:
         util = (used / limit) * 100 if limit > 0 else 0
         bar = _progress_bar(util)
         result += "**Extra credits**\n"
-        result += f"[{bar}] ${used} / ${limit} ({util:.1f}%)\n\n"
+        result += f"[{bar}] {_format_usd_from_cents(used)} / {_format_usd_from_cents(limit)} ({util:.1f}%)\n\n"
 
     return result
 

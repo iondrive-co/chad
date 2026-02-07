@@ -206,6 +206,20 @@ class ProviderUIManager:
         filled = int(pct / (100 / width))
         return "█" * filled + "░" * (width - filled)
 
+    @staticmethod
+    def _format_usd_from_cents(value: float | int | None) -> str:
+        """Format a cents value as a USD string."""
+        try:
+            cents = float(0.0 if value is None else value)
+        except (TypeError, ValueError):
+            cents = 0.0
+
+        if math.isnan(cents) or math.isinf(cents):
+            cents = 0.0
+
+        dollars = max(0.0, cents) / 100.0
+        return f"${dollars:.2f}"
+
     def get_remaining_usage(self, account_name: str) -> float:
         """Get remaining usage as 0.0-1.0 (1.0 = full capacity remaining).
 
@@ -918,7 +932,10 @@ class ProviderUIManager:
                 util = self._normalize_pct(extra.get("utilization"))
                 bar = self._progress_bar(util)
                 result += "**Extra credits**\n"
-                result += f"[{bar}] ${used:.0f} / ${limit:.0f} ({util:.1f}%)\n\n"
+                result += (
+                    f"[{bar}] {self._format_usd_from_cents(used)} / "
+                    f"{self._format_usd_from_cents(limit)} ({util:.1f}%)\n\n"
+                )
 
             return result
 
