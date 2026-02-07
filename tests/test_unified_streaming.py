@@ -1415,6 +1415,28 @@ class TestContextBasedProviderSwitch:
         resp = client.get("/api/v1/config/mock-context-remaining/context-mock-1")
         assert resp.json()["remaining"] == 0.2
 
+    def test_mock_run_duration_api_endpoints(self, client):
+        """Test mock run duration API endpoints for get/set operations."""
+        # Create a mock provider account
+        client.post("/api/v1/accounts", json={"name": "duration-mock-1", "provider": "mock"})
+
+        # Default mock duration should be 0 seconds
+        resp = client.get("/api/v1/config/mock-run-duration/duration-mock-1")
+        assert resp.status_code == 200
+        assert resp.json()["seconds"] == 0
+
+        # Set mock duration to 60 seconds
+        resp = client.put(
+            "/api/v1/config/mock-run-duration",
+            json={"account_name": "duration-mock-1", "seconds": 60}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["seconds"] == 60
+
+        # Verify it persisted
+        resp = client.get("/api/v1/config/mock-run-duration/duration-mock-1")
+        assert resp.json()["seconds"] == 60
+
     def test_context_threshold_api_endpoints(self, client):
         """Test context switch threshold API endpoints."""
         # Get default threshold (should be 90%)

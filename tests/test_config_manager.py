@@ -1134,6 +1134,48 @@ class TestMockContextRemaining:
         assert mgr2.get_mock_context_remaining("test-mock") == 0.25
 
 
+class TestMockRunDuration:
+    """Tests for mock run duration configuration."""
+
+    def test_get_mock_run_duration_default(self, tmp_path):
+        """Default mock run duration should be 0 seconds."""
+        mgr = ConfigManager(tmp_path / "test.conf")
+        assert mgr.get_mock_run_duration_seconds("any-mock") == 0
+
+    def test_set_and_get_mock_run_duration(self, tmp_path):
+        """Can set and retrieve mock run duration per account."""
+        mgr = ConfigManager(tmp_path / "test.conf")
+
+        mgr.set_mock_run_duration_seconds("mock-1", 60)
+        assert mgr.get_mock_run_duration_seconds("mock-1") == 60
+
+        mgr.set_mock_run_duration_seconds("mock-2", 15)
+        assert mgr.get_mock_run_duration_seconds("mock-2") == 15
+
+        # Ensure account isolation
+        assert mgr.get_mock_run_duration_seconds("mock-1") == 60
+
+    def test_set_mock_run_duration_validates_range(self, tmp_path):
+        """Mock run duration must be between 0 and 3600 seconds."""
+        mgr = ConfigManager(tmp_path / "test.conf")
+
+        with pytest.raises(ValueError, match="must be between 0 and 3600"):
+            mgr.set_mock_run_duration_seconds("mock-1", -1)
+
+        with pytest.raises(ValueError, match="must be between 0 and 3600"):
+            mgr.set_mock_run_duration_seconds("mock-1", 3601)
+
+    def test_mock_run_duration_persists(self, tmp_path):
+        """Mock run duration persists across instances."""
+        config_path = tmp_path / "test.conf"
+
+        mgr1 = ConfigManager(config_path)
+        mgr1.set_mock_run_duration_seconds("test-mock", 75)
+
+        mgr2 = ConfigManager(config_path)
+        assert mgr2.get_mock_run_duration_seconds("test-mock") == 75
+
+
 class TestConfigUIParity:
     """Test that both Gradio and CLI UIs expose all required config options.
 
@@ -1165,6 +1207,7 @@ class TestConfigUIParity:
         "projects",           # Per-project settings, not global config
         "mock_remaining_usage",    # Testing only - per-account mock via provider cards
         "mock_context_remaining",  # Testing only - per-account mock via provider cards
+        "mock_run_duration_seconds",  # Testing only - per-account mock via provider cards
     }
 
     # Config keys that MUST be editable in both Gradio and CLI UIs

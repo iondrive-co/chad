@@ -345,6 +345,7 @@ class Task:
     _event_queue: queue.Queue = field(default_factory=queue.Queue, repr=False)
     _provider: Any = field(default=None, repr=False)
     _last_terminal_snapshot: str = field(default="", repr=False)
+    _mock_duration_applied: bool = field(default=False, repr=False)
 
 
 _BINARY_GARBAGE_RE = re.compile(r'[@#%*&^]{10,}')
@@ -368,6 +369,7 @@ def build_agent_command(
     exploration_output: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    mock_run_duration_seconds: int = 0,
 ) -> tuple[list[str], dict[str, str], str | None]:
     """Build CLI command and environment for a provider.
 
@@ -381,6 +383,7 @@ def build_agent_command(
         exploration_output: For implementation/continuation phase, the previous output context
         model: Optional model name override (e.g., 'gpt-5.3-codex', 'claude-opus-4-6')
         reasoning_effort: Optional reasoning effort level (e.g., 'low', 'medium', 'high')
+        mock_run_duration_seconds: Mock-only run duration in seconds for handover testing
 
     Returns:
         Tuple of (command_list, environment_dict, initial_input)
@@ -491,7 +494,7 @@ def build_agent_command(
 
     elif provider == "mock":
         # Mock provider - simulates an agent CLI with ANSI output
-        cmd = _build_mock_agent_command(project_path, task_description)
+        cmd = _build_mock_agent_command(project_path, task_description, mock_run_duration_seconds)
 
     else:
         # Fallback - try running provider name as command
@@ -502,13 +505,20 @@ def build_agent_command(
     return cmd, env, initial_input
 
 
-def _build_mock_agent_command(project_path: Path, task_description: str | None) -> list[str]:
+def _build_mock_agent_command(
+    project_path: Path,
+    task_description: str | None,
+    run_duration_seconds: int = 0,
+) -> list[str]:
     """Build mock agent command that simulates a real agent CLI."""
+    duration = max(0, int(run_duration_seconds or 0))
     # Python script that outputs ANSI-formatted text like a real agent
     # Uses minimal delays to keep tests fast while still demonstrating ANSI output
     script = f'''
 import sys
 import os
+import time
+import random
 
 # ANSI colors
 BLUE = "\\033[1;34m"
@@ -557,6 +567,23 @@ except Exception as e:
 writeln()
 writeln(f"{{YELLOW}}> Running verification...{{RESET}}")
 writeln(f"{{GREEN}}✓{{RESET}} All checks passed")
+
+# Optional long-running stream simulation for handover tests
+run_duration_seconds = {duration}
+if run_duration_seconds > 0:
+    writeln()
+    writeln(f"{{YELLOW}}> Streaming simulated work for {{run_duration_seconds}}s...{{RESET}}")
+    words = [
+        "handover", "context", "quota", "switch", "token", "window",
+        "stream", "analysis", "progress", "checkpoint", "fallback", "provider"
+    ]
+    end_time = time.time() + run_duration_seconds
+    tick = 0
+    while time.time() < end_time:
+        tick += 1
+        sample = " ".join(random.choice(words) for _ in range(8))
+        writeln(f"{{GRAY}}[tick {{tick:03d}}] {{sample}}{{RESET}}")
+        time.sleep(1)
 
 # Summary
 writeln()
@@ -805,6 +832,14 @@ class TaskExecutor:
             last_log_flush = time.time()
 
         # Build agent command for this phase
+        mock_run_duration_seconds = 0
+        if coding_provider == "mock" and not task._mock_duration_applied:
+            try:
+                mock_run_duration_seconds = self.config_manager.get_mock_run_duration_seconds(coding_account)
+            except Exception:
+                mock_run_duration_seconds = 0
+            task._mock_duration_applied = mock_run_duration_seconds > 0
+
         cmd, env, initial_input = build_agent_command(
             coding_provider,
             coding_account,
@@ -815,6 +850,7 @@ class TaskExecutor:
             exploration_output=exploration_output,
             model=coding_model,
             reasoning_effort=coding_reasoning,
+            mock_run_duration_seconds=mock_run_duration_seconds,
         )
 
         # Use stdin pipe for Codex to avoid prompt echo in output

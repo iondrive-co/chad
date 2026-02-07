@@ -218,6 +218,23 @@ class TestConfigEndpoints:
         assert response.status_code == 400
         assert "Unknown account(s): codex-work" in response.json()["detail"]
 
+    def test_mock_run_duration_endpoints(self, client):
+        """Can get/set per-account mock run duration."""
+        get_default = client.get("/api/v1/config/mock-run-duration/mock-runner")
+        assert get_default.status_code == 200
+        assert get_default.json()["seconds"] == 0
+
+        set_resp = client.put(
+            "/api/v1/config/mock-run-duration",
+            json={"account_name": "mock-runner", "seconds": 60},
+        )
+        assert set_resp.status_code == 200
+        assert set_resp.json()["seconds"] == 60
+
+        get_after = client.get("/api/v1/config/mock-run-duration/mock-runner")
+        assert get_after.status_code == 200
+        assert get_after.json()["seconds"] == 60
+
 
 class TestWorktreeEndpoints:
     """Tests for worktree endpoints (require valid session)."""

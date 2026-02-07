@@ -3075,6 +3075,39 @@ class TestDynamicStatusLine:
         assert "Context: 60%" in status
 
 
+class TestMockProviderCardControls:
+    """Tests for mock-specific provider card controls."""
+
+    def test_provider_state_includes_context_and_duration_sliders_for_mock(self):
+        """Mock provider cards expose usage, context, and duration controls."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def list_accounts(self):
+                return [MockAccount(name="mock-coding", provider="mock", role="CODING")]
+
+            def get_mock_remaining_usage(self, name):
+                return 0.4
+
+            def get_mock_context_remaining(self, name):
+                return 0.25
+
+            def get_mock_run_duration_seconds(self, name):
+                return 60
+
+        ui = ProviderUIManager(MockAPIClient(), dev_mode=True)
+        state = ui.provider_state(card_slots=1)
+
+        # Per-card tuple shape:
+        # column, group, header, account_name, usage_box, usage_slider, context_slider, duration_slider, delete_btn
+        assert len(state) == 9
+        assert state[3] == "mock-coding"
+        assert state[4]["visible"] is False
+        assert state[5]["visible"] is True and state[5]["value"] == 40
+        assert state[6]["visible"] is True and state[6]["value"] == 25
+        assert state[7]["visible"] is True and state[7]["value"] == 60
+
+
 class TestVerificationPrompt:
     """Ensure verification prompts include task context and summaries."""
 
