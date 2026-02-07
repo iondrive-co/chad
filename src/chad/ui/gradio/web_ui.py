@@ -2864,6 +2864,11 @@ class ChadWebUI:
 
                 if not response:
                     last_error = "No response from verification agent"
+                    if on_activity:
+                        on_activity(
+                            "system",
+                            f"Verification response missing (attempt {attempt + 1}/{max_parse_attempts})",
+                        )
                     continue
 
                 try:
@@ -2886,6 +2891,11 @@ class ChadWebUI:
 
                 except VerificationParseError as e:
                     last_error = str(e)
+                    if on_activity:
+                        on_activity(
+                            "system",
+                            f"Verification parse failed (attempt {attempt + 1}/{max_parse_attempts}): {last_error}",
+                        )
                     if attempt < max_parse_attempts - 1:
                         # Retry with a reminder to use JSON format
                         verification_prompt = (
