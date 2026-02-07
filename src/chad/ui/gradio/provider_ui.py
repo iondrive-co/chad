@@ -2222,37 +2222,6 @@ class ProviderUIManager:
             return True, f"✓ Ready — **Coding:** {coding_info} {usage_metrics}{switch_indicator}"
         return True, f"✓ Ready — **Coding:** {coding_info}{switch_indicator}"
 
-    def format_role_status(
-        self,
-        task_state: str | None = None,
-        worktree_path: str | None = None,
-        switched_from: str | None = None,
-        active_account: str | None = None,
-        project_path: str | None = None,
-        verification_account: str | None = None,
-        accounts=None,
-    ) -> str:
-        """Return role status text.
-
-        Args:
-            task_state: Optional task state for dynamic status.
-            worktree_path: Optional worktree path to display.
-            switched_from: If set, shows a switch indicator with the previous provider.
-            active_account: If set, use this account as the active provider instead
-                           of looking up the CODING role assignment.
-            project_path: Optional project path to display (shown when no worktree exists).
-            verification_account: If set, use this account when showing verifying status.
-            accounts: Pre-fetched accounts list to avoid API call.
-
-        Returns:
-            Formatted status string.
-        """
-        _, status = self.get_role_config_status(
-            task_state, worktree_path, switched_from, active_account, project_path, verification_account,
-            accounts=accounts,
-        )
-        return status
-
     def assign_role(self, account_name: str, role: str, card_slots: int):
         """Assign a role to a provider and refresh the provider panel."""
         try:

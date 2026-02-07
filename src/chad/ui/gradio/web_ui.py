@@ -968,16 +968,6 @@ body, .gradio-container, .gradio-container * {
   background: transparent !important;
 }
 
-#role-config-status {
-  width: 100%;
-  margin: 0;
-  padding-top: 0 !important;
-}
-
-#role-config-status p {
-  margin: 0 !important;
-}
-
 .role-status-row button,
 .role-status-row .download-button,
 .role-status-row a[download] {
@@ -2053,6 +2043,27 @@ def make_progress_message(progress: ProgressUpdate) -> dict:
     return {"role": "assistant", "content": "".join(parts)}
 
 
+def make_phase_milestone(phase_name: str, account_name: str, model_name: str,
+                         usage_pct: int | None = None, context_pct: int | None = None) -> dict:
+    """Create a chatbot message marking a phase transition with provider info.
+
+    Args:
+        phase_name: Phase name (e.g., "Exploration", "Coding", "Verification").
+        account_name: Provider account name.
+        model_name: Model identifier.
+        usage_pct: Usage remaining percentage (0-100), or None if unavailable.
+        context_pct: Context remaining percentage (0-100), or None if unavailable.
+
+    Returns:
+        Chat message dict with role="user" for display in the milestones panel.
+    """
+    metrics = ""
+    if usage_pct is not None and context_pct is not None:
+        metrics = f" Usage remaining: {usage_pct}% · Context remaining: {context_pct}%"
+    content = f"**{phase_name}:** {account_name} ({model_name}{metrics})"
+    return {"role": "user", "content": content}
+
+
 def _truncate_verification_output(text: str, limit: int = MAX_VERIFICATION_PROMPT_CHARS) -> str:
     """Compact the coding agent output for verification prompts."""
     cleaned = text.strip()
@@ -3024,20 +3035,17 @@ class ChadWebUI:
             accounts=accounts,
         )
 
-    def format_role_status(
-        self,
-        task_state: str | None = None,
-        worktree_path: str | None = None,
-        switched_from: str | None = None,
-        active_account: str | None = None,
-        project_path: str | None = None,
-        verification_account: str | None = None,
-        accounts=None,
-    ) -> str:
-        return self.provider_ui.format_role_status(
-            task_state, worktree_path, switched_from, active_account, project_path, verification_account,
-            accounts=accounts,
-        )
+    def _make_phase_milestone(self, phase_name: str, account_name: str, model_name: str) -> dict:
+        """Create a phase milestone chat message with live usage metrics."""
+        try:
+            usage_remaining = self.provider_ui.get_remaining_usage(account_name)
+            context_remaining = self.provider_ui.get_context_remaining(account_name)
+            usage_pct = int(usage_remaining * 100)
+            context_pct = int(context_remaining * 100)
+        except Exception:
+            usage_pct = None
+            context_pct = None
+        return make_phase_milestone(phase_name, account_name, model_name, usage_pct, context_pct)
 
     def assign_role(self, account_name: str, role: str):
         return self.provider_ui.assign_role(account_name, role, self.provider_card_count)
@@ -3296,7 +3304,6 @@ class ChadWebUI:
                             gr.update(),  # task_description
                             gr.update(interactive=True),  # start_btn
                             gr.update(interactive=False),  # cancel_btn
-                            gr.update(),  # role_status
                             gr.update(),  # session_log_btn
                             gr.update(),  # workspace_display
                             gr.update(),  # followup_input
@@ -3360,13 +3367,6 @@ class ChadWebUI:
             )
             session.has_initial_live_render = updated_flag
             is_error = "❌" in status
-            # Get worktree/project path for status display
-            wt_path = str(session.worktree_path) if session.worktree_path else None
-            proj_path = session.project_path
-            display_role_status = self.format_role_status(
-                task_state, wt_path, session.switched_from, session.coding_account, proj_path,
-                verification_account=verification_account
-            )
             log_btn_update = gr.update(
                 label=session.log_path.name if session.log_path else "Session Log",
                 value=str(session.log_path) if session.log_path else None,
@@ -3409,7 +3409,6 @@ class ChadWebUI:
                 gr.update(value=task_description, interactive=interactive),
                 gr.update(interactive=start_btn_interactive),
                 gr.update(interactive=cancel_btn_interactive),
-                gr.update(value=display_role_status),
                 log_btn_update,
                 workspace_update,
                 gr.update(value=""),  # Clear followup input
@@ -3561,6 +3560,11 @@ class ChadWebUI:
             )
             session.last_exploration_prompt = display_exploration_prompt
             session.last_implementation_prompt = display_implementation_prompt
+
+            # Insert exploration phase milestone
+            chat_history.append(
+                self._make_phase_milestone("Exploration", coding_account, selected_model)
+            )
 
             initial_status = f"{status_prefix}⏳ Initializing session..."
             yield make_yield(
@@ -3777,6 +3781,15 @@ class ChadWebUI:
                                 progress = extract_progress_update(streaming_buffer)
                                 if progress:
                                     progress_emitted = True
+                                    # Insert coding phase milestone
+                                    coding_milestone = self._make_phase_milestone(
+                                        "Coding", coding_account, selected_model
+                                    )
+                                    if pending_message_idx is not None:
+                                        chat_history.insert(pending_message_idx, coding_milestone)
+                                        pending_message_idx += 1
+                                    else:
+                                        chat_history.append(coding_milestone)
                                     # Insert progress bubble at the tracked position
                                     progress_msg = make_progress_message(progress)
                                     if pending_message_idx is not None:
@@ -3972,6 +3985,11 @@ class ChadWebUI:
                     verification_attempt += 1
 
                     chat_history.append(
+                        self._make_phase_milestone(
+                            "Verification", verification_account_for_run, resolved_verification_model
+                        )
+                    )
+                    chat_history.append(
                         {
                             "role": "user",
                             "content": f"───────────── 🔍 VERIFICATION (Attempt {verification_attempt}) ─────────────",
@@ -4157,6 +4175,9 @@ class ChadWebUI:
                             and verification_attempt < max_verification_attempts
                         )
                         if can_revise:
+                            chat_history.append(
+                                self._make_phase_milestone("Re-coding", coding_account, selected_model)
+                            )
                             revision_content = (
                                 "───────────── → REVISION REQUESTED ─────────────\n\n"
                                 "*Sending verification feedback to coding agent...*"
@@ -4267,6 +4288,11 @@ class ChadWebUI:
                                 }
                                 break
 
+                            chat_history.append(
+                                self._make_phase_milestone(
+                                    "Re-verification", verification_account_for_run, resolved_verification_model
+                                )
+                            )
                             reverify_placeholder = build_live_stream_html(
                                 "✓ Revision complete, re-verifying...", "VERIFICATION AI", live_stream_id
                             )
@@ -4283,6 +4309,9 @@ class ChadWebUI:
                             and not session.cancel_requested
                         ):
                             # API-based revision: re-run task via API with revision feedback
+                            chat_history.append(
+                                self._make_phase_milestone("Re-coding", coding_account, selected_model)
+                            )
                             revision_content = (
                                 "───────────── → REVISION REQUESTED ─────────────\n\n"
                                 "*Re-running coding agent with verification feedback...*"
@@ -4415,6 +4444,11 @@ class ChadWebUI:
                                 })
                                 break
 
+                            chat_history.append(
+                                self._make_phase_milestone(
+                                    "Re-verification", verification_account_for_run, resolved_verification_model
+                                )
+                            )
                             reverify_placeholder = build_live_stream_html(
                                 "✓ Revision complete, re-verifying...", "VERIFICATION AI", live_stream_id
                             )
@@ -4846,6 +4880,11 @@ class ChadWebUI:
             session.event_log.start_turn()
             session.event_log.log(UserMessageEvent(content=raw_followup_message))
 
+        # Insert coding phase milestone for follow-up
+        chat_history.append(
+            self._make_phase_milestone("Coding", coding_agent, requested_model)
+        )
+
         # Track where the final message will be inserted
         # Don't add a placeholder - use only the dedicated live stream panel
         pending_idx = len(chat_history)
@@ -5091,6 +5130,11 @@ class ChadWebUI:
             while not verified and verification_attempt < max_verification_attempts and not session.cancel_requested:
                 verification_attempt += 1
                 chat_history.append(
+                    self._make_phase_milestone(
+                        "Verification", verification_account_for_run, resolved_verification_model
+                    )
+                )
+                chat_history.append(
                     {
                         "role": "user",
                         "content": f"───────────── 🔍 VERIFICATION (Attempt {verification_attempt}) ─────────────",
@@ -5238,6 +5282,9 @@ class ChadWebUI:
                     )
                     if can_revise:
                         chat_history.append(
+                            self._make_phase_milestone("Re-coding", coding_agent, requested_model)
+                        )
+                        chat_history.append(
                             {
                                 "role": "user",
                                 "content": "───────────── → REVISION REQUESTED ─────────────",
@@ -5304,6 +5351,11 @@ class ChadWebUI:
                             )
                             break
 
+                        chat_history.append(
+                            self._make_phase_milestone(
+                                "Re-verification", verification_account_for_run, resolved_verification_model
+                            )
+                        )
                         reverify_placeholder = build_live_stream_html(
                             "✓ Revision complete, re-verifying...", "VERIFICATION AI", live_stream_id
                         )
@@ -6190,14 +6242,6 @@ class ChadWebUI:
                                 elem_classes=["doc-path-input", "architecture-path-input"],
                             )
                         # Ready status belongs on the left under the doc-path fields.
-                        wt_path = str(session.worktree_path) if session.worktree_path else None
-                        proj_path = session.project_path
-                        role_status = gr.Markdown(
-                            self.format_role_status(worktree_path=wt_path, project_path=proj_path, accounts=accounts),
-                            key=f"role-status-{session_id}",
-                            elem_id="role-config-status" if is_first else None,
-                            elem_classes=["role-config-status"],
-                        )
                     with gr.Column(scale=1, min_width=200, elem_classes=["agent-config"]):
                         coding_agent = gr.Dropdown(
                             choices=account_choices,
@@ -6631,7 +6675,7 @@ class ChadWebUI:
         project_save_btn.click(
             on_project_save,
             inputs=[project_path, lint_cmd_input, test_cmd_input, instructions_input, architecture_input],
-            outputs=[role_status],
+            outputs=[task_status],
         )
 
         def start_task_wrapper(
@@ -6748,7 +6792,6 @@ class ChadWebUI:
                 task_description,
                 start_btn,
                 cancel_btn,
-                role_status,
                 session_log_btn,
                 workspace_display,
                 followup_input,
@@ -6873,9 +6916,7 @@ class ChadWebUI:
 
         # Handler for coding agent selection change
         def on_coding_agent_change(selected_account, verification_value, current_verif_model, current_verif_reasoning):
-            """Update role assignment, status, and dropdowns when coding agent changes."""
-            wt_path = str(session.worktree_path) if session.worktree_path else None
-            proj_path = session.project_path
+            """Update role assignment and dropdowns when coding agent changes."""
             if not selected_account:
                 verif_model_update, verif_reasoning_update = verification_dropdown_updates(
                     None,
@@ -6886,7 +6927,6 @@ class ChadWebUI:
                     current_verif_reasoning,
                 )
                 return (
-                    gr.update(value=self.format_role_status(worktree_path=wt_path, project_path=proj_path)),
                     gr.update(interactive=False),
                     gr.update(choices=["default"], value="default", interactive=False),
                     gr.update(choices=["default"], value="default", interactive=False),
@@ -6900,9 +6940,10 @@ class ChadWebUI:
             except Exception:
                 pass
 
-            # Get updated status
+            # Check if ready
+            wt_path = str(session.worktree_path) if session.worktree_path else None
+            proj_path = session.project_path
             is_ready, _ = self.get_role_config_status(worktree_path=wt_path, project_path=proj_path)
-            status_text = self.format_role_status(worktree_path=wt_path, project_path=proj_path)
 
             # Get model choices for the selected account
             model_choices = self.get_models_for_account(selected_account)
@@ -6933,7 +6974,6 @@ class ChadWebUI:
             )
 
             return (
-                gr.update(value=status_text),
                 gr.update(interactive=is_ready),
                 gr.update(choices=model_choices, value=model_value, interactive=True),
                 gr.update(choices=reasoning_choices, value=reasoning_value, interactive=True),
@@ -6945,7 +6985,6 @@ class ChadWebUI:
             on_coding_agent_change,
             inputs=[coding_agent, verification_agent, verification_model, verification_reasoning],
             outputs=[
-                role_status,
                 start_btn,
                 coding_model,
                 coding_reasoning,

@@ -2,6 +2,7 @@ import base64
 import json
 import os
 from pathlib import Path
+from unittest.mock import Mock
 
 from chad.util.model_catalog import ModelCatalog
 
@@ -99,3 +100,37 @@ def test_openai_models_sync_windows_real_home(monkeypatch, tmp_path):
     models = catalog.get_models("openai", "codex-home")
 
     assert "o3-mini" in models
+
+
+def test_mock_provider_filters_cross_provider_stored_model(tmp_path):
+    api_client = Mock()
+    api_client.get_account.return_value = Mock(provider="mock", model="claude-sonnet-4-20250514")
+    api_client.get_account_model.return_value = "claude-sonnet-4-20250514"
+    catalog = ModelCatalog(api_client=api_client, home_dir=tmp_path, cache_ttl=0)
+
+    models = catalog.get_models("mock", "testy")
+
+    assert models == ["default"]
+
+
+def test_anthropic_provider_keeps_claude_stored_model(tmp_path):
+    api_client = Mock()
+    api_client.get_account.return_value = Mock(provider="anthropic", model="claude-sonnet-4-5")
+    api_client.get_account_model.return_value = "claude-sonnet-4-5"
+    catalog = ModelCatalog(api_client=api_client, home_dir=tmp_path, cache_ttl=0)
+
+    models = catalog.get_models("anthropic", "claude-pro")
+
+    assert "claude-sonnet-4-5" in models
+
+
+def test_openai_provider_filters_claude_stored_model(tmp_path):
+    api_client = Mock()
+    api_client.get_account.return_value = Mock(provider="openai", model="claude-sonnet-4-20250514")
+    api_client.get_account_model.return_value = "claude-sonnet-4-20250514"
+    catalog = ModelCatalog(api_client=api_client, home_dir=tmp_path, cache_ttl=0)
+
+    models = catalog.get_models("openai", "codex-home")
+
+    assert "claude-sonnet-4-20250514" not in models
+    assert "default" in models
