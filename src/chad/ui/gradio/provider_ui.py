@@ -100,9 +100,10 @@ class ProviderUIManager:
         # For now, return 1.0 (full context available)
         return 1.0
 
-    def get_provider_card_items(self) -> list[tuple[str, str]]:
+    def get_provider_card_items(self, accounts=None) -> list[tuple[str, str]]:
         """Return provider account items for card display."""
-        accounts = self.api_client.list_accounts()
+        if accounts is None:
+            accounts = self.api_client.list_accounts()
         account_items = [(acc.name, acc.provider) for acc in accounts]
 
         # In screenshot mode, ensure deterministic ordering for tests
@@ -2076,6 +2077,7 @@ class ProviderUIManager:
         active_account: str | None = None,
         project_path: str | None = None,
         verification_account: str | None = None,
+        accounts=None,
     ) -> tuple[bool, str]:
         """Check if roles are properly configured for running tasks.
 
@@ -2089,11 +2091,13 @@ class ProviderUIManager:
                            of looking up the CODING role assignment.
             project_path: Optional project path to display (shown when no worktree exists).
             verification_account: If set, use this account when showing verifying status.
+            accounts: Pre-fetched accounts list to avoid API call.
 
         Returns:
             Tuple of (is_ready, status_text)
         """
-        accounts = self.api_client.list_accounts()
+        if accounts is None:
+            accounts = self.api_client.list_accounts()
         if not accounts:
             return False, "⚠️ Add a provider to start tasks."
 
@@ -2183,6 +2187,7 @@ class ProviderUIManager:
         active_account: str | None = None,
         project_path: str | None = None,
         verification_account: str | None = None,
+        accounts=None,
     ) -> str:
         """Return role status text.
 
@@ -2194,12 +2199,14 @@ class ProviderUIManager:
                            of looking up the CODING role assignment.
             project_path: Optional project path to display (shown when no worktree exists).
             verification_account: If set, use this account when showing verifying status.
+            accounts: Pre-fetched accounts list to avoid API call.
 
         Returns:
             Formatted status string.
         """
         _, status = self.get_role_config_status(
-            task_state, worktree_path, switched_from, active_account, project_path, verification_account
+            task_state, worktree_path, switched_from, active_account, project_path, verification_account,
+            accounts=accounts,
         )
         return status
 

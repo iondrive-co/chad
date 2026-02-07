@@ -2976,9 +2976,11 @@ class ChadWebUI:
         worktree_path: str | None = None,
         project_path: str | None = None,
         verification_account: str | None = None,
+        accounts=None,
     ) -> tuple[bool, str]:
         return self.provider_ui.get_role_config_status(
-            task_state, worktree_path, project_path=project_path, verification_account=verification_account
+            task_state, worktree_path, project_path=project_path, verification_account=verification_account,
+            accounts=accounts,
         )
 
     def format_role_status(
@@ -2989,9 +2991,11 @@ class ChadWebUI:
         active_account: str | None = None,
         project_path: str | None = None,
         verification_account: str | None = None,
+        accounts=None,
     ) -> str:
         return self.provider_ui.format_role_status(
-            task_state, worktree_path, switched_from, active_account, project_path, verification_account
+            task_state, worktree_path, switched_from, active_account, project_path, verification_account,
+            accounts=accounts,
         )
 
     def assign_role(self, account_name: str, role: str):
@@ -3116,6 +3120,7 @@ class ChadWebUI:
         coding_reasoning_value: str | None,
         current_verification_model: str | None = None,
         current_verification_reasoning: str | None = None,
+        accounts=None,
     ) -> VerificationDropdownState:
         """Resolve verification dropdown values based on current selections."""
         if verification_agent == self.VERIFICATION_NONE:
@@ -3126,7 +3131,8 @@ class ChadWebUI:
                 "default",
                 False,
             )
-        accounts = self.api_client.list_accounts()
+        if accounts is None:
+            accounts = self.api_client.list_accounts()
         accounts_map = {acc.name: acc.provider for acc in accounts}
         account_choices = list(accounts_map.keys())
         actual_account = coding_agent if verification_agent == self.SAME_AS_CODING else verification_agent
@@ -5902,7 +5908,9 @@ class ChadWebUI:
         if not session.project_path:
             session.project_path = default_path
 
-        accounts = self.api_client.list_accounts()
+        # Use prefetched data during init, fall back to API calls at runtime
+        init = getattr(self, "_init_data", None)
+        accounts = init["accounts"] if init else self.api_client.list_accounts()
         accounts_map = {acc.name: acc for acc in accounts}
         account_choices = list(accounts_map.keys())
 
@@ -5922,8 +5930,11 @@ class ChadWebUI:
             except Exception:
                 pass
 
-        # Get ready status after any auto-assignment
-        is_ready, _ = self.get_role_config_status(project_path=session.project_path)
+        # During init we can derive is_ready from cached accounts
+        if init:
+            is_ready = bool(initial_coding)
+        else:
+            is_ready, _ = self.get_role_config_status(project_path=session.project_path)
 
         none_label = (
             "None (disable verification)"
@@ -5935,7 +5946,7 @@ class ChadWebUI:
             (none_label, self.VERIFICATION_NONE),
             *[(account, account) for account in account_choices],
         ]
-        stored_verification = self.api_client.get_verification_agent()
+        stored_verification = init["verification_agent"] if init else self.api_client.get_verification_agent()
         if stored_verification == self.VERIFICATION_NONE:
             initial_verification = self.VERIFICATION_NONE
         elif stored_verification in account_choices:
@@ -5967,7 +5978,9 @@ class ChadWebUI:
         )
 
         # Load preferred verification model from config
-        stored_verification_model = self.api_client.get_preferred_verification_model()
+        stored_verification_model = (
+            init["preferred_verification_model"] if init else self.api_client.get_preferred_verification_model()
+        )
 
         verif_state = self._build_verification_dropdown_state(
             initial_coding,
@@ -5975,6 +5988,7 @@ class ChadWebUI:
             coding_model_value,
             coding_reasoning_value,
             current_verification_model=stored_verification_model,
+            accounts=accounts,
         )
 
         with gr.Row(
@@ -6185,7 +6199,7 @@ class ChadWebUI:
         wt_path = str(session.worktree_path) if session.worktree_path else None
         proj_path = session.project_path
         role_status = gr.Markdown(
-            self.format_role_status(worktree_path=wt_path, project_path=proj_path),
+            self.format_role_status(worktree_path=wt_path, project_path=proj_path, accounts=accounts),
             key=f"role-status-{session_id}",
             elem_id="role-config-status" if is_first else None,
             elem_classes=["role-config-status"],
@@ -6943,7 +6957,10 @@ class ChadWebUI:
 
     def _create_providers_ui(self):
         """Create the Setup tab UI within @gr.render."""
-        account_items = self.provider_ui.get_provider_card_items()
+        init = getattr(self, "_init_data", None)
+        account_items = self.provider_ui.get_provider_card_items(
+            accounts=init["accounts"] if init else None
+        )
         self.provider_card_count = max(12, len(account_items) + 8)
 
         provider_feedback = gr.Markdown("")
@@ -7033,9 +7050,9 @@ class ChadWebUI:
             elem_classes=["config-accordion"],
         ):
             config_status = gr.Markdown("", elem_classes=["config-panel__status"])
-            # Load settings from API
+            # Load settings from prefetched data or API
             try:
-                preferences = self.api_client.get_preferences()
+                preferences = init["preferences"] if init else self.api_client.get_preferences()
                 prefs_dict = {"project_path": preferences.last_project_path} if preferences else {}
                 ui_mode = preferences.ui_mode if preferences else "gradio"
             except Exception:
@@ -7043,12 +7060,12 @@ class ChadWebUI:
                 ui_mode = "gradio"
 
             try:
-                cleanup_settings = self.api_client.get_cleanup_settings()
+                cleanup_settings = init["cleanup_settings"] if init else self.api_client.get_cleanup_settings()
                 retention_days = cleanup_settings.retention_days
             except Exception:
                 retention_days = 7
 
-            accounts = self.api_client.list_accounts()
+            accounts = init["accounts"] if init else self.api_client.list_accounts()
             account_choices = [acc.name for acc in accounts]
             coding_assignment = ""
             for acc in accounts:
@@ -7057,7 +7074,7 @@ class ChadWebUI:
                     break
             coding_value = coding_assignment if coding_assignment in account_choices else None
 
-            stored_verification = self.api_client.get_verification_agent()
+            stored_verification = init["verification_agent"] if init else self.api_client.get_verification_agent()
             if stored_verification == self.VERIFICATION_NONE:
                 verification_value = self.VERIFICATION_NONE
             elif stored_verification and stored_verification in account_choices:
@@ -7175,20 +7192,13 @@ class ChadWebUI:
 
             # Load current fallback order and threshold
             try:
-                fallback_order = self.api_client.get_provider_fallback_order()
+                fallback_order = init["fallback_order"] if init else self.api_client.get_provider_fallback_order()
                 fallback_order_str = ", ".join(fallback_order)
             except Exception:
                 fallback_order_str = ""
 
-            try:
-                usage_threshold = self.api_client.get_usage_switch_threshold()
-            except Exception:
-                usage_threshold = 90
-
-            try:
-                context_threshold = self.api_client.get_context_switch_threshold()
-            except Exception:
-                context_threshold = 80
+            usage_threshold = init["usage_threshold"] if init else self.api_client.get_usage_switch_threshold()
+            context_threshold = init["context_threshold"] if init else self.api_client.get_context_switch_threshold()
 
             with gr.Row():
                 fallback_order_input = gr.Textbox(
@@ -7217,10 +7227,7 @@ class ChadWebUI:
 
             # Verification settings
             gr.Markdown("### Verification Settings")
-            try:
-                max_attempts = self.api_client.get_max_verification_attempts()
-            except Exception:
-                max_attempts = 5
+            max_attempts = init["max_verification_attempts"] if init else self.api_client.get_max_verification_attempts()
 
             with gr.Row():
                 max_verification_attempts_input = gr.Number(
@@ -7494,13 +7501,68 @@ class ChadWebUI:
                 inputs=[card["mock_usage_slider"], card["account_state"]],
             )
 
+    def _prefetch_init_data(self) -> dict:
+        """Fetch all data needed for UI construction in one batch.
+
+        This replaces ~49 individual API roundtrips with ~9, cutting
+        startup time significantly.
+        """
+        accounts = self.api_client.list_accounts()
+        try:
+            verification_agent = self.api_client.get_verification_agent()
+        except Exception:
+            verification_agent = ""
+        try:
+            preferred_verification_model = self.api_client.get_preferred_verification_model()
+        except Exception:
+            preferred_verification_model = ""
+        try:
+            preferences = self.api_client.get_preferences()
+        except Exception:
+            preferences = None
+        try:
+            cleanup_settings = self.api_client.get_cleanup_settings()
+        except Exception:
+            cleanup_settings = None
+        try:
+            fallback_order = self.api_client.get_provider_fallback_order()
+        except Exception:
+            fallback_order = []
+        try:
+            usage_threshold = self.api_client.get_usage_switch_threshold()
+        except Exception:
+            usage_threshold = 90
+        try:
+            context_threshold = self.api_client.get_context_switch_threshold()
+        except Exception:
+            context_threshold = 80
+        try:
+            max_verification_attempts = self.api_client.get_max_verification_attempts()
+        except Exception:
+            max_verification_attempts = 5
+        return {
+            "accounts": accounts,
+            "verification_agent": verification_agent,
+            "preferred_verification_model": preferred_verification_model,
+            "preferences": preferences,
+            "cleanup_settings": cleanup_settings,
+            "fallback_order": fallback_order,
+            "usage_threshold": usage_threshold,
+            "context_threshold": context_threshold,
+            "max_verification_attempts": max_verification_attempts,
+        }
+
     def create_interface(self) -> gr.Blocks:
         """Create the Gradio interface."""
         # Create initial session
         initial_session = self.create_session("Task 1")
         initial_session.event_log = EventLog(initial_session.id)
 
-        with gr.Blocks(title="Chad", js="""
+        # Prefetch all data needed during UI construction to avoid
+        # redundant API calls (was ~49 HTTP roundtrips, now ~9).
+        self._init_data = self._prefetch_init_data()
+
+        with gr.Blocks(title="Chad", analytics_enabled=False, js="""
         () => {
             const getRoot = () => {
                 const app = document.querySelector('gradio-app');
@@ -8353,6 +8415,8 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                     outputs=[self._config_verification_pref],
                 )
 
+            # Init data was only needed during construction
+            del self._init_data
             return interface
 
 
