@@ -16,7 +16,7 @@ v0.12 Intentionality Reduction
 
 Slack integration
 Packaging for different platforms
-Remix static site ui which downloads and talks to the server on localhost
+Renamed web_ui to gradio_ui. Make Remix static site ui which downloads and talks to the server on localhost
 
 ---- Repeated failures ----
 

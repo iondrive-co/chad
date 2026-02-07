@@ -3215,11 +3215,8 @@ class TestVerificationPrompt:
                 return MockAccount(name=name, provider="anthropic")
 
         class DummyVerifier:
-            def __init__(self):
-                self._responses = iter([
-                    '```json\n{"change_summary": "wrong schema"}\n```',
-                    '```json\n{"passed": true, "summary": "Looks good"}\n```',
-                ])
+            def __init__(self, response):
+                self._response = response
 
             def set_activity_callback(self, _callback):
                 return None
@@ -3231,12 +3228,23 @@ class TestVerificationPrompt:
                 return None
 
             def get_response(self, timeout=None):
-                return next(self._responses, None)
+                return self._response
 
             def stop_session(self):
                 return None
 
-        monkeypatch.setattr(web_ui, "create_provider", lambda *_args, **_kwargs: DummyVerifier())
+        responses = [
+            '```json\n{"change_summary": "wrong schema"}\n```',
+            '```json\n{"passed": true, "summary": "Looks good"}\n```',
+        ]
+        create_calls = {"count": 0}
+
+        def create_provider_stub(*_args, **_kwargs):
+            idx = create_calls["count"]
+            create_calls["count"] += 1
+            return DummyVerifier(responses[min(idx, len(responses) - 1)])
+
+        monkeypatch.setattr(web_ui, "create_provider", create_provider_stub)
         monkeypatch.setattr(web_ui, "check_verification_mentioned", lambda *_args, **_kwargs: True)
 
         ui = ChadWebUI(DummyAPIClient())
@@ -3246,6 +3254,58 @@ class TestVerificationPrompt:
 
         assert verified is True
         assert feedback == "Looks good"
+        assert create_calls["count"] == 2
+
+    def test_run_verification_retry_uses_fresh_provider_session(self, monkeypatch, tmp_path):
+        """Retry should create a new verifier instance instead of reusing prior session state."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+        import chad.ui.gradio.web_ui as web_ui
+
+        class DummyAPIClient:
+            def get_account(self, name):
+                return MockAccount(name=name, provider="openai")
+
+        class DummyVerifier:
+            def __init__(self, response):
+                self._response = response
+
+            def set_activity_callback(self, _callback):
+                return None
+
+            def start_session(self, _project_path, _system_prompt):
+                return True
+
+            def send_message(self, _message):
+                return None
+
+            def get_response(self, timeout=None):
+                return self._response
+
+            def stop_session(self):
+                return None
+
+        responses = [
+            '```json\n{"change_summary": "wrong schema"}\n```',
+            '```json\n{"passed": true, "summary": "Looks good"}\n```',
+        ]
+        create_calls = {"count": 0}
+
+        def create_provider_stub(*_args, **_kwargs):
+            idx = create_calls["count"]
+            create_calls["count"] += 1
+            return DummyVerifier(responses[min(idx, len(responses) - 1)])
+
+        monkeypatch.setattr(web_ui, "create_provider", create_provider_stub)
+        monkeypatch.setattr(web_ui, "check_verification_mentioned", lambda *_args, **_kwargs: True)
+
+        ui = ChadWebUI(DummyAPIClient())
+        verified, feedback = ui._run_verification(
+            str(tmp_path), "coding output", "Task", "verifier"
+        )
+
+        assert verified is True
+        assert feedback == "Looks good"
+        assert create_calls["count"] == 2
 
 
 class TestAnsiToHtml:

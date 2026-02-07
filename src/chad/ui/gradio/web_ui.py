@@ -6,6 +6,7 @@ import json
 import re
 import socket
 import threading
+import time
 import queue
 import uuid
 import html
@@ -2850,65 +2851,65 @@ class ChadWebUI:
         verification_prompt = get_verification_prompt(trimmed_output, task_description, change_summary)
 
         try:
-            verifier = create_provider(verification_config)
-            if on_activity:
-                verifier.set_activity_callback(on_activity)
-
-            if not verifier.start_session(project_path, None):
-                return True, "Verification skipped: failed to start session"
-
             max_parse_attempts = 2
             last_error = None
 
             for attempt in range(max_parse_attempts):
-                verifier.send_message(verification_prompt)
-                response = verifier.get_response(timeout=timeout)
+                verifier = create_provider(verification_config)
+                if on_activity:
+                    verifier.set_activity_callback(on_activity)
 
-                if not response:
-                    last_error = "No response from verification agent"
-                    if on_activity:
-                        on_activity(
-                            "system",
-                            f"Verification response missing (attempt {attempt + 1}/{max_parse_attempts})",
-                        )
-                    continue
+                if not verifier.start_session(project_path, None):
+                    return True, "Verification skipped: failed to start session"
 
                 try:
-                    passed, summary, issues = parse_verification_response(response)
+                    verifier.send_message(verification_prompt)
+                    response = verifier.get_response(timeout=timeout)
 
+                    if not response:
+                        last_error = "No response from verification agent"
+                        if on_activity:
+                            on_activity(
+                                "system",
+                                f"Verification response missing (attempt {attempt + 1}/{max_parse_attempts})",
+                            )
+                        continue
+
+                    try:
+                        passed, summary, issues = parse_verification_response(response)
+
+                        if passed:
+                            # Skip automated verification for mock provider (testing mode)
+                            if verification_provider != "mock" and not check_verification_mentioned(coding_output):
+                                verified, feedback = _run_automated_verification()
+                                if not verified:
+                                    return False, feedback or "Verification failed"
+                            return True, summary
+
+                        feedback = summary
+                        if issues:
+                            feedback += "\n\nIssues:\n" + "\n".join(f"- {issue}" for issue in issues)
+                        return False, feedback
+
+                    except VerificationParseError as e:
+                        last_error = str(e)
+                        if on_activity:
+                            on_activity(
+                                "system",
+                                f"Verification parse failed (attempt {attempt + 1}/{max_parse_attempts}): {last_error}",
+                            )
+                        if attempt < max_parse_attempts - 1:
+                            # Retry with a reminder to use JSON format
+                            verification_prompt = (
+                                "Your previous response was not valid JSON. "
+                                "You MUST respond with ONLY a JSON object like:\n"
+                                '```json\n{"passed": true, "summary": "explanation"}\n```\n\n'
+                                "Try again."
+                            )
+                        continue
+                finally:
                     verifier.stop_session()
 
-                    if passed:
-                        # Skip automated verification for mock provider (testing mode)
-                        if verification_provider != "mock" and not check_verification_mentioned(coding_output):
-                            verified, feedback = _run_automated_verification()
-                            if not verified:
-                                return False, feedback or "Verification failed"
-                        return True, summary
-
-                    feedback = summary
-                    if issues:
-                        feedback += "\n\nIssues:\n" + "\n".join(f"- {issue}" for issue in issues)
-                    return False, feedback
-
-                except VerificationParseError as e:
-                    last_error = str(e)
-                    if on_activity:
-                        on_activity(
-                            "system",
-                            f"Verification parse failed (attempt {attempt + 1}/{max_parse_attempts}): {last_error}",
-                        )
-                    if attempt < max_parse_attempts - 1:
-                        # Retry with a reminder to use JSON format
-                        verification_prompt = (
-                            "Your previous response was not valid JSON. "
-                            "You MUST respond with ONLY a JSON object like:\n"
-                            '```json\n{"passed": true, "summary": "explanation"}\n```\n\n'
-                            "Try again."
-                        )
-                    continue
-
-            verifier.stop_session()
             # All attempts failed - return error
             return None, f"Verification failed: {last_error}"
 
@@ -5999,12 +6000,20 @@ class ChadWebUI:
             with gr.Column(scale=1):
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=3, min_width=260):
-                        # Auto-detect initial verification commands for default path
-                        initial_detected = detect_verification_commands(Path(default_path).expanduser().resolve())
+                        # Auto-detect initial verification commands for default path (cached)
+                        _project_resolved = Path(default_path).expanduser().resolve()
+                        if not hasattr(self, "_detected_commands_cache"):
+                            self._detected_commands_cache = {}
+                        _cache_key = str(_project_resolved)
+                        if _cache_key not in self._detected_commands_cache:
+                            self._detected_commands_cache[_cache_key] = (
+                                detect_verification_commands(_project_resolved),
+                                detect_doc_paths(_project_resolved),
+                            )
+                        initial_detected, initial_docs = self._detected_commands_cache[_cache_key]
                         initial_lint = initial_detected.get("lint_command") or ""
                         initial_test = initial_detected.get("test_command") or ""
                         initial_type = initial_detected.get("project_type", "unknown")
-                        initial_docs = detect_doc_paths(Path(default_path).expanduser().resolve())
                         initial_instructions = initial_docs.instructions_path or ""
                         initial_architecture = initial_docs.architecture_path or ""
 
@@ -7552,6 +7561,11 @@ class ChadWebUI:
             "max_verification_attempts": max_verification_attempts,
         }
 
+    def _startup_log(self, msg: str) -> None:
+        t0 = getattr(self, "_startup_t0", None)
+        if t0 is not None and self.dev_mode:
+            print(f"{_startup_elapsed(t0)} {msg}", flush=True)
+
     def create_interface(self) -> gr.Blocks:
         """Create the Gradio interface."""
         # Create initial session
@@ -7560,7 +7574,9 @@ class ChadWebUI:
 
         # Prefetch all data needed during UI construction to avoid
         # redundant API calls (was ~49 HTTP roundtrips, now ~9).
+        self._startup_log("Prefetching config...")
         self._init_data = self._prefetch_init_data()
+        self._startup_log("Config ready")
 
         with gr.Blocks(title="Chad", analytics_enabled=False, js="""
         () => {
@@ -8206,7 +8222,7 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
             )
 
             # Maximum number of task tabs we can have
-            MAX_TASKS = 10
+            MAX_TASKS = 8
 
             # Pre-create sessions for all potential tabs
             all_sessions = [initial_session]
@@ -8221,10 +8237,12 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
             # Tab index 1 = Task 1 (since Setup is index 0)
             with gr.Tabs(selected=1, elem_id="main-tabs") as main_tabs:
                 # Setup tab (first, but not default selected)
+                self._startup_log("Creating setup tab...")
                 with gr.Tab("⚙️ Setup", id=0):
                     self._create_providers_ui()
 
                 # Pre-create ALL task tabs - only first visible initially
+                self._startup_log("Creating task tabs...")
                 task_tabs = []
                 for i in range(MAX_TASKS):
                     tab_id = i + 1  # Setup is 0, tasks start at 1
@@ -8232,6 +8250,7 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                     with gr.Tab(f"Task {i + 1}", id=tab_id, visible=is_visible) as task_tab:
                         self._create_session_ui(all_sessions[i].id, is_first=(i == 0))
                     task_tabs.append(task_tab)
+                self._startup_log("Task tabs created")
 
                 # "+" tab to add new tasks - contains a button that triggers task creation
                 add_tab_id = MAX_TASKS + 1
@@ -8243,6 +8262,7 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                         elem_id="add-new-task-btn",
                     )
 
+            self._startup_log("Wiring event handlers...")
             # Handle clicking the Add New Task button
             def on_add_task_click(current_count):
                 if current_count >= MAX_TASKS:
@@ -8420,6 +8440,11 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
             return interface
 
 
+def _startup_elapsed(t0: float) -> str:
+    """Format seconds elapsed since t0."""
+    return f"[{time.monotonic() - t0:.1f}s]"
+
+
 def launch_web_ui(
     api_base_url: str = "http://localhost:8000",
     port: int = 7860,
@@ -8435,6 +8460,8 @@ def launch_web_ui(
     Returns:
         Tuple of (None, actual_port) where actual_port is the port used
     """
+    t0 = time.monotonic()
+
     # Ensure downstream agents inherit a consistent project root
     try:
         from chad.util.config import ensure_project_root_env
@@ -8448,9 +8475,16 @@ def launch_web_ui(
     from chad.ui.client import APIClient
     api_client = APIClient(api_base_url)
 
+    def _log(msg: str) -> None:
+        if dev_mode:
+            print(f"{_startup_elapsed(t0)} {msg}", flush=True)
+
     # Create and launch UI
+    _log("Building interface...")
     ui = ChadWebUI(api_client, dev_mode=dev_mode)
+    ui._startup_t0 = t0
     app = ui.create_interface()
+    _log("Interface built")
 
     requested_port = port
     port, ephemeral, conflicted = _resolve_port(port)
@@ -8459,16 +8493,7 @@ def launch_web_ui(
     if conflicted:
         print(f"Port {requested_port} already in use; launching on ephemeral port {port}")
 
-    print("\n" + "=" * 70)
-    print("CHAD WEB UI")
-    print("=" * 70)
-    if open_browser:
-        print("Opening web interface in your browser...")
-    print("Press Ctrl+C to stop the server")
-    print("=" * 70 + "\n")
-
-    # Print port marker for scripts to parse (before launch blocks)
-    print(f"CHAD_PORT={port}", flush=True)
+    _log("Launching Gradio server...")
 
     # Allow serving session log files from the logs directory
     log_dir = str(EventLog.get_log_dir())
@@ -8477,8 +8502,10 @@ def launch_web_ui(
         server_name="127.0.0.1",
         server_port=port,
         share=False,
-        inbrowser=open_browser,  # Don't open browser for screenshot mode
+        inbrowser=open_browser,
         quiet=False,
+        show_api=False,
+        enable_monitoring=False,
         allowed_paths=[log_dir],
     )
 
