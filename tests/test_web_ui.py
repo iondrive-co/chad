@@ -517,6 +517,25 @@ class TestChadWebUI:
         assert "gpt-5.1-codex-max" in models
         assert "default" in models
 
+    def test_get_models_for_mock_excludes_foreign_stored_model(self, web_ui, mock_api_client, tmp_path):
+        """Mock coding agent should not expose models from other providers."""
+        mock_account = MockAccount(
+            name="testy",
+            provider="mock",
+            role="CODING",
+            model="claude-sonnet-4-20250514",
+        )
+        mock_api_client.list_accounts.return_value = [mock_account]
+        mock_api_client.get_account.side_effect = lambda _: mock_account
+        mock_api_client.get_account_model.return_value = "claude-sonnet-4-20250514"
+
+        from chad.util.model_catalog import ModelCatalog
+
+        web_ui.model_catalog = ModelCatalog(api_client=mock_api_client, home_dir=tmp_path, cache_ttl=0)
+        models = web_ui.get_models_for_account("testy")
+
+        assert models == ["default"]
+
     def test_get_account_choices(self, web_ui, mock_api_client):
         """Test getting account choices for dropdowns."""
         choices = web_ui.get_account_choices()
@@ -568,8 +587,8 @@ class TestChadWebUI:
 
         assert len(updates) == 1
         update = updates[0]
-        # 25 elements: 19 base (includes workspace display) + 6 prompt outputs
-        assert len(update) == 25
+        # 24 elements: 18 base (role_status removed) + 6 prompt outputs
+        assert len(update) == 24
         assert "already running" in update[2].get("value", "").lower()
         assert update[5].get("interactive") is True
         assert update[6].get("interactive") is False
@@ -2867,11 +2886,42 @@ class TestLivePatchScrollPreservation:
         assert flag is True  # should flip on first render
 
 
-class TestDynamicStatusLine:
-    """Test dynamic status line with task state and worktree path."""
+class TestPhaseMilestones:
+    """Test phase milestone messages inserted into chat history."""
+
+    def test_make_phase_milestone_with_metrics(self):
+        """make_phase_milestone should format phase name, account, model, and metrics."""
+        from chad.ui.gradio.web_ui import make_phase_milestone
+
+        msg = make_phase_milestone("Exploration", "claude-1", "claude-sonnet-4-20250514", 85, 100)
+        assert msg["role"] == "user"
+        assert "**Exploration:**" in msg["content"]
+        assert "claude-1" in msg["content"]
+        assert "claude-sonnet-4-20250514" in msg["content"]
+        assert "Usage remaining: 85%" in msg["content"]
+        assert "Context remaining: 100%" in msg["content"]
+
+    def test_make_phase_milestone_without_metrics(self):
+        """make_phase_milestone should omit metrics when not provided."""
+        from chad.ui.gradio.web_ui import make_phase_milestone
+
+        msg = make_phase_milestone("Verification", "verifier", "gpt-4o")
+        assert msg["role"] == "user"
+        assert "**Verification:**" in msg["content"]
+        assert "verifier" in msg["content"]
+        assert "gpt-4o" in msg["content"]
+        assert "Usage remaining" not in msg["content"]
+
+    def test_make_phase_milestone_different_phases(self):
+        """make_phase_milestone should work with various phase names."""
+        from chad.ui.gradio.web_ui import make_phase_milestone
+
+        for phase in ("Coding", "Re-coding", "Re-verification"):
+            msg = make_phase_milestone(phase, "acct", "model-x", 50, 75)
+            assert f"**{phase}:**" in msg["content"]
 
     def test_idle_status_shows_ready_with_model(self):
-        """Idle status should show Ready with coding model info."""
+        """Idle status should show Ready with coding model info (get_role_config_status still works)."""
         from chad.ui.gradio.provider_ui import ProviderUIManager
 
         class MockAPIClient:
@@ -2884,141 +2934,6 @@ class TestDynamicStatusLine:
         assert "Ready" in status
         assert "Coding" in status
         assert "claude-main" in status
-
-    def test_ready_status_shows_worktree_path(self):
-        """Ready status should show worktree path when provided."""
-        from chad.ui.gradio.provider_ui import ProviderUIManager
-
-        class MockAPIClient:
-            def list_accounts(self):
-                return [MockAccount(name="claude-main", provider="anthropic", model="sonnet-4", role="CODING")]
-
-        ui = ProviderUIManager(MockAPIClient())
-        ready, status = ui.get_role_config_status(worktree_path="/home/user/.chad-worktrees/abc123")
-        assert ready is True
-        assert "Ready" in status
-        assert "Coding" in status
-        assert "claude-main" in status
-        assert "Worktree" in status
-        assert "abc123" in status  # Last component of worktree path
-
-    def test_running_status_shows_worktree_path(self):
-        """Running state should show worktree path instead of model."""
-        from chad.ui.gradio.provider_ui import ProviderUIManager
-
-        class MockAPIClient:
-            def list_accounts(self):
-                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
-
-        ui = ProviderUIManager(MockAPIClient())
-        ready, status = ui.get_role_config_status(task_state="running", worktree_path="/tmp/worktree-abc123")
-        assert ready is True
-        assert "Running" in status
-        assert "Worktree" in status
-        assert "/tmp/worktree-abc123" in status
-        assert "Ready" not in status
-
-    def test_verifying_status_shows_worktree_path(self):
-        """Verifying state should show worktree path."""
-        from chad.ui.gradio.provider_ui import ProviderUIManager
-
-        class MockAPIClient:
-            def list_accounts(self):
-                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
-
-        ui = ProviderUIManager(MockAPIClient())
-        ready, status = ui.get_role_config_status(task_state="verifying", worktree_path="/tmp/worktree-abc123")
-        assert ready is True
-        assert "Verifying" in status
-        assert "Worktree" in status
-        assert "/tmp/worktree-abc123" in status
-
-    def test_completed_status_shows_agent_name(self):
-        """Completed state should show agent name (not worktree)."""
-        from chad.ui.gradio.provider_ui import ProviderUIManager
-
-        class MockAPIClient:
-            def list_accounts(self):
-                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
-
-        ui = ProviderUIManager(MockAPIClient())
-        ready, status = ui.get_role_config_status(task_state="completed", worktree_path="/tmp/worktree-abc123")
-        assert ready is True
-        assert "Completed" in status
-        assert "Agent" in status
-        assert "claude-main" in status
-        # Worktree path not shown for completed/failed states
-        assert "Worktree" not in status
-
-    def test_failed_status_shows_agent_name(self):
-        """Failed state should show agent name (not worktree)."""
-        from chad.ui.gradio.provider_ui import ProviderUIManager
-
-        class MockAPIClient:
-            def list_accounts(self):
-                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
-
-        ui = ProviderUIManager(MockAPIClient())
-        ready, status = ui.get_role_config_status(task_state="failed", worktree_path="/tmp/worktree-abc123")
-        assert ready is True
-        assert "Failed" in status
-        assert "Agent" in status
-        assert "claude-main" in status
-
-    def test_format_role_status_passes_parameters(self):
-        """format_role_status should pass task state and worktree path through."""
-        from chad.ui.gradio.provider_ui import ProviderUIManager
-
-        class MockAPIClient:
-            def list_accounts(self):
-                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
-
-        ui = ProviderUIManager(MockAPIClient())
-        status = ui.format_role_status(task_state="running", worktree_path="/tmp/wt")
-        assert "Running" in status
-        assert "Worktree" in status
-
-    def test_verifying_status_shows_verification_account(self):
-        """When verifying with a verification_account and no worktree, status should show that account."""
-        from chad.ui.gradio.provider_ui import ProviderUIManager
-
-        class MockAPIClient:
-            def __init__(self):
-                self._mock_usage = {"verifier-agent": 0.6}
-                self._mock_context = {"verifier-agent": 0.4}
-
-            def list_accounts(self):
-                return [
-                    MockAccount(name="coding-agent", provider="anthropic", role="CODING"),
-                    MockAccount(name="verifier-agent", provider="mock", role=None),
-                ]
-
-            def get_account(self, name):
-                if name == "verifier-agent":
-                    return MockAccount(name=name, provider="mock", role=None)
-                return MockAccount(name=name, provider="anthropic", role="CODING")
-
-            def get_mock_remaining_usage(self, name):
-                return self._mock_usage.get(name, 0.5)
-
-            def get_mock_context_remaining(self, name):
-                return self._mock_context.get(name, 1.0)
-
-        ui = ProviderUIManager(MockAPIClient())
-        # Without worktree path, status shows agent name
-        ready, status = ui.get_role_config_status(
-            task_state="verifying",
-            verification_account="verifier-agent",
-        )
-        assert ready is True
-        assert "Verifying" in status
-        # Should show the verification account, not the coding account
-        assert "verifier-agent" in status
-        # Coding account should not be shown during verification
-        assert "coding-agent" not in status
-        # Metrics should be from the verification account (60% usage, 40% context)
-        assert "Usage: 60%" in status
-        assert "Context: 40%" in status
 
     def test_format_usage_metrics_returns_percentages(self):
         """_format_usage_metrics should return formatted usage and context percentages."""
@@ -3671,6 +3586,28 @@ class TestPreferredVerificationModel:
 
         # Should fall back to the account's stored model
         assert state.model_value == "claude-sonnet-4-20250514"
+
+    def test_build_verification_dropdown_same_as_mock_filters_foreign_model(self, web_ui, mock_api_client):
+        """SAME_AS_CODING should not retain a model that belongs to a different provider."""
+        mock_account = MockAccount(
+            name="testy",
+            provider="mock",
+            role="CODING",
+            model="claude-sonnet-4-20250514",
+            reasoning="default",
+        )
+        mock_api_client.list_accounts.return_value = [mock_account]
+        mock_api_client.get_account.side_effect = lambda _: mock_account
+
+        state = web_ui._build_verification_dropdown_state(
+            coding_agent="testy",
+            verification_agent=web_ui.SAME_AS_CODING,
+            coding_model_value="claude-sonnet-4-20250514",
+            coding_reasoning_value="default",
+        )
+
+        assert state.model_choices == ["default"]
+        assert state.model_value == "default"
 
     def test_resolve_verification_preferences_persists_model(self, web_ui, mock_api_client):
         """Test that _resolve_verification_preferences persists the verification model to config."""

@@ -422,71 +422,7 @@ def cli_config_parity_check() -> ConfigParityResult:
 
 
 # ---------------------------------------------------------------------------
-# Tool 6: get_formatted_status
-# ---------------------------------------------------------------------------
-
-def get_formatted_status(
-    accounts: list[dict[str, Any]] | None = None,
-    task_state: str | None = None,
-    worktree_path: str | None = None,
-    switched_from: str | None = None,
-    active_account: str | None = None,
-    project_path: str | None = None,
-    verification_account: str | None = None,
-) -> str:
-    """Call ``ProviderUIManager.format_role_status()`` with mock data.
-
-    Creates a mock ``APIClient`` whose ``list_accounts`` returns *accounts*.
-
-    Args:
-        accounts: List of account dicts with keys ``name``, ``provider``,
-            ``role``, ``model`` (optional).  Defaults to a single mock account.
-        task_state: One of ``running``, ``verifying``, ``completed``, ``failed``, or ``None``.
-        worktree_path: Path string to show in status.
-        switched_from: Previous provider name for handover indicator.
-        active_account: Override the coding agent account name.
-        project_path: Project path to show in status.
-        verification_account: Account name for verification display.
-
-    Returns:
-        The rendered markdown status string.
-    """
-    from unittest.mock import MagicMock
-    from chad.ui.gradio.provider_ui import ProviderUIManager
-
-    if accounts is None:
-        accounts = [
-            {"name": "mock-agent", "provider": "mock", "role": "CODING", "model": None}
-        ]
-
-    # Build lightweight account objects with required attributes
-    mock_accounts = []
-    for acc in accounts:
-        a = MagicMock()
-        a.name = acc.get("name", "unknown")
-        a.provider = acc.get("provider", "mock")
-        a.role = acc.get("role", None)
-        a.model = acc.get("model", None)
-        mock_accounts.append(a)
-
-    api_client = MagicMock()
-    api_client.list_accounts.return_value = mock_accounts
-    # Provide a default for usage metrics (returns None = no metrics)
-    api_client.get_account_usage.return_value = None
-
-    manager = ProviderUIManager(api_client=api_client)
-    return manager.format_role_status(
-        task_state=task_state,
-        worktree_path=worktree_path,
-        switched_from=switched_from,
-        active_account=active_account,
-        project_path=project_path,
-        verification_account=verification_account,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Tool 7: inspect_stream_output
+# Tool 6: inspect_stream_output (formerly Tool 7)
 # ---------------------------------------------------------------------------
 
 @dataclass

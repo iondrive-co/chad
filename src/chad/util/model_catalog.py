@@ -113,6 +113,51 @@ class ModelCatalog:
             "mock": self.MOCK_FALLBACK,
         }.get(provider, ("default",))
 
+    @staticmethod
+    def _normalize_stored_model(model: object) -> str | None:
+        if not isinstance(model, str):
+            return None
+        normalized = model.strip()
+        return normalized or None
+
+    def _model_matches_provider(self, provider: str, model: str) -> bool:
+        normalized = model.strip().lower()
+        if not normalized:
+            return False
+        if normalized == "default":
+            return True
+
+        if provider == "mock":
+            return False
+        if provider == "anthropic":
+            return normalized.startswith("claude-")
+        if provider == "gemini":
+            return normalized.startswith("gemini-")
+        if provider == "qwen":
+            return normalized.startswith("qwen")
+        if provider == "kimi":
+            return normalized.startswith("kimi")
+        if provider == "mistral":
+            return normalized.startswith(("mistral", "codestral", "ministral", "open-mistral", "pixtral"))
+        if provider == "opencode":
+            return "/" in normalized
+        if provider == "openai":
+            foreign_prefixes = (
+                "claude-",
+                "anthropic/",
+                "gemini-",
+                "google/",
+                "qwen",
+                "kimi",
+                "mistral",
+                "codestral",
+                "ministral",
+                "open-mistral",
+                "pixtral",
+            )
+            return not normalized.startswith(foreign_prefixes)
+        return True
+
     def _stored_model(self, provider: str, account_name: str | None) -> set[str]:
         if not account_name or not self.api_client:
             return set()
@@ -122,17 +167,20 @@ class ModelCatalog:
         # Primary: model stored on the account object (used throughout the UI)
         try:
             account = self.api_client.get_account(account_name)
-            model = getattr(account, "model", None)
-            if model:
-                models.add(str(model))
+            account_provider = getattr(account, "provider", None)
+            if account_provider and str(account_provider).strip() != provider:
+                return set()
+            model = self._normalize_stored_model(getattr(account, "model", None))
+            if model and self._model_matches_provider(provider, model):
+                models.add(model)
         except Exception:
             pass
 
         # Legacy/compat: some API clients expose get_account_model instead
         try:
-            model = self.api_client.get_account_model(account_name)
-            if model:
-                models.add(str(model))
+            model = self._normalize_stored_model(self.api_client.get_account_model(account_name))
+            if model and self._model_matches_provider(provider, model):
+                models.add(model)
         except Exception:
             pass
 

@@ -23,7 +23,6 @@ from tests.test_helpers import (
     capture_provider_command,
     cli_config_parity_check,
     collect_stream_events,
-    get_formatted_status,
     inspect_stream_output,
 )
 
@@ -377,56 +376,7 @@ class TestCliConfigParityCheck:
         assert result.cli_keys | result.missing_from_cli == result.api_keys
 
 
-# ── Tool 6: get_formatted_status ─────────────────────────────────────────
-
-
-class TestGetFormattedStatus:
-    """Tests for get_formatted_status."""
-
-    def test_default_ready_status(self):
-        status = get_formatted_status()
-        assert isinstance(status, str)
-        assert "Ready" in status or "mock-agent" in status
-
-    def test_running_status(self):
-        status = get_formatted_status(task_state="running")
-        assert "Running" in status
-
-    def test_verifying_status_with_account(self):
-        accounts = [
-            {"name": "coder", "provider": "mock", "role": "CODING", "model": None},
-        ]
-        status = get_formatted_status(
-            accounts=accounts,
-            task_state="verifying",
-            verification_account="verifier",
-        )
-        assert "Verifying" in status
-
-    def test_worktree_path_shown(self):
-        status = get_formatted_status(
-            task_state="running",
-            worktree_path="/tmp/chad-worktrees/abc123",
-        )
-        assert "abc123" in status or "worktree" in status.lower()
-
-    def test_switch_indicator(self):
-        status = get_formatted_status(
-            task_state="running",
-            switched_from="old-provider",
-        )
-        assert "old-provider" in status
-
-    def test_no_accounts_warning(self):
-        status = get_formatted_status(accounts=[])
-        assert "provider" in status.lower() or "⚠" in status
-
-    def test_project_path_shown(self):
-        status = get_formatted_status(project_path="/home/user/myproject")
-        assert "myproject" in status
-
-
-# ── Tool 7: inspect_stream_output ─────────────────────────────────────────
+# ── Tool 6: inspect_stream_output ─────────────────────────────────────────
 
 
 class TestInspectStreamOutput:

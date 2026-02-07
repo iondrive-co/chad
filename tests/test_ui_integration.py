@@ -207,17 +207,11 @@ class TestUIElements:
 
 
 class TestReadyStatus:
-    """Test the Ready status display with model assignments."""
+    """Test that the role_status row was removed (milestone info is now in chatbot)."""
 
-    def test_ready_status_shows_model_info(self, page: Page):
-        """Ready status should include model assignment info."""
-        # In tab-based UI, the first session is shown by default
-        status = page.locator("#role-config-status")
-        expect(status).to_be_visible(timeout=10000)
-
-        # Should contain model assignment info
-        text = status.text_content()
-        assert "Ready" in text or "Missing" in text
+    def test_role_config_status_removed(self, page: Page):
+        """The #role-config-status element should no longer exist."""
+        assert page.locator("#role-config-status").count() == 0
 
 
 class TestCodingAgentLayout:
@@ -227,38 +221,24 @@ class TestCodingAgentLayout:
         """Action buttons should sit under the agent selectors on the right."""
         top_row = page.locator("#run-top-row")
         status_row = page.locator("#role-status-row")
-        role_status = page.locator("#role-config-status")
         coding_agent = page.get_by_label("Coding Agent")
         verification_agent = page.get_by_label("Verification Agent")
         cancel_btn = page.locator("#cancel-task-btn")
         expect(top_row).to_be_visible()
         expect(status_row).to_be_visible()
-        expect(role_status).to_be_visible()
         expect(coding_agent).to_be_visible()
         expect(verification_agent).to_be_visible()
         expect(cancel_btn).to_be_visible()
 
         row_box = top_row.bounding_box()
-        status_line_box = role_status.bounding_box()
         button_row_box = status_row.bounding_box()
         coding_box = coding_agent.bounding_box()
         verification_box = verification_agent.bounding_box()
 
-        assert row_box and status_line_box and button_row_box, (
+        assert row_box and button_row_box, (
             "Missing bounding box data for layout assertions"
         )
         assert coding_box and verification_box
-
-        # Status line should stay inside the top panel and anchored left.
-        assert (
-            status_line_box["y"] >= row_box["y"] - 2
-        ), "Status line should remain inside the top panel"
-        assert (
-            status_line_box["y"] <= row_box["y"] + row_box["height"] + 2
-        ), "Status line should remain inside the top panel"
-        assert (
-            status_line_box["x"] < coding_box["x"] - 40
-        ), "Status line should anchor to the left column"
 
         # Action row should sit under agent selectors on the right.
         assert (
@@ -277,7 +257,6 @@ class TestCodingAgentLayout:
     def test_run_top_controls_stack_with_matching_widths(self, page: Page):
         """Model/Reasoning controls should stack under agents and action row stays right."""
         project_path = page.get_by_label("Project Path")
-        status = page.locator("#role-config-status")
         session_log = page.locator("#session-log-btn")
         workspace = page.locator("#workspace-display")
         status_row = page.locator("#role-status-row")
@@ -289,7 +268,6 @@ class TestCodingAgentLayout:
         verification_reasoning = page.get_by_label("Verification Reasoning Effort")
 
         expect(project_path).to_be_visible()
-        expect(status).to_be_visible()
         expect(session_log).to_be_visible()
         expect(workspace).to_be_visible()
         expect(status_row).to_be_visible()
@@ -300,8 +278,6 @@ class TestCodingAgentLayout:
         expect(verification_model).to_be_visible()
         expect(verification_reasoning).to_be_visible()
 
-        project_box = project_path.bounding_box()
-        status_box = status.bounding_box()
         log_box = session_log.bounding_box()
         workspace_box = workspace.bounding_box()
         status_row_box = status_row.bounding_box()
@@ -313,9 +289,7 @@ class TestCodingAgentLayout:
         verification_reasoning_box = verification_reasoning.bounding_box()
 
         assert (
-            project_box
-            and status_box
-            and log_box
+            log_box
             and workspace_box
             and status_row_box
             and coding_box
@@ -326,9 +300,6 @@ class TestCodingAgentLayout:
             and verification_reasoning_box
         )
 
-        assert (
-            status_box["y"] >= project_box["y"] + project_box["height"] - 2
-        ), "Status should appear beneath the Project Path field"
         assert (
             log_box["y"] >= status_row_box["y"] - 4
         ), "Session log button should align with the action row"
@@ -361,44 +332,28 @@ class TestCodingAgentLayout:
         assert abs(verification_reasoning_box["x"] - verification_box["x"]) <= 4
         assert abs(verification_reasoning_box["width"] - verification_box["width"]) <= 4
 
-    def test_status_sits_directly_under_doc_paths_without_compact_action_row(self, page: Page):
-        """Ready status should sit under doc paths while action row stays non-compact on the right."""
+    def test_doc_paths_visible_and_action_row_on_right(self, page: Page):
+        """Doc paths should be visible and action row stays non-compact on the right."""
         instructions = page.get_by_label("Agent Instructions Path")
         architecture = page.get_by_label("Architecture Doc Path")
         doc_paths_row = page.locator(".doc-paths-row")
-        status = page.locator("#role-config-status")
         status_row = page.locator("#role-status-row")
         coding_agent = page.get_by_label("Coding Agent")
 
         expect(instructions).to_be_visible()
         expect(architecture).to_be_visible()
         expect(doc_paths_row).to_be_visible()
-        expect(status).to_be_visible()
         expect(status_row).to_be_visible()
         expect(coding_agent).to_be_visible()
 
-        doc_paths_box = doc_paths_row.bounding_box()
-        status_box = status.bounding_box()
         action_box = status_row.bounding_box()
         coding_box = coding_agent.bounding_box()
 
-        assert doc_paths_box and status_box and action_box and coding_box
+        assert action_box and coding_box
 
-        doc_bottom = doc_paths_box["y"] + doc_paths_box["height"]
-        assert (
-            status_box["y"] <= doc_bottom + 8
-        ), "Ready status should be directly under doc path fields with no visible gap"
-        assert (
-            status_box["x"] + status_box["width"] <= coding_box["x"] + 40
-        ), "Ready status should stay in the left panel"
         assert (
             action_box["x"] >= coding_box["x"] - 20
         ), "Action row should stay in the right panel under agent selectors"
-
-        classes = page.evaluate(
-            "() => document.querySelector('#role-status-row')?.className || ''"
-        )
-        assert "compact" not in classes.split(), "Action row should not use compact variant styling"
 
     def test_cancel_button_in_status_row(self, page: Page):
         """Cancel button should be in the status row, to the left of the save button."""

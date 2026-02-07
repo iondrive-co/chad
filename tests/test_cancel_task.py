@@ -215,8 +215,8 @@ class TestCancelTask:
             "start_btn should be interactive=True in final yield after cancel"
         )
 
-        # Check followup row is hidden after cancel (index 11)
-        followup_row_update = final_update[11]
+        # Check followup row is hidden after cancel (index 10)
+        followup_row_update = final_update[10]
         assert isinstance(followup_row_update, dict), "followup_row update should be a dict"
         assert followup_row_update.get("visible") is False, (
             "followup_row should be visible=False in final yield after cancel"

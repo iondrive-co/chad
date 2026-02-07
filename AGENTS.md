@@ -336,7 +336,6 @@ Import them in any test file or use interactively via `pytest` fixtures.
 | `TaskPhaseMonitor` | `(events) → .phases, .phase_names(), .terminal_counts_by_phase()` | Scans events for phase transitions (coding → verification → continuation). Detects structured markers and text-based "Phase N:" markers. |
 | `capture_provider_command` | `(provider, account_name, project_path, ...) → CapturedCommand` | Calls `build_agent_command()` directly. Returns `.cmd`, `.env`, `.initial_input`. No monkeypatching needed. |
 | `cli_config_parity_check` | `() → ConfigParityResult` | Checks which user-editable config keys are missing from `cli/app.py`. Returns `.api_keys`, `.cli_keys`, `.missing_from_cli`. |
-| `get_formatted_status` | `(accounts=None, task_state=None, worktree_path=None, ...) → str` | Renders `ProviderUIManager.format_role_status()` with mock data. Returns markdown status string. |
 | `inspect_stream_output` | `(decoded_output) → StreamInspection` | Scans decoded terminal text for raw JSON patterns and binary garbage. Returns `.has_raw_json`, `.json_fragments`, `.has_binary_data`, `.binary_fragments`. |
 
 ### Usage Examples

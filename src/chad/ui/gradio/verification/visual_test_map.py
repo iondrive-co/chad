@@ -131,7 +131,8 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         component="agent-communication",
         tests=["TestUIElements"],
         source_file="chad/web_ui.py",
-        keywords=["chat", "chatbot", "messages", "conversation", "agent communication"],
+        keywords=["chat", "chatbot", "messages", "conversation", "agent communication",
+                  "phase milestone", "milestone", "phase marker"],
     ),
     "CODING_SUMMARY_BUBBLE": UIComponent(
         tab="run",
