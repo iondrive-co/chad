@@ -6158,59 +6158,47 @@ class ChadWebUI:
                             key=f"verification-reasoning-{session_id}",
                             interactive=verif_state.interactive,
                         )
-
-        # Action buttons: right-aligned beneath the agent selector columns
-        with gr.Row(
-            elem_id="role-status-row-container" if is_first else None,
-            elem_classes=["role-status-row-container"],
-            equal_height=True,
-        ):
-            with gr.Row(
-                elem_id="role-status-row" if is_first else None,
-                elem_classes=["role-status-row"],
-                variant="compact",
-                equal_height=True,
-            ):
-                cancel_btn = gr.Button(
-                    "Cancel",
-                    variant="stop",
-                    interactive=False,
-                    key=f"cancel-btn-{session_id}",
-                    elem_id="cancel-task-btn" if is_first else None,
-                    elem_classes=["cancel-task-btn"],
-                    min_width=80,
-                    scale=0,
-                )
-                project_save_btn = gr.Button(
-                    "Save",
-                    variant="primary",
-                    size="sm",
-                    key=f"project-save-{session_id}",
-                    elem_classes=["project-save-btn"],
-                    min_width=80,
-                    scale=0,
-                )
-                log_path = session.log_path
-                session_log_btn = gr.DownloadButton(
-                    label="Session Log" if not log_path else log_path.name,
-                    value=str(log_path) if log_path else None,
-                    visible=log_path is not None,
-                    variant="secondary",
-                    size="sm",
-                    scale=0,
-                    min_width=140,
-                    key=f"log-btn-{session_id}",
-                    elem_id="session-log-btn" if is_first else None,
-                    elem_classes=["session-log-btn"],
-                )
-                workspace_display = gr.HTML(
-                    self._workspace_html(session),
-                    key=f"workspace-display-{session_id}",
-                    elem_id="workspace-display" if is_first else None,
-                    elem_classes=["workspace-display"],
-                )
-
-        # Full-width status line below the config panel
+        # Action buttons: compact row beneath the agent selector columns
+        with gr.Row(variant="compact", equal_height=True):
+            cancel_btn = gr.Button(
+                "Cancel",
+                variant="stop",
+                interactive=False,
+                key=f"cancel-btn-{session_id}",
+                elem_id="cancel-task-btn" if is_first else None,
+                elem_classes=["cancel-task-btn"],
+                min_width=80,
+                scale=0,
+            )
+            project_save_btn = gr.Button(
+                "Save",
+                variant="primary",
+                size="sm",
+                key=f"project-save-{session_id}",
+                elem_classes=["project-save-btn"],
+                min_width=80,
+                scale=0,
+            )
+            log_path = session.log_path
+            session_log_btn = gr.DownloadButton(
+                label="Session Log" if not log_path else log_path.name,
+                value=str(log_path) if log_path else None,
+                visible=log_path is not None,
+                variant="secondary",
+                size="sm",
+                scale=0,
+                min_width=140,
+                key=f"log-btn-{session_id}",
+                elem_id="session-log-btn" if is_first else None,
+                elem_classes=["session-log-btn"],
+            )
+            workspace_display = gr.HTML(
+                self._workspace_html(session),
+                key=f"workspace-display-{session_id}",
+                elem_id="workspace-display" if is_first else None,
+                elem_classes=["workspace-display"],
+            )
+        # Role status directly below action buttons
         wt_path = str(session.worktree_path) if session.worktree_path else None
         proj_path = session.project_path
         role_status = gr.Markdown(
@@ -6219,7 +6207,6 @@ class ChadWebUI:
             elem_id="role-config-status" if is_first else None,
             elem_classes=["role-config-status"],
         )
-
         # Task status header - always in DOM but CSS hides when empty
         # This ensures JavaScript can find it for merge section visibility logic
         task_status = gr.Markdown(
@@ -8269,6 +8256,7 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                     )
 
             self._startup_log("Wiring event handlers...")
+
             # Handle clicking the Add New Task button
             def on_add_task_click(current_count):
                 if current_count >= MAX_TASKS:
@@ -8281,6 +8269,7 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
 
                 # Build visibility updates - show tabs 1 through new_count
                 updates = [gr.Tabs(selected=new_tab_id), new_count]
+
                 for i in range(MAX_TASKS):
                     if i < new_count:
                         updates.append(gr.update(visible=True))
