@@ -4585,6 +4585,9 @@ class ChadWebUI:
             yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
             return
 
+        # Capture raw message before screenshot/resume-prompt modifications
+        raw_followup_message = followup_message
+
         # Append screenshot paths to message if provided
         if screenshots:
             screenshot_section = "\n\nThe user has attached the following screenshots for reference. " \
@@ -4786,6 +4789,11 @@ class ChadWebUI:
         else:
             user_content = f"**Follow-up**\n\n{followup_message}"
         chat_history.append({"role": "user", "content": user_content})
+
+        # Log follow-up user message to event log
+        if session.event_log:
+            session.event_log.start_turn()
+            session.event_log.log(UserMessageEvent(content=raw_followup_message))
 
         # Track where the final message will be inserted
         # Don't add a placeholder - use only the dedicated live stream panel
@@ -5007,6 +5015,12 @@ class ChadWebUI:
         chat_history.insert(pending_idx, make_chat_message("CODING AI", parsed))
         last_coding_output = parsed
 
+        # Log assistant response to event log
+        if session.event_log and parsed:
+            session.event_log.log(AssistantMessageEvent(
+                blocks=[{"kind": "text", "content": parsed[:1000]}]
+            ))
+
         # Update stored history
         session.chat_history = chat_history
         self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
@@ -5126,6 +5140,12 @@ class ChadWebUI:
                             "content": "───────────── ❌ VERIFICATION ERROR ─────────────",
                         }
                     )
+                    if session.event_log:
+                        session.event_log.log(VerificationAttemptEvent(
+                            attempt_number=verification_attempt,
+                            passed=False,
+                            summary="Verification error",
+                        ))
                     self._update_session_log(
                         session, chat_history, full_history, verification_attempts=verification_log
                     )
@@ -5138,11 +5158,23 @@ class ChadWebUI:
                             "content": "───────────── ✅ VERIFICATION PASSED ─────────────",
                         }
                     )
+                    if session.event_log:
+                        session.event_log.log(VerificationAttemptEvent(
+                            attempt_number=verification_attempt,
+                            passed=True,
+                            summary=verification_feedback[:500] if verification_feedback else "",
+                        ))
                     self._update_session_log(
                         session, chat_history, full_history, verification_attempts=verification_log
                     )
                 else:
                     chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
+                    if session.event_log:
+                        session.event_log.log(VerificationAttemptEvent(
+                            attempt_number=verification_attempt,
+                            passed=False,
+                            summary=verification_feedback[:500] if verification_feedback else "",
+                        ))
                     self._update_session_log(
                         session, chat_history, full_history, verification_attempts=verification_log
                     )
@@ -5182,6 +5214,8 @@ class ChadWebUI:
                             f"{verification_feedback}\n\n"
                             "Please fix these issues and confirm when done."
                         )
+                        if session.event_log:
+                            session.event_log.log(UserMessageEvent(content="Revision requested"))
                         try:
                             coding_provider.send_message(revision_request)
                             revision_response = coding_provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
@@ -5202,6 +5236,10 @@ class ChadWebUI:
                             parsed_revision = parse_codex_output(revision_response)
                             chat_history[revision_idx] = make_chat_message("CODING AI", parsed_revision)
                             last_coding_output = parsed_revision
+                            if session.event_log and parsed_revision:
+                                session.event_log.log(AssistantMessageEvent(
+                                    blocks=[{"kind": "text", "content": parsed_revision[:1000]}]
+                                ))
                             self._update_session_log(
                                 session, chat_history, full_history, verification_attempts=verification_log
                             )
@@ -6158,8 +6196,10 @@ class ChadWebUI:
                             key=f"verification-reasoning-{session_id}",
                             interactive=verif_state.interactive,
                         )
-        # Action buttons: compact row beneath the agent selector columns
+        # Action buttons: compact row beneath the agent selector columns, right-aligned
         with gr.Row(variant="compact", equal_height=True):
+            # Empty column to push buttons to the right
+            gr.HTML("", scale=1)
             cancel_btn = gr.Button(
                 "Cancel",
                 variant="stop",
