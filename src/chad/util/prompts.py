@@ -489,49 +489,91 @@ def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
     # e.g., "*Thinking: **Ensuring valid JSON output***\n\n{..."
     cleaned = re.sub(r"^\s*\*+[Tt]hinking:.*?\*+\s*", "", response, flags=re.DOTALL)
 
-    # Extract JSON from the response (may be wrapped in ```json ... ```)
-    json_match = re.search(r"```json\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
-    if json_match:
-        json_str = json_match.group(1)
-    else:
-        # Try to find JSON object by matching balanced braces
-        # Find the first { and extract a valid JSON object from there
-        brace_start = cleaned.find("{")
-        if brace_start != -1:
-            depth = 0
-            in_string = False
-            escape_next = False
-            json_end = -1
-            for i, char in enumerate(cleaned[brace_start:], brace_start):
-                if escape_next:
-                    escape_next = False
-                    continue
-                if char == "\\" and in_string:
-                    escape_next = True
-                    continue
-                if char == '"' and not escape_next:
-                    in_string = not in_string
-                    continue
-                if in_string:
-                    continue
-                if char == "{":
-                    depth += 1
-                elif char == "}":
-                    depth -= 1
-                    if depth == 0:
-                        json_end = i + 1
-                        break
-            if json_end != -1:
-                json_str = cleaned[brace_start:json_end]
-            else:
-                raise VerificationParseError(f"No valid JSON found in response: {response[:200]}")
-        else:
-            raise VerificationParseError(f"No JSON found in response: {response[:200]}")
+    def _extract_balanced_json_objects(text: str) -> list[str]:
+        objects: list[str] = []
+        depth = 0
+        in_string = False
+        escape_next = False
+        start_idx: int | None = None
 
-    try:
-        data = json.loads(json_str)
-    except json.JSONDecodeError as e:
-        raise VerificationParseError(f"Invalid JSON: {e}")
+        for idx, char in enumerate(text):
+            if escape_next:
+                escape_next = False
+                continue
+
+            if in_string:
+                if char == "\\":
+                    escape_next = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+                continue
+
+            if char == "{":
+                if depth == 0:
+                    start_idx = idx
+                depth += 1
+                continue
+
+            if char == "}":
+                if depth == 0:
+                    continue
+                depth -= 1
+                if depth == 0 and start_idx is not None:
+                    objects.append(text[start_idx: idx + 1])
+                    start_idx = None
+
+        return objects
+
+    # Collect candidate JSON objects from fenced and raw content.
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    for match in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL | re.IGNORECASE):
+        candidate = match.group(1).strip()
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+
+    for candidate in _extract_balanced_json_objects(cleaned):
+        normalized = candidate.strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            candidates.append(normalized)
+
+    if not candidates:
+        raise VerificationParseError(f"No JSON found in response: {response[:200]}")
+
+    # If multiple JSON objects exist, prefer one that includes `passed`.
+    prioritized = sorted(candidates, key=lambda text: '"passed"' not in text)
+    data = None
+    parse_error = None
+    missing_passed_seen = False
+    for candidate in prioritized:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError as e:
+            parse_error = e
+            continue
+
+        if not isinstance(parsed, dict):
+            continue
+
+        if "passed" in parsed:
+            data = parsed
+            break
+
+        missing_passed_seen = True
+
+    if data is None:
+        if missing_passed_seen:
+            raise VerificationParseError("Missing required field 'passed' in JSON response")
+        if parse_error is not None:
+            raise VerificationParseError(f"Invalid JSON: {parse_error}")
+        raise VerificationParseError(f"No valid JSON found in response: {response[:200]}")
 
     if "passed" not in data:
         raise VerificationParseError("Missing required field 'passed' in JSON response")

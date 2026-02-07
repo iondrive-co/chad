@@ -3139,6 +3139,114 @@ class TestVerificationPrompt:
         assert summary == "All good!"
         assert issues == []
 
+    def test_parse_verification_response_prefers_json_with_passed(self):
+        """When multiple JSON blocks exist, parser should choose one with `passed`."""
+        from chad.util.prompts import parse_verification_response
+
+        response = """
+        ```json
+        {"change_summary": "Coding-style summary", "completion_status": "success"}
+        ```
+
+        ```json
+        {"passed": false, "summary": "Needs fixes", "issues": ["Missing test"]}
+        ```
+        """
+        passed, summary, issues = parse_verification_response(response)
+        assert passed is False
+        assert summary == "Needs fixes"
+        assert issues == ["Missing test"]
+
+    def test_run_verification_emits_parse_failure_status(self, monkeypatch, tmp_path):
+        """Verification should surface parse failures while retrying."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+        import chad.ui.gradio.web_ui as web_ui
+
+        class DummyAPIClient:
+            def get_account(self, name):
+                return MockAccount(name=name, provider="anthropic")
+
+        class DummyVerifier:
+            def __init__(self):
+                self._responses = iter([
+                    '```json\n{"change_summary": "wrong schema"}\n```',
+                    '```json\n{"change_summary": "still wrong"}\n```',
+                ])
+
+            def set_activity_callback(self, _callback):
+                return None
+
+            def start_session(self, _project_path, _system_prompt):
+                return True
+
+            def send_message(self, _message):
+                return None
+
+            def get_response(self, timeout=None):
+                return next(self._responses, None)
+
+            def stop_session(self):
+                return None
+
+        monkeypatch.setattr(web_ui, "create_provider", lambda *_args, **_kwargs: DummyVerifier())
+
+        activities = []
+
+        def on_activity(kind, detail):
+            activities.append((kind, detail))
+
+        ui = ChadWebUI(DummyAPIClient())
+        verified, feedback = ui._run_verification(
+            str(tmp_path), "coding output", "Task", "verifier", on_activity=on_activity
+        )
+
+        assert verified is None
+        assert "Missing required field 'passed'" in feedback
+        parse_status = [d for k, d in activities if k == "system" and "Verification parse failed" in d]
+        assert parse_status, "Expected parse-failure status updates during retries"
+
+    def test_run_verification_recovers_after_one_parse_failure(self, monkeypatch, tmp_path):
+        """Verifier should retry once and succeed when second response is valid."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+        import chad.ui.gradio.web_ui as web_ui
+
+        class DummyAPIClient:
+            def get_account(self, name):
+                return MockAccount(name=name, provider="anthropic")
+
+        class DummyVerifier:
+            def __init__(self):
+                self._responses = iter([
+                    '```json\n{"change_summary": "wrong schema"}\n```',
+                    '```json\n{"passed": true, "summary": "Looks good"}\n```',
+                ])
+
+            def set_activity_callback(self, _callback):
+                return None
+
+            def start_session(self, _project_path, _system_prompt):
+                return True
+
+            def send_message(self, _message):
+                return None
+
+            def get_response(self, timeout=None):
+                return next(self._responses, None)
+
+            def stop_session(self):
+                return None
+
+        monkeypatch.setattr(web_ui, "create_provider", lambda *_args, **_kwargs: DummyVerifier())
+        monkeypatch.setattr(web_ui, "check_verification_mentioned", lambda *_args, **_kwargs: True)
+
+        ui = ChadWebUI(DummyAPIClient())
+        verified, feedback = ui._run_verification(
+            str(tmp_path), "coding output", "Task", "verifier"
+        )
+
+        assert verified is True
+        assert feedback == "Looks good"
+
 
 class TestAnsiToHtml:
     """Test that ANSI escape codes are properly converted to HTML spans."""
