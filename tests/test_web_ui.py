@@ -3307,6 +3307,53 @@ class TestVerificationPrompt:
         assert feedback == "Looks good"
         assert create_calls["count"] == 2
 
+    def test_run_verification_uses_two_phase_prompts(self, monkeypatch, tmp_path):
+        """Verification should run exploration first, then a strict conclusion JSON prompt."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+        import chad.ui.gradio.web_ui as web_ui
+
+        class DummyAPIClient:
+            def get_account(self, name):
+                return MockAccount(name=name, provider="openai")
+
+        sent_messages = []
+
+        class DummyVerifier:
+            def __init__(self):
+                self._responses = iter(
+                    [
+                        "Exploration complete. I reviewed the changes.",
+                        '```json\n{"passed": true, "summary": "Looks good"}\n```',
+                    ]
+                )
+
+            def set_activity_callback(self, _callback):
+                return None
+
+            def start_session(self, _project_path, _system_prompt):
+                return True
+
+            def send_message(self, message):
+                sent_messages.append(message)
+
+            def get_response(self, timeout=None):
+                return next(self._responses, None)
+
+            def stop_session(self):
+                return None
+
+        monkeypatch.setattr(web_ui, "create_provider", lambda *_args, **_kwargs: DummyVerifier())
+        monkeypatch.setattr(web_ui, "check_verification_mentioned", lambda *_args, **_kwargs: True)
+
+        ui = ChadWebUI(DummyAPIClient())
+        verified, feedback = ui._run_verification(
+            str(tmp_path), "coding output", "Task", "verifier"
+        )
+
+        assert verified is True
+        assert feedback == "Looks good"
+        assert len(sent_messages) == 2
+
 
 class TestAnsiToHtml:
     """Test that ANSI escape codes are properly converted to HTML spans."""
@@ -3645,3 +3692,170 @@ class TestScreenshotUpload:
             request_data = call_args.kwargs.get("json", {})
             assert "screenshots" in request_data
             assert request_data["screenshots"] == ["/tmp/screenshot1.png"]
+
+
+class TestFollowupEventLogging:
+    """Test that send_followup() logs events to the session event log."""
+
+    @pytest.fixture
+    def web_ui(self):
+        from chad.ui.gradio.web_ui import ChadWebUI
+        client = Mock()
+        claude_account = MockAccount(name="claude", provider="mock", role="CODING")
+        client.list_accounts.return_value = [claude_account]
+        client.get_account.return_value = claude_account
+        client.get_verification_agent.return_value = None
+        client.get_preferences.return_value = Mock(last_project_path=None, dark_mode=True, ui_mode="gradio")
+        client.get_cleanup_settings.return_value = Mock(retention_days=7, auto_cleanup=True)
+        client.get_max_verification_attempts.return_value = 3
+        ui = ChadWebUI(client)
+        ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/codex"))
+        return ui
+
+    def _setup_session(self, web_ui, session_id, git_repo, monkeypatch):
+        """Set up a session with a MockProvider and EventLog."""
+        from chad.util.event_log import EventLog
+        git_mgr = GitWorktreeManager(git_repo)
+        worktree_path, base_commit = git_mgr.create_worktree(session_id)
+
+        session = web_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = worktree_path
+        session.worktree_branch = git_mgr._branch_name(session_id)
+        session.worktree_base_commit = base_commit
+        session.active = True
+        session.chat_history = [{"role": "user", "content": "**Task**\n\nInitial task"}]
+        session.task_description = "Initial task"
+
+        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
+        config = ModelConfig(provider="mock", model_name="default", account_name="claude")
+        provider = MockProvider(config)
+        provider.start_session(str(worktree_path))
+        session.provider = provider
+        session.coding_account = "claude"
+        session.config = config
+
+        # Set up event log (remove any stale log from previous runs)
+        session.event_log = EventLog(session_id)
+        if session.event_log.log_path.exists():
+            session.event_log.log_path.unlink()
+            session.event_log = EventLog(session_id)
+        session.event_log.start_turn()
+        return session
+
+    def _get_events(self, session):
+        """Read all events from the session's event log."""
+        import json
+        events = []
+        log_path = session.event_log.log_path
+        if log_path.exists():
+            for line in log_path.read_text().splitlines():
+                if line.strip():
+                    events.append(json.loads(line))
+        return events
+
+    def test_followup_logs_user_and_assistant_events(self, web_ui, git_repo, monkeypatch):
+        """Follow-up should log UserMessageEvent and AssistantMessageEvent."""
+        session = self._setup_session(web_ui, "event-log-basic", git_repo, monkeypatch)
+
+        list(web_ui.send_followup(
+            "event-log-basic",
+            "Fix the button color",
+            session.chat_history,
+            coding_agent="claude",
+            verification_agent=web_ui.VERIFICATION_NONE,
+        ))
+
+        events = self._get_events(session)
+        event_types = [e["type"] for e in events]
+        assert "user_message" in event_types, f"Expected user_message event, got: {event_types}"
+        assert "assistant_message" in event_types, f"Expected assistant_message event, got: {event_types}"
+
+        # Check sequence numbers are monotonically increasing
+        sequences = [e["seq"] for e in events if e["type"] in ("user_message", "assistant_message")]
+        assert sequences == sorted(sequences), f"Sequences not monotonic: {sequences}"
+
+    def test_followup_logs_raw_message_not_resume_prompt(self, web_ui, git_repo, monkeypatch):
+        """Logged UserMessageEvent should contain the raw user message, not modified versions."""
+        session = self._setup_session(web_ui, "event-log-raw", git_repo, monkeypatch)
+
+        raw_message = "Please change the font size"
+        list(web_ui.send_followup(
+            "event-log-raw",
+            raw_message,
+            session.chat_history,
+            coding_agent="claude",
+            verification_agent=web_ui.VERIFICATION_NONE,
+            screenshots=["/tmp/fake_screenshot.png"],
+        ))
+
+        events = self._get_events(session)
+        user_events = [e for e in events if e["type"] == "user_message"]
+        assert len(user_events) >= 1
+        # The logged content should be the raw message, not the screenshot-appended version
+        assert user_events[0]["content"] == raw_message
+
+    def test_followup_with_verification_logs_verification_events(self, web_ui, git_repo, monkeypatch):
+        """Follow-up with verification should log VerificationAttemptEvent."""
+        session = self._setup_session(web_ui, "event-log-verify", git_repo, monkeypatch)
+
+        # Mock _run_verification to return success
+        monkeypatch.setattr(
+            web_ui, "_run_verification",
+            lambda *args, **kwargs: (True, "All checks passed"),
+        )
+
+        list(web_ui.send_followup(
+            "event-log-verify",
+            "Add a test",
+            session.chat_history,
+            coding_agent="claude",
+            verification_agent="claude",
+        ))
+
+        events = self._get_events(session)
+        event_types = [e["type"] for e in events]
+        assert "user_message" in event_types
+        assert "assistant_message" in event_types
+        assert "verification_attempt" in event_types
+
+        verify_events = [e for e in events if e["type"] == "verification_attempt"]
+        assert verify_events[0]["passed"] is True
+
+    def test_followup_verification_revision_logs_all_events(self, web_ui, git_repo, monkeypatch):
+        """Verification fail + revision should log the full event sequence."""
+        session = self._setup_session(web_ui, "event-log-revision", git_repo, monkeypatch)
+
+        # First call fails verification, second passes
+        verification_calls = {"count": 0}
+
+        def mock_verification(*args, **kwargs):
+            verification_calls["count"] += 1
+            if verification_calls["count"] == 1:
+                return (False, "Tests are failing")
+            return (True, "All good now")
+
+        monkeypatch.setattr(web_ui, "_run_verification", mock_verification)
+
+        list(web_ui.send_followup(
+            "event-log-revision",
+            "Fix the layout",
+            session.chat_history,
+            coding_agent="claude",
+            verification_agent="claude",
+        ))
+
+        events = self._get_events(session)
+        event_types = [e["type"] for e in events]
+
+        # Should have: user_message (followup), assistant_message (coding),
+        # verification_attempt (fail), user_message (revision), assistant_message (revision),
+        # verification_attempt (pass)
+        assert event_types.count("user_message") >= 2, f"Expected >=2 user_message events, got: {event_types}"
+        assert event_types.count("assistant_message") >= 2, f"Expected >=2 assistant_message events, got: {event_types}"
+        assert event_types.count("verification_attempt") == 2, f"Expected 2 verification_attempt events, got: {event_types}"
+
+        # First verification should be failed, second should pass
+        verify_events = [e for e in events if e["type"] == "verification_attempt"]
+        assert verify_events[0]["passed"] is False
+        assert verify_events[1]["passed"] is True

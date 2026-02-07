@@ -19,7 +19,7 @@ from chad.server.services.pty_stream import reset_pty_stream_service
 from chad.server.state import reset_state
 from chad.ui.client.stream_client import StreamClient, decode_terminal_data
 from chad.ui.terminal_emulator import TerminalEmulator
-from chad.util.event_log import EventLog, SessionStartedEvent, TerminalOutputEvent
+from chad.util.event_log import EventLog, SessionEndedEvent, SessionStartedEvent, TerminalOutputEvent
 
 
 @pytest.fixture
@@ -1768,6 +1768,349 @@ class TestEventMultiplexer:
 
         # After ping, should not need another immediately
         assert not mux._should_ping()
+
+
+    @pytest.mark.asyncio
+    async def test_mux_multi_phase_delivers_complete(self, tmp_path):
+        """Multiplexer delivers complete after exploration→implementation phase transition.
+
+        Simulates the real task flow:
+        1. Exploration PTY starts, produces output, exits
+        2. Brief gap (task executor processes output)
+        3. Implementation PTY starts, produces output, exits
+        4. session_ended written to EventLog
+        5. Multiplexer should yield complete event
+
+        This covers the bug where the UI showed only the initial progress
+        update and never received the implementation phase completion.
+        """
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import get_pty_stream_service, reset_pty_stream_service
+
+        reset_pty_stream_service()
+        pty_service = get_pty_stream_service()
+        session_id = "mux-multi-phase"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Test multi-phase",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+
+        mux = EventMultiplexer(session_id, log)
+
+        collected_events = []
+        got_complete = False
+
+        async def collect():
+            nonlocal got_complete
+            async for event in mux.stream_events(pty_service):
+                collected_events.append(event)
+                if event.type == "complete":
+                    got_complete = True
+                    break
+
+        async def simulate_phases():
+            # Phase 1: Exploration
+            await anyio.sleep(0.1)
+            pty_service.start_pty_session(
+                session_id=session_id,
+                cmd=["bash", "-c", "echo 'exploring...'; sleep 0.2; echo 'progress found'"],
+                cwd=tmp_path,
+            )
+
+            # Wait for exploration to finish
+            await anyio.sleep(1.0)
+
+            # Log some terminal output (like flush_terminal_buffer does)
+            log.log(TerminalOutputEvent(data="exploring...\nprogress found"))
+
+            # Cleanup exploration session (like _run_phase does)
+            sessions = pty_service.list_sessions()
+            for sid in sessions:
+                sess = pty_service.get_session(sid)
+                if sess and sess.session_id == session_id:
+                    pty_service.cleanup_session(sid)
+
+            # Brief gap (simulates extract_progress, check_thresholds, etc.)
+            await anyio.sleep(0.3)
+
+            # Phase 2: Implementation
+            pty_service.start_pty_session(
+                session_id=session_id,
+                cmd=["bash", "-c", "echo 'implementing...'; sleep 0.2; echo 'done'"],
+                cwd=tmp_path,
+            )
+
+            # Wait for implementation to finish
+            await anyio.sleep(1.0)
+
+            # Log implementation output
+            log.log(TerminalOutputEvent(data="implementing...\ndone"))
+
+            # Cleanup implementation session
+            sessions = pty_service.list_sessions()
+            for sid in sessions:
+                sess = pty_service.get_session(sid)
+                if sess and sess.session_id == session_id:
+                    pty_service.cleanup_session(sid)
+
+            # Brief gap (simulates extract_coding_summary, etc.)
+            await anyio.sleep(0.2)
+
+            # Write session_ended (like _run_task does at the end)
+            log.log(SessionEndedEvent(success=True, reason="completed"))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(collect)
+            tg.start_soon(simulate_phases)
+
+        assert got_complete, (
+            f"Should receive complete event after multi-phase task. "
+            f"Got {len(collected_events)} events: {[e.type for e in collected_events]}"
+        )
+
+        # Verify we got terminal events from both phases
+        terminal_events = [e for e in collected_events if e.type == "terminal"]
+        assert len(terminal_events) >= 2, (
+            f"Should get terminal events from both phases, got {len(terminal_events)}"
+        )
+
+        reset_pty_stream_service()
+
+    @pytest.mark.asyncio
+    async def test_mux_multi_phase_no_premature_complete(self, tmp_path):
+        """Multiplexer must NOT emit complete when first PTY phase exits.
+
+        The multiplexer should wait for session_ended in EventLog rather than
+        emitting complete after the exploration PTY exits.
+        """
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import get_pty_stream_service, reset_pty_stream_service
+
+        reset_pty_stream_service()
+        pty_service = get_pty_stream_service()
+        session_id = "mux-no-premature"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Test",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+
+        mux = EventMultiplexer(session_id, log)
+
+        events_before_phase2 = []
+        phase2_started = anyio.Event()
+        complete_received = anyio.Event()
+
+        async def collect():
+            async for event in mux.stream_events(pty_service):
+                if not phase2_started.is_set():
+                    events_before_phase2.append(event)
+                if event.type == "complete":
+                    complete_received.set()
+                    break
+
+        async def simulate():
+            # Phase 1: Start and let exploration finish
+            await anyio.sleep(0.1)
+            stream1 = pty_service.start_pty_session(
+                session_id=session_id,
+                cmd=["bash", "-c", "echo phase1"],
+                cwd=tmp_path,
+            )
+            await anyio.sleep(0.5)
+            pty_service.cleanup_session(stream1)
+
+            # Gap between phases - multiplexer should NOT emit complete here
+            await anyio.sleep(0.5)
+
+            # Check that no complete event was emitted yet
+            types_so_far = [e.type for e in events_before_phase2]
+            assert "complete" not in types_so_far, (
+                f"Premature complete emitted after phase 1! Events: {types_so_far}"
+            )
+
+            # Phase 2: Implementation
+            phase2_started.set()
+            pty_service.start_pty_session(
+                session_id=session_id,
+                cmd=["bash", "-c", "echo phase2"],
+                cwd=tmp_path,
+            )
+            await anyio.sleep(0.5)
+
+            # Write session_ended
+            log.log(SessionEndedEvent(success=True, reason="completed"))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(collect)
+            tg.start_soon(simulate)
+
+        assert complete_received.is_set(), "Should eventually receive complete"
+
+        reset_pty_stream_service()
+
+
+    @pytest.mark.asyncio
+    async def test_mux_stream_with_since_multi_phase(self, tmp_path):
+        """Full SSE-like flow using stream_with_since for multi-phase tasks.
+
+        Tests the actual code path used by the SSE endpoint, including
+        the catchup phase followed by live streaming.
+        """
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import get_pty_stream_service, reset_pty_stream_service
+
+        reset_pty_stream_service()
+        pty_service = get_pty_stream_service()
+        session_id = "mux-since-multi"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Test",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+
+        mux = EventMultiplexer(session_id, log)
+
+        collected = []
+        got_complete = False
+
+        async def collect():
+            nonlocal got_complete
+            # Use stream_with_since like the SSE endpoint does
+            async for event in mux.stream_with_since(
+                pty_service,
+                since_seq=0,
+                include_terminal=True,
+                include_events=True,
+            ):
+                collected.append(event)
+                if event.type == "complete":
+                    got_complete = True
+                    break
+
+        async def simulate():
+            # Phase 1
+            await anyio.sleep(0.1)
+            stream1 = pty_service.start_pty_session(
+                session_id=session_id,
+                cmd=["bash", "-c", "echo exploration; sleep 0.2"],
+                cwd=tmp_path,
+            )
+            await anyio.sleep(0.8)
+            log.log(TerminalOutputEvent(data="exploration"))
+            pty_service.cleanup_session(stream1)
+            await anyio.sleep(0.3)
+
+            # Phase 2
+            stream2 = pty_service.start_pty_session(
+                session_id=session_id,
+                cmd=["bash", "-c", "echo implementation; sleep 0.2"],
+                cwd=tmp_path,
+            )
+            await anyio.sleep(0.8)
+            log.log(TerminalOutputEvent(data="implementation"))
+            pty_service.cleanup_session(stream2)
+            await anyio.sleep(0.2)
+
+            log.log(SessionEndedEvent(success=True, reason="completed"))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(collect)
+            tg.start_soon(simulate)
+
+        assert got_complete, (
+            f"Should receive complete via stream_with_since. "
+            f"Events: {[e.type for e in collected]}"
+        )
+
+        # Should have gotten session_started from catchup and terminal events
+        event_types = [e.type for e in collected]
+        assert "event" in event_types, "Should get structured events"
+        assert "terminal" in event_types, "Should get terminal events"
+
+        reset_pty_stream_service()
+
+    @pytest.mark.asyncio
+    async def test_mux_cleanup_before_subscribe_race(self, tmp_path):
+        """Test race where PTY is cleaned up between detection and subscription.
+
+        Simulates: multiplexer detects implementation PTY, but by the time
+        it subscribes, the session has been cleaned up.
+        """
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import get_pty_stream_service, reset_pty_stream_service
+
+        reset_pty_stream_service()
+        pty_service = get_pty_stream_service()
+        session_id = "mux-race"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Test",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+
+        mux = EventMultiplexer(session_id, log)
+
+        collected = []
+        got_complete = False
+
+        async def collect():
+            nonlocal got_complete
+            async for event in mux.stream_events(pty_service):
+                collected.append(event)
+                if event.type == "complete":
+                    got_complete = True
+                    break
+
+        async def simulate():
+            # Phase 1: Very short-lived
+            await anyio.sleep(0.1)
+            stream1 = pty_service.start_pty_session(
+                session_id=session_id,
+                cmd=["bash", "-c", "echo fast"],
+                cwd=tmp_path,
+            )
+            await anyio.sleep(0.3)
+            pty_service.cleanup_session(stream1)
+
+            # Phase 2: Also very short-lived - might be cleaned up before
+            # multiplexer can subscribe
+            stream2 = pty_service.start_pty_session(
+                session_id=session_id,
+                cmd=["bash", "-c", "echo fast2"],
+                cwd=tmp_path,
+            )
+            # Immediately clean up - simulates a very fast phase
+            await anyio.sleep(0.3)
+            pty_service.cleanup_session(stream2)
+
+            # Write session_ended - multiplexer should find it via polling
+            await anyio.sleep(0.2)
+            log.log(SessionEndedEvent(success=True, reason="completed"))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(collect)
+            tg.start_soon(simulate)
+
+        assert got_complete, (
+            f"Should receive complete even with cleanup race. "
+            f"Events: {[e.type for e in collected]}"
+        )
+
+        reset_pty_stream_service()
 
 
 class TestPTYCursorResponse:
