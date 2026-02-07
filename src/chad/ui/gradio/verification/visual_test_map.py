@@ -186,7 +186,14 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         component="provider-card",
         tests=["TestSetupTab", "TestProviderTwoColumnLayout"],
         source_file="chad/provider_ui.py",
-        keywords=["provider card", "account card", "provider settings"],
+        keywords=[
+            "provider card",
+            "account card",
+            "provider settings",
+            "mock usage slider",
+            "mock context slider",
+            "mock run duration",
+        ],
     ),
     "PROVIDER_MODEL_DROPDOWN": UIComponent(
         tab="setup",

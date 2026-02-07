@@ -725,6 +725,40 @@ class APIClient:
         resp.raise_for_status()
         return resp.json().get("remaining", remaining)
 
+    def get_mock_run_duration_seconds(self, account_name: str) -> int:
+        """Get mock run duration for a mock provider account.
+
+        Used for testing handover timing.
+
+        Args:
+            account_name: The mock account name
+
+        Returns:
+            Run duration in seconds (0-3600)
+        """
+        resp = self._client.get(self._url(f"/config/mock-run-duration/{account_name}"))
+        resp.raise_for_status()
+        return resp.json().get("seconds", 0)
+
+    def set_mock_run_duration_seconds(self, account_name: str, seconds: int) -> int:
+        """Set mock run duration for a mock provider account.
+
+        Used for testing handover timing.
+
+        Args:
+            account_name: The mock account name
+            seconds: Run duration in seconds (0-3600)
+
+        Returns:
+            The run duration that was set
+        """
+        resp = self._client.put(
+            self._url("/config/mock-run-duration"),
+            json={"account_name": account_name, "seconds": seconds},
+        )
+        resp.raise_for_status()
+        return resp.json().get("seconds", seconds)
+
     def get_max_verification_attempts(self) -> int:
         """Get the maximum number of verification attempts.
 

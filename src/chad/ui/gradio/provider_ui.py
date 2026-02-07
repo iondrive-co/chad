@@ -81,6 +81,22 @@ class ProviderUIManager:
         except Exception:
             return 1.0  # Default to 100%
 
+    def set_mock_run_duration_seconds(self, account_name: str, seconds: int) -> None:
+        """Set mock run duration in seconds for handover testing."""
+        try:
+            clamped = max(0, min(3600, int(seconds)))
+            self.api_client.set_mock_run_duration_seconds(account_name, clamped)
+        except Exception:
+            pass  # Ignore errors setting mock run duration
+
+    def get_mock_run_duration_seconds(self, account_name: str) -> int:
+        """Get mock run duration in seconds, defaults to 0."""
+        try:
+            value = self.api_client.get_mock_run_duration_seconds(account_name)
+            return max(0, min(3600, int(value)))
+        except Exception:
+            return 0
+
     def get_context_remaining(self, account_name: str) -> float:
         """Get remaining context capacity for a provider (0.0-1.0).
 
@@ -491,11 +507,17 @@ class ProviderUIManager:
                 # Mock providers use slider, others use markdown
                 if is_mock:
                     mock_value = int(self.get_mock_remaining_usage(account_name) * 100)
+                    mock_context = int(self.get_mock_context_remaining(account_name) * 100)
+                    mock_duration = self.get_mock_run_duration_seconds(account_name)
                     usage_update = gr.update(visible=False)
                     slider_update = gr.update(visible=True, value=mock_value)
+                    context_slider_update = gr.update(visible=True, value=mock_context)
+                    duration_slider_update = gr.update(visible=True, value=mock_duration)
                 else:
                     usage_update = gr.update(visible=True, value=usage)
                     slider_update = gr.update(visible=False)
+                    context_slider_update = gr.update(visible=False)
+                    duration_slider_update = gr.update(visible=False)
 
                 outputs.extend(
                     [
@@ -505,6 +527,8 @@ class ProviderUIManager:
                         account_name,
                         usage_update,
                         slider_update,
+                        context_slider_update,
+                        duration_slider_update,
                         delete_btn_update,
                     ]
                 )
@@ -517,6 +541,8 @@ class ProviderUIManager:
                         "",
                         gr.update(visible=False),  # usage_box hidden
                         gr.update(visible=False),  # slider hidden
+                        gr.update(visible=False),  # context slider hidden
+                        gr.update(visible=False),  # duration slider hidden
                         gr.update(value="🗑︎", variant="secondary"),
                     ]
                 )

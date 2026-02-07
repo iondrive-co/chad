@@ -29,6 +29,7 @@ CONFIG_BASE_KEYS: set[str] = {
     "mock_remaining_usage",  # Dict of account_name -> 0.0-1.0 for mock provider testing
     "context_switch_threshold",  # Percentage (0-100) of context usage before auto-switching providers
     "mock_context_remaining",  # Dict of account_name -> 0.0-1.0 for mock provider context testing
+    "mock_run_duration_seconds",  # Dict of account_name -> 0-3600 mock run duration for handover testing
     "max_verification_attempts",  # Maximum verification attempts before giving up (default 5)
 }
 
@@ -860,6 +861,51 @@ class ConfigManager:
         if "mock_context_remaining" not in config:
             config["mock_context_remaining"] = {}
         config["mock_context_remaining"][account_name] = remaining
+        self.save_config(config)
+
+    def get_mock_run_duration_seconds(self, account_name: str) -> int:
+        """Get mock run duration for a mock provider account.
+
+        Used for testing handover by forcing mock provider runs to stream output
+        for a configurable duration.
+
+        Args:
+            account_name: The mock account name
+
+        Returns:
+            Run duration in seconds (0-3600), defaults to 0
+        """
+        config = self.load_config()
+        duration_dict = config.get("mock_run_duration_seconds", {})
+        raw_value = duration_dict.get(account_name, 0)
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, min(3600, value))
+
+    def set_mock_run_duration_seconds(self, account_name: str, seconds: int) -> None:
+        """Set mock run duration for a mock provider account.
+
+        Args:
+            account_name: The mock account name
+            seconds: Run duration in seconds (0-3600)
+
+        Raises:
+            ValueError: If seconds is not between 0 and 3600
+        """
+        try:
+            seconds_int = int(seconds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("mock_run_duration_seconds must be between 0 and 3600") from exc
+
+        if not 0 <= seconds_int <= 3600:
+            raise ValueError("mock_run_duration_seconds must be between 0 and 3600")
+
+        config = self.load_config()
+        if "mock_run_duration_seconds" not in config:
+            config["mock_run_duration_seconds"] = {}
+        config["mock_run_duration_seconds"][account_name] = seconds_int
         self.save_config(config)
 
     def get_max_verification_attempts(self) -> int:

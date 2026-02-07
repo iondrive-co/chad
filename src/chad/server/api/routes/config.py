@@ -126,6 +126,24 @@ class MockContextRemainingUpdate(BaseModel):
     )
 
 
+class MockRunDurationResponse(BaseModel):
+    """Response for mock run duration endpoint."""
+
+    account_name: str = Field(description="The mock account name")
+    seconds: int = Field(description="Mock run duration in seconds (0-3600)")
+
+
+class MockRunDurationUpdate(BaseModel):
+    """Request to set mock run duration."""
+
+    account_name: str = Field(description="The mock account name")
+    seconds: int = Field(
+        ge=0,
+        le=3600,
+        description="Mock run duration in seconds (0-3600)",
+    )
+
+
 @router.get("/verification", response_model=VerificationSettings)
 async def get_verification_settings() -> VerificationSettings:
     """Get verification agent settings."""
@@ -391,6 +409,35 @@ async def set_mock_context_remaining(
     return MockContextRemainingResponse(
         account_name=request.account_name,
         remaining=request.remaining,
+    )
+
+
+@router.get("/mock-run-duration/{account_name}", response_model=MockRunDurationResponse)
+async def get_mock_run_duration(account_name: str) -> MockRunDurationResponse:
+    """Get mock run duration for a mock provider account.
+
+    Used for testing handover timing by extending mock task runtime.
+    """
+    config_mgr = get_config_manager()
+    seconds = config_mgr.get_mock_run_duration_seconds(account_name)
+
+    return MockRunDurationResponse(account_name=account_name, seconds=seconds)
+
+
+@router.put("/mock-run-duration", response_model=MockRunDurationResponse)
+async def set_mock_run_duration(
+    request: MockRunDurationUpdate,
+) -> MockRunDurationResponse:
+    """Set mock run duration for a mock provider account.
+
+    Used for testing handover timing by extending mock task runtime.
+    """
+    config_mgr = get_config_manager()
+    config_mgr.set_mock_run_duration_seconds(request.account_name, request.seconds)
+
+    return MockRunDurationResponse(
+        account_name=request.account_name,
+        seconds=request.seconds,
     )
 
 

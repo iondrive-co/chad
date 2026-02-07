@@ -7074,6 +7074,8 @@ class ChadWebUI:
                     usage_text = self.get_provider_usage(account_name)
                     is_mock = provider_type == "mock"
                     mock_usage_value = self.provider_ui.get_mock_remaining_usage(account_name) if is_mock else 0.5
+                    mock_context_value = self.provider_ui.get_mock_context_remaining(account_name) if is_mock else 1.0
+                    mock_duration_seconds = self.provider_ui.get_mock_run_duration_seconds(account_name) if is_mock else 0
                 else:
                     account_name = ""
                     provider_type = ""
@@ -7082,6 +7084,8 @@ class ChadWebUI:
                     usage_text = ""
                     is_mock = False
                     mock_usage_value = 0.5
+                    mock_context_value = 1.0
+                    mock_duration_seconds = 0
 
                 card_group_classes = ["provider-card"] if visible else ["provider-card", "provider-card-empty"]
                 with gr.Column(visible=visible, scale=1) as card_column:
@@ -7105,9 +7109,27 @@ class ChadWebUI:
                             maximum=100,
                             value=int(mock_usage_value * 100),
                             step=5,
-                            label="Remaining %",
+                            label="Usage Remaining %",
                             visible=is_mock,
                             elem_classes=["mock-usage-slider"],
+                        )
+                        mock_context_slider = gr.Slider(
+                            minimum=0,
+                            maximum=100,
+                            value=int(mock_context_value * 100),
+                            step=5,
+                            label="Context Remaining %",
+                            visible=is_mock,
+                            elem_classes=["mock-context-slider"],
+                        )
+                        mock_duration_slider = gr.Slider(
+                            minimum=0,
+                            maximum=3600,
+                            value=int(mock_duration_seconds),
+                            step=5,
+                            label="Run Duration (sec)",
+                            visible=is_mock,
+                            elem_classes=["mock-duration-slider"],
                         )
 
                 provider_cards.append(
@@ -7119,6 +7141,8 @@ class ChadWebUI:
                         "account_name": account_name,
                         "usage_box": usage_box,
                         "mock_usage_slider": mock_usage_slider,
+                        "mock_context_slider": mock_context_slider,
+                        "mock_duration_slider": mock_duration_slider,
                         "delete_btn": delete_btn,
                     }
                 )
@@ -7345,6 +7369,8 @@ class ChadWebUI:
                     card["account_state"],
                     card["usage_box"],
                     card["mock_usage_slider"],
+                    card["mock_context_slider"],
+                    card["mock_duration_slider"],
                     card["delete_btn"],
                 ]
             )
@@ -7594,6 +7620,28 @@ class ChadWebUI:
             card["mock_usage_slider"].change(
                 fn=make_mock_usage_handler(),
                 inputs=[card["mock_usage_slider"], card["account_state"]],
+            )
+
+            def make_mock_context_handler():
+                def handler(value, account_name):
+                    if account_name:
+                        self.provider_ui.set_mock_context_remaining(account_name, value / 100.0)
+                return handler
+
+            card["mock_context_slider"].change(
+                fn=make_mock_context_handler(),
+                inputs=[card["mock_context_slider"], card["account_state"]],
+            )
+
+            def make_mock_duration_handler():
+                def handler(value, account_name):
+                    if account_name:
+                        self.provider_ui.set_mock_run_duration_seconds(account_name, int(value))
+                return handler
+
+            card["mock_duration_slider"].change(
+                fn=make_mock_duration_handler(),
+                inputs=[card["mock_duration_slider"], card["account_state"]],
             )
 
     def _prefetch_init_data(self) -> dict:

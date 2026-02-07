@@ -193,6 +193,22 @@ class TestBuildAgentCommand:
         assert "Mock Agent" in result.stdout
         assert initial_input is None
 
+    def test_mock_provider_respects_run_duration(self, tmp_path):
+        """Mock provider emits timed output when run duration is configured."""
+        cmd, env, initial_input = build_agent_command(
+            "mock",
+            "test-account",
+            tmp_path,
+            "Test task",
+            mock_run_duration_seconds=1,
+        )
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0
+        assert "Streaming simulated work for 1s" in result.stdout
+        assert "[tick 001]" in result.stdout
+        assert initial_input is None
+
     def test_continuation_phase_uses_continuation_prompt(self, tmp_path):
         """Continuation phase uses the continuation prompt when agent exits early."""
         previous_output = "Found the bug in src/main.py:42"
