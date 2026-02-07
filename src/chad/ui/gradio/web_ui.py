@@ -217,17 +217,17 @@ body, .gradio-container, .gradio-container * {
 }
 
 .run-top-row {
-  gap: 10px !important;
+  gap: 4px !important;
   align-items: flex-start !important;
 }
 
 .run-top-row .row,
 .run-top-row .column {
-  gap: 8px !important;
+  gap: 4px !important;
 }
 
 .run-top-row .block {
-  margin-bottom: 6px !important;
+  margin-bottom: 2px !important;
 }
 
 
@@ -949,6 +949,8 @@ body, .gradio-container, .gradio-container * {
   display: flex;
   justify-content: flex-end;
   width: 100%;
+  margin-top: -4px !important;
+  margin-bottom: 0 !important;
 }
 
 /* Action row: compact inline controls */
@@ -956,7 +958,7 @@ body, .gradio-container, .gradio-container * {
 .role-status-row {
   display: inline-flex !important;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   flex-wrap: nowrap;
   width: auto !important;
   flex: 0 0 auto;
