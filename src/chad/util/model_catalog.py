@@ -55,7 +55,6 @@ class ModelCatalog:
     )
     QWEN_FALLBACK: tuple[str, ...] = (
         "qwen3-coder",
-        "qwen3-coder-plus",
         "default",
     )
     MISTRAL_FALLBACK: tuple[str, ...] = ("default",)
