@@ -48,8 +48,8 @@ from chad.util.prompts import (
     extract_coding_summary,
     extract_progress_update,
     check_verification_mentioned,
-    get_verification_prompt,
     get_verification_exploration_prompt,
+    get_verification_conclusion_prompt,
     parse_verification_response,
     ProgressUpdate,
     VerificationParseError,
@@ -2848,11 +2848,13 @@ class ChadWebUI:
         coding_summary = extract_coding_summary(coding_output)
         change_summary = coding_summary.change_summary if coding_summary else None
         trimmed_output = _truncate_verification_output(coding_output)
-        verification_prompt = get_verification_prompt(trimmed_output, task_description, change_summary)
+        exploration_prompt = get_verification_exploration_prompt(trimmed_output, task_description, change_summary)
+        conclusion_prompt = get_verification_conclusion_prompt()
 
         try:
             max_parse_attempts = 2
             last_error = None
+            retry_conclusion_prompt = conclusion_prompt
 
             for attempt in range(max_parse_attempts):
                 verifier = create_provider(verification_config)
@@ -2863,7 +2865,10 @@ class ChadWebUI:
                     return True, "Verification skipped: failed to start session"
 
                 try:
-                    verifier.send_message(verification_prompt)
+                    verifier.send_message(exploration_prompt)
+                    _ = verifier.get_response(timeout=timeout)
+
+                    verifier.send_message(retry_conclusion_prompt)
                     response = verifier.get_response(timeout=timeout)
 
                     if not response:
@@ -2899,12 +2904,13 @@ class ChadWebUI:
                                 f"Verification parse failed (attempt {attempt + 1}/{max_parse_attempts}): {last_error}",
                             )
                         if attempt < max_parse_attempts - 1:
-                            # Retry with a reminder to use JSON format
-                            verification_prompt = (
+                            # Retry with a stronger reminder to use strict JSON in the conclusion phase.
+                            retry_conclusion_prompt = (
                                 "Your previous response was not valid JSON. "
                                 "You MUST respond with ONLY a JSON object like:\n"
                                 '```json\n{"passed": true, "summary": "explanation"}\n```\n\n'
-                                "Try again."
+                                "Try again.\n\n"
+                                f"{conclusion_prompt}"
                             )
                         continue
                 finally:
