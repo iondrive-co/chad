@@ -169,6 +169,11 @@ class EventMultiplexer:
                     for event in events:
                         yield event
                         if event.data.get("type") in ("session_ended",):
+                            yield MuxEvent(
+                                type="complete",
+                                data={"exit_code": None},
+                                seq=self._next_seq(),
+                            )
                             return
 
                 if self._should_ping():
@@ -302,7 +307,18 @@ class EventMultiplexer:
                 )
                 return
 
+            # Safety timeout: stop polling after 45 minutes to prevent infinite hangs
+            poll_deadline = datetime.now(timezone.utc).timestamp() + 45 * 60
+
             while True:
+                if datetime.now(timezone.utc).timestamp() > poll_deadline:
+                    yield MuxEvent(
+                        type="complete",
+                        data={"exit_code": exit_code, "timeout": True},
+                        seq=self._next_seq(),
+                    )
+                    return
+
                 # Check if a new PTY session has started (continuation phase)
                 new_pty_session = pty_service.get_session_by_session_id(self.session_id)
                 if new_pty_session and new_pty_session.stream_id != old_stream_id:
@@ -402,7 +418,16 @@ class EventMultiplexer:
 
         else:
             # Fallback path: Poll EventLog only (no active PTY)
+            poll_deadline = datetime.now(timezone.utc).timestamp() + 45 * 60
+
             while True:
+                if datetime.now(timezone.utc).timestamp() > poll_deadline:
+                    yield MuxEvent(
+                        type="complete",
+                        data={"exit_code": None, "timeout": True},
+                        seq=self._next_seq(),
+                    )
+                    return
                 if include_events or include_terminal:
                     events = self._drain_event_log(skip_terminal=not include_terminal)
                     for event in events:
@@ -474,6 +499,14 @@ class EventMultiplexer:
                         data=log_event,
                         seq=log_seq,
                     )
+                    # If session already ended during catchup, emit complete and stop
+                    if log_event.get("type") == "session_ended":
+                        yield MuxEvent(
+                            type="complete",
+                            data={"exit_code": None},
+                            seq=self._next_seq(),
+                        )
+                        return
 
         # Stream live events
         async for event in self.stream_events(

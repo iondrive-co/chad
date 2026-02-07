@@ -1,5 +1,6 @@
 """Comprehensive tests for unified PTY streaming through API."""
 
+import asyncio
 import anyio
 import base64
 import html
@@ -1769,7 +1770,6 @@ class TestEventMultiplexer:
         # After ping, should not need another immediately
         assert not mux._should_ping()
 
-
     @pytest.mark.asyncio
     async def test_mux_multi_phase_delivers_complete(self, tmp_path):
         """Multiplexer delivers complete after exploration→implementation phase transition.
@@ -1956,7 +1956,6 @@ class TestEventMultiplexer:
 
         reset_pty_stream_service()
 
-
     @pytest.mark.asyncio
     async def test_mux_stream_with_since_multi_phase(self, tmp_path):
         """Full SSE-like flow using stream_with_since for multi-phase tasks.
@@ -2109,6 +2108,221 @@ class TestEventMultiplexer:
             f"Should receive complete even with cleanup race. "
             f"Events: {[e.type for e in collected]}"
         )
+
+        reset_pty_stream_service()
+
+
+class TestEventMuxCompletionBugs:
+    """Tests for EventMux completion event handling bugs.
+
+    Covers:
+    - stream_events initial wait loop yielding "complete" after session_ended
+    - stream_with_since catchup yielding "complete" after session_ended
+    - Safety timeout on polling loops
+    """
+
+    @pytest.mark.asyncio
+    async def test_stream_events_initial_wait_yields_complete_on_session_ended(self, tmp_path):
+        """stream_events initial wait loop must yield 'complete' after session_ended.
+
+        Regression: previously returned without yielding complete, leaving clients
+        without a termination signal.
+        """
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import PTYStreamService
+
+        pty_service = PTYStreamService()
+        session_id = "wait-complete-test"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Test",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+        # Task already ended before SSE connection - no PTY will ever appear
+        log.log(SessionEndedEvent(success=True, reason="completed"))
+
+        mux = EventMultiplexer(session_id, log)
+
+        collected = []
+        async for event in mux.stream_events(pty_service, include_terminal=True):
+            collected.append(event)
+            if event.type == "complete":
+                break
+
+        event_types = [e.type for e in collected]
+        # Must find session_ended as a structured event
+        session_ended_events = [
+            e for e in collected
+            if e.type == "event" and e.data.get("type") == "session_ended"
+        ]
+        assert len(session_ended_events) == 1, f"Expected session_ended event, got: {event_types}"
+        # Must find complete event AFTER session_ended
+        assert event_types[-1] == "complete", f"Last event should be 'complete', got: {event_types}"
+
+    @pytest.mark.asyncio
+    async def test_stream_with_since_catchup_yields_complete_on_session_ended(self, tmp_path):
+        """stream_with_since must yield 'complete' when session_ended is in catchup.
+
+        Regression: previously fell through to stream_events() which polled forever
+        because _event_log_seq was past the session_ended event.
+        """
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import PTYStreamService
+
+        pty_service = PTYStreamService()
+        session_id = "catchup-complete-test"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Test",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+        # Log several terminal events and then session_ended
+        for i in range(5):
+            log.log(TerminalOutputEvent(data=f"output chunk {i}"))
+        log.log(SessionEndedEvent(success=True, reason="completed"))
+
+        mux = EventMultiplexer(session_id, log)
+
+        collected = []
+
+        # Use asyncio.wait_for to detect infinite hang
+        async def stream():
+            async for event in mux.stream_with_since(
+                pty_service,
+                since_seq=0,
+                include_terminal=True,
+                include_events=True,
+            ):
+                collected.append(event)
+                if event.type == "complete":
+                    return
+
+        await asyncio.wait_for(stream(), timeout=5.0)
+
+        event_types = [e.type for e in collected]
+        assert "complete" in event_types, f"Must get complete event, got: {event_types}"
+
+        # session_ended should appear as structured event before complete
+        session_ended_found = any(
+            e.type == "event" and e.data.get("type") == "session_ended"
+            for e in collected
+        )
+        assert session_ended_found, f"session_ended must be in catchup events: {event_types}"
+
+    @pytest.mark.asyncio
+    async def test_stream_with_since_mid_sequence_catchup(self, tmp_path):
+        """stream_with_since catchup with since_seq > 0 still detects session_ended.
+
+        Simulates a client reconnecting after receiving some events.
+        """
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import PTYStreamService
+
+        pty_service = PTYStreamService()
+        session_id = "mid-catchup-test"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Test",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+        for i in range(10):
+            log.log(TerminalOutputEvent(data=f"chunk {i}"))
+        log.log(SessionEndedEvent(success=True, reason="completed"))
+
+        mux = EventMultiplexer(session_id, log)
+
+        collected = []
+
+        # Reconnect from seq 5 - should still get session_ended and complete
+        async def stream():
+            async for event in mux.stream_with_since(
+                pty_service,
+                since_seq=5,
+                include_terminal=True,
+                include_events=True,
+            ):
+                collected.append(event)
+                if event.type == "complete":
+                    return
+
+        await asyncio.wait_for(stream(), timeout=5.0)
+
+        event_types = [e.type for e in collected]
+        assert "complete" in event_types, f"Must get complete on reconnect, got: {event_types}"
+
+    @pytest.mark.asyncio
+    async def test_polling_loop_safety_timeout(self, tmp_path):
+        """Polling loop must not hang forever if session_ended is never written.
+
+        The safety timeout should emit a complete event with timeout flag.
+        """
+        from unittest.mock import patch
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import get_pty_stream_service, reset_pty_stream_service
+
+        reset_pty_stream_service()
+        pty_service = get_pty_stream_service()
+        session_id = "timeout-safety-test"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Test",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+
+        # Use a very short timeout for testing
+        mux = EventMultiplexer(session_id, log, ping_interval=0.5)
+
+        collected = []
+
+        async def stream():
+            async for event in mux.stream_events(
+                pty_service,
+                include_terminal=False,
+                include_events=True,
+            ):
+                collected.append(event)
+                if event.type == "complete":
+                    return
+
+        # Patch the deadline to be very short (0.5 seconds from now)
+        from datetime import datetime
+        original_now = datetime.now
+
+        call_count = [0]
+
+        def fake_now(tz=None):
+            call_count[0] += 1
+            result = original_now(tz) if tz else original_now()
+            # After a few calls, jump time forward past the deadline
+            if call_count[0] > 10:
+                from datetime import timedelta
+                return result + timedelta(minutes=50)
+            return result
+
+        with patch("chad.server.services.event_mux.datetime") as mock_dt:
+            mock_dt.now = fake_now
+            mock_dt.side_effect = lambda *a, **k: datetime(*a, **k)
+            # timezone needs to be accessible
+            await asyncio.wait_for(stream(), timeout=5.0)
+
+        event_types = [e.type for e in collected]
+        assert "complete" in event_types, f"Safety timeout should emit complete: {event_types}"
+
+        # Check the timeout flag
+        complete_events = [e for e in collected if e.type == "complete"]
+        assert complete_events[0].data.get("timeout") is True
 
         reset_pty_stream_service()
 

@@ -1298,6 +1298,22 @@ class TestChadWebUIInterface:
         assert all(kwargs.get("file_types") == ["image"] for kwargs in multimodal_calls)
         assert all(kwargs.get("file_count") == "multiple" for kwargs in multimodal_calls)
 
+    @patch("chad.ui.gradio.web_ui.gr")
+    def test_create_interface_does_not_pass_scale_to_html(self, mock_gr, mock_api_client):
+        """gr.HTML does not support scale; passing it causes startup failure."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        mock_blocks = MagicMock()
+        mock_gr.Blocks.return_value.__enter__ = Mock(return_value=mock_blocks)
+        mock_gr.Blocks.return_value.__exit__ = Mock(return_value=None)
+
+        web_ui = ChadWebUI(mock_api_client)
+        web_ui.create_interface()
+
+        assert mock_gr.HTML.call_count > 0
+        for call in mock_gr.HTML.call_args_list:
+            assert "scale" not in call.kwargs
+
     def test_provider_fallback_order_saves_on_submit_not_change(self):
         """Fallback order should save on Enter/submit to avoid per-keystroke API calls."""
         import inspect

@@ -6199,7 +6199,8 @@ class ChadWebUI:
         # Action buttons: compact row beneath the agent selector columns, right-aligned
         with gr.Row(variant="compact", equal_height=True):
             # Empty column to push buttons to the right
-            gr.HTML("", scale=1)
+            with gr.Column(scale=1, min_width=0):
+                gr.HTML("")
             cancel_btn = gr.Button(
                 "Cancel",
                 variant="stop",
