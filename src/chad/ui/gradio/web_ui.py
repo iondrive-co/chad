@@ -45,6 +45,7 @@ from chad.util.model_catalog import ModelCatalog
 from chad.util.prompts import (
     build_exploration_prompt,
     build_implementation_prompt,
+    build_prompt_previews,
     extract_coding_summary,
     extract_progress_update,
     check_verification_mentioned,
@@ -6402,8 +6403,9 @@ class ChadWebUI:
             )
 
             # Prompt display accordions - show all three prompts from the start
-            # Initial display shows raw templates with placeholders like {task}
-            # These get updated with actual values when the task runs
+            # Pre-fill with project docs from default path; only {task} remains as placeholder
+            _initial_previews = build_prompt_previews(default_path)
+
             with gr.Accordion(
                 "Exploration Prompt",
                 open=False,
@@ -6412,7 +6414,7 @@ class ChadWebUI:
                 elem_classes=["prompt-accordion"],
             ) as exploration_prompt_accordion:
                 exploration_prompt_display = gr.Markdown(
-                    EXPLORATION_PROMPT,
+                    _initial_previews.exploration,
                     key=f"exploration-prompt-display-{session_id}",
                     elem_classes=["prompt-display"],
                 )
@@ -6425,7 +6427,7 @@ class ChadWebUI:
                 elem_classes=["prompt-accordion"],
             ) as implementation_prompt_accordion:
                 implementation_prompt_display = gr.Markdown(
-                    IMPLEMENTATION_PROMPT,
+                    _initial_previews.implementation,
                     key=f"implementation-prompt-display-{session_id}",
                     elem_classes=["prompt-display"],
                 )
@@ -6438,7 +6440,7 @@ class ChadWebUI:
                 elem_classes=["prompt-accordion"],
             ) as verification_prompt_accordion:
                 verification_prompt_display = gr.Markdown(
-                    VERIFICATION_EXPLORATION_PROMPT,
+                    _initial_previews.verification,
                     key=f"verification-prompt-display-{session_id}",
                     elem_classes=["prompt-display"],
                 )
@@ -6563,6 +6565,7 @@ class ChadWebUI:
         # Project setup handlers
         def on_project_path_change(path_val):
             """Auto-detect project type and commands when path changes."""
+            empty_previews = build_prompt_previews(None)
             if not path_val:
                 return (
                     gr.update(label=self._format_project_label("enter path")),
@@ -6572,6 +6575,9 @@ class ChadWebUI:
                     gr.update(value=""),
                     "",
                     "",
+                    gr.update(value=empty_previews.exploration),
+                    gr.update(value=empty_previews.implementation),
+                    gr.update(value=empty_previews.verification),
                 )
             path_obj = Path(path_val).expanduser().resolve()
             if not path_obj.exists():
@@ -6583,7 +6589,12 @@ class ChadWebUI:
                     gr.update(value=""),
                     "",
                     "",
+                    gr.update(value=empty_previews.exploration),
+                    gr.update(value=empty_previews.implementation),
+                    gr.update(value=empty_previews.verification),
                 )
+
+            previews = build_prompt_previews(path_obj)
 
             # Try loading existing config first
             config = load_project_config(path_obj)
@@ -6597,6 +6608,9 @@ class ChadWebUI:
                     gr.update(value=(docs.architecture_path or "")),
                     "",
                     "",
+                    gr.update(value=previews.exploration),
+                    gr.update(value=previews.implementation),
+                    gr.update(value=previews.verification),
                 )
 
             # Auto-detect
@@ -6610,6 +6624,9 @@ class ChadWebUI:
                 gr.update(value=detected_docs.architecture_path or ""),
                 "",
                 "",
+                gr.update(value=previews.exploration),
+                gr.update(value=previews.implementation),
+                gr.update(value=previews.verification),
             )
 
         project_path.change(
@@ -6623,6 +6640,9 @@ class ChadWebUI:
                 architecture_input,
                 lint_status,
                 test_status,
+                exploration_prompt_display,
+                implementation_prompt_display,
+                verification_prompt_display,
             ],
         )
 

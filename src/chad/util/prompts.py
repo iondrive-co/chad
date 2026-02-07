@@ -246,6 +246,58 @@ Output ONLY the JSON block, no other text.
 """
 
 
+@dataclass
+class PromptPreviews:
+    """Pre-filled prompt templates with project docs but task placeholders."""
+
+    exploration: str
+    implementation: str
+    verification: str
+
+
+def build_prompt_previews(project_path: str | Path | None) -> PromptPreviews:
+    """Build prompt previews with project docs filled in but {task} as placeholder.
+
+    Call this when the project path changes to show users what the prompts
+    will look like before a task is started.
+
+    Args:
+        project_path: Path to the project directory
+
+    Returns:
+        PromptPreviews with all three prompts partially filled
+    """
+    from chad.util.project_setup import build_doc_reference_text
+
+    project_docs = None
+    if project_path:
+        project_docs = build_doc_reference_text(Path(project_path))
+
+    docs_section, verification_section = _build_docs_and_verification(project_docs, project_path)
+
+    exploration = EXPLORATION_PROMPT.format(
+        project_docs=docs_section,
+        verification_instructions=verification_section,
+        task="{task}",
+    )
+    implementation = IMPLEMENTATION_PROMPT.format(
+        project_docs=docs_section,
+        verification_instructions=verification_section,
+        task="{task}",
+        exploration_output="{exploration_output}",
+    )
+    verification = VERIFICATION_EXPLORATION_PROMPT.format(
+        task="{task}",
+        coding_output="{coding_output}",
+    )
+
+    return PromptPreviews(
+        exploration=exploration,
+        implementation=implementation,
+        verification=verification,
+    )
+
+
 def _build_task_with_screenshots(task: str, screenshots: list[str] | None) -> str:
     """Build task section with screenshots if provided."""
     if not screenshots:
