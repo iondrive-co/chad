@@ -3642,6 +3642,51 @@ class TestPreferredVerificationModel:
         mock_api_client.set_preferred_verification_model.assert_not_called()
 
 
+class TestPromptPreviews:
+    """Tests for build_prompt_previews which pre-fills prompts with project docs."""
+
+    def test_previews_without_project_path(self):
+        """Previews with no project path should have {task} placeholder and no docs."""
+        from chad.util.prompts import build_prompt_previews
+
+        previews = build_prompt_previews(None)
+        assert "{task}" in previews.exploration
+        assert "{task}" in previews.implementation
+        assert "{task}" in previews.verification
+        assert "{exploration_output}" in previews.implementation
+        assert "Project Documentation" not in previews.exploration
+
+    def test_previews_with_project_path(self, tmp_path):
+        """Previews with a project path should include docs and verification instructions."""
+        from chad.util.prompts import build_prompt_previews
+
+        # Create a project with an AGENTS.md doc
+        agents_md = tmp_path / "AGENTS.md"
+        agents_md.write_text("# My Project\nDo things.")
+
+        previews = build_prompt_previews(tmp_path)
+        # Should still have {task} placeholder
+        assert "{task}" in previews.exploration
+        assert "{task}" in previews.implementation
+        # Should have project docs filled in (reference to AGENTS.md)
+        assert "AGENTS.md" in previews.exploration
+        assert "AGENTS.md" in previews.implementation
+
+    def test_previews_keep_exploration_output_placeholder(self):
+        """Implementation preview should keep {exploration_output} as placeholder."""
+        from chad.util.prompts import build_prompt_previews
+
+        previews = build_prompt_previews(None)
+        assert "{exploration_output}" in previews.implementation
+
+    def test_previews_verification_has_coding_output_placeholder(self):
+        """Verification preview should keep {coding_output} as placeholder."""
+        from chad.util.prompts import build_prompt_previews
+
+        previews = build_prompt_previews(None)
+        assert "{coding_output}" in previews.verification
+
+
 class TestScreenshotUpload:
     """Tests for screenshot upload functionality."""
 
