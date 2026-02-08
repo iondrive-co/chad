@@ -631,7 +631,6 @@ class TestMockProviderHandoffIntegration:
             account_name="test-mock-account",
         )
         provider = MockProvider(model_config)
-        provider._simulate_quota = True
         provider._get_remaining_usage = lambda: 0.0  # Quota exhausted
 
         # Start session and trigger quota error
@@ -696,7 +695,6 @@ class TestMockProviderHandoffIntegration:
         # Simulate quota exhaustion on the original provider
         model_config = ModelConfig(provider="mock", model_name="default", account_name="exhausted-account")
         old_provider = MockProvider(model_config)
-        old_provider._simulate_quota = True
         old_provider._get_remaining_usage = lambda: 0.0
 
         old_provider.start_session(str(temp_log_dir))

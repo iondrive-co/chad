@@ -2934,7 +2934,7 @@ class MockProvider(AIProvider):
     _coding_turn_counts: dict[str, int] = {}
 
     # Usage decrement per response (configurable for testing)
-    USAGE_DECREMENT_PER_RESPONSE = 0.1
+    USAGE_DECREMENT_PER_RESPONSE = 0.01
 
     def __init__(self, config: ModelConfig):
         super().__init__(config)
@@ -2943,7 +2943,6 @@ class MockProvider(AIProvider):
         self._response_queue: list[str] = []
         self._project_path: str | None = None
         self._is_verification_mode = False
-        self._simulate_quota = False  # Enable to test quota exhaustion/handover
 
     def queue_response(self, response: str) -> None:
         """Queue a response to be returned by get_response (for unit tests)."""
@@ -2967,14 +2966,9 @@ class MockProvider(AIProvider):
     def _decrement_usage(self, amount: float | None = None) -> None:
         """Decrement the mock remaining usage after a response.
 
-        Only decrements when _simulate_quota is True (opt-in).
-
         Args:
             amount: Amount to decrement (0.0-1.0), defaults to USAGE_DECREMENT_PER_RESPONSE
         """
-        if not self._simulate_quota:
-            return
-
         from .config_manager import ConfigManager
 
         account_name = self.config.account_name
@@ -2994,14 +2988,9 @@ class MockProvider(AIProvider):
         an error with a message that matches quota exhaustion patterns,
         enabling testing of provider handover.
 
-        Only checks quota when _simulate_quota is True (opt-in).
-
         Raises:
-            MockProviderQuotaError: When mock_remaining_usage is 0 and _simulate_quota is True
+            MockProviderQuotaError: When mock_remaining_usage is 0
         """
-        if not self._simulate_quota:
-            return
-
         remaining = self._get_remaining_usage()
         if remaining <= 0.0:
             account = self.config.account_name or "mock"
