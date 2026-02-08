@@ -3398,6 +3398,48 @@ class TestLivePatchScrollPreservation:
         assert live_patch is None
         assert flag is True  # should flip on first render
 
+    def test_empty_content_resets_initial_flag(self, web_ui):
+        """Clearing live_stream must reset has_initial so next content does a full render.
+
+        Reproduces the race condition where:
+        1. First render sets has_initial = True
+        2. Empty content clears the DOM but has_initial stays True
+        3. Next content tries JS patching on a cleared DOM and fails silently
+        """
+        session = web_ui.create_session("clear-reset")
+        live_stream_id = "live-stream-box"
+        live_html = (
+            f'<div data-live-id="{live_stream_id}">'
+            '<div class="live-output-content">content</div></div>'
+        )
+
+        # Step 1: initial render — sets has_initial = True
+        _, _, flag = web_ui._compute_live_stream_updates(
+            live_html, None, session, live_stream_id=live_stream_id,
+            task_ended=False,
+        )
+        assert flag is True
+
+        # Step 2: empty content arrives (e.g. status event clears live stream)
+        session.has_initial_live_render = flag
+        _, _, flag = web_ui._compute_live_stream_updates(
+            "", None, session, live_stream_id=live_stream_id,
+            task_ended=False,
+        )
+        assert flag is False, "has_initial must reset when content is cleared"
+
+        # Step 3: new content arrives — must do a full Gradio render (not JS patch)
+        session.has_initial_live_render = flag
+        display_stream, live_patch, flag = web_ui._compute_live_stream_updates(
+            live_html, None, session, live_stream_id=live_stream_id,
+            task_ended=False,
+        )
+        assert display_stream == live_html, (
+            "After clearing, next content must use full Gradio render"
+        )
+        assert live_patch is None
+        assert flag is True
+
 
 class TestPhaseMilestones:
     """Test phase milestone messages inserted into chat history."""
