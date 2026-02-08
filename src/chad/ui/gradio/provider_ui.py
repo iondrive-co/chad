@@ -506,8 +506,8 @@ class ProviderUIManager:
 
                 # Mock providers use slider, others use markdown
                 if is_mock:
-                    mock_value = int(self.get_mock_remaining_usage(account_name) * 100)
-                    mock_context = int(self.get_mock_context_remaining(account_name) * 100)
+                    mock_value = int((1.0 - self.get_mock_remaining_usage(account_name)) * 100)
+                    mock_context = int((1.0 - self.get_mock_context_remaining(account_name)) * 100)
                     mock_duration = self.get_mock_run_duration_seconds(account_name)
                     usage_update = gr.update(visible=False)
                     slider_update = gr.update(visible=True, value=mock_value)

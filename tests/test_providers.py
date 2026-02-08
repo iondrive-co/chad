@@ -2896,7 +2896,6 @@ class TestMockProviderQuotaSimulation:
             account_name="test-account",
         )
         provider = MockProvider(model_config)
-        provider._simulate_quota = True
         # Mock the internal method to return 0 usage
         provider._get_remaining_usage = lambda: 0.0
         provider.start_session(str(tmp_path))
@@ -2917,7 +2916,6 @@ class TestMockProviderQuotaSimulation:
             account_name="test-account",
         )
         provider = MockProvider(model_config)
-        provider._simulate_quota = True
         provider._get_remaining_usage = lambda: 0.5
         provider._decrement_usage = lambda amount=None: None  # No-op
         provider.start_session(str(tmp_path))
@@ -2944,7 +2942,6 @@ class TestMockProviderQuotaSimulation:
             account_name="test-account",
         )
         provider = MockProvider(model_config)
-        provider._simulate_quota = True
         provider._get_remaining_usage = get_usage
         provider._decrement_usage = decrement_usage
         provider.start_session(str(tmp_path))
@@ -2966,29 +2963,12 @@ class TestMockProviderQuotaSimulation:
             account_name="test-account",
         )
         provider = MockProvider(model_config)
-        provider._simulate_quota = True
         provider._get_remaining_usage = lambda: 0.0  # Would fail if checked
         provider.start_session(str(tmp_path))
 
         provider.queue_response('{"test": "response"}')
         response = provider.get_response()
         assert response == '{"test": "response"}'
-
-    def test_quota_simulation_disabled_by_default(self, tmp_path):
-        """Quota simulation is disabled by default (doesn't affect existing tests)."""
-        model_config = ModelConfig(
-            provider="mock",
-            model_name="default",
-            account_name="test-account",
-        )
-        provider = MockProvider(model_config)
-        # _simulate_quota is False by default - quota check won't run
-        provider._get_remaining_usage = lambda: 0.0  # Would fail if checked
-        provider.start_session(str(tmp_path))
-        provider.send_message("test task")
-
-        response = provider.get_response()
-        assert response  # Should work despite "zero" usage
 
     def test_quota_error_matches_handoff_detection(self, tmp_path):
         """Quota error message matches is_quota_exhaustion_error() patterns."""
@@ -3000,7 +2980,6 @@ class TestMockProviderQuotaSimulation:
             account_name="test-account",
         )
         provider = MockProvider(model_config)
-        provider._simulate_quota = True
         provider._get_remaining_usage = lambda: 0.0
         provider.start_session(str(tmp_path))
         provider.send_message("test task")
@@ -3016,7 +2995,7 @@ class TestMockProviderQuotaSimulation:
 
     def test_gradual_quota_depletion(self, tmp_path):
         """MockProvider can simulate gradual quota depletion over multiple responses."""
-        usage = [0.15]  # Start with just enough for 2 responses
+        usage = [0.015]  # Start with just enough for 2 responses (0.01 each)
 
         def get_usage():
             return usage[0]
@@ -3031,7 +3010,6 @@ class TestMockProviderQuotaSimulation:
             account_name="test-account",
         )
         provider = MockProvider(model_config)
-        provider._simulate_quota = True
         provider._get_remaining_usage = get_usage
         provider._decrement_usage = decrement_usage
         provider.start_session(str(tmp_path))
@@ -3041,12 +3019,12 @@ class TestMockProviderQuotaSimulation:
         response1 = provider.get_response()
         assert response1
 
-        # Second response should also succeed (0.15 - 0.1 = 0.05 > 0)
+        # Second response should also succeed (0.015 - 0.01 = 0.005 > 0)
         provider.send_message("task 2")
         response2 = provider.get_response()
         assert response2
 
-        # Third response should fail (0.05 - 0.1 = -0.05 -> clamped to 0)
+        # Third response should fail (0.005 - 0.01 = -0.005 -> clamped to 0)
         provider.send_message("task 3")
         with pytest.raises(MockProviderQuotaError):
             provider.get_response()

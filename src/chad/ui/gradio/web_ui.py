@@ -236,7 +236,10 @@ body, .gradio-container, .gradio-container * {
   margin-bottom: 2px !important;
 }
 
-
+.prompt-display textarea {                                                                                    
+   max-height: 300px !important;                                                                               
+   overflow-y: auto !important;                                                                                
+} 
 .project-setup-column {
   display: grid;
   gap: 4px;
@@ -2056,15 +2059,15 @@ def make_phase_milestone(phase_name: str, account_name: str, model_name: str,
         phase_name: Phase name (e.g., "Exploration", "Coding", "Verification").
         account_name: Provider account name.
         model_name: Model identifier.
-        usage_pct: Usage remaining percentage (0-100), or None if unavailable.
-        context_pct: Context remaining percentage (0-100), or None if unavailable.
+        usage_pct: Usage used percentage (0-100), or None if unavailable.
+        context_pct: Context used percentage (0-100), or None if unavailable.
 
     Returns:
         Chat message dict with role="user" for display in the milestones panel.
     """
     metrics = ""
     if usage_pct is not None and context_pct is not None:
-        metrics = f" Usage remaining: {usage_pct}% · Context remaining: {context_pct}%"
+        metrics = f" Usage: {usage_pct}% · Context: {context_pct}%"
     content = f"**{phase_name}:** {account_name} ({model_name}{metrics})"
     return {"role": "user", "content": content}
 
@@ -3049,8 +3052,8 @@ class ChadWebUI:
         try:
             usage_remaining = self.provider_ui.get_remaining_usage(account_name)
             context_remaining = self.provider_ui.get_context_remaining(account_name)
-            usage_pct = int(usage_remaining * 100)
-            context_pct = int(context_remaining * 100)
+            usage_pct = int((1.0 - usage_remaining) * 100)
+            context_pct = int((1.0 - context_remaining) * 100)
         except Exception:
             usage_pct = None
             context_pct = None
@@ -7253,18 +7256,18 @@ class ChadWebUI:
                         mock_usage_slider = gr.Slider(
                             minimum=0,
                             maximum=100,
-                            value=int(mock_usage_value * 100),
+                            value=int((1.0 - mock_usage_value) * 100),
                             step=5,
-                            label="Usage Remaining %",
+                            label="Usage %",
                             visible=is_mock,
                             elem_classes=["mock-usage-slider"],
                         )
                         mock_context_slider = gr.Slider(
                             minimum=0,
                             maximum=100,
-                            value=int(mock_context_value * 100),
+                            value=int((1.0 - mock_context_value) * 100),
                             step=5,
-                            label="Context Remaining %",
+                            label="Context %",
                             visible=is_mock,
                             elem_classes=["mock-context-slider"],
                         )
@@ -7760,7 +7763,7 @@ class ChadWebUI:
             def make_mock_usage_handler():
                 def handler(value, account_name):
                     if account_name:
-                        self.provider_ui.set_mock_remaining_usage(account_name, value / 100.0)
+                        self.provider_ui.set_mock_remaining_usage(account_name, (100.0 - value) / 100.0)
                 return handler
 
             card["mock_usage_slider"].change(
@@ -7771,7 +7774,7 @@ class ChadWebUI:
             def make_mock_context_handler():
                 def handler(value, account_name):
                     if account_name:
-                        self.provider_ui.set_mock_context_remaining(account_name, value / 100.0)
+                        self.provider_ui.set_mock_context_remaining(account_name, (100.0 - value) / 100.0)
                 return handler
 
             card["mock_context_slider"].change(

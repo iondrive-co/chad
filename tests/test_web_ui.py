@@ -402,6 +402,8 @@ class TestChadWebUI:
         monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
         config = ModelConfig(provider="mock", model_name="default", account_name="claude")
         provider = MockProvider(config)
+        provider._get_remaining_usage = lambda: 0.5
+        provider._decrement_usage = lambda amount=None: None
         provider.start_session(str(worktree_path))
         session.provider = provider
         session.coding_account = "claude"
@@ -2898,8 +2900,8 @@ class TestPhaseMilestones:
         assert "**Exploration:**" in msg["content"]
         assert "claude-1" in msg["content"]
         assert "claude-sonnet-4-20250514" in msg["content"]
-        assert "Usage remaining: 85%" in msg["content"]
-        assert "Context remaining: 100%" in msg["content"]
+        assert "Usage: 85%" in msg["content"]
+        assert "Context: 100%" in msg["content"]
 
     def test_make_phase_milestone_without_metrics(self):
         """make_phase_milestone should omit metrics when not provided."""
@@ -2910,7 +2912,7 @@ class TestPhaseMilestones:
         assert "**Verification:**" in msg["content"]
         assert "verifier" in msg["content"]
         assert "gpt-4o" in msg["content"]
-        assert "Usage remaining" not in msg["content"]
+        assert "Usage:" not in msg["content"]
 
     def test_make_phase_milestone_different_phases(self):
         """make_phase_milestone should work with various phase names."""
@@ -3018,8 +3020,8 @@ class TestMockProviderCardControls:
         assert len(state) == 9
         assert state[3] == "mock-coding"
         assert state[4]["visible"] is False
-        assert state[5]["visible"] is True and state[5]["value"] == 40
-        assert state[6]["visible"] is True and state[6]["value"] == 25
+        assert state[5]["visible"] is True and state[5]["value"] == 60
+        assert state[6]["visible"] is True and state[6]["value"] == 75
         assert state[7]["visible"] is True and state[7]["value"] == 60
 
 
@@ -3865,6 +3867,8 @@ class TestFollowupEventLogging:
         monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
         config = ModelConfig(provider="mock", model_name="default", account_name="claude")
         provider = MockProvider(config)
+        provider._get_remaining_usage = lambda: 0.5
+        provider._decrement_usage = lambda amount=None: None
         provider.start_session(str(worktree_path))
         session.provider = provider
         session.coding_account = "claude"
