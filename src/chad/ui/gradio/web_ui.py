@@ -1062,7 +1062,6 @@ mark.live-search-match.current {
 .workspace-display {
   margin: 0 !important;
   min-width: 0 !important;
-  max-width: 230px;
   width: auto !important;
   overflow: hidden !important;
 }
@@ -1073,8 +1072,6 @@ mark.live-search-match.current {
   font-size: 12px;
   color: #cdd6f4;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 /* Agent communication chatbot - preserve scroll position */
@@ -7780,7 +7777,6 @@ class ChadWebUI:
             inputs=[usage_threshold_input],
             outputs=[config_status],
         )
-
 
         def on_max_verification_attempts_change(attempts):
             try:

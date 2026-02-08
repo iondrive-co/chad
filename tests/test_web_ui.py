@@ -1578,6 +1578,27 @@ def test_live_stream_render_state_resets_for_rerender():
     assert state.should_render(rendered) is True
 
 
+def test_workspace_display_allows_full_path():
+    """Workspace display should allow full path without ellipsis truncation."""
+    from chad.ui.gradio import web_ui
+
+    # Check that workspace display CSS doesn't cause text truncation
+    css = web_ui.PROVIDER_PANEL_CSS
+
+    # Look for workspace-inline style block that controls text display
+    workspace_inline_pattern = r"\.workspace-inline[^}]*\{([^}]*)\}"
+    matches = re.findall(workspace_inline_pattern, css, re.MULTILINE | re.DOTALL)
+
+    assert matches, "Expected workspace-inline CSS style block"
+
+    workspace_inline_css = matches[0]
+
+    # The workspace should not truncate text with ellipsis - it should allow full paths to be shown
+    # This test will fail if ellipsis truncation is present, requiring the fix
+    assert not ("text-overflow: ellipsis" in workspace_inline_css and "overflow: hidden" in workspace_inline_css), \
+        f"Workspace inline should not use ellipsis truncation to allow full path display: {workspace_inline_css}"
+
+
 class TestChadWebUIInterface:
     """Test cases for Gradio interface creation."""
 
