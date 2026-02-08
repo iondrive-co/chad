@@ -4,7 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-ProviderType = Literal["anthropic", "openai", "gemini", "qwen", "mistral", "mock"]
+ProviderType = Literal["anthropic", "openai", "gemini", "qwen", "mistral", "opencode", "kimi", "mock"]
 RoleType = Literal["CODING", "VERIFICATION"]
 
 

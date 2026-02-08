@@ -222,6 +222,7 @@ class AIToolInstaller:
     def _install_with_shell(self, spec: CLIToolSpec) -> tuple[bool, str]:
         """Install a tool by running a shell script from a URL."""
         import os
+        import shutil
         import subprocess
         import tempfile
 
@@ -273,6 +274,19 @@ class AIToolInstaller:
             except OSError:
                 pass
             return False, f"Failed to run {spec.name} installer: {e}"
+
+        # Some installers (e.g. OpenCode) ignore BIN_DIR and install to ~/.<tool>/bin.
+        # Bridge that location into Chad's managed bin directory when present.
+        conventional_bin = Path.home() / f".{spec.binary}" / "bin" / spec.binary
+        managed_bin = self.bin_dir / spec.binary
+        if conventional_bin.exists() and not managed_bin.exists():
+            try:
+                managed_bin.symlink_to(conventional_bin)
+            except (FileExistsError, OSError):
+                try:
+                    shutil.copy2(conventional_bin, managed_bin)
+                except OSError:
+                    pass
 
         resolved = self.resolve_tool_path(spec.binary)
         if not resolved:

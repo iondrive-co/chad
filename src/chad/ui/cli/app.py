@@ -29,7 +29,7 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
     """Run the OAuth flow for a provider.
 
     Args:
-        provider: Provider type (anthropic, openai, gemini, qwen, mistral)
+        provider: Provider type (anthropic, openai, gemini, qwen, mistral, opencode, kimi)
         account_name: Name for the new account
 
     Returns:
@@ -148,14 +148,18 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
             return False, f"Login error: {e}"
 
     elif provider == "mistral":
-        print("Starting Vibe login... (browser will open)")
+        vibe_config = Path.home() / ".vibe" / "config.toml"
+        if vibe_config.exists():
+            return True, "Already logged in"
+
+        print("Starting Vibe setup...")
         print()
         try:
             result = subprocess.run(
-                ["vibe"],
+                ["vibe", "--setup"],
                 timeout=120,
             )
-            if result.returncode == 0:
+            if result.returncode == 0 and vibe_config.exists():
                 return True, "Login successful"
             return False, "Login failed or was cancelled"
         except FileNotFoundError:
@@ -164,6 +168,18 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
             return False, "Login timed out"
         except Exception as e:
             return False, f"Login error: {e}"
+
+    elif provider == "opencode":
+        # OpenCode has no OAuth step; it relies on backend credentials.
+        if shutil.which("opencode") is None:
+            return False, "OpenCode CLI not found"
+        return True, "No login required"
+
+    elif provider == "kimi":
+        kimi_config = Path.home() / ".kimi" / "config.toml"
+        if kimi_config.exists():
+            return True, "Already logged in"
+        return False, "Kimi is not logged in. Run `kimi` and use `/login` first."
 
     else:
         return False, f"Unsupported provider: {provider}"

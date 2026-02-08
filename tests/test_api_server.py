@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from chad.server.main import create_app
 from chad.server.services import reset_session_manager, reset_task_executor
-from chad.server.state import reset_state
+from chad.server.state import get_config_manager, reset_state
 
 
 @pytest.fixture
@@ -123,6 +123,29 @@ class TestProviderEndpoints:
         assert "anthropic" in provider_types
         assert "openai" in provider_types
         assert "gemini" in provider_types
+        assert "opencode" in provider_types
+        assert "kimi" in provider_types
+
+    @pytest.mark.parametrize("provider", ["opencode", "kimi"])
+    def test_create_account_accepts_new_provider_types(self, client, provider):
+        """Account create API should accept all provider types exposed in the setup UI."""
+        config_mgr = get_config_manager()
+        config_mgr.save_config(
+            {
+                "password_hash": "",
+                "encryption_salt": "dGVzdHNhbHQ=",
+                "accounts": {},
+            }
+        )
+
+        response = client.post(
+            "/api/v1/accounts",
+            json={"name": f"{provider}-test", "provider": provider},
+        )
+        assert response.status_code == 201, response.text
+        data = response.json()
+        assert data["name"] == f"{provider}-test"
+        assert data["provider"] == provider
 
     def test_list_accounts_empty(self, client):
         """List accounts returns empty list when no accounts configured."""

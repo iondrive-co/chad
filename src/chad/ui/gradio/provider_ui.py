@@ -1443,7 +1443,7 @@ class ProviderUIManager:
                 return False, "Not logged in"
 
             if provider_type == "mistral":
-                vibe_config = Path.home() / ".vibe" / "config.toml"
+                vibe_config = safe_home() / ".vibe" / "config.toml"
                 if vibe_config.exists():
                     return True, "Logged in"
                 return False, "Not logged in"
@@ -1453,8 +1453,10 @@ class ProviderUIManager:
                 return True, "Ready (uses backend credentials)"
 
             if provider_type == "kimi":
-                kimi_config = Path.home() / ".kimi" / "config.toml"
-                if kimi_config.exists():
+                # Prefer account-isolated config when account_name is available.
+                isolated_kimi_config = safe_home() / ".chad" / "kimi-homes" / account_name / ".kimi" / "config.toml"
+                global_kimi_config = safe_home() / ".kimi" / "config.toml"
+                if isolated_kimi_config.exists() or global_kimi_config.exists():
                     return True, "Logged in"
                 return False, "Not logged in"
 
@@ -2035,18 +2037,29 @@ class ProviderUIManager:
 
             else:
                 # Generic flow for mistral and other providers
+                login_success, login_msg = self._check_provider_login(provider_type, account_name)
+                auth_info = {
+                    "mistral": ("vibe --setup", "Set up your Mistral API key"),
+                    "kimi": ("kimi", "Run `/login` to authenticate"),
+                }
+
+                # Gate account creation for providers that require up-front CLI auth.
+                if provider_type in auth_info and not login_success:
+                    auth_cmd, auth_desc = auth_info[provider_type]
+                    result = (
+                        f"❌ {provider_type.capitalize()} is not logged in yet.\n\n"
+                        f"Run `{auth_cmd}` in terminal ({auth_desc}), then add this provider again."
+                    )
+                    base_response = self.provider_action_response(result, card_slots)
+                    return (*base_response, name_field_value, add_btn_state, accordion_state)
+
                 self.api_client.create_account(account_name, provider_type)
                 result = f"✓ Provider '{account_name}' ({provider_type}) added."
-
-                login_success, login_msg = self._check_provider_login(provider_type, account_name)
 
                 if login_success:
                     result += f" ✅ {login_msg}"
                 else:
                     result += f" ⚠️ {login_msg}"
-                    auth_info = {
-                        "mistral": ("vibe --setup", "Set up your Mistral API key"),
-                    }
                     auth_cmd, auth_desc = auth_info.get(provider_type, ("unknown", ""))
                     if auth_cmd != "unknown":
                         result += f" — manual login: run `{auth_cmd}` ({auth_desc})"
