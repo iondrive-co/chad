@@ -69,6 +69,21 @@ NAMED_COLORS = {
 }
 
 
+class _CompatibleHistoryScreen(pyte.HistoryScreen):
+    """HistoryScreen compatibility shim for pyte private-SGR dispatch.
+
+    pyte's parser may dispatch CSI "?...m" with ``private=True`` to
+    ``select_graphic_rendition``. Older Screen implementations don't accept this
+    keyword, which raises TypeError and aborts task execution.
+    """
+
+    def select_graphic_rendition(self, *attrs: int, private: bool = False) -> None:
+        # Private SGR-like sequences are not style updates; ignore them.
+        if private:
+            return
+        super().select_graphic_rendition(*attrs)
+
+
 def _color_to_rgb(color: str | None, default: tuple[int, int, int] | None) -> tuple[int, int, int] | None:
     """Convert pyte color to RGB tuple.
 
@@ -136,7 +151,7 @@ class TerminalEmulator:
             history: Number of history lines to keep for scrollback
         """
         # Use HistoryScreen for infinite scrollback support
-        self.screen = pyte.HistoryScreen(cols, rows, history=history)
+        self.screen = _CompatibleHistoryScreen(cols, rows, history=history)
         self.stream = pyte.Stream(self.screen)
         self._total_bytes = 0
 
