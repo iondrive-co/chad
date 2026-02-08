@@ -89,10 +89,11 @@ class TestChadWebUI:
         return client
 
     @pytest.fixture
-    def web_ui(self, mock_api_client):
+    def web_ui(self, mock_api_client, monkeypatch, tmp_path):
         """Create a ChadWebUI instance with mocked dependencies."""
         from chad.ui.gradio.web_ui import ChadWebUI
 
+        monkeypatch.setenv("CHAD_CONFIG", str(tmp_path / "test_chad.conf"))
         ui = ChadWebUI(mock_api_client)
         ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/codex"))
         return ui
@@ -505,6 +506,30 @@ class TestChadWebUI:
 
         assert "❌" in result
         assert "Node missing" in result
+        mock_api_client.create_account.assert_not_called()
+
+    def test_add_provider_mistral_requires_login_before_account_creation(self, web_ui, mock_api_client):
+        """Mistral accounts should only be created after successful vibe auth."""
+        mock_api_client.list_accounts.return_value = []
+        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/vibe"))
+
+        with patch.object(web_ui.provider_ui, "_check_provider_login", return_value=(False, "Not logged in")):
+            result = web_ui.add_provider("mistral-1", "mistral")[0]
+
+        assert "❌" in result
+        assert "vibe --setup" in result
+        mock_api_client.create_account.assert_not_called()
+
+    def test_add_provider_kimi_requires_login_before_account_creation(self, web_ui, mock_api_client):
+        """Kimi accounts should only be created after successful Kimi login."""
+        mock_api_client.list_accounts.return_value = []
+        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/kimi"))
+
+        with patch.object(web_ui.provider_ui, "_check_provider_login", return_value=(False, "Not logged in")):
+            result = web_ui.add_provider("kimi-1", "kimi")[0]
+
+        assert "❌" in result
+        assert "/login" in result
         mock_api_client.create_account.assert_not_called()
 
     def test_get_models_includes_stored_model(self, web_ui, mock_api_client, tmp_path):
@@ -3726,6 +3751,7 @@ class TestVerificationPrompt:
     def test_run_verification_mock_provider_two_phase_fail_then_pass(self, monkeypatch, tmp_path):
         """Mock provider should fail first verification attempt, then pass after revision."""
         from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.util.config_manager import ConfigManager
         from chad.util.providers import MockProvider
 
         class DummyAPIClient:
@@ -3734,6 +3760,9 @@ class TestVerificationPrompt:
 
         # Keep this test fast and isolated.
         monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
+        monkeypatch.setenv("CHAD_CONFIG", str(tmp_path / "test_chad.conf"))
+        config_mgr = ConfigManager()
+        config_mgr.save_config({"mock_remaining_usage": {"mock-verifier": 1.0}})
         MockProvider._verification_counts.clear()
 
         ui = ChadWebUI(DummyAPIClient())
