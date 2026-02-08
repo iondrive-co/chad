@@ -18,6 +18,7 @@ from chad.util.git_worktree import GitWorktreeManager
 from chad.util.event_log import (
     EventLog,
     SessionStartedEvent,
+    StatusEvent,
     UserMessageEvent,
     TerminalOutputEvent,
     SessionEndedEvent,
@@ -1109,10 +1110,16 @@ class TaskExecutor:
         """
         rows = terminal_rows if terminal_rows else TERMINAL_ROWS
         cols = terminal_cols if terminal_cols else TERMINAL_COLS
+        status_logging_enabled = [False]
 
         def emit(event_type: str, **data):
             event = StreamEvent(type=event_type, data=data)
             task._event_queue.put(event)
+            if event_type == "status" and task.event_log and status_logging_enabled[0]:
+                try:
+                    task.event_log.log(StatusEvent(status=str(data.get("status", ""))))
+                except Exception:
+                    pass
             try:
                 self._touch_activity(task.id)
             except Exception:
@@ -1152,6 +1159,7 @@ class TaskExecutor:
                 ))
                 task.event_log.start_turn()
                 task.event_log.log(UserMessageEvent(content=task_description))
+                status_logging_enabled[0] = True
 
             # All providers use phased execution: exploration → implementation → continuation
             emit("status", status=f"Starting {coding_provider} agent...")

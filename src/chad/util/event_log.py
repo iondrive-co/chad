@@ -19,6 +19,7 @@ from typing import Any, Literal
 # Event types
 EventType = Literal[
     "session_started",
+    "status",
     "model_selected",
     "provider_switched",
     "user_message",
@@ -94,6 +95,13 @@ class SessionStartedEvent(EventBase):
     coding_provider: str = ""
     coding_account: str = ""
     coding_model: str | None = None
+
+
+@dataclass
+class StatusEvent(EventBase):
+    """Logged when task execution status changes."""
+
+    status: str = ""
 
 
 @dataclass

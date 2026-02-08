@@ -286,16 +286,29 @@ def detect_doc_paths(project_path: Path) -> DocsConfig:
     )
 
 
+def _get_config_project_root(project_path: Path) -> Path:
+    """Resolve the canonical project root for config lookup.
+
+    Worktrees live under `<repo>/.chad-worktrees/<session_id>`. Project
+    settings are saved for the main repo root, not each ephemeral worktree.
+    """
+    project_path = Path(project_path).resolve()
+    if project_path.parent.name == ".chad-worktrees":
+        return project_path.parent.parent
+    return project_path
+
+
 def ensure_docs_config(project_path: Path) -> DocsConfig:
     """Ensure docs paths are recorded in project config and return them."""
-    project_path = Path(project_path)
-    config = load_project_config(project_path)
+    project_path = Path(project_path).resolve()
+    config_root = _get_config_project_root(project_path)
+    config = load_project_config(config_root)
 
     if config is None:
         config = ProjectConfig()
 
     docs = config.docs or DocsConfig()
-    detected = detect_doc_paths(project_path)
+    detected = detect_doc_paths(config_root)
 
     if not docs.instructions_path:
         docs.instructions_path = detected.instructions_path
@@ -303,7 +316,7 @@ def ensure_docs_config(project_path: Path) -> DocsConfig:
         docs.architecture_path = detected.architecture_path
 
     config.docs = docs
-    save_project_config(project_path, config)
+    save_project_config(config_root, config)
 
     return docs
 

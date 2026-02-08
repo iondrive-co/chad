@@ -1,6 +1,8 @@
 """Tests for project_setup module."""
 
 import json
+import os
+import subprocess
 
 import pytest
 
@@ -347,3 +349,59 @@ class TestDocsConfig:
         ref_text = build_doc_reference_text(tmp_path)
         assert str(custom_instructions.resolve()) in ref_text
         assert str(custom_architecture.resolve()) in ref_text
+
+    def test_build_doc_reference_text_uses_saved_doc_paths_in_worktree(self, tmp_path, isolated_config):
+        """Worktree prompt docs should use saved project doc paths, not auto-detected defaults."""
+        from chad.util.git_worktree import GitWorktreeManager
+
+        (tmp_path / "AGENTS.md").write_text("default instructions", encoding="utf-8")
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        custom_instructions = docs_dir / "DEV_GUIDE.md"
+        custom_instructions.write_text("custom instructions", encoding="utf-8")
+        (tmp_path / "README.md").write_text("repo", encoding="utf-8")
+
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True, text=True)
+        commit_env = os.environ.copy()
+        commit_env.update(
+            {
+                "GIT_AUTHOR_NAME": "test",
+                "GIT_AUTHOR_EMAIL": "test@example.com",
+                "GIT_COMMITTER_NAME": "test",
+                "GIT_COMMITTER_EMAIL": "test@example.com",
+            }
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=commit_env,
+        )
+
+        save_project_settings(
+            tmp_path,
+            lint_command="flake8 .",
+            test_command="pytest -q",
+            instructions_path="docs/DEV_GUIDE.md",
+            architecture_path=None,
+        )
+
+        manager = GitWorktreeManager(tmp_path)
+        worktree_path, _ = manager.create_worktree("docscheck")
+        worktree_path = worktree_path.resolve()
+        try:
+            ref_text = build_doc_reference_text(worktree_path)
+            assert ref_text is not None
+            assert str(worktree_path / "docs" / "DEV_GUIDE.md") in ref_text
+            assert str(worktree_path / "AGENTS.md") not in ref_text
+        finally:
+            subprocess.run(
+                ["git", "worktree", "remove", str(worktree_path), "--force"],
+                cwd=tmp_path,
+                check=False,
+                capture_output=True,
+                text=True,
+            )

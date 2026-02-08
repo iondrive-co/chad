@@ -837,6 +837,71 @@ class TestChadWebUI:
         )]
         assert len(content_updates) > 0, f"Live stream should have content during streaming. Got updates: {progress_updates[:5]}"
 
+    def test_coding_milestone_inserted_on_phase2_status(self, monkeypatch, web_ui, git_repo):
+        """Coding milestone appears when Phase 2 status is received, even without progress JSON."""
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", "exploring...\n"))
+            # Phase 2 status triggers the Coding milestone
+            message_queue.put(("status", "Phase 2: Implementing changes..."))
+            time.sleep(0.02)
+            message_queue.put(("stream", "implementing...\n"))
+            message_queue.put(("message_complete", "CODING AI", "Task done"))
+            return True, "completed", "server-session", None
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("test")
+        updates = list(web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+
+        # Collect all chat history snapshots
+        all_histories = [u[1] for u in updates if isinstance(u[1], list)]
+        # The final chat history should contain a Coding milestone
+        final_history = all_histories[-1] if all_histories else []
+        coding_milestones = [
+            msg for msg in final_history
+            if isinstance(msg, dict) and "**Coding:**" in msg.get("content", "")
+        ]
+        assert len(coding_milestones) == 1, (
+            f"Expected exactly 1 Coding milestone, found {len(coding_milestones)}. "
+            f"History contents: {[m.get('content', '')[:60] for m in final_history if isinstance(m, dict)]}"
+        )
+
+    def test_coding_milestone_not_duplicated_with_progress_json(self, monkeypatch, web_ui, git_repo):
+        """Coding milestone is not duplicated when both Phase 2 status and progress JSON appear."""
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", "exploring...\n"))
+            # Phase 2 status first
+            message_queue.put(("status", "Phase 2: Implementing changes..."))
+            time.sleep(0.02)
+            # Then progress JSON
+            progress_json = '{"type": "progress", "summary": "Found bug", "location": "x.py:1", "next_step": "Fix"}'
+            message_queue.put(("stream", progress_json))
+            time.sleep(0.02)
+            message_queue.put(("stream", "fixing...\n"))
+            message_queue.put(("message_complete", "CODING AI", "Task done"))
+            return True, "completed", "server-session", None
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("test")
+        updates = list(web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+
+        all_histories = [u[1] for u in updates if isinstance(u[1], list)]
+        final_history = all_histories[-1] if all_histories else []
+        coding_milestones = [
+            msg for msg in final_history
+            if isinstance(msg, dict) and "**Coding:**" in msg.get("content", "")
+        ]
+        assert len(coding_milestones) == 1, (
+            f"Expected exactly 1 Coding milestone even with progress JSON, found {len(coding_milestones)}"
+        )
+
 
 class TestClaudeJsonParsingIntegration:
     """Tests for Claude stream-json parsing in the web UI."""
@@ -1187,6 +1252,59 @@ class TestClaudeJsonParsingIntegration:
         assert success
         # The buffered content should be flushed and included in final output
         assert "Important content here" in output
+
+    def test_run_task_forwards_phase_status_and_strips_ansi(self, web_ui, mock_api_client, git_repo):
+        """Structured status events should reach UI and final output should be ANSI-clean."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="mock-coding", provider="mock", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-status"
+        mock_api_client.create_session.return_value = mock_session
+
+        raw_output = b"\x1b[1;34mMock Agent v1.0\x1b[0m\n\x1b[33m> Analyzing task...\x1b[0m\n"
+
+        terminal_event = Mock()
+        terminal_event.event_type = "terminal"
+        terminal_event.data = {"data": base64.b64encode(raw_output).decode()}
+
+        phase_event = Mock()
+        phase_event.event_type = "event"
+        phase_event.data = {"type": "status", "status": "Phase 2: Implementing changes..."}
+
+        complete_event = Mock()
+        complete_event.event_type = "complete"
+        complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([terminal_event, phase_event, complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="mock-coding",
+            message_queue=message_queue,
+        )
+
+        statuses = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "status":
+                statuses.append(msg[1])
+
+        assert success
+        assert any("Phase 2: Implementing changes..." in s for s in statuses), statuses
+        assert "Mock Agent v1.0" in output
+        assert "\x1b" not in output
 
 
 class TestLiveStreamPresentation:
@@ -3724,12 +3842,14 @@ class TestScreenshotUpload:
         assert "Screenshot" not in prompt
 
     def test_exploration_prompt_includes_phase_info(self):
-        """Exploration prompt should include Phase 1 and progress JSON requirement."""
+        """Exploration prompt should include phase info, class-map guidance, and progress JSON requirement."""
         from chad.util.prompts import build_exploration_prompt
 
         prompt = build_exploration_prompt(task="Do thing")
         # Should have Phase 1 marker
         assert "Phase 1" in prompt
+        # Exploration should steer agents toward using the class map when present
+        assert "Class Map" in prompt
         # Progress update requirement should be present
         assert "progress" in prompt.lower()
         # Time constraint should be present (60 seconds for exploration)
