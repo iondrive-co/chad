@@ -2749,6 +2749,10 @@ class ChadWebUI:
                     use_live_patch = (live_stream_id, live_stream)
                 else:
                     has_initial = True
+        elif not live_stream:
+            # DOM content is being cleared — reset so next content gets a full
+            # Gradio render instead of JS-patching a now-empty element.
+            has_initial = False
 
         if task_ended:
             has_initial = False
