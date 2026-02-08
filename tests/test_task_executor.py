@@ -238,6 +238,41 @@ class TestBuildAgentCommand:
         assert "Previous Exploration" in initial_input
         assert exploration_output in initial_input
 
+    def test_override_prompt_replaces_auto_generated(self, tmp_path):
+        """Override prompt is used instead of auto-generated prompt."""
+        override = "Custom exploration instructions for the agent"
+        cmd, env, initial_input = build_agent_command(
+            "openai", "test-account", tmp_path, "Fix the bug",
+            phase="exploration",
+            override_prompt=override,
+        )
+        # OpenAI uses initial_input for the prompt (with trailing newline)
+        assert initial_input.strip() == override
+
+    def test_override_prompt_replaces_exploration_output_placeholder(self, tmp_path):
+        """Override implementation prompt has {exploration_output} replaced."""
+        override = "Implement based on: {exploration_output}"
+        exploration = "Found bug in line 42"
+        cmd, env, initial_input = build_agent_command(
+            "openai", "test-account", tmp_path, "Fix the bug",
+            phase="implementation",
+            exploration_output=exploration,
+            override_prompt=override,
+        )
+        assert initial_input.strip() == "Implement based on: Found bug in line 42"
+
+    def test_override_prompt_anthropic_uses_cmd_arg(self, tmp_path):
+        """Override prompt for Anthropic goes into command args, not initial_input."""
+        override = "Custom exploration prompt"
+        cmd, env, initial_input = build_agent_command(
+            "anthropic", "test-account", tmp_path, "Fix the bug",
+            phase="exploration",
+            override_prompt=override,
+        )
+        assert initial_input is None
+        prompt_arg = [arg for arg in cmd if "Custom exploration prompt" in arg]
+        assert len(prompt_arg) == 1
+
 
 def _init_git_repo(repo_path: Path) -> None:
     repo_path.mkdir(parents=True, exist_ok=True)
