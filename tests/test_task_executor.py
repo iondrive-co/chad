@@ -209,6 +209,21 @@ class TestBuildAgentCommand:
         assert "[tick 001]" in result.stdout
         assert initial_input is None
 
+    def test_mock_provider_outputs_phase_prompt_marker(self, tmp_path):
+        """Mock provider output should include an explicit phase prompt marker."""
+        cmd, env, initial_input = build_agent_command(
+            "mock",
+            "test-account",
+            tmp_path,
+            "Test task",
+            phase="exploration",
+        )
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        assert result.returncode == 0
+        assert "Prompt: Exploration" in result.stdout
+        assert initial_input is None
+
     def test_continuation_phase_uses_continuation_prompt(self, tmp_path):
         """Continuation phase uses the continuation prompt when agent exits early."""
         previous_output = "Found the bug in src/main.py:42"

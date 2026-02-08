@@ -1306,6 +1306,53 @@ class TestClaudeJsonParsingIntegration:
         assert "Mock Agent v1.0" in output
         assert "\x1b" not in output
 
+    def test_run_task_reused_session_streams_only_new_events(self, web_ui, mock_api_client, git_repo):
+        """Reused server sessions should stream from latest sequence, not from the beginning."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="mock-coding", provider="mock", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+        mock_api_client.get_session_latest_seq.return_value = 9
+
+        stale_complete = Mock()
+        stale_complete.event_type = "complete"
+        stale_complete.data = {"exit_code": None}
+
+        terminal_event = Mock()
+        terminal_event.event_type = "terminal"
+        terminal_event.data = {"data": base64.b64encode(b"new run output\n").decode()}
+
+        fresh_complete = Mock()
+        fresh_complete.event_type = "complete"
+        fresh_complete.data = {"exit_code": 0}
+
+        def stream_events(session_id, since_seq=0, include_terminal=True):
+            if since_seq == 0:
+                return iter([stale_complete])
+            return iter([terminal_event, fresh_complete])
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.side_effect = stream_events
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="mock-coding",
+            message_queue=message_queue,
+            server_session_id="server-sess-reuse",
+        )
+
+        assert success
+        assert "new run output" in output
+        mock_api_client.get_session_latest_seq.assert_called_once_with("server-sess-reuse")
+
 
 class TestLiveStreamPresentation:
     """Formatting and styling tests for the live activity stream."""
@@ -1322,6 +1369,41 @@ class TestLiveStreamPresentation:
 
         assert "first line\nsecond block\nthird" in rendered
         assert "\n\n" not in rendered
+
+
+class TestLiveStreamSearch:
+    """Verify that live stream HTML includes the search bar."""
+
+    def test_live_stream_html_contains_search_bar(self):
+        """build_live_stream_html should include search input in header."""
+        from chad.ui.gradio import web_ui
+
+        rendered = web_ui.build_live_stream_html("some content", "AI")
+        assert 'class="live-search-input"' in rendered
+        assert 'class="live-search-bar"' in rendered
+        assert 'class="live-search-count"' in rendered
+        assert 'class="live-search-nav"' in rendered
+        assert 'placeholder="Search..."' in rendered
+
+    def test_live_stream_pyte_contains_search_bar(self):
+        """build_live_stream_html_from_pyte should include search input in header."""
+        from chad.ui.gradio import web_ui
+
+        rendered = web_ui.build_live_stream_html_from_pyte("<p>content</p>", "AI")
+        assert 'class="live-search-input"' in rendered
+        assert 'class="live-search-bar"' in rendered
+        assert 'class="live-search-count"' in rendered
+        assert 'class="live-search-nav"' in rendered
+
+    def test_search_bar_inside_header(self):
+        """Search bar should be inside the live-output-header div."""
+        from chad.ui.gradio import web_ui
+
+        rendered = web_ui.build_live_stream_html("test", "AI")
+        # Header should contain the title and search bar
+        assert 'class="live-header-title"' in rendered
+        # Ensure the header still shows the AI name
+        assert "AI (Live Stream)" in rendered
 
 
 class TestPortResolution:
@@ -1503,6 +1585,22 @@ class TestChadWebUIInterface:
         assert mock_gr.HTML.call_count > 0
         for call in mock_gr.HTML.call_args_list:
             assert "scale" not in call.kwargs
+
+    @patch("chad.ui.gradio.web_ui.gr")
+    def test_create_interface_disables_chat_message_grouping(self, mock_gr, mock_api_client):
+        """Milestones chatbot should not merge consecutive same-role messages."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        mock_blocks = MagicMock()
+        mock_gr.Blocks.return_value.__enter__ = Mock(return_value=mock_blocks)
+        mock_gr.Blocks.return_value.__exit__ = Mock(return_value=None)
+
+        web_ui = ChadWebUI(mock_api_client)
+        web_ui.create_interface()
+
+        chatbot_calls = [c.kwargs for c in mock_gr.Chatbot.call_args_list if c.kwargs.get("label") == "Milestones"]
+        assert chatbot_calls, "Expected Milestones chatbot to be created"
+        assert all(c.get("group_consecutive_messages") is False for c in chatbot_calls)
 
     def test_provider_fallback_order_saves_on_submit_not_change(self):
         """Fallback order should save on Enter/submit to avoid per-keystroke API calls."""
@@ -2086,6 +2184,57 @@ class TestUsageBasedProviderSwitch:
         # Should not switch since fallback is also exhausted
         assert account == "primary-mock"
         assert switched_from is None
+
+    def test_start_task_uses_selected_coding_agent_for_initial_run(
+        self, web_ui, mock_api_client, git_repo, monkeypatch
+    ):
+        """Initial coding run should honor the selected coding agent."""
+        mock_api_client.get_usage_switch_threshold.return_value = 50
+        mock_api_client.get_next_fallback_provider.return_value = "fallback-mock"
+        mock_api_client.get_worktree_status.return_value = Mock(exists=False)
+
+        def mock_remaining(name):
+            if name == "primary-mock":
+                return 0.01  # 99% used (over threshold)
+            return 0.90
+
+        mock_api_client.get_mock_remaining_usage.side_effect = mock_remaining
+
+        captured = {"coding_account": None}
+
+        def fake_run_task_via_api(
+            session_id,
+            project_path,
+            task_description,
+            coding_account,
+            message_queue,
+            **kwargs,
+        ):
+            captured["coding_account"] = coding_account
+            message_queue.put(("status", "Phase 1: Exploring codebase..."))
+            message_queue.put(("status", "Phase 2: Implementing changes..."))
+            message_queue.put(("message_complete", "CODING AI", "done"))
+            return True, "done", "server-session", {
+                "files_modified": ["src/example.py"],
+                "files_created": [],
+                "commands_run": [],
+                "total_tool_calls": 1,
+            }
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("selected-agent")
+        list(
+            web_ui.start_chad_task(
+                session.id,
+                str(git_repo),
+                "test",
+                coding_agent="primary-mock",
+                verification_agent=web_ui.VERIFICATION_NONE,
+            )
+        )
+
+        assert captured["coding_account"] == "primary-mock"
 
 
 class TestContextBasedProviderSwitch:

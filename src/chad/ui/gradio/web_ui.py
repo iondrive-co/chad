@@ -622,6 +622,57 @@ body, .gradio-container, .gradio-container * {
   font-size: 12px;
   letter-spacing: 0.05em;
   margin: 0;
+  display: flex;
+  align-items: center;
+}
+.live-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.live-search-input {
+  background: #1a1a2e;
+  color: #e2e8f0;
+  border: 1px solid #555;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 11px;
+  width: 140px;
+  outline: none;
+  font-family: inherit;
+}
+.live-search-input:focus {
+  border-color: #a8d4ff;
+}
+.live-search-count {
+  color: #888;
+  font-size: 11px;
+  min-width: 28px;
+  text-align: center;
+  font-weight: 400;
+}
+.live-search-nav {
+  background: transparent;
+  color: #a8d4ff;
+  border: 1px solid #555;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 10px;
+  cursor: pointer;
+  line-height: 1;
+}
+.live-search-nav:hover {
+  background: #333;
+}
+mark.live-search-match {
+  background: rgba(255, 230, 0, 0.35);
+  color: inherit;
+  padding: 0;
+  border-radius: 2px;
+}
+mark.live-search-match.current {
+  background: rgba(255, 180, 0, 0.7);
 }
 
 #live-stream-box .live-output-content,
@@ -1863,7 +1914,17 @@ def build_live_stream_html(content: str, ai_name: str = "CODING AI", live_id: st
     html_content = highlight_diffs(html_content)
     # Apply syntax highlighting to code blocks
     html_content = highlight_code_syntax(html_content)
-    header = f'<div class="live-output-header">▶ {ai_name} (Live Stream)</div>'
+    header = (
+        f'<div class="live-output-header">'
+        f'<span class="live-header-title">▶ {ai_name} (Live Stream)</span>'
+        f'<span class="live-search-bar">'
+        f'<input type="text" class="live-search-input" placeholder="Search..." />'
+        f'<span class="live-search-count"></span>'
+        f'<button class="live-search-nav" title="Previous">&#9650;</button>'
+        f'<button class="live-search-nav" title="Next">&#9660;</button>'
+        f'</span>'
+        f'</div>'
+    )
     body = f'<div class="live-output-content">{html_content}</div>'
     wrapper_attr = f' data-live-id="{live_id}"' if live_id else ''
     return f'<div class="live-output-wrapper"{wrapper_attr}>{header}\n{body}</div>'
@@ -1886,7 +1947,17 @@ def build_live_stream_html_from_pyte(content_html: str, ai_name: str = "CODING A
     content_html = '\n'.join(normalized_lines)
     if not content_html.strip():
         return ""
-    header = f'<div class="live-output-header">▶ {ai_name} (Live Stream)</div>'
+    header = (
+        f'<div class="live-output-header">'
+        f'<span class="live-header-title">▶ {ai_name} (Live Stream)</span>'
+        f'<span class="live-search-bar">'
+        f'<input type="text" class="live-search-input" placeholder="Search..." />'
+        f'<span class="live-search-count"></span>'
+        f'<button class="live-search-nav" title="Previous">&#9650;</button>'
+        f'<button class="live-search-nav" title="Next">&#9660;</button>'
+        f'</span>'
+        f'</div>'
+    )
     body = f'<div class="live-output-content">{content_html}</div>'
     wrapper_attr = f' data-live-id="{live_id}"' if live_id else ''
     return f'<div class="live-output-wrapper"{wrapper_attr}>{header}\n{body}</div>'
@@ -2243,6 +2314,15 @@ class ChadWebUI:
                 message_queue.put(("status", f"❌ Failed to create session: {e}"))
                 return False, str(e), None, None
 
+        resume_since_seq = 0
+        if server_session_id:
+            try:
+                # When reusing a server session for revision runs, skip prior events
+                # so stale complete events don't terminate the new stream.
+                resume_since_seq = int(self.api_client.get_session_latest_seq(server_session_id))
+            except Exception:
+                resume_since_seq = 0
+
         if server_session_id:
             message_queue.put(("session_id", server_session_id))
 
@@ -2329,7 +2409,17 @@ class ChadWebUI:
         )
 
         try:
-            for event in stream_client.stream_events(server_session_id, include_terminal=True):
+            try:
+                stream_iter = stream_client.stream_events(
+                    server_session_id,
+                    since_seq=resume_since_seq,
+                    include_terminal=True,
+                )
+            except TypeError:
+                # Backward-compatible fallback for simple stream client stubs in tests
+                stream_iter = stream_client.stream_events(server_session_id, include_terminal=True)
+
+            for event in stream_iter:
                 if event.event_type == "terminal":
                     # Feed terminal data (base64 for live PTY, plain text for logs)
                     raw_data = event.data.get("data", "")
@@ -3529,20 +3619,7 @@ class ChadWebUI:
 
             coding_account = coding_agent
             coding_provider = account.provider
-
-            # Check usage threshold and switch provider if needed
-            coding_account, switched_from = self._check_usage_and_switch(coding_account)
-            if switched_from:
-                # Provider was switched due to usage threshold
-                session.switched_from = switched_from
-                try:
-                    new_account = self.api_client.get_account(coding_account)
-                    coding_provider = new_account.provider
-                except Exception:
-                    # Fallback failed, revert to original
-                    coding_account = coding_agent
-                    coding_provider = account.provider
-                    session.switched_from = None
+            session.switched_from = None
 
             self.api_client.set_account_role(coding_account, "CODING")
 
@@ -6531,6 +6608,7 @@ class ChadWebUI:
                 elem_classes=["agent-chatbot"],  # CSS targets this class
                 sanitize_html=False,  # Required for inline screenshots - content is internally generated
                 type="messages",  # Use OpenAI-style dicts with 'role' and 'content' keys
+                group_consecutive_messages=False,  # Keep phase milestones as distinct entries
             )
 
         # Hidden state for dynamic terminal dimensions (calculated from container width)
@@ -8125,6 +8203,10 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                         content.innerHTML = newContent.innerHTML;
                       }
 
+                      if (window._liveSearchReapply && parent) {
+                        window._liveSearchReapply(parent);
+                      }
+
                       requestAnimationFrame(() => {
                         requestAnimationFrame(() => {
                           const newScrollHeight = content.scrollHeight;
@@ -8509,8 +8591,161 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                       }
                     });
                   };
+                  const initializeLiveStreamSearch = () => {
+                    const searchStates = new WeakMap();
+
+                    const getSearchState = (box) => {
+                      if (!searchStates.has(box)) {
+                        searchStates.set(box, { query: '', currentIdx: 0, matchCount: 0, debounceTimer: null });
+                      }
+                      return searchStates.get(box);
+                    };
+
+                    const clearHighlights = (content) => {
+                      const marks = content.querySelectorAll('mark.live-search-match');
+                      marks.forEach(mark => {
+                        const parent = mark.parentNode;
+                        parent.replaceChild(document.createTextNode(mark.textContent), mark);
+                        parent.normalize();
+                      });
+                    };
+
+                    const applyHighlights = (content, query) => {
+                      if (!query) return 0;
+                      const lowerQuery = query.toLowerCase();
+                      let matchCount = 0;
+                      const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+                      const textNodes = [];
+                      while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+                      textNodes.forEach(node => {
+                        const text = node.textContent;
+                        const lowerText = text.toLowerCase();
+                        let idx = lowerText.indexOf(lowerQuery);
+                        if (idx === -1) return;
+                        const frag = document.createDocumentFragment();
+                        let lastIdx = 0;
+                        while (idx !== -1) {
+                          if (idx > lastIdx) frag.appendChild(document.createTextNode(text.slice(lastIdx, idx)));
+                          const mark = document.createElement('mark');
+                          mark.className = 'live-search-match';
+                          mark.textContent = text.slice(idx, idx + query.length);
+                          frag.appendChild(mark);
+                          matchCount++;
+                          lastIdx = idx + query.length;
+                          idx = lowerText.indexOf(lowerQuery, lastIdx);
+                        }
+                        if (lastIdx < text.length) frag.appendChild(document.createTextNode(text.slice(lastIdx)));
+                        node.parentNode.replaceChild(frag, node);
+                      });
+                      return matchCount;
+                    };
+
+                    const updateCurrent = (content, state, countEl) => {
+                      const marks = content.querySelectorAll('mark.live-search-match');
+                      state.matchCount = marks.length;
+                      marks.forEach(m => m.classList.remove('current'));
+                      if (marks.length > 0) {
+                        if (state.currentIdx >= marks.length) state.currentIdx = 0;
+                        if (state.currentIdx < 0) state.currentIdx = marks.length - 1;
+                        marks[state.currentIdx].classList.add('current');
+                        marks[state.currentIdx].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                        countEl.textContent = (state.currentIdx + 1) + '/' + marks.length;
+                      } else {
+                        countEl.textContent = state.query ? '0/0' : '';
+                      }
+                    };
+
+                    const runSearch = (box) => {
+                      const input = box.querySelector('.live-search-input');
+                      const countEl = box.querySelector('.live-search-count');
+                      const content = box.querySelector('.live-output-content');
+                      if (!input || !countEl || !content) return;
+                      const state = getSearchState(box);
+                      state.query = input.value;
+                      state.currentIdx = 0;
+                      clearHighlights(content);
+                      applyHighlights(content, state.query);
+                      updateCurrent(content, state, countEl);
+                    };
+
+                    window._liveSearchReapply = (box) => {
+                      if (!box) return;
+                      const input = box.querySelector('.live-search-input');
+                      const countEl = box.querySelector('.live-search-count');
+                      const content = box.querySelector('.live-output-content');
+                      if (!input || !countEl || !content) return;
+                      const state = getSearchState(box);
+                      if (!state.query) return;
+                      const savedIdx = state.currentIdx;
+                      clearHighlights(content);
+                      applyHighlights(content, state.query);
+                      state.currentIdx = savedIdx;
+                      updateCurrent(content, state, countEl);
+                    };
+
+                    const bindInput = (input) => {
+                      if (input._searchBound) return;
+                      input._searchBound = true;
+                      const box = input.closest('#live-stream-box, .live-stream-box, .live-output-wrapper');
+                      if (!box) return;
+                      const state = getSearchState(box);
+
+                      input.addEventListener('input', () => {
+                        clearTimeout(state.debounceTimer);
+                        state.debounceTimer = setTimeout(() => runSearch(box), 200);
+                      });
+
+                      input.addEventListener('keydown', (e) => {
+                        e.stopPropagation();
+                        if (e.key === 'Escape') {
+                          input.value = '';
+                          runSearch(box);
+                          input.blur();
+                        } else if (e.key === 'Enter') {
+                          const countEl = box.querySelector('.live-search-count');
+                          const content = box.querySelector('.live-output-content');
+                          if (!countEl || !content) return;
+                          if (e.shiftKey) {
+                            state.currentIdx--;
+                          } else {
+                            state.currentIdx++;
+                          }
+                          updateCurrent(content, state, countEl);
+                        }
+                      });
+
+                      const navBtns = box.querySelectorAll('.live-search-nav');
+                      if (navBtns.length >= 2) {
+                        navBtns[0].addEventListener('click', () => {
+                          const countEl = box.querySelector('.live-search-count');
+                          const content = box.querySelector('.live-output-content');
+                          if (!countEl || !content) return;
+                          state.currentIdx--;
+                          updateCurrent(content, state, countEl);
+                        });
+                        navBtns[1].addEventListener('click', () => {
+                          const countEl = box.querySelector('.live-search-count');
+                          const content = box.querySelector('.live-output-content');
+                          if (!countEl || !content) return;
+                          state.currentIdx++;
+                          updateCurrent(content, state, countEl);
+                        });
+                      }
+                    };
+
+                    const discoverInputs = () => {
+                      const root = getRoot();
+                      root.querySelectorAll('.live-search-input').forEach(bindInput);
+                    };
+
+                    setInterval(discoverInputs, 500);
+                    setTimeout(discoverInputs, 100);
+                  };
+
                   initializeLiveDomPatching();
                   initializeLiveStreamScrollTracking();
+                  initializeLiveStreamSearch();
                   initializeTerminalColumnTracking();
                   const tickAll = () => {
                     wirePlus();

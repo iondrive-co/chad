@@ -1,8 +1,8 @@
 v0.10 Hack-Propagation
 
-Full inter-provider handoff including summarize progress and resume from checkpoints
+Expanded event log and implemented inter-provider handoff
+Search for text in agent streams
 Improve the mistral and gemini and qwen providers data 
-Load balance based on usage, user preference, context limits hit, etc.
 Repo map and next step field in initial update
 
 v0.11 Epochalypse
@@ -13,13 +13,14 @@ Receive tasks from slack
 
 v0.12 Slip Slop Slap
 
+Full inter-provider handoff including summarize progress and resume from checkpoints
+Load balance based on usage, user preference, context limits hit, etc.
 Session branching and resume session at startup
 Repeated failures
 Queue of bugs/features
 
 v0.13 Intentionality Reduction
 
-Search for text in agent streams
 Packaging for different platforms
 Renamed web_ui to gradio_ui. Make Remix static site ui which downloads and talks to the server on localhost
 
