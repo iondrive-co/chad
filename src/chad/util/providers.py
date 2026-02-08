@@ -1196,7 +1196,6 @@ class AIProvider(ABC):
         return None
 
 
-
 class ClaudeCodeProvider(AIProvider):
     """Provider for Anthropic Claude Code CLI.
 

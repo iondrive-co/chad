@@ -2574,6 +2574,196 @@ class TestClaudeMultiAccount:
         mock_api_client.create_account.assert_called_once()
 
 
+class TestPexpectLoginDrain:
+    """Test that pexpect-based login flows drain PTY output to prevent buffer deadlocks."""
+
+    @pytest.fixture
+    def mock_api_client(self):
+        mgr = Mock()
+        mgr.list_accounts.return_value = []
+        mgr.list_role_assignments.return_value = {}
+        mgr.get_account_model.return_value = "default"
+        mgr.get_account_reasoning.return_value = "default"
+        return mgr
+
+    @pytest.fixture
+    def web_ui(self, mock_api_client):
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        ui = ChadWebUI(mock_api_client)
+        ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "gemini"))
+        return ui
+
+    @patch("pathlib.Path.home")
+    def test_gemini_login_creates_settings_json(self, mock_home, web_ui, mock_api_client, tmp_path):
+        """Gemini login pre-creates settings.json so the CLI skips the auth dialog."""
+        import json
+        import pexpect
+
+        mock_home.return_value = tmp_path
+
+        mock_child = Mock()
+        mock_child.isalive.return_value = True
+        mock_child.close = Mock()
+
+        def fake_drain(size=10000, timeout=0.1):
+            raise pexpect.TIMEOUT("no data")
+
+        mock_child.read_nonblocking = fake_drain
+
+        poll_count = [0]
+        original_exists = Path.exists
+
+        def mock_exists(path):
+            if "oauth_creds.json" in str(path) and ".gemini" in str(path):
+                poll_count[0] += 1
+                # _check_provider_login calls once, then loop polls
+                return poll_count[0] >= 3
+            return original_exists(path)
+
+        with patch("pexpect.spawn", return_value=mock_child):
+            with patch("time.sleep"):
+                with patch.object(Path, "exists", mock_exists):
+                    result = web_ui.add_provider("my-gemini", "gemini")[0]
+
+        # settings.json must be created before the CLI is spawned
+        settings_path = tmp_path / ".gemini" / "settings.json"
+        assert settings_path.exists(), "settings.json not pre-created"
+        settings = json.loads(settings_path.read_text())
+        assert settings["security"]["auth"]["selectedType"] == "oauth-personal"
+        assert "✅" in result
+
+    @patch("pathlib.Path.home")
+    def test_gemini_login_drains_pty_output(self, mock_home, web_ui, mock_api_client, tmp_path):
+        """Gemini login flow must drain PTY output to prevent buffer deadlock.
+
+        Without draining, the Gemini CLI blocks when its PTY output buffer fills,
+        causing the polling loop to hang indefinitely since child.isalive() stays True.
+        """
+        import pexpect
+
+        mock_home.return_value = tmp_path
+
+        # Track read_nonblocking calls to verify draining happens
+        drain_calls = []
+
+        mock_child = Mock()
+        mock_child.isalive.return_value = True
+        mock_child.close = Mock()
+
+        def track_drain(size=10000, timeout=0.1):
+            drain_calls.append((size, timeout))
+            raise pexpect.TIMEOUT("no data")
+
+        mock_child.read_nonblocking = track_drain
+
+        poll_count = [0]
+        original_exists = Path.exists
+
+        def mock_exists(path):
+            if "oauth_creds.json" in str(path) and ".gemini" in str(path):
+                poll_count[0] += 1
+                # _check_provider_login calls exists() once (poll 1),
+                # then the loop polls: poll 2, 3, 4 return False, poll 5 succeeds.
+                # This gives 3 drain calls in the loop.
+                return poll_count[0] >= 5
+            return original_exists(path)
+
+        with patch("pexpect.spawn", return_value=mock_child):
+            with patch("time.sleep"):
+                with patch.object(Path, "exists", mock_exists):
+                    result = web_ui.add_provider("my-gemini", "gemini")[0]
+
+        # Verify draining happened during polling
+        assert len(drain_calls) >= 2, (
+            f"Expected read_nonblocking to be called during polling, got {len(drain_calls)} calls. "
+            "Without draining, the PTY buffer fills and the CLI deadlocks."
+        )
+        assert "✅" in result
+        mock_api_client.create_account.assert_called_once_with("my-gemini", "gemini")
+
+    @patch("pathlib.Path.home")
+    def test_gemini_login_does_not_overwrite_existing_settings(self, mock_home, web_ui, mock_api_client, tmp_path):
+        """If settings.json already exists, don't overwrite the user's config."""
+        import json
+        import pexpect
+
+        mock_home.return_value = tmp_path
+
+        # Pre-create settings with custom content
+        gemini_dir = tmp_path / ".gemini"
+        gemini_dir.mkdir(parents=True)
+        custom = {"security": {"auth": {"selectedType": "gemini-api-key"}}, "custom": True}
+        (gemini_dir / "settings.json").write_text(json.dumps(custom))
+
+        mock_child = Mock()
+        mock_child.isalive.return_value = True
+        mock_child.close = Mock()
+        mock_child.read_nonblocking = Mock(side_effect=pexpect.TIMEOUT("no data"))
+
+        poll_count = [0]
+        original_exists = Path.exists
+
+        def mock_exists(path):
+            if "oauth_creds.json" in str(path) and ".gemini" in str(path):
+                poll_count[0] += 1
+                return poll_count[0] >= 3
+            return original_exists(path)
+
+        with patch("pexpect.spawn", return_value=mock_child):
+            with patch("time.sleep"):
+                with patch.object(Path, "exists", mock_exists):
+                    web_ui.add_provider("my-gemini", "gemini")
+
+        # Original settings must be preserved
+        settings = json.loads((gemini_dir / "settings.json").read_text())
+        assert settings["custom"] is True
+        assert settings["security"]["auth"]["selectedType"] == "gemini-api-key"
+
+    @patch("pathlib.Path.home")
+    def test_qwen_login_drains_pty_output(self, mock_home, web_ui, mock_api_client, tmp_path):
+        """Qwen login flow drains PTY output (regression guard)."""
+        import pexpect
+
+        mock_home.return_value = tmp_path
+        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "qwen"))
+
+        drain_calls = []
+
+        mock_child = Mock()
+        mock_child.isalive.return_value = True
+        mock_child.send = Mock()
+        mock_child.close = Mock()
+
+        def track_drain(size=10000, timeout=0.1):
+            drain_calls.append((size, timeout))
+            raise pexpect.TIMEOUT("no data")
+
+        mock_child.read_nonblocking = track_drain
+
+        poll_count = [0]
+        original_exists = Path.exists
+
+        def mock_exists(path):
+            if "oauth_creds.json" in str(path) and ".qwen" in str(path):
+                poll_count[0] += 1
+                # _check_provider_login calls exists() once (poll 1),
+                # then the loop polls: poll 2, 3, 4 return False, poll 5 succeeds.
+                return poll_count[0] >= 5
+            return original_exists(path)
+
+        with patch("pexpect.spawn", return_value=mock_child):
+            with patch("time.sleep"):
+                with patch.object(Path, "exists", mock_exists):
+                    result = web_ui.add_provider("my-qwen", "qwen")[0]
+
+        assert len(drain_calls) >= 2, (
+            f"Expected read_nonblocking to be called during polling, got {len(drain_calls)} calls."
+        )
+        assert "✅" in result
+        mock_api_client.create_account.assert_called_once_with("my-qwen", "qwen")
+
+
 class TestCodingSummaryExtraction:
     """Test extraction of structured summaries from coding agent output."""
 
