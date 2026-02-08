@@ -665,6 +665,17 @@ class TaskExecutor:
 
         return coding_account, coding_provider, None
 
+    def _decrement_mock_usage(self, coding_provider: str, coding_account: str) -> None:
+        """Decrement mock usage after a successful PTY phase completion."""
+        if coding_provider != "mock":
+            return
+        try:
+            remaining = self.config_manager.get_mock_remaining_usage(coding_account)
+            new_remaining = max(0.0, remaining - 0.01)
+            self.config_manager.set_mock_remaining_usage(coding_account, new_remaining)
+        except Exception:
+            pass
+
     def start_task(
         self,
         session_id: str,
@@ -1172,6 +1183,8 @@ class TaskExecutor:
             )
             accumulated_output = exploration_output
             final_exit_code = exit_code
+            if exit_code == 0:
+                self._decrement_mock_usage(coding_provider, coding_account)
 
             # Handle cancellation/timeout from exploration phase
             if task.cancel_requested or exit_code == -1:
@@ -1231,6 +1244,8 @@ class TaskExecutor:
                 )
                 accumulated_output += "\n" + impl_output
                 final_exit_code = exit_code
+                if exit_code == 0:
+                    self._decrement_mock_usage(coding_provider, coding_account)
 
                 # Handle cancellation/timeout from implementation phase
                 if task.cancel_requested or exit_code == -1:
@@ -1285,6 +1300,8 @@ class TaskExecutor:
                         )
                         accumulated_output += "\n" + cont_output
                         final_exit_code = exit_code
+                        if exit_code == 0:
+                            self._decrement_mock_usage(coding_provider, coding_account)
 
                         # Handle cancellation
                         if task.cancel_requested or exit_code == -1:

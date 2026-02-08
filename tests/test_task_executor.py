@@ -610,6 +610,74 @@ class TestBinaryGarbageFilter:
         assert _strip_binary_garbage("") == ""
 
 
+class TestMockUsageDecrement:
+    """Tests that mock provider usage is decremented after each PTY phase."""
+
+    def test_usage_decremented_after_successful_phases(self, tmp_path, monkeypatch):
+        """Mock usage decreases after each successful phase completion."""
+        repo_path = tmp_path / "repo"
+        _init_git_repo(repo_path)
+
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({"accounts": {"mock-acct": {"provider": "mock"}}}), encoding="utf-8")
+        monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+        monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+        cm = ConfigManager()
+        cm.set_mock_remaining_usage("mock-acct", 0.50)
+
+        session_manager = SessionManager()
+        session = session_manager.create_session(project_path=str(repo_path), name="usage-test")
+
+        executor = TaskExecutor(cm, session_manager, inactivity_timeout=30.0)
+
+        import chad.server.services.task_executor as te
+
+        run_count = [0]
+
+        def mock_command(provider, account_name, project_path, task_description=None,
+                         screenshots=None, phase="combined", exploration_output=None, **kwargs):
+            run_count[0] += 1
+            if phase == "exploration":
+                script = "echo '{\"type\":\"progress\",\"summary\":\"Found it\",\"location\":\"x.py:1\",\"next_step\":\"Fix\"}'"
+            else:
+                script = "echo '```json'; echo '{\"change_summary\":\"Done\",\"files_changed\":[\"x.py\"],\"completion_status\":\"success\"}'; echo '```'"
+            return ["bash", "-c", script], {}, None
+
+        monkeypatch.setattr(te, "build_agent_command", mock_command)
+
+        task = executor.start_task(
+            session_id=session.id,
+            project_path=str(repo_path),
+            task_description="Test usage decrement",
+            coding_account="mock-acct",
+        )
+        task._thread.join(timeout=10)
+
+        assert task.state == TaskState.COMPLETED
+        # Two successful phases (exploration + implementation) should decrement 0.01 each
+        remaining = cm.get_mock_remaining_usage("mock-acct")
+        assert remaining < 0.50, f"Usage should have decreased from 0.50, got {remaining}"
+        assert abs(remaining - 0.48) < 0.001, f"Expected ~0.48 after 2 decrements, got {remaining}"
+
+    def test_no_decrement_for_non_mock_provider(self, tmp_path, monkeypatch):
+        """Non-mock providers don't trigger usage decrement."""
+        repo_path = tmp_path / "repo"
+        _init_git_repo(repo_path)
+
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({"accounts": {"real-acct": {"provider": "anthropic"}}}), encoding="utf-8")
+        monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+        monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+        cm = ConfigManager()
+        executor = TaskExecutor(cm, SessionManager(), inactivity_timeout=30.0)
+
+        # Should be a no-op for non-mock providers
+        executor._decrement_mock_usage("anthropic", "real-acct")
+        # No exception, no side effects
+
+
 class TestCaptureProviderCommand:
     """Tests for capture_provider_command test helper with model support."""
 

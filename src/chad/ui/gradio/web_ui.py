@@ -3706,6 +3706,7 @@ class ChadWebUI:
             pending_message_idx = None
             render_state = LiveStreamRenderState()
             progress_emitted = False  # Track if we've shown a progress update bubble
+            coding_milestone_emitted = False  # Track if we've shown the Coding milestone
             while not relay_complete.is_set() and not session.cancel_requested:
                 try:
                     msg = message_queue.get(timeout=0.02)
@@ -3763,6 +3764,17 @@ class ChadWebUI:
                         current_live_stream = ""
                         latest_pyte_html = ""
                         render_state.reset()
+                        # Insert Coding milestone when Phase 2 starts
+                        if "Phase 2" in msg[1] and not coding_milestone_emitted:
+                            coding_milestone_emitted = True
+                            coding_milestone = self._make_phase_milestone(
+                                "Coding", coding_account, selected_model
+                            )
+                            if pending_message_idx is not None:
+                                chat_history.insert(pending_message_idx, coding_milestone)
+                                pending_message_idx += 1
+                            else:
+                                chat_history.append(coding_milestone)
                         summary_text = current_status
                         yield make_yield(
                             chat_history,
@@ -3829,15 +3841,17 @@ class ChadWebUI:
                                 progress = extract_progress_update(streaming_buffer)
                                 if progress:
                                     progress_emitted = True
-                                    # Insert coding phase milestone
-                                    coding_milestone = self._make_phase_milestone(
-                                        "Coding", coding_account, selected_model
-                                    )
-                                    if pending_message_idx is not None:
-                                        chat_history.insert(pending_message_idx, coding_milestone)
-                                        pending_message_idx += 1
-                                    else:
-                                        chat_history.append(coding_milestone)
+                                    # Insert coding phase milestone if not already inserted by status handler
+                                    if not coding_milestone_emitted:
+                                        coding_milestone_emitted = True
+                                        coding_milestone = self._make_phase_milestone(
+                                            "Coding", coding_account, selected_model
+                                        )
+                                        if pending_message_idx is not None:
+                                            chat_history.insert(pending_message_idx, coding_milestone)
+                                            pending_message_idx += 1
+                                        else:
+                                            chat_history.append(coding_milestone)
                                     # Insert progress bubble at the tracked position
                                     progress_msg = make_progress_message(progress)
                                     if pending_message_idx is not None:
