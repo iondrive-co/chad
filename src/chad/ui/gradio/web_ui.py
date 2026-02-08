@@ -2147,7 +2147,7 @@ def make_progress_message(progress: ProgressUpdate) -> dict:
 
 
 def make_phase_milestone(phase_name: str, account_name: str, model_name: str,
-                         usage_pct: int | None = None, context_pct: int | None = None) -> dict:
+                         usage_pct: int | None = None) -> dict:
     """Create a chatbot message marking a phase transition with provider info.
 
     Args:
@@ -2155,14 +2155,13 @@ def make_phase_milestone(phase_name: str, account_name: str, model_name: str,
         account_name: Provider account name.
         model_name: Model identifier.
         usage_pct: Usage used percentage (0-100), or None if unavailable.
-        context_pct: Context used percentage (0-100), or None if unavailable.
 
     Returns:
         Chat message dict with role="user" for display in the milestones panel.
     """
     metrics = ""
-    if usage_pct is not None and context_pct is not None:
-        metrics = f" Usage: {usage_pct}% · Context: {context_pct}%"
+    if usage_pct is not None:
+        metrics = f" Usage: {usage_pct}%"
     content = f"**{phase_name}:** {account_name} ({model_name}{metrics})"
     return {"role": "user", "content": content}
 
@@ -2384,9 +2383,20 @@ class ChadWebUI:
         except Exception:
             pass  # Fall back to raw output if we can't determine provider
 
-        # For stream-json providers: accumulate parsed text directly (no terminal width constraints)
-        # For others: use pyte terminal emulation for proper ANSI/cursor handling
-        accumulated_text: list[str] = []
+        # Track output across the entire run (for verification input) and for the
+        # currently active chat phase (exploration vs implementation message bubbles).
+        full_output_chunks: list[str] = []
+        phase_output_chunks: list[str] = []
+        phase_message_split_done = False
+
+        def _record_output_chunk(chunk: str) -> None:
+            if not chunk:
+                return
+            full_output_chunks.append(chunk)
+            phase_output_chunks.append(chunk)
+
+        # For stream-json providers: parse text directly (no terminal width constraints).
+        # For others: use pyte terminal emulation for proper ANSI/cursor handling.
         terminal = None if json_parser else TerminalEmulator(cols=effective_cols, rows=TERMINAL_ROWS)
 
         # Detect provider for Codex prompt echo filtering
@@ -2451,10 +2461,11 @@ class ChadWebUI:
                         text_chunks = json_parser.feed(raw_bytes)
                         if text_chunks:
                             # Accumulate parsed text and render as HTML directly
-                            accumulated_text.extend(text_chunks)
+                            for text_chunk in text_chunks:
+                                _record_output_chunk(text_chunk)
                             readable_text = "\n".join(text_chunks) + "\n"
                             # Escape HTML and preserve newlines
-                            all_text = "\n".join(accumulated_text)
+                            all_text = "\n".join(full_output_chunks)
                             html_output = html.escape(all_text)
                             message_queue.put(("stream", readable_text, html_output))
                         # If no complete lines yet, don't emit anything
@@ -2502,7 +2513,7 @@ class ChadWebUI:
                                     pre_echo = normalized[:match.start()]
                                     if pre_echo.strip():
                                         terminal.feed(pre_echo.encode("utf-8"))
-                                        accumulated_text.append(pre_echo)
+                                        _record_output_chunk(pre_echo)
                                         html_output = terminal.render_html()
                                         message_queue.put(("stream", pre_echo, html_output))
                                     # Now in prompt echo section - update buffer
@@ -2529,7 +2540,7 @@ class ChadWebUI:
                                 codex_output_buffer = ""
                                 if agent_output.strip():
                                     terminal.feed(agent_output.encode("utf-8"))
-                                    accumulated_text.append(agent_output)
+                                    _record_output_chunk(agent_output)
                                     html_output = terminal.render_html()
                                     message_queue.put(("stream", agent_output, html_output))
                                 continue
@@ -2542,14 +2553,14 @@ class ChadWebUI:
                                     codex_output_buffer = codex_output_buffer[-500:]
                                     if to_emit.strip():
                                         terminal.feed(to_emit.encode("utf-8"))
-                                        accumulated_text.append(to_emit)
+                                        _record_output_chunk(to_emit)
                                         html_output = terminal.render_html()
                                         message_queue.put(("stream", to_emit, html_output))
                             continue
 
                         # Past prompt echo - pass through raw PTY output with terminal emulation
                         terminal.feed(raw_bytes)
-                        accumulated_text.append(decoded)
+                        _record_output_chunk(decoded)
                         html_output = terminal.render_html()
                         message_queue.put(("stream", decoded, html_output))
 
@@ -2560,7 +2571,7 @@ class ChadWebUI:
                     if is_codex and codex_output_buffer.strip():
                         if terminal:
                             terminal.feed(codex_output_buffer.encode("utf-8"))
-                        accumulated_text.append(codex_output_buffer)
+                        _record_output_chunk(codex_output_buffer)
                         codex_output_buffer = ""
                     break
 
@@ -2577,6 +2588,16 @@ class ChadWebUI:
                     elif event_type == "status":
                         status_text = event.data.get("status", "")
                         if status_text:
+                            if (
+                                status_text == "Phase 2: Implementing changes..."
+                                and not phase_message_split_done
+                            ):
+                                exploration_output = _sanitize_terminal_text("\n".join(phase_output_chunks)).strip()
+                                if exploration_output:
+                                    message_queue.put(("message_complete", "CODING AI", exploration_output))
+                                    message_queue.put(("message_start", "CODING AI"))
+                                    phase_message_split_done = True
+                                phase_output_chunks = []
                             message_queue.put(("status", status_text))
                     elif event_type == "terminal_output":
                         # Fallback for parsed terminal output from EventLog
@@ -2585,7 +2606,8 @@ class ChadWebUI:
                         if data and data.strip():
                             # For JSON providers, use the already-parsed EventLog text
                             if json_parser:
-                                accumulated_text = [data]  # Replace with EventLog content
+                                full_output_chunks = [data]  # Replace with EventLog content
+                                phase_output_chunks = [data]
                                 html_output = html.escape(data)
                                 message_queue.put(("stream", data, html_output))
                     elif event_type == "tool_call_started":
@@ -2620,19 +2642,21 @@ class ChadWebUI:
             return False, "Stream ended unexpectedly", server_session_id, work_done
 
         # Get plain text for final output
-        # Always prefer accumulated_text (captures full session) over terminal.get_text()
+        # Always prefer full_output_chunks (captures full session) over terminal.get_text()
         # (which only returns the visible screen buffer, losing scrollback history)
-        if accumulated_text:
-            final_output = "\n".join(accumulated_text)
+        if full_output_chunks:
+            final_output = "\n".join(full_output_chunks)
         elif terminal:
             final_output = terminal.get_text()
         else:
             final_output = ""
         final_output = _sanitize_terminal_text(final_output)
+        phase_output = _sanitize_terminal_text("\n".join(phase_output_chunks))
+        final_message_output = phase_output if phase_output.strip() else final_output
 
         # Emit completion
         if exit_code == 0:
-            message_queue.put(("message_complete", "CODING AI", final_output))
+            message_queue.put(("message_complete", "CODING AI", final_message_output))
             # Check if agent only explored without making changes
             made_changes = bool(work_done["files_modified"] or work_done["files_created"])
             if not made_changes:
@@ -2640,7 +2664,7 @@ class ChadWebUI:
             return True, final_output, server_session_id, work_done
         else:
             message_queue.put(("status", f"❌ Agent exited with code {exit_code}"))
-            message_queue.put(("message_complete", "CODING AI", final_output))
+            message_queue.put(("message_complete", "CODING AI", final_message_output))
             return False, f"Agent exited with code {exit_code}", server_session_id, work_done
 
     def get_session(self, session_id: str) -> Session:
@@ -2816,47 +2840,6 @@ class ChadWebUI:
             return coding_account, None
 
         # Switch to fallback
-        return next_account, coding_account
-
-    def get_context_remaining(self, account_name: str) -> float:
-        """Get remaining context capacity for a provider (0.0-1.0)."""
-        return self.provider_ui.get_context_remaining(account_name)
-
-    def _check_context_and_switch(self, coding_account: str) -> tuple[str, str | None]:
-        """Check if current provider's context exceeds threshold and switch if needed.
-
-        Returns:
-            Tuple of (account_to_use, switched_from_account)
-            switched_from_account is None if no switch occurred
-        """
-        try:
-            threshold = self.api_client.get_context_switch_threshold()
-        except Exception:
-            threshold = 90
-
-        # Threshold of 100 disables context-based switching
-        if threshold >= 100:
-            return coding_account, None
-
-        # Check current account context usage
-        remaining = self.get_context_remaining(coding_account)
-        used_pct = (1.0 - remaining) * 100
-
-        if used_pct < threshold:
-            # Context usage is below threshold, no switch needed
-            return coding_account, None
-
-        # Context exceeds threshold, try to find a fallback
-        try:
-            next_account = self.api_client.get_next_fallback_provider(coding_account)
-        except Exception:
-            return coding_account, None
-
-        if not next_account:
-            return coding_account, None
-
-        # Fallback provider starts fresh, so it has full context
-        # No need to check fallback's context usage
         return next_account, coding_account
 
     def _provider_state(self, pending_delete: str = None) -> tuple:
@@ -3173,13 +3156,10 @@ class ChadWebUI:
         """Create a phase milestone chat message with live usage metrics."""
         try:
             usage_remaining = self.provider_ui.get_remaining_usage(account_name)
-            context_remaining = self.provider_ui.get_context_remaining(account_name)
             usage_pct = int((1.0 - usage_remaining) * 100)
-            context_pct = int((1.0 - context_remaining) * 100)
         except Exception:
             usage_pct = None
-            context_pct = None
-        return make_phase_milestone(phase_name, account_name, model_name, usage_pct, context_pct)
+        return make_phase_milestone(phase_name, account_name, model_name, usage_pct)
 
     def assign_role(self, account_name: str, role: str):
         return self.provider_ui.assign_role(account_name, role, self.provider_card_count)
@@ -7347,7 +7327,6 @@ class ChadWebUI:
                     usage_text = self.get_provider_usage(account_name)
                     is_mock = provider_type == "mock"
                     mock_usage_value = self.provider_ui.get_mock_remaining_usage(account_name) if is_mock else 0.5
-                    mock_context_value = self.provider_ui.get_mock_context_remaining(account_name) if is_mock else 1.0
                     mock_duration_seconds = self.provider_ui.get_mock_run_duration_seconds(account_name) if is_mock else 0
                 else:
                     account_name = ""
@@ -7357,7 +7336,6 @@ class ChadWebUI:
                     usage_text = ""
                     is_mock = False
                     mock_usage_value = 0.5
-                    mock_context_value = 1.0
                     mock_duration_seconds = 0
 
                 card_group_classes = ["provider-card"] if visible else ["provider-card", "provider-card-empty"]
@@ -7386,15 +7364,6 @@ class ChadWebUI:
                             visible=is_mock,
                             elem_classes=["mock-usage-slider"],
                         )
-                        mock_context_slider = gr.Slider(
-                            minimum=0,
-                            maximum=100,
-                            value=int((1.0 - mock_context_value) * 100),
-                            step=5,
-                            label="Context %",
-                            visible=is_mock,
-                            elem_classes=["mock-context-slider"],
-                        )
                         mock_duration_slider = gr.Slider(
                             minimum=0,
                             maximum=3600,
@@ -7414,7 +7383,6 @@ class ChadWebUI:
                         "account_name": account_name,
                         "usage_box": usage_box,
                         "mock_usage_slider": mock_usage_slider,
-                        "mock_context_slider": mock_context_slider,
                         "mock_duration_slider": mock_duration_slider,
                         "delete_btn": delete_btn,
                     }
@@ -7590,8 +7558,6 @@ class ChadWebUI:
                 fallback_order_str = ""
 
             usage_threshold = init["usage_threshold"] if init else self.api_client.get_usage_switch_threshold()
-            context_threshold = init["context_threshold"] if init else self.api_client.get_context_switch_threshold()
-
             with gr.Row():
                 fallback_order_input = gr.Textbox(
                     label="Provider Fallback Order",
@@ -7608,15 +7574,6 @@ class ChadWebUI:
                     value=usage_threshold,
                     info="Switch provider when usage exceeds this percentage (100 = disable)",
                 )
-                context_threshold_input = gr.Slider(
-                    label="Context Switch Threshold (%)",
-                    minimum=0,
-                    maximum=100,
-                    step=5,
-                    value=context_threshold,
-                    info="Switch provider when context exceeds this percentage (100 = disable)",
-                )
-
             # Verification settings
             gr.Markdown("### Verification Settings")
             max_attempts = init["max_verification_attempts"] if init else self.api_client.get_max_verification_attempts()
@@ -7642,7 +7599,6 @@ class ChadWebUI:
                     card["account_state"],
                     card["usage_box"],
                     card["mock_usage_slider"],
-                    card["mock_context_slider"],
                     card["mock_duration_slider"],
                     card["delete_btn"],
                 ]
@@ -7825,20 +7781,6 @@ class ChadWebUI:
             outputs=[config_status],
         )
 
-        def on_context_threshold_change(threshold):
-            try:
-                self.api_client.set_context_switch_threshold(int(threshold))
-                if threshold >= 100:
-                    return "✅ Context-based switching disabled"
-                return f"✅ Will switch providers when context exceeds {int(threshold)}%"
-            except Exception as exc:
-                return f"❌ {exc}"
-
-        context_threshold_input.change(
-            on_context_threshold_change,
-            inputs=[context_threshold_input],
-            outputs=[config_status],
-        )
 
         def on_max_verification_attempts_change(attempts):
             try:
@@ -7895,17 +7837,6 @@ class ChadWebUI:
                 inputs=[card["mock_usage_slider"], card["account_state"]],
             )
 
-            def make_mock_context_handler():
-                def handler(value, account_name):
-                    if account_name:
-                        self.provider_ui.set_mock_context_remaining(account_name, (100.0 - value) / 100.0)
-                return handler
-
-            card["mock_context_slider"].change(
-                fn=make_mock_context_handler(),
-                inputs=[card["mock_context_slider"], card["account_state"]],
-            )
-
             def make_mock_duration_handler():
                 def handler(value, account_name):
                     if account_name:
@@ -7949,10 +7880,6 @@ class ChadWebUI:
         except Exception:
             usage_threshold = 90
         try:
-            context_threshold = self.api_client.get_context_switch_threshold()
-        except Exception:
-            context_threshold = 80
-        try:
             max_verification_attempts = self.api_client.get_max_verification_attempts()
         except Exception:
             max_verification_attempts = 5
@@ -7964,7 +7891,6 @@ class ChadWebUI:
             "cleanup_settings": cleanup_settings,
             "fallback_order": fallback_order,
             "usage_threshold": usage_threshold,
-            "context_threshold": context_threshold,
             "max_verification_attempts": max_verification_attempts,
         }
 

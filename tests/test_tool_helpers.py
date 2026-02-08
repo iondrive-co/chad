@@ -367,7 +367,7 @@ class TestCliConfigParityCheck:
         internal = {
             "password_hash", "encryption_salt", "accounts",
             "role_assignments", "preferences", "projects",
-            "mock_remaining_usage", "mock_context_remaining",
+            "mock_remaining_usage",
         }
         assert not result.api_keys.intersection(internal)
 

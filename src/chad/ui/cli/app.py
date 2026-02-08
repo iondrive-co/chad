@@ -255,8 +255,6 @@ def run_settings_menu(client: APIClient) -> None:
         max_verification_attempts = client.get_max_verification_attempts()
         fallback_order = client.get_provider_fallback_order()
         usage_threshold = client.get_usage_switch_threshold()
-        context_threshold = client.get_context_switch_threshold()
-
         # Find coding agent from roles
         coding_agent = None
         for acc in accounts:
@@ -274,7 +272,6 @@ def run_settings_menu(client: APIClient) -> None:
         fallback_str = " -> ".join(fallback_order) if fallback_order else "(none)"
         print(f"  Fallback Order:     {fallback_str}")
         print(f"  Usage Threshold:    {usage_threshold}%")
-        print(f"  Context Threshold:  {context_threshold}%")
         print()
 
         print("Settings Menu:")
@@ -285,8 +282,7 @@ def run_settings_menu(client: APIClient) -> None:
         print("  [5] Set max verification attempts")
         print("  [6] Set provider fallback order")
         print("  [7] Set usage threshold")
-        print("  [8] Set context threshold")
-        print("  [9] Set UI mode")
+        print("  [8] Set UI mode")
         print("  [b] Back to main menu")
         print()
 
@@ -446,25 +442,6 @@ def run_settings_menu(client: APIClient) -> None:
             input("Press Enter to continue...")
 
         elif choice == "8":
-            # Set context threshold
-            print()
-            print(f"Current context threshold: {context_threshold}%")
-            print("When context window usage exceeds this %, auto-switch to next fallback.")
-            print("Set to 100 to disable context-based switching.")
-            try:
-                new_threshold = input("New threshold (0-100): ").strip()
-                if new_threshold:
-                    threshold = int(new_threshold)
-                    if 0 <= threshold <= 100:
-                        client.set_context_switch_threshold(threshold)
-                        print(f"Context threshold set to {threshold}%")
-                    else:
-                        print("Please enter a number between 0 and 100")
-            except ValueError:
-                print("Invalid number")
-            input("Press Enter to continue...")
-
-        elif choice == "9":
             # Set UI mode
             print()
             print(f"Current UI mode: {preferences.ui_mode}")

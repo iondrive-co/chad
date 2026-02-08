@@ -654,20 +654,6 @@ class TaskExecutor:
                             emit("status", status=f"Switching from {coding_account} to {next_account} (usage threshold)")
                             return next_account, next_provider, coding_account
 
-            # Check context threshold
-            context_threshold = self.config_manager.get_context_switch_threshold()
-            if context_threshold < 100:
-                ctx_remaining = self.config_manager.get_mock_context_remaining(coding_account)
-                ctx_used_pct = (1.0 - ctx_remaining) * 100
-                if ctx_used_pct >= context_threshold:
-                    next_account = self.config_manager.get_next_fallback_provider(coding_account)
-                    if next_account:
-                        accounts = self.config_manager.list_accounts()
-                        next_info = accounts.get(next_account)
-                        if next_info:
-                            next_provider = next_info.get("provider", coding_provider)
-                            emit("status", status=f"Switching from {coding_account} to {next_account} (context threshold)")
-                            return next_account, next_provider, coding_account
         except Exception:
             pass  # Don't fail the task if threshold checking fails
 

@@ -1392,30 +1392,8 @@ class TestUsageBasedProviderSwitch:
         assert resp.json()["threshold"] == 100
 
 
-class TestContextBasedProviderSwitch:
-    """Tests for proactive context-based provider switching."""
-
-    def test_mock_context_api_endpoints(self, client):
-        """Test mock context API endpoints for get/set operations."""
-        # Create a mock provider account
-        client.post("/api/v1/accounts", json={"name": "context-mock-1", "provider": "mock"})
-
-        # Default mock context should be 1.0 (100%)
-        resp = client.get("/api/v1/config/mock-context-remaining/context-mock-1")
-        assert resp.status_code == 200
-        assert resp.json()["remaining"] == 1.0
-
-        # Set mock context to 0.2 (20% remaining = 80% used)
-        resp = client.put(
-            "/api/v1/config/mock-context-remaining",
-            json={"account_name": "context-mock-1", "remaining": 0.2}
-        )
-        assert resp.status_code == 200
-        assert resp.json()["remaining"] == 0.2
-
-        # Verify it persisted
-        resp = client.get("/api/v1/config/mock-context-remaining/context-mock-1")
-        assert resp.json()["remaining"] == 0.2
+class TestMockRunDurationAPI:
+    """Tests for mock run duration API endpoints."""
 
     def test_mock_run_duration_api_endpoints(self, client):
         """Test mock run duration API endpoints for get/set operations."""
@@ -1438,67 +1416,6 @@ class TestContextBasedProviderSwitch:
         # Verify it persisted
         resp = client.get("/api/v1/config/mock-run-duration/duration-mock-1")
         assert resp.json()["seconds"] == 60
-
-    def test_context_threshold_api_endpoints(self, client):
-        """Test context switch threshold API endpoints."""
-        # Get default threshold (should be 90%)
-        resp = client.get("/api/v1/config/context-switch-threshold")
-        assert resp.status_code == 200
-        assert resp.json()["threshold"] == 90
-
-        # Set threshold to 70%
-        resp = client.put(
-            "/api/v1/config/context-switch-threshold",
-            json={"threshold": 70}
-        )
-        assert resp.status_code == 200
-        assert resp.json()["threshold"] == 70
-
-        # Verify it persisted
-        resp = client.get("/api/v1/config/context-switch-threshold")
-        assert resp.json()["threshold"] == 70
-
-    def test_context_threshold_configuration(self, client, git_repo):
-        """Test complete context threshold configuration for provider switch."""
-        # Create two mock provider accounts
-        client.post("/api/v1/accounts", json={"name": "context-primary", "provider": "mock"})
-        client.post("/api/v1/accounts", json={"name": "context-fallback", "provider": "mock"})
-
-        # Set up fallback order
-        resp = client.put(
-            "/api/v1/config/provider-fallback-order",
-            json={"order": ["context-primary", "context-fallback"]}
-        )
-        assert resp.status_code == 200
-
-        # Set context threshold to 50%
-        resp = client.put(
-            "/api/v1/config/context-switch-threshold",
-            json={"threshold": 50}
-        )
-        assert resp.status_code == 200
-
-        # Set primary to have 30% context remaining (70% used, exceeds 50% threshold)
-        resp = client.put(
-            "/api/v1/config/mock-context-remaining",
-            json={"account_name": "context-primary", "remaining": 0.3}
-        )
-        assert resp.status_code == 200
-
-        # Verify the configuration
-        resp = client.get("/api/v1/config/mock-context-remaining/context-primary")
-        assert resp.json()["remaining"] == 0.3
-
-        resp = client.get("/api/v1/config/context-switch-threshold")
-        assert resp.json()["threshold"] == 50
-
-    def test_context_switch_disabled_at_100_percent(self, client):
-        """Test that context-based switching is disabled when threshold is 100%."""
-        # Set threshold to 100% (disabled)
-        resp = client.put("/api/v1/config/context-switch-threshold", json={"threshold": 100})
-        assert resp.status_code == 200
-        assert resp.json()["threshold"] == 100
-
 
 class TestEventMultiplexer:
     """Tests for the EventMultiplexer class."""
