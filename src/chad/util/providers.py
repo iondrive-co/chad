@@ -2943,6 +2943,7 @@ class MockProvider(AIProvider):
         self._response_queue: list[str] = []
         self._project_path: str | None = None
         self._is_verification_mode = False
+        self._verification_phase: str | None = None
 
     def queue_response(self, response: str) -> None:
         """Queue a response to be returned by get_response (for unit tests)."""
@@ -3004,13 +3005,29 @@ class MockProvider(AIProvider):
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         self._alive = True
         self._project_path = project_path
+        self._is_verification_mode = False
+        self._verification_phase = None
         self._notify_activity("text", "Mock session started")
         return True
 
     def send_message(self, message: str) -> None:
         self._messages.append(message)
-        # Detect if this is a verification prompt
-        self._is_verification_mode = "DO NOT modify or create any files" in message
+        # Two-phase verification flow:
+        # 1) Exploration prompt (free-form analysis)
+        # 2) Conclusion prompt (strict JSON verdict)
+        if "DO NOT modify or create any files" in message:
+            self._is_verification_mode = True
+            self._verification_phase = "exploration"
+            return
+
+        if "Based on your analysis, provide your final verdict." in message:
+            self._is_verification_mode = True
+            self._verification_phase = "conclusion"
+            return
+
+        # Any other prompt is coding/follow-up mode.
+        self._is_verification_mode = False
+        self._verification_phase = None
 
     def _simulate_delay(self, seconds: float = 0.1) -> None:
         """Simulate processing delay."""
@@ -3128,9 +3145,11 @@ I modified BUGS.md to add a test marker.
         return response
 
     def _generate_verification_response(self) -> str:
-        """Generate a realistic verification agent response."""
-        verification_count = self._get_verification_count()
+        """Generate a realistic verification agent response.
 
+        Exploration phase returns analysis text.
+        Conclusion phase returns JSON verdict (fail first, then pass).
+        """
         # Simulate verification activities
         self._notify_activity("tool", "Read: BUGS.md")
         self._simulate_delay(0.15)
@@ -3141,7 +3160,13 @@ I modified BUGS.md to add a test marker.
         self._notify_activity("stream", "Checking diff output...\n")
         self._simulate_delay(0.1)
 
-        # First verification: reject with a reason
+        if self._verification_phase != "conclusion":
+            self._notify_activity("stream", "Exploration complete. Ready to provide final verdict.\n")
+            return "I reviewed BUGS.md and the diff. Please ask for the final verdict."
+
+        verification_count = self._get_verification_count()
+
+        # First verification conclusion: reject with a reason
         if verification_count == 1:
             self._notify_activity("stream", "Found an issue with the changes.\n")
             return """{
@@ -3153,7 +3178,7 @@ I modified BUGS.md to add a test marker.
   ]
 }"""
 
-        # Subsequent verifications: accept
+        # Subsequent conclusions: accept
         self._notify_activity("stream", "Changes look good.\n")
         return """{
   "passed": true,

@@ -151,7 +151,10 @@ def _sanitize_terminal_text(text: str) -> str:
     """Strip ANSI/control sequences from terminal text for chat rendering."""
     if not text:
         return ""
-    cleaned = ANSI_ESCAPE_RE.sub("", text)
+    # Some providers emit a visible Unicode escape symbol (␛) instead of
+    # the raw ESC byte. Normalize it so ANSI stripping still works.
+    normalized = text.replace("\u241b", "\x1b")
+    cleaned = ANSI_ESCAPE_RE.sub("", normalized)
     cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
     return CONTROL_CHAR_RE.sub("", cleaned)
 
@@ -1995,8 +1998,26 @@ def summarize_content(content: str, max_length: int = 200) -> str:
     """
     import re
 
+    def _truncate(text: str) -> str:
+        text = text.strip()
+        if len(text) <= max_length:
+            return text
+        return text[:max_length].rsplit(" ", 1)[0] + "..."
+
     # Remove markdown formatting for cleaner summary
     clean = content.replace("**", "").replace("`", "").replace("# ", "")
+
+    # Prefer phase/prompt markers for terminal-like output. This avoids
+    # summaries collapsing to a random file path line like "Tool: Read ...".
+    lines = [line.strip() for line in clean.splitlines() if line.strip()]
+    terminal_markers = ("Prompt:", "Phase ", "Tool:", "Working in:", "Task Complete", "> ")
+    if lines and any(marker in clean for marker in terminal_markers):
+        for prefix in ("Prompt:", "Phase ", "> ", "Task Complete", "Tool:"):
+            for line in lines:
+                if line.startswith(prefix):
+                    return _truncate(line)
+        # Fallback for terminal output without known prefixes.
+        return _truncate(lines[0])
 
     # Split into sentences
     sentences = re.split(r"(?<=[.!?])\s+", clean)
@@ -2017,17 +2038,13 @@ def summarize_content(content: str, max_length: int = 200) -> str:
         for pattern in action_patterns:
             if re.match(pattern, sentence, re.IGNORECASE):
                 # Found a good summary sentence
-                if len(sentence) <= max_length:
-                    return sentence
-                return sentence[:max_length].rsplit(" ", 1)[0] + "..."
+                return _truncate(sentence)
 
     # Look for sentences mentioning file paths
     for sentence in sentences:
         sentence = sentence.strip()
         if re.search(r"[a-zA-Z_]+\.(py|js|ts|tsx|css|html|md|json|yaml|yml)", sentence):
-            if len(sentence) <= max_length:
-                return sentence
-            return sentence[:max_length].rsplit(" ", 1)[0] + "..."
+            return _truncate(sentence)
 
     # Fallback: get first meaningful paragraph
     first_para = clean.split("\n\n")[0].strip()
@@ -2038,9 +2055,7 @@ def summarize_content(content: str, max_length: int = 200) -> str:
                 first_para = para.strip()
                 break
 
-    if len(first_para) <= max_length:
-        return first_para
-    return first_para[:max_length].rsplit(" ", 1)[0] + "..."
+    return _truncate(first_para)
 
 
 def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> dict:
@@ -2916,6 +2931,7 @@ class ChadWebUI:
             - verified=True means the work passed verification
             - verified=False means revisions are needed, feedback contains issues
             - verified=None means verification aborted due to missing inputs
+              or internal verifier execution errors
         """
         try:
             account = self.api_client.get_account(verification_account)
@@ -3077,8 +3093,10 @@ class ChadWebUI:
                 finally:
                     verifier.stop_session()
 
-            # All attempts failed - return error
-            return None, f"Verification failed: {last_error}"
+            # All attempts failed to produce parseable verdict JSON.
+            # Treat this as a failed verification (revision needed) rather than
+            # a terminal error so the coding loop can continue.
+            return False, f"Verification failed: {last_error or 'unknown verification parse error'}"
 
         except Exception as e:
             return None, f"Verification error: {str(e)}"
@@ -8641,6 +8659,18 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                       return matchCount;
                     };
 
+                    const scrollInContainer = (container, el) => {
+                      const elTop = el.offsetTop;
+                      const elBottom = elTop + el.offsetHeight;
+                      const viewTop = container.scrollTop;
+                      const viewBottom = viewTop + container.clientHeight;
+                      if (elTop < viewTop) {
+                        container.scrollTop = elTop - 20;
+                      } else if (elBottom > viewBottom) {
+                        container.scrollTop = elBottom - container.clientHeight + 20;
+                      }
+                    };
+
                     const updateCurrent = (content, state, countEl) => {
                       const marks = content.querySelectorAll('mark.live-search-match');
                       state.matchCount = marks.length;
@@ -8649,7 +8679,7 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                         if (state.currentIdx >= marks.length) state.currentIdx = 0;
                         if (state.currentIdx < 0) state.currentIdx = marks.length - 1;
                         marks[state.currentIdx].classList.add('current');
-                        marks[state.currentIdx].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                        scrollInContainer(content, marks[state.currentIdx]);
                         countEl.textContent = (state.currentIdx + 1) + '/' + marks.length;
                       } else {
                         countEl.textContent = state.query ? '0/0' : '';

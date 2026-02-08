@@ -2690,6 +2690,40 @@ More details here...
         # Should use heuristic extraction (starts with "I've updated...")
         assert "I've updated the authentication module" in message["content"]
 
+    def test_make_chat_message_prefers_prompt_line_for_terminal_output(self):
+        """Collapsed terminal summaries should prioritize prompt/phase markers over file paths."""
+        from chad.ui.gradio.web_ui import make_chat_message
+
+        content = (
+            "Mock Agent v1.0\n"
+            "Working in: /tmp/work\n"
+            "Prompt: Exploration\n\n"
+            "> Analyzing task...\n"
+            "Tool: Read BUGS.md\n"
+            "✓ Read 15 lines\n"
+            "Tool: Glob src/**/*.py\n"
+            "✓ Found 8 files\n"
+            + ("[tick] provider context stream\n" * 30)
+        )
+
+        message = make_chat_message("CODING AI", content)
+        summary_part = message["content"].split("<details>")[0]
+
+        assert "Prompt: Exploration" in summary_part
+        assert "Tool: Read BUGS.md" not in summary_part
+
+    def test_make_chat_message_strips_visible_escape_symbol_sequences(self):
+        """Visible Unicode escape symbol sequences should be sanitized from chat output."""
+        from chad.ui.gradio.web_ui import make_chat_message
+
+        content = "␛[1;34mMock Agent v1.0␛[0m\n␛[36mPrompt: Exploration␛[0m"
+        message = make_chat_message("CODING AI", content, collapsible=False)
+        rendered = message["content"]
+
+        assert "␛[" not in rendered
+        assert "Mock Agent v1.0" in rendered
+        assert "Prompt: Exploration" in rendered
+
     def test_make_chat_message_displays_hypothesis_and_screenshots(self, tmp_path):
         """make_chat_message should show hypothesis and inline screenshot images."""
         from chad.ui.gradio.web_ui import make_chat_message
@@ -3513,10 +3547,37 @@ class TestVerificationPrompt:
             str(tmp_path), "coding output", "Task", "verifier", on_activity=on_activity
         )
 
-        assert verified is None
+        assert verified is False
+        assert feedback.startswith("Verification failed:")
         assert "Missing required field 'passed'" in feedback
         parse_status = [d for k, d in activities if k == "system" and "Verification parse failed" in d]
         assert parse_status, "Expected parse-failure status updates during retries"
+
+    def test_run_verification_mock_provider_two_phase_fail_then_pass(self, monkeypatch, tmp_path):
+        """Mock provider should fail first verification attempt, then pass after revision."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.util.providers import MockProvider
+
+        class DummyAPIClient:
+            def get_account(self, name):
+                return MockAccount(name=name, provider="mock")
+
+        # Keep this test fast and isolated.
+        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
+        MockProvider._verification_counts.clear()
+
+        ui = ChadWebUI(DummyAPIClient())
+        first_verified, first_feedback = ui._run_verification(
+            str(tmp_path), "coding output", "Task", "mock-verifier"
+        )
+        second_verified, second_feedback = ui._run_verification(
+            str(tmp_path), "coding output", "Task", "mock-verifier"
+        )
+
+        assert first_verified is False
+        assert "timestamp" in first_feedback.lower()
+        assert second_verified is True
+        assert "verified that bugs.md was updated correctly" in second_feedback.lower()
 
     def test_run_verification_recovers_after_one_parse_failure(self, monkeypatch, tmp_path):
         """Verifier should retry once and succeed when second response is valid."""

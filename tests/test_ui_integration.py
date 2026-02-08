@@ -1476,6 +1476,83 @@ class TestLiveStreamSearch:
         marks_after = page.locator("mark.live-search-match")
         assert marks_after.count() == 0
 
+    def test_navigation_scrolls_to_offscreen_match(self, page: Page):
+        """Navigating to a match that is off-screen should scroll it into view."""
+        # Build content with many lines so the second "NEEDLE" is far below the fold
+        lines = ['<p>The NEEDLE is here on line 1.</p>']
+        for i in range(2, 80):
+            lines.append(f'<p>Filler line {i} with nothing interesting.</p>')
+        lines.append('<p>Another NEEDLE hidden way down at the bottom.</p>')
+        tall_content = '\n'.join(lines)
+        from chad.ui.gradio.web_ui import build_live_stream_html_from_pyte
+        full_html = build_live_stream_html_from_pyte(tall_content, "TEST AI")
+        page.evaluate(
+            """
+(html) => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    if (!box) return false;
+    box.classList.add('live-stream-box');
+    let node = box;
+    while (node) {
+        if (node.classList) {
+            node.classList.remove('hide-container');
+            node.classList.remove('live-stream-hidden');
+        }
+        if (node.style) {
+            node.style.setProperty('display', 'block', 'important');
+            node.style.setProperty('visibility', 'visible', 'important');
+            node.style.setProperty('opacity', '1', 'important');
+            node.style.setProperty('height', 'auto', 'important');
+        }
+        node = node.parentElement;
+    }
+    box.style.minHeight = '300px';
+    box.innerHTML = html;
+    box.scrollIntoView({ behavior: 'instant', block: 'center' });
+    return true;
+}
+""",
+            full_html,
+        )
+        page.wait_for_timeout(600)
+
+        search_input = page.locator(".live-search-input").last
+        search_input.fill("NEEDLE")
+        page.wait_for_timeout(400)
+
+        # First match should be current and near the top
+        count_el = page.locator(".live-search-count").last
+        assert count_el.text_content() == "1/2"
+
+        # Record scroll position before navigating
+        scroll_before = page.evaluate("""
+() => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    const content = box && box.querySelector('.live-output-content');
+    return content ? content.scrollTop : null;
+}
+""")
+
+        # Navigate to the second match (far below)
+        next_btn = page.locator(".live-search-nav").last
+        next_btn.click()
+        page.wait_for_timeout(300)
+        assert count_el.text_content() == "2/2"
+
+        scroll_after = page.evaluate("""
+() => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    const content = box && box.querySelector('.live-output-content');
+    return content ? content.scrollTop : null;
+}
+""")
+
+        assert scroll_after is not None
+        assert scroll_after > scroll_before, (
+            f"Scrollbar should move down to off-screen match. "
+            f"Before={scroll_before}, After={scroll_after}"
+        )
+
 
 class TestTUIContentRendering:
     """Test that TUI-style content (boxes, cursor positioning) renders correctly.
