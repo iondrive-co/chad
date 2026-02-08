@@ -54,9 +54,6 @@ from chad.util.prompts import (
     parse_verification_response,
     ProgressUpdate,
     VerificationParseError,
-    EXPLORATION_PROMPT,
-    IMPLEMENTATION_PROMPT,
-    VERIFICATION_EXPLORATION_PROMPT,
 )
 from chad.util.project_setup import (
     detect_verification_commands,
@@ -143,10 +140,20 @@ class VerificationDropdownState:
 
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\][^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
 
 DEFAULT_CODING_TIMEOUT = 900.0
 DEFAULT_VERIFICATION_TIMEOUT = 1800.0  # 30 minutes to match provider defaults
 MAX_VERIFICATION_PROMPT_CHARS = 6000
+
+
+def _sanitize_terminal_text(text: str) -> str:
+    """Strip ANSI/control sequences from terminal text for chat rendering."""
+    if not text:
+        return ""
+    cleaned = ANSI_ESCAPE_RE.sub("", text)
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+    return CONTROL_CHAR_RE.sub("", cleaned)
 
 
 def _find_free_port() -> int:
@@ -1973,6 +1980,8 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
         content: The message content
         collapsible: Whether to make long messages collapsible with a summary
     """
+    content = _sanitize_terminal_text(content)
+
     if collapsible and len(content) > 300:
         coding_summary = extract_coding_summary(content)
         if coding_summary:
@@ -2460,6 +2469,10 @@ class ChadWebUI:
                     event_type = event.data.get("type", "")
                     if event_type == "session_started":
                         pass  # Already handled by task start
+                    elif event_type == "status":
+                        status_text = event.data.get("status", "")
+                        if status_text:
+                            message_queue.put(("status", status_text))
                     elif event_type == "terminal_output":
                         # Fallback for parsed terminal output from EventLog
                         # This ensures content is shown even if raw PTY parsing fails
@@ -2510,6 +2523,7 @@ class ChadWebUI:
             final_output = terminal.get_text()
         else:
             final_output = ""
+        final_output = _sanitize_terminal_text(final_output)
 
         # Emit completion
         if exit_code == 0:

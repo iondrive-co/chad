@@ -393,6 +393,47 @@ def test_terminal_output_is_periodically_flushed_and_decoded(tmp_path, monkeypat
     assert len(terminal_events) >= 1, "Expected at least one terminal_output snapshot"
 
 
+def test_phase_status_events_are_logged_for_streaming(tmp_path, monkeypatch):
+    """Event log should include phase status updates for UI milestone triggers."""
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"accounts": {"mock-acct": {"provider": "mock"}}}), encoding="utf-8")
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+    session_manager = SessionManager()
+    session = session_manager.create_session(project_path=str(repo_path), name="status-test")
+    executor = TaskExecutor(ConfigManager(), session_manager, inactivity_timeout=30.0)
+
+    import chad.server.services.task_executor as te
+
+    def scripted_command(provider, account_name, project_path, task_description=None,
+                         screenshots=None, phase="combined", exploration_output=None, **kwargs):
+        if phase == "exploration":
+            script = "echo '{\"type\":\"progress\",\"summary\":\"Scoped\",\"location\":\"x.py:1\",\"next_step\":\"Implement\"}'"
+        else:
+            script = "echo '```json'; echo '{\"change_summary\":\"Done\",\"files_changed\":[\"x.py\"],\"completion_status\":\"success\"}'; echo '```'"
+        return ["bash", "-c", script], {}, None
+
+    monkeypatch.setattr(te, "build_agent_command", scripted_command)
+
+    task = executor.start_task(
+        session_id=session.id,
+        project_path=str(repo_path),
+        task_description="Ensure phase status events are logged",
+        coding_account="mock-acct",
+    )
+    task._thread.join(timeout=10)
+
+    assert task.state == TaskState.COMPLETED
+    events = task.event_log.get_events()
+    statuses = [e.get("status", "") for e in events if e.get("type") == "status"]
+    assert any("Phase 1: Exploring codebase..." in s for s in statuses), statuses
+    assert any("Phase 2: Implementing changes..." in s for s in statuses), statuses
+
+
 def test_continuation_loop_waits_for_completion_json(tmp_path, monkeypatch):
     """Task executor continues running until completion JSON is found."""
     repo_path = tmp_path / "repo"

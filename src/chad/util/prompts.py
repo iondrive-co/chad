@@ -36,6 +36,7 @@ You need to complete the following task:
 ## Phase 1: Exploration
 
 CRITICAL: This phase MUST complete within 60 seconds. Read only 2-3 key files to understand the area - do not spend excessive time exploring.
+If the project instructions include a Class Map, use it first to choose your initial files before running broad searches.
 
 When you have completed your quick exploration, IMMEDIATELY output a progress update using this JSON format:
 ```json
