@@ -3774,6 +3774,30 @@ class TestScreenshotUpload:
         )
         assert task_with_screenshots.screenshots == ["/tmp/screenshot1.png", "/tmp/screenshot2.png"]
 
+    def test_task_create_schema_accepts_override_prompts(self):
+        """TaskCreate schema should accept optional override prompt fields."""
+        from chad.server.api.schemas.task import TaskCreate
+
+        # Without overrides
+        task = TaskCreate(
+            project_path="/tmp/project",
+            task_description="Fix bug",
+            coding_agent="claude",
+        )
+        assert task.override_exploration_prompt is None
+        assert task.override_implementation_prompt is None
+
+        # With overrides
+        task_with_overrides = TaskCreate(
+            project_path="/tmp/project",
+            task_description="Fix bug",
+            coding_agent="claude",
+            override_exploration_prompt="Custom exploration",
+            override_implementation_prompt="Custom implementation",
+        )
+        assert task_with_overrides.override_exploration_prompt == "Custom exploration"
+        assert task_with_overrides.override_implementation_prompt == "Custom implementation"
+
     def test_api_client_start_task_accepts_screenshots(self):
         """APIClient.start_task should accept screenshots parameter."""
         from chad.ui.client.api_client import APIClient

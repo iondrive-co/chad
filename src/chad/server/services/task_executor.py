@@ -370,6 +370,7 @@ def build_agent_command(
     model: str | None = None,
     reasoning_effort: str | None = None,
     mock_run_duration_seconds: int = 0,
+    override_prompt: str | None = None,
 ) -> tuple[list[str], dict[str, str], str | None]:
     """Build CLI command and environment for a provider.
 
@@ -406,9 +407,14 @@ def build_agent_command(
 
     initial_input: str | None = None
 
-    # Build full prompt based on phase
+    # Build full prompt based on phase (use override if user edited the prompt)
     full_prompt: str | None = None
-    if task_description:
+    if override_prompt:
+        full_prompt = override_prompt
+        # Replace remaining placeholders in user-edited prompts
+        if phase == "implementation" and exploration_output:
+            full_prompt = full_prompt.replace("{exploration_output}", exploration_output)
+    elif task_description:
         project_docs = _read_project_docs(project_path)
         if phase == "exploration":
             # Phase 1: Explore codebase and output progress JSON
@@ -671,6 +677,8 @@ class TaskExecutor:
         terminal_rows: int | None = None,
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
+        override_exploration_prompt: str | None = None,
+        override_implementation_prompt: str | None = None,
     ) -> Task:
         """Start a new coding task.
 
@@ -741,6 +749,8 @@ class TaskExecutor:
                 terminal_rows,
                 terminal_cols,
                 screenshots,
+                override_exploration_prompt,
+                override_implementation_prompt,
             ),
             daemon=True,
         )
@@ -766,6 +776,7 @@ class TaskExecutor:
         git_mgr: GitWorktreeManager,
         coding_model: str | None = None,
         coding_reasoning: str | None = None,
+        override_prompt: str | None = None,
     ) -> tuple[int, str]:
         """Execute a single phase of the task.
 
@@ -851,6 +862,7 @@ class TaskExecutor:
             model=coding_model,
             reasoning_effort=coding_reasoning,
             mock_run_duration_seconds=mock_run_duration_seconds,
+            override_prompt=override_prompt,
         )
 
         # Use stdin pipe for Codex to avoid prompt echo in output
@@ -1074,6 +1086,8 @@ class TaskExecutor:
         terminal_rows: int | None,
         terminal_cols: int | None,
         screenshots: list[str] | None,
+        override_exploration_prompt: str | None = None,
+        override_implementation_prompt: str | None = None,
     ):
         """Execute the task in a background thread using PTY.
 
@@ -1154,6 +1168,7 @@ class TaskExecutor:
                 git_mgr=git_mgr,
                 coding_model=coding_model,
                 coding_reasoning=coding_reasoning,
+                override_prompt=override_exploration_prompt,
             )
             accumulated_output = exploration_output
             final_exit_code = exit_code
@@ -1212,6 +1227,7 @@ class TaskExecutor:
                     git_mgr=git_mgr,
                     coding_model=coding_model,
                     coding_reasoning=coding_reasoning,
+                    override_prompt=override_implementation_prompt,
                 )
                 accumulated_output += "\n" + impl_output
                 final_exit_code = exit_code

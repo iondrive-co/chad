@@ -179,7 +179,8 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         tests=["TestChadWebUI"],
         source_file="chad/web_ui.py",
         keywords=["exploration prompt", "implementation prompt", "verification prompt",
-                  "prompt accordion", "prompt display", "coding prompt"],
+                  "prompt accordion", "prompt display", "coding prompt",
+                  "project information", "editable prompt", "prompt textbox"],
     ),
     # --- Setup Tab (formerly Providers) ---
     "PROVIDER_CARD": UIComponent(

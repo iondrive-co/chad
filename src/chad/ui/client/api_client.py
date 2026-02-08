@@ -282,6 +282,8 @@ class APIClient:
         terminal_rows: int | None = None,
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
+        override_exploration_prompt: str | None = None,
+        override_implementation_prompt: str | None = None,
     ) -> TaskStatus:
         """Start a new coding task.
 
@@ -289,6 +291,8 @@ class APIClient:
             terminal_rows: Terminal height in rows (for PTY sizing)
             terminal_cols: Terminal width in columns (for PTY sizing)
             screenshots: Optional list of screenshot file paths for agent reference
+            override_exploration_prompt: User-edited exploration prompt override
+            override_implementation_prompt: User-edited implementation prompt override
         """
         data = {
             "project_path": project_path,
@@ -313,6 +317,10 @@ class APIClient:
             data["terminal_cols"] = terminal_cols
         if screenshots:
             data["screenshots"] = screenshots
+        if override_exploration_prompt:
+            data["override_exploration_prompt"] = override_exploration_prompt
+        if override_implementation_prompt:
+            data["override_implementation_prompt"] = override_implementation_prompt
 
         resp = self._client.post(
             self._url(f"/sessions/{session_id}/tasks"),

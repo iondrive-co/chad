@@ -223,6 +223,10 @@ body, .gradio-container, .gradio-container * {
   align-items: flex-start !important;
 }
 
+.run-top-row > .column > .row {
+  align-items: flex-start !important;
+}
+
 .run-top-row .row,
 .run-top-row .column {
   gap: 4px !important;
@@ -2184,6 +2188,8 @@ class ChadWebUI:
         server_session_id: str | None = None,
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
+        override_exploration_prompt: str | None = None,
+        override_implementation_prompt: str | None = None,
     ) -> tuple[bool, str, str | None, dict | None]:
         """Run a task via the API and post events to the message queue.
 
@@ -2243,6 +2249,8 @@ class ChadWebUI:
                 terminal_rows=TERMINAL_ROWS,
                 terminal_cols=effective_cols,
                 screenshots=screenshots,
+                override_exploration_prompt=override_exploration_prompt,
+                override_implementation_prompt=override_implementation_prompt,
             )
         except Exception as e:
             message_queue.put(("status", f"❌ Failed to start task: {e}"))
@@ -3255,6 +3263,8 @@ class ChadWebUI:
         verification_reasoning: str | None = None,
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
+        override_exploration_prompt: str | None = None,
+        override_implementation_prompt: str | None = None,
     ) -> Iterator[
         tuple[
             list,
@@ -3401,6 +3411,43 @@ class ChadWebUI:
             # When display_stream is None (patching mode), don't update the live_stream value
             # This allows JS to patch the DOM in-place without Gradio replacing it
             live_stream_update = gr.update() if display_stream is None else gr.update(value=display_stream)
+            # Prompt textboxes - update content and interactivity based on phase
+            # During task: lock prompts for phases that have started
+            # After task ends: unlock all prompts for editing
+            _explore_interactive = True if task_ended else (
+                True if task_state is None else False
+            )
+            _impl_interactive = True if task_ended else (
+                True if task_state is None else (
+                    task_state == "running"  # Still editable during exploration
+                )
+            )
+            _verif_interactive = True if task_ended else (
+                True if task_state is None else (
+                    task_state in ("running",)  # Still editable during exploration/implementation
+                )
+            )
+            _explore_acc = gr.update(visible=True) if exploration_prompt else gr.update()
+            _explore_val = (
+                gr.update(value=exploration_prompt, interactive=_explore_interactive)
+                if exploration_prompt else (
+                    gr.update(interactive=_explore_interactive) if task_state is not None or task_ended else gr.update()
+                )
+            )
+            _impl_acc = gr.update(visible=True) if implementation_prompt else gr.update()
+            _impl_val = (
+                gr.update(value=implementation_prompt, interactive=_impl_interactive)
+                if implementation_prompt else (
+                    gr.update(interactive=_impl_interactive) if task_state is not None or task_ended else gr.update()
+                )
+            )
+            _verif_acc = gr.update(visible=True) if verification_prompt else gr.update()
+            _verif_val = (
+                gr.update(value=verification_prompt, interactive=_verif_interactive)
+                if verification_prompt else (
+                    gr.update(interactive=_verif_interactive) if task_state is not None or task_ended else gr.update()
+                )
+            )
             return (
                 live_stream_update,  # live_stream - Updated by JS patching when live_patch is provided
                 display_history,  # chatbot
@@ -3421,14 +3468,9 @@ class ChadWebUI:
                 gr.update(value=diff_full),  # Full diff content
                 header_text,  # merge_section_header - dynamic header
                 patch_html,  # live_patch_trigger - JS reads this to patch content
-                # Prompt accordions - all three visible, update content when provided
-                # Prompts are rendered as markdown directly since they contain markdown content
-                gr.update(visible=True) if exploration_prompt else gr.update(),
-                gr.update(value=exploration_prompt) if exploration_prompt else gr.update(),
-                gr.update(visible=True) if implementation_prompt else gr.update(),
-                gr.update(value=implementation_prompt) if implementation_prompt else gr.update(),
-                gr.update(visible=True) if verification_prompt else gr.update(),
-                gr.update(value=verification_prompt) if verification_prompt else gr.update(),
+                _explore_acc, _explore_val,
+                _impl_acc, _impl_val,
+                _verif_acc, _verif_val,
             )
 
         try:
@@ -3548,12 +3590,12 @@ class ChadWebUI:
             session.event_log.log(UserMessageEvent(content=task_description))
 
             # Build the exploration and implementation prompts for display
+            # Use override prompts if user edited them, otherwise auto-generate
             project_docs = self._read_project_docs(path_obj)
-            display_exploration_prompt = build_exploration_prompt(
+            display_exploration_prompt = override_exploration_prompt or build_exploration_prompt(
                 task_description, project_docs, str(path_obj)
             )
-            # Build implementation prompt with placeholder exploration output
-            display_implementation_prompt = build_implementation_prompt(
+            display_implementation_prompt = override_implementation_prompt or build_implementation_prompt(
                 task_description,
                 "{exploration_output}",  # Placeholder until exploration completes
                 project_docs,
@@ -3595,6 +3637,8 @@ class ChadWebUI:
                         coding_reasoning=selected_reasoning if selected_reasoning != "default" else None,
                         terminal_cols=terminal_cols,
                         screenshots=screenshots,
+                        override_exploration_prompt=override_exploration_prompt,
+                        override_implementation_prompt=override_implementation_prompt,
                     )
                     # Store work_done for later use in revision context
                     session.last_work_done = work_done
@@ -6146,7 +6190,7 @@ class ChadWebUI:
             equal_height=True,
         ):
             with gr.Column(scale=1):
-                with gr.Row(equal_height=True):
+                with gr.Row(equal_height=False):
                     with gr.Column(scale=3, min_width=260):
                         # Auto-detect initial verification commands for default path (cached)
                         _project_resolved = Path(default_path).expanduser().resolve()
@@ -6165,84 +6209,183 @@ class ChadWebUI:
                         initial_instructions = initial_docs.instructions_path or ""
                         initial_architecture = initial_docs.architecture_path or ""
 
-                        project_path = gr.Textbox(
-                            label=self._format_project_label(initial_type),
-                            placeholder="/path/to/project",
-                            value=default_path,
-                            scale=3,
-                            key=f"project-path-{session_id}",
-                            elem_id="project-path-input" if is_first else None,
-                            elem_classes=["project-path-input"],
-                        )
-                        with gr.Row(elem_classes=["project-commands-row"], equal_height=True):
-                            with gr.Column(scale=1, elem_classes=["command-column"]):
-                                with gr.Row(elem_classes=["command-header", "lint-command-label"], equal_height=True):
-                                    gr.Markdown(
-                                        "**Lint Command**",
-                                        elem_classes=["command-label"],
-                                    )
-                                    lint_test_btn = gr.Button(
-                                        "Test",
-                                        variant="secondary",
-                                        size="sm",
-                                        key=f"lint-test-{session_id}",
-                                        elem_classes=["command-test-btn", "lint-test-btn"],
-                                    )
-                                lint_cmd_input = gr.Textbox(
-                                    label="Lint Command",
-                                    value=initial_lint,
-                                    placeholder=".venv/bin/python -m flake8 .",
-                                    key=f"lint-cmd-{session_id}",
-                                    show_label=False,
-                                    elem_classes=["command-input", "lint-command-input"],
-                                )
-                                lint_status = gr.Markdown(
-                                    "",
-                                    key=f"lint-status-{session_id}",
-                                    elem_classes=["command-status", "lint-command-status"],
-                                )
-                            with gr.Column(scale=1, elem_classes=["command-column"]):
-                                with gr.Row(elem_classes=["command-header", "test-command-label"], equal_height=True):
-                                    gr.Markdown(
-                                        "**Test Command**",
-                                        elem_classes=["command-label"],
-                                    )
-                                    test_test_btn = gr.Button(
-                                        "Test",
-                                        variant="secondary",
-                                        size="sm",
-                                        key=f"test-test-{session_id}",
-                                        elem_classes=["command-test-btn", "test-command-btn"],
-                                    )
-                                test_cmd_input = gr.Textbox(
-                                    label="Test Command",
-                                    value=initial_test,
-                                    placeholder=".venv/bin/python -m pytest tests/ -v",
-                                    key=f"test-cmd-{session_id}",
-                                    show_label=False,
-                                    elem_classes=["command-input", "test-command-input"],
-                                )
-                                test_status = gr.Markdown(
-                                    "",
-                                    key=f"test-status-{session_id}",
-                                    elem_classes=["command-status", "test-command-status"],
-                                )
-                        with gr.Row(elem_classes=["doc-paths-row"], equal_height=True):
-                            instructions_input = gr.Textbox(
-                                label="Agent Instructions Path",
-                                value=initial_instructions,
-                                placeholder="AGENTS.md",
-                                key=f"instructions-path-{session_id}",
-                                elem_classes=["doc-path-input", "instructions-path-input"],
+                        # Pre-fill prompt previews for initial project path
+                        _initial_previews = build_prompt_previews(default_path)
+
+                        with gr.Accordion("Project Information", open=False, elem_classes=["project-info-accordion"]):
+                            project_path = gr.Textbox(
+                                label=self._format_project_label(initial_type),
+                                placeholder="/path/to/project",
+                                value=default_path,
+                                scale=3,
+                                key=f"project-path-{session_id}",
+                                elem_id="project-path-input" if is_first else None,
+                                elem_classes=["project-path-input"],
                             )
-                            architecture_input = gr.Textbox(
-                                label="Architecture Doc Path",
-                                value=initial_architecture,
-                                placeholder="docs/ARCHITECTURE.md",
-                                key=f"architecture-path-{session_id}",
-                                elem_classes=["doc-path-input", "architecture-path-input"],
+                            with gr.Row(elem_classes=["project-commands-row"], equal_height=True):
+                                with gr.Column(scale=1, elem_classes=["command-column"]):
+                                    with gr.Row(elem_classes=["command-header", "lint-command-label"], equal_height=True):
+                                        gr.Markdown(
+                                            "**Lint Command**",
+                                            elem_classes=["command-label"],
+                                        )
+                                        lint_test_btn = gr.Button(
+                                            "Test",
+                                            variant="secondary",
+                                            size="sm",
+                                            key=f"lint-test-{session_id}",
+                                            elem_classes=["command-test-btn", "lint-test-btn"],
+                                        )
+                                    lint_cmd_input = gr.Textbox(
+                                        label="Lint Command",
+                                        value=initial_lint,
+                                        placeholder=".venv/bin/python -m flake8 .",
+                                        key=f"lint-cmd-{session_id}",
+                                        show_label=False,
+                                        elem_classes=["command-input", "lint-command-input"],
+                                    )
+                                    lint_status = gr.Markdown(
+                                        "",
+                                        key=f"lint-status-{session_id}",
+                                        elem_classes=["command-status", "lint-command-status"],
+                                    )
+                                with gr.Column(scale=1, elem_classes=["command-column"]):
+                                    with gr.Row(elem_classes=["command-header", "test-command-label"], equal_height=True):
+                                        gr.Markdown(
+                                            "**Test Command**",
+                                            elem_classes=["command-label"],
+                                        )
+                                        test_test_btn = gr.Button(
+                                            "Test",
+                                            variant="secondary",
+                                            size="sm",
+                                            key=f"test-test-{session_id}",
+                                            elem_classes=["command-test-btn", "test-command-btn"],
+                                        )
+                                    test_cmd_input = gr.Textbox(
+                                        label="Test Command",
+                                        value=initial_test,
+                                        placeholder=".venv/bin/python -m pytest tests/ -v",
+                                        key=f"test-cmd-{session_id}",
+                                        show_label=False,
+                                        elem_classes=["command-input", "test-command-input"],
+                                    )
+                                    test_status = gr.Markdown(
+                                        "",
+                                        key=f"test-status-{session_id}",
+                                        elem_classes=["command-status", "test-command-status"],
+                                    )
+                            with gr.Row(elem_classes=["doc-paths-row"], equal_height=True):
+                                instructions_input = gr.Textbox(
+                                    label="Agent Instructions Path",
+                                    value=initial_instructions,
+                                    placeholder="AGENTS.md",
+                                    key=f"instructions-path-{session_id}",
+                                    elem_classes=["doc-path-input", "instructions-path-input"],
+                                )
+                                architecture_input = gr.Textbox(
+                                    label="Architecture Doc Path",
+                                    value=initial_architecture,
+                                    placeholder="docs/ARCHITECTURE.md",
+                                    key=f"architecture-path-{session_id}",
+                                    elem_classes=["doc-path-input", "architecture-path-input"],
+                                )
+
+                            # Prompt display accordions - editable textboxes
+                            with gr.Accordion(
+                                "Exploration Prompt",
+                                open=False,
+                                visible=True,
+                                key=f"exploration-prompt-accordion-{session_id}",
+                                elem_classes=["prompt-accordion"],
+                            ) as exploration_prompt_accordion:
+                                exploration_prompt_display = gr.Textbox(
+                                    value=_initial_previews.exploration,
+                                    key=f"exploration-prompt-display-{session_id}",
+                                    elem_classes=["prompt-display"],
+                                    lines=10,
+                                    max_lines=30,
+                                    interactive=True,
+                                    show_label=False,
+                                )
+
+                            with gr.Accordion(
+                                "Implementation Prompt",
+                                open=False,
+                                visible=True,
+                                key=f"implementation-prompt-accordion-{session_id}",
+                                elem_classes=["prompt-accordion"],
+                            ) as implementation_prompt_accordion:
+                                implementation_prompt_display = gr.Textbox(
+                                    value=_initial_previews.implementation,
+                                    key=f"implementation-prompt-display-{session_id}",
+                                    elem_classes=["prompt-display"],
+                                    lines=10,
+                                    max_lines=30,
+                                    interactive=True,
+                                    show_label=False,
+                                )
+
+                            with gr.Accordion(
+                                "Verification Prompt",
+                                open=False,
+                                visible=True,
+                                key=f"verification-prompt-accordion-{session_id}",
+                                elem_classes=["prompt-accordion"],
+                            ) as verification_prompt_accordion:
+                                verification_prompt_display = gr.Textbox(
+                                    value=_initial_previews.verification,
+                                    key=f"verification-prompt-display-{session_id}",
+                                    elem_classes=["prompt-display"],
+                                    lines=10,
+                                    max_lines=30,
+                                    interactive=True,
+                                    show_label=False,
+                                )
+                        # Action row under project info accordion
+                        with gr.Row(
+                            equal_height=True,
+                            elem_id="role-status-row" if is_first else None,
+                            elem_classes=["role-status-row"],
+                        ):
+                            cancel_btn = gr.Button(
+                                "Cancel",
+                                variant="stop",
+                                interactive=False,
+                                key=f"cancel-btn-{session_id}",
+                                elem_id="cancel-task-btn" if is_first else None,
+                                elem_classes=["cancel-task-btn"],
+                                min_width=80,
+                                scale=0,
                             )
-                        # Ready status belongs on the left under the doc-path fields.
+                            project_save_btn = gr.Button(
+                                "Save",
+                                variant="primary",
+                                size="sm",
+                                key=f"project-save-{session_id}",
+                                elem_classes=["project-save-btn"],
+                                min_width=80,
+                                scale=0,
+                            )
+                            log_path = session.log_path
+                            session_log_btn = gr.DownloadButton(
+                                label="Session Log" if not log_path else log_path.name,
+                                value=str(log_path) if log_path else None,
+                                visible=log_path is not None,
+                                variant="secondary",
+                                size="sm",
+                                scale=0,
+                                min_width=140,
+                                key=f"log-btn-{session_id}",
+                                elem_id="session-log-btn" if is_first else None,
+                                elem_classes=["session-log-btn"],
+                            )
+                            workspace_display = gr.HTML(
+                                self._workspace_html(session),
+                                key=f"workspace-display-{session_id}",
+                                elem_id="workspace-display" if is_first else None,
+                                elem_classes=["workspace-display"],
+                            )
                     with gr.Column(scale=1, min_width=200, elem_classes=["agent-config"]):
                         coding_agent = gr.Dropdown(
                             choices=account_choices,
@@ -6301,50 +6444,6 @@ class ChadWebUI:
                             key=f"verification-reasoning-{session_id}",
                             interactive=verif_state.interactive,
                         )
-                        # Action row belongs on the right under agent selectors.
-                        with gr.Row(
-                            equal_height=True,
-                            elem_id="role-status-row" if is_first else None,
-                            elem_classes=["role-status-row"],
-                        ):
-                            cancel_btn = gr.Button(
-                                "Cancel",
-                                variant="stop",
-                                interactive=False,
-                                key=f"cancel-btn-{session_id}",
-                                elem_id="cancel-task-btn" if is_first else None,
-                                elem_classes=["cancel-task-btn"],
-                                min_width=80,
-                                scale=0,
-                            )
-                            project_save_btn = gr.Button(
-                                "Save",
-                                variant="primary",
-                                size="sm",
-                                key=f"project-save-{session_id}",
-                                elem_classes=["project-save-btn"],
-                                min_width=80,
-                                scale=0,
-                            )
-                            log_path = session.log_path
-                            session_log_btn = gr.DownloadButton(
-                                label="Session Log" if not log_path else log_path.name,
-                                value=str(log_path) if log_path else None,
-                                visible=log_path is not None,
-                                variant="secondary",
-                                size="sm",
-                                scale=0,
-                                min_width=140,
-                                key=f"log-btn-{session_id}",
-                                elem_id="session-log-btn" if is_first else None,
-                                elem_classes=["session-log-btn"],
-                            )
-                            workspace_display = gr.HTML(
-                                self._workspace_html(session),
-                                key=f"workspace-display-{session_id}",
-                                elem_id="workspace-display" if is_first else None,
-                                elem_classes=["workspace-display"],
-                            )
         # Task status header - always in DOM but CSS hides when empty
         # This ensures JavaScript can find it for merge section visibility logic
         task_status = gr.Markdown(
@@ -6371,6 +6470,8 @@ class ChadWebUI:
                         key=f"task-desc-{session_id}",
                         elem_classes=["task-desc-input"],
                     )
+                    # Hidden start button - retains state for output tuples
+                    # Task is started via the MultimodalTextbox submit (play) button
                     start_btn = gr.Button(
                         "▶ Start Task",
                         variant="primary",
@@ -6378,8 +6479,7 @@ class ChadWebUI:
                         key=f"start-btn-{session_id}",
                         elem_id="start-task-btn" if is_first else None,
                         elem_classes=["start-task-btn"],
-                        scale=1,
-                        min_width=120,
+                        visible=False,
                     )
 
             # Live stream kept in DOM (visible=True) but hidden via CSS for visual tests
@@ -6401,49 +6501,6 @@ class ChadWebUI:
                 sanitize_html=False,  # Required for inline screenshots - content is internally generated
                 type="messages",  # Use OpenAI-style dicts with 'role' and 'content' keys
             )
-
-            # Prompt display accordions - show all three prompts from the start
-            # Pre-fill with project docs from default path; only {task} remains as placeholder
-            _initial_previews = build_prompt_previews(default_path)
-
-            with gr.Accordion(
-                "Exploration Prompt",
-                open=False,
-                visible=True,
-                key=f"exploration-prompt-accordion-{session_id}",
-                elem_classes=["prompt-accordion"],
-            ) as exploration_prompt_accordion:
-                exploration_prompt_display = gr.Markdown(
-                    _initial_previews.exploration,
-                    key=f"exploration-prompt-display-{session_id}",
-                    elem_classes=["prompt-display"],
-                )
-
-            with gr.Accordion(
-                "Implementation Prompt",
-                open=False,
-                visible=True,
-                key=f"implementation-prompt-accordion-{session_id}",
-                elem_classes=["prompt-accordion"],
-            ) as implementation_prompt_accordion:
-                implementation_prompt_display = gr.Markdown(
-                    _initial_previews.implementation,
-                    key=f"implementation-prompt-display-{session_id}",
-                    elem_classes=["prompt-display"],
-                )
-
-            with gr.Accordion(
-                "Verification Prompt",
-                open=False,
-                visible=True,
-                key=f"verification-prompt-accordion-{session_id}",
-                elem_classes=["prompt-accordion"],
-            ) as verification_prompt_accordion:
-                verification_prompt_display = gr.Markdown(
-                    _initial_previews.verification,
-                    key=f"verification-prompt-display-{session_id}",
-                    elem_classes=["prompt-display"],
-                )
 
         # Hidden state for dynamic terminal dimensions (calculated from container width)
         # JavaScript updates this when the live-stream-box is resized
@@ -6708,6 +6765,8 @@ class ChadWebUI:
             v_model,
             v_reason,
             term_cols,
+            explore_prompt_val,
+            impl_prompt_val,
         ):
             # Extract text and file paths from MultimodalTextbox
             task_desc = ""
@@ -6720,6 +6779,20 @@ class ChadWebUI:
                         screenshot_paths = [f if isinstance(f, str) else f.get("path", "") for f in files]
                 else:
                     task_desc = str(task_input)
+
+            # Detect if user edited prompts by comparing with auto-generated defaults
+            override_explore = None
+            override_impl = None
+            if task_desc and proj_path:
+                from chad.util.prompts import build_prompt_previews as _bpp
+                defaults = _bpp(proj_path)
+                if explore_prompt_val and explore_prompt_val.strip() != defaults.exploration.strip():
+                    # Replace {task} placeholder with actual task description
+                    override_explore = explore_prompt_val.replace("{task}", task_desc)
+                if impl_prompt_val and impl_prompt_val.strip() != defaults.implementation.strip():
+                    # Replace {task} placeholder; {exploration_output} is replaced server-side
+                    override_impl = impl_prompt_val.replace("{task}", task_desc)
+
             yield from self.start_chad_task(
                 session_id,
                 proj_path,
@@ -6732,6 +6805,8 @@ class ChadWebUI:
                 v_reason,
                 terminal_cols=int(term_cols) if term_cols else None,
                 screenshots=screenshot_paths,
+                override_exploration_prompt=override_explore,
+                override_implementation_prompt=override_impl,
             )
 
         def cancel_wrapper():
@@ -6791,45 +6866,57 @@ class ChadWebUI:
                 ),
             )
 
+        _task_start_inputs = [
+            project_path,
+            task_description,
+            coding_agent,
+            verification_agent,
+            coding_model,
+            coding_reasoning,
+            verification_model,
+            verification_reasoning,
+            terminal_cols_state,
+            exploration_prompt_display,
+            implementation_prompt_display,
+        ]
+        _task_start_outputs = [
+            live_stream,
+            chatbot,
+            task_status,
+            project_path,
+            task_description,
+            start_btn,
+            cancel_btn,
+            session_log_btn,
+            workspace_display,
+            followup_input,
+            followup_row,
+            send_followup_btn,
+            merge_section_group,
+            changes_summary,
+            merge_target_branch,
+            diff_content,
+            merge_section_header,
+            live_patch_trigger,
+            exploration_prompt_accordion,
+            exploration_prompt_display,
+            implementation_prompt_accordion,
+            implementation_prompt_display,
+            verification_prompt_accordion,
+            verification_prompt_display,
+        ]
+
         start_btn.click(
             start_task_wrapper,
-            inputs=[
-                project_path,
-                task_description,
-                coding_agent,
-                verification_agent,
-                coding_model,
-                coding_reasoning,
-                verification_model,
-                verification_reasoning,
-                terminal_cols_state,
-            ],
-            outputs=[
-                live_stream,
-                chatbot,
-                task_status,
-                project_path,
-                task_description,
-                start_btn,
-                cancel_btn,
-                session_log_btn,
-                workspace_display,
-                followup_input,
-                followup_row,
-                send_followup_btn,
-                merge_section_group,
-                changes_summary,
-                merge_target_branch,
-                diff_content,
-                merge_section_header,
-                live_patch_trigger,
-                exploration_prompt_accordion,
-                exploration_prompt_display,
-                implementation_prompt_accordion,
-                implementation_prompt_display,
-                verification_prompt_accordion,
-                verification_prompt_display,
-            ],
+            inputs=_task_start_inputs,
+            outputs=_task_start_outputs,
+        )
+
+        # MultimodalTextbox submit (play button) also starts the task
+        task_description.submit(
+            start_task_wrapper,
+            inputs=_task_start_inputs,
+            outputs=_task_start_outputs,
         )
 
         cancel_btn.click(

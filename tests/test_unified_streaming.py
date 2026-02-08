@@ -874,6 +874,8 @@ class TestPlainTextTerminalEvents:
                 terminal_rows=None,
                 terminal_cols=None,
                 screenshots=None,
+                override_exploration_prompt=None,
+                override_implementation_prompt=None,
             ):
                 return None
 

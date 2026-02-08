@@ -5,16 +5,21 @@ Improve the mistral and gemini and qwen providers data
 Load balance based on usage, user preference, context limits hit, etc.
 Repo map and next step field in initial update
 
-v0.11 Slip Slop Slap
+v0.11 Epochalypse
+
+Event loop
+Option to resume task once usage limit has reset (rather than switch to another provider)
+Receive tasks from slack
+
+v0.12 Slip Slop Slap
 
 Session branching and resume session at startup
 Repeated failures
-Task list - wait until limit expires and feed in more. User inputs a list of bugs/features, these are async run through
-phases ANALYZE, IMPLEMENT <-> REVIEW (prove with screenshot)
+Queue of bugs/features
 
-v0.12 Intentionality Reduction
+v0.13 Intentionality Reduction
 
-Slack integration
+Search for text in agent streams
 Packaging for different platforms
 Renamed web_ui to gradio_ui. Make Remix static site ui which downloads and talks to the server on localhost
 
