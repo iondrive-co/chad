@@ -19,6 +19,7 @@ from chad.util.event_log import (
     EventLog,
     SessionStartedEvent,
     StatusEvent,
+    ProgressEvent,
     UserMessageEvent,
     TerminalOutputEvent,
     SessionEndedEvent,
@@ -1108,9 +1109,18 @@ class TaskExecutor:
         def emit(event_type: str, **data):
             event = StreamEvent(type=event_type, data=data)
             task._event_queue.put(event)
-            if event_type == "status" and task.event_log and status_logging_enabled[0]:
+            if task.event_log and status_logging_enabled[0]:
                 try:
-                    task.event_log.log(StatusEvent(status=str(data.get("status", ""))))
+                    if event_type == "status":
+                        task.event_log.log(StatusEvent(status=str(data.get("status", ""))))
+                    elif event_type == "progress":
+                        task.event_log.log(ProgressEvent(
+                            summary=str(data.get("summary", "")),
+                            location=data.get("location"),
+                            next_step=data.get("next_step"),
+                            before_screenshot=data.get("before_screenshot"),
+                            before_description=data.get("before_description"),
+                        ))
                 except Exception:
                     pass
             try:

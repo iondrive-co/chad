@@ -409,7 +409,7 @@ def test_terminal_output_is_periodically_flushed_and_decoded(tmp_path, monkeypat
 
 
 def test_phase_status_events_are_logged_for_streaming(tmp_path, monkeypatch):
-    """Event log should include phase status updates for UI milestone triggers."""
+    """Event log should include progress and phase status updates in phase order."""
     repo_path = tmp_path / "repo"
     _init_git_repo(repo_path)
 
@@ -447,6 +447,21 @@ def test_phase_status_events_are_logged_for_streaming(tmp_path, monkeypatch):
     statuses = [e.get("status", "") for e in events if e.get("type") == "status"]
     assert any("Phase 1: Exploring codebase..." in s for s in statuses), statuses
     assert any("Phase 2: Implementing changes..." in s for s in statuses), statuses
+
+    progress_events = [e for e in events if e.get("type") == "progress"]
+    assert len(progress_events) == 1, f"Expected one progress event, got: {progress_events}"
+    assert progress_events[0].get("summary") == "Scoped"
+    assert progress_events[0].get("location") == "x.py:1"
+    assert progress_events[0].get("next_step") == "Implement"
+
+    phase2_events = [
+        e for e in events
+        if e.get("type") == "status" and "Phase 2: Implementing changes..." in (e.get("status") or "")
+    ]
+    assert phase2_events, f"Expected phase 2 status event, got: {events}"
+    assert progress_events[0]["seq"] < phase2_events[0]["seq"], (
+        "Progress event must be logged before phase 2 status so UI can render the handoff in order"
+    )
 
 
 def test_continuation_loop_waits_for_completion_json(tmp_path, monkeypatch):

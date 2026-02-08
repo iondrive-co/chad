@@ -20,6 +20,7 @@ from typing import Any, Literal
 EventType = Literal[
     "session_started",
     "status",
+    "progress",
     "model_selected",
     "provider_switched",
     "user_message",
@@ -102,6 +103,17 @@ class StatusEvent(EventBase):
     """Logged when task execution status changes."""
 
     status: str = ""
+
+
+@dataclass
+class ProgressEvent(EventBase):
+    """Logged when exploration emits a structured progress update."""
+
+    summary: str = ""
+    location: str | None = None
+    next_step: str | None = None
+    before_screenshot: str | None = None
+    before_description: str | None = None
 
 
 @dataclass

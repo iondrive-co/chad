@@ -927,6 +927,64 @@ class TestChadWebUI:
             f"Expected exactly 1 Coding milestone even with progress JSON, found {len(coding_milestones)}"
         )
 
+    def test_structured_progress_renders_before_coding_milestone(self, monkeypatch, web_ui, git_repo):
+        """Structured progress events should appear before the coding phase milestone."""
+        from chad.util.prompts import ProgressUpdate
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", "exploring...\n"))
+            time.sleep(0.02)
+            # TaskExecutor emits structured progress before Phase 2 status.
+            message_queue.put(("progress", ProgressUpdate(
+                summary="Found bug",
+                location="x.py:1",
+                next_step="Fix",
+            )))
+            time.sleep(0.02)
+            message_queue.put(("status", "Phase 2: Implementing changes..."))
+            time.sleep(0.02)
+            # Delayed echoed JSON should not create a second progress bubble.
+            message_queue.put((
+                "stream",
+                '{"type": "progress", "summary": "Found bug", "location": "x.py:1", "next_step": "Fix"}',
+            ))
+            message_queue.put(("stream", "implementing...\n"))
+            time.sleep(0.02)
+            message_queue.put(("message_complete", "CODING AI", "Task done"))
+            return True, "completed", "server-session", None
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("test")
+        updates = list(web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+
+        all_histories = [u[1] for u in updates if isinstance(u[1], list)]
+        final_history = all_histories[-1] if all_histories else []
+
+        progress_indices = [
+            idx for idx, msg in enumerate(final_history)
+            if isinstance(msg, dict) and "*(Progress)*" in msg.get("content", "")
+        ]
+        coding_indices = [
+            idx for idx, msg in enumerate(final_history)
+            if isinstance(msg, dict) and "**Coding:**" in msg.get("content", "")
+        ]
+
+        assert len(progress_indices) == 1, (
+            f"Expected exactly one progress bubble, got {len(progress_indices)} "
+            f"with history: {[m.get('content', '')[:80] for m in final_history if isinstance(m, dict)]}"
+        )
+        assert len(coding_indices) == 1, (
+            f"Expected exactly one coding milestone, got {len(coding_indices)} "
+            f"with history: {[m.get('content', '')[:80] for m in final_history if isinstance(m, dict)]}"
+        )
+        assert progress_indices[0] < coding_indices[0], (
+            "Progress bubble should be shown before the Coding milestone when structured progress "
+            "arrives first"
+        )
+
 
 class TestClaudeJsonParsingIntegration:
     """Tests for Claude stream-json parsing in the web UI."""
@@ -1012,6 +1070,67 @@ class TestClaudeJsonParsingIntegration:
         assert "1 file read" in combined, "Tool summary should be included before text"
         assert '{"type":"system"' not in combined, "Raw JSON should not appear"
         assert '{"type":"result"' not in combined, "Result events should be filtered"
+
+    def test_run_task_emits_progress_messages_from_structured_events(self, web_ui, mock_api_client, git_repo):
+        """run_task_via_api should convert structured progress events into queue progress messages."""
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+        from chad.util.prompts import ProgressUpdate
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="claude", provider="anthropic", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-123"
+        mock_api_client.create_session.return_value = mock_session
+
+        progress_event = Mock()
+        progress_event.event_type = "event"
+        progress_event.data = {
+            "type": "progress",
+            "summary": "Found workspace CSS issue",
+            "location": "src/chad/ui/gradio/web_ui.py:1066",
+            "next_step": "Apply CSS fix",
+        }
+
+        status_event = Mock()
+        status_event.event_type = "event"
+        status_event.data = {"type": "status", "status": "Phase 2: Implementing changes..."}
+
+        complete_event = Mock()
+        complete_event.event_type = "complete"
+        complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([progress_event, status_event, complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="claude",
+            message_queue=message_queue,
+        )
+
+        assert success is True
+        assert output == ""
+
+        queued_messages = []
+        while not message_queue.empty():
+            queued_messages.append(message_queue.get())
+
+        progress_messages = [msg for msg in queued_messages if msg[0] == "progress"]
+        assert len(progress_messages) == 1, f"Expected one progress message, got: {queued_messages}"
+
+        progress_payload = progress_messages[0][1]
+        assert isinstance(progress_payload, ProgressUpdate)
+        assert progress_payload.summary == "Found workspace CSS issue"
+        assert progress_payload.location == "src/chad/ui/gradio/web_ui.py:1066"
+        assert progress_payload.next_step == "Apply CSS fix"
 
     def test_run_task_passes_through_raw_for_non_anthropic(self, web_ui, mock_api_client, git_repo):
         """run_task_via_api should pass through raw output for non-anthropic providers."""
