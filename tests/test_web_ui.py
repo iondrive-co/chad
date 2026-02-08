@@ -1306,6 +1306,69 @@ class TestClaudeJsonParsingIntegration:
         assert "Mock Agent v1.0" in output
         assert "\x1b" not in output
 
+    def test_run_task_emits_separate_exploration_and_coding_messages(self, web_ui, mock_api_client, git_repo):
+        """Phase 2 transition should close exploration bubble and start a coding bubble."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="mock-coding", provider="mock", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-phase-split"
+        mock_api_client.create_session.return_value = mock_session
+
+        exploration = b"Prompt: Exploration\nExploring files...\n"
+        implementation = b"Prompt: Implementation\nApplying fix...\n"
+
+        exploration_event = Mock()
+        exploration_event.event_type = "terminal"
+        exploration_event.data = {"data": base64.b64encode(exploration).decode()}
+
+        phase_event = Mock()
+        phase_event.event_type = "event"
+        phase_event.data = {"type": "status", "status": "Phase 2: Implementing changes..."}
+
+        implementation_event = Mock()
+        implementation_event.event_type = "terminal"
+        implementation_event.data = {"data": base64.b64encode(implementation).decode()}
+
+        complete_event = Mock()
+        complete_event.event_type = "complete"
+        complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter(
+            [exploration_event, phase_event, implementation_event, complete_event]
+        )
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="mock-coding",
+            message_queue=message_queue,
+        )
+
+        assert success
+        assert "Prompt: Exploration" in output
+        assert "Prompt: Implementation" in output
+
+        completes = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "message_complete":
+                completes.append(msg[2])
+
+        assert len(completes) == 2
+        assert "Prompt: Exploration" in completes[0]
+        assert "Prompt: Implementation" in completes[1]
+
     def test_run_task_reused_session_streams_only_new_events(self, web_ui, mock_api_client, git_repo):
         """Reused server sessions should stream from latest sequence, not from the beginning."""
         import base64
@@ -2237,95 +2300,6 @@ class TestUsageBasedProviderSwitch:
         assert captured["coding_account"] == "primary-mock"
 
 
-class TestContextBasedProviderSwitch:
-    """Test cases for proactive context-based provider switching."""
-
-    @pytest.fixture
-    def mock_api_client(self):
-        """Create a mock API client with mock provider support."""
-        mgr = Mock()
-        accounts = {
-            "primary-mock": MockAccount(name="primary-mock", provider="mock", role="CODING"),
-            "fallback-mock": MockAccount(name="fallback-mock", provider="mock"),
-        }
-        mgr.list_accounts.return_value = list(accounts.values())
-        mgr.list_role_assignments.return_value = {}
-        mgr.get_account_model.return_value = "default"
-
-        def get_account(name):
-            if name in accounts:
-                return accounts[name]
-            raise ValueError(f"Account {name} not found")
-
-        mgr.get_account.side_effect = get_account
-        return mgr
-
-    @pytest.fixture
-    def web_ui(self, mock_api_client):
-        """Create a ChadWebUI instance."""
-        from chad.ui.gradio.web_ui import ChadWebUI
-
-        return ChadWebUI(mock_api_client)
-
-    def test_check_context_and_switch_no_switch_under_threshold(self, web_ui, mock_api_client):
-        """No switch should occur when context usage is below threshold."""
-        # Set threshold to 80%
-        mock_api_client.get_context_switch_threshold.return_value = 80
-
-        # Set mock context remaining to 0.5 (50% remaining = 50% used, under 80% threshold)
-        mock_api_client.get_mock_context_remaining.return_value = 0.5
-
-        account, switched_from = web_ui._check_context_and_switch("primary-mock")
-
-        assert account == "primary-mock"
-        assert switched_from is None
-
-    def test_check_context_and_switch_triggers_switch(self, web_ui, mock_api_client):
-        """Switch should occur when context usage exceeds threshold."""
-        # Set threshold to 50%
-        mock_api_client.get_context_switch_threshold.return_value = 50
-
-        # Primary mock has 20% remaining (80% used, exceeds 50% threshold)
-        mock_api_client.get_mock_context_remaining.return_value = 0.2
-
-        # Set up fallback order
-        mock_api_client.get_next_fallback_provider.return_value = "fallback-mock"
-
-        account, switched_from = web_ui._check_context_and_switch("primary-mock")
-
-        assert account == "fallback-mock"
-        assert switched_from == "primary-mock"
-
-    def test_check_context_and_switch_disabled_at_100_percent(self, web_ui, mock_api_client):
-        """No switch should occur when threshold is 100% (disabled)."""
-        # Set threshold to 100% (disabled)
-        mock_api_client.get_context_switch_threshold.return_value = 100
-
-        # Even with high context usage, no switch should occur
-        mock_api_client.get_mock_context_remaining.return_value = 0.05  # 95% used
-
-        account, switched_from = web_ui._check_context_and_switch("primary-mock")
-
-        assert account == "primary-mock"
-        assert switched_from is None
-
-    def test_check_context_and_switch_no_fallback_available(self, web_ui, mock_api_client):
-        """No switch should occur when no fallback is configured."""
-        # Set threshold to 50%
-        mock_api_client.get_context_switch_threshold.return_value = 50
-
-        # High context usage
-        mock_api_client.get_mock_context_remaining.return_value = 0.2  # 80% used
-
-        # No fallback available
-        mock_api_client.get_next_fallback_provider.return_value = None
-
-        account, switched_from = web_ui._check_context_and_switch("primary-mock")
-
-        assert account == "primary-mock"
-        assert switched_from is None
-
-
 class TestClaudeMultiAccount:
     """Test cases for Claude multi-account support."""
 
@@ -3196,13 +3170,12 @@ class TestPhaseMilestones:
         """make_phase_milestone should format phase name, account, model, and metrics."""
         from chad.ui.gradio.web_ui import make_phase_milestone
 
-        msg = make_phase_milestone("Exploration", "claude-1", "claude-sonnet-4-20250514", 85, 100)
+        msg = make_phase_milestone("Exploration", "claude-1", "claude-sonnet-4-20250514", 85)
         assert msg["role"] == "user"
         assert "**Exploration:**" in msg["content"]
         assert "claude-1" in msg["content"]
         assert "claude-sonnet-4-20250514" in msg["content"]
         assert "Usage: 85%" in msg["content"]
-        assert "Context: 100%" in msg["content"]
 
     def test_make_phase_milestone_without_metrics(self):
         """make_phase_milestone should omit metrics when not provided."""
@@ -3220,7 +3193,7 @@ class TestPhaseMilestones:
         from chad.ui.gradio.web_ui import make_phase_milestone
 
         for phase in ("Coding", "Re-coding", "Re-verification"):
-            msg = make_phase_milestone(phase, "acct", "model-x", 50, 75)
+            msg = make_phase_milestone(phase, "acct", "model-x", 50)
             assert f"**{phase}:**" in msg["content"]
 
     def test_idle_status_shows_ready_with_model(self):
@@ -3239,13 +3212,12 @@ class TestPhaseMilestones:
         assert "claude-main" in status
 
     def test_format_usage_metrics_returns_percentages(self):
-        """_format_usage_metrics should return formatted usage and context percentages."""
+        """_format_usage_metrics should return formatted usage percentage."""
         from chad.ui.gradio.provider_ui import ProviderUIManager
 
         class MockAPIClient:
             def __init__(self):
                 self._mock_usage = {"test-account": 0.75}
-                self._mock_context = {"test-account": 0.5}
 
             def list_accounts(self):
                 return [MockAccount(name="test-account", provider="mock", role="CODING")]
@@ -3256,13 +3228,9 @@ class TestPhaseMilestones:
             def get_mock_remaining_usage(self, name):
                 return self._mock_usage.get(name, 0.5)
 
-            def get_mock_context_remaining(self, name):
-                return self._mock_context.get(name, 1.0)
-
         ui = ProviderUIManager(MockAPIClient())
         metrics = ui._format_usage_metrics("test-account")
         assert "Usage: 75%" in metrics
-        assert "Context: 50%" in metrics
 
     def test_ready_status_includes_usage_metrics(self):
         """Ready status should include usage metrics when available."""
@@ -3271,7 +3239,6 @@ class TestPhaseMilestones:
         class MockAPIClient:
             def __init__(self):
                 self._mock_usage = {"test-account": 0.8}
-                self._mock_context = {"test-account": 0.6}
 
             def list_accounts(self):
                 return [MockAccount(name="test-account", provider="mock", role="CODING")]
@@ -3282,22 +3249,18 @@ class TestPhaseMilestones:
             def get_mock_remaining_usage(self, name):
                 return self._mock_usage.get(name, 0.5)
 
-            def get_mock_context_remaining(self, name):
-                return self._mock_context.get(name, 1.0)
-
         ui = ProviderUIManager(MockAPIClient())
         ready, status = ui.get_role_config_status()
         assert ready is True
         assert "Ready" in status
         assert "Usage: 80%" in status
-        assert "Context: 60%" in status
 
 
 class TestMockProviderCardControls:
     """Tests for mock-specific provider card controls."""
 
-    def test_provider_state_includes_context_and_duration_sliders_for_mock(self):
-        """Mock provider cards expose usage, context, and duration controls."""
+    def test_provider_state_includes_duration_sliders_for_mock(self):
+        """Mock provider cards expose usage and duration controls."""
         from chad.ui.gradio.provider_ui import ProviderUIManager
 
         class MockAPIClient:
@@ -3307,9 +3270,6 @@ class TestMockProviderCardControls:
             def get_mock_remaining_usage(self, name):
                 return 0.4
 
-            def get_mock_context_remaining(self, name):
-                return 0.25
-
             def get_mock_run_duration_seconds(self, name):
                 return 60
 
@@ -3317,13 +3277,12 @@ class TestMockProviderCardControls:
         state = ui.provider_state(card_slots=1)
 
         # Per-card tuple shape:
-        # column, group, header, account_name, usage_box, usage_slider, context_slider, duration_slider, delete_btn
-        assert len(state) == 9
+        # column, group, header, account_name, usage_box, usage_slider, duration_slider, delete_btn
+        assert len(state) == 8
         assert state[3] == "mock-coding"
         assert state[4]["visible"] is False
         assert state[5]["visible"] is True and state[5]["value"] == 60
-        assert state[6]["visible"] is True and state[6]["value"] == 75
-        assert state[7]["visible"] is True and state[7]["value"] == 60
+        assert state[6]["visible"] is True and state[6]["value"] == 60
 
 
 class TestVerificationPrompt:

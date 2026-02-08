@@ -90,41 +90,6 @@ class MockRemainingUsageUpdate(BaseModel):
     )
 
 
-class ContextSwitchThresholdResponse(BaseModel):
-    """Response for context switch threshold endpoint."""
-
-    threshold: int = Field(
-        description="Percentage threshold (0-100) for triggering provider switch based on context usage",
-    )
-
-
-class ContextSwitchThresholdUpdate(BaseModel):
-    """Request to set context switch threshold."""
-
-    threshold: int = Field(
-        ge=0,
-        le=100,
-        description="Percentage threshold (0-100). Use 100 to disable context-based switching.",
-    )
-
-
-class MockContextRemainingResponse(BaseModel):
-    """Response for mock context remaining endpoint."""
-
-    account_name: str = Field(description="The mock account name")
-    remaining: float = Field(description="Remaining context as 0.0-1.0 (1.0 = full context)")
-
-
-class MockContextRemainingUpdate(BaseModel):
-    """Request to set mock context remaining."""
-
-    account_name: str = Field(description="The mock account name")
-    remaining: float = Field(
-        ge=0.0,
-        le=1.0,
-        description="Remaining context as 0.0-1.0 (1.0 = full context available)",
-    )
-
 
 class MockRunDurationResponse(BaseModel):
     """Response for mock run duration endpoint."""
@@ -356,60 +321,6 @@ async def set_mock_remaining_usage(
     )
 
 
-@router.get("/context-switch-threshold", response_model=ContextSwitchThresholdResponse)
-async def get_context_switch_threshold() -> ContextSwitchThresholdResponse:
-    """Get the context usage percentage threshold for auto-switching providers.
-
-    When a provider's context window usage exceeds this percentage, the system will
-    automatically switch to the next fallback provider.
-    """
-    config_mgr = get_config_manager()
-    threshold = config_mgr.get_context_switch_threshold()
-
-    return ContextSwitchThresholdResponse(threshold=threshold)
-
-
-@router.put("/context-switch-threshold", response_model=ContextSwitchThresholdResponse)
-async def set_context_switch_threshold(
-    request: ContextSwitchThresholdUpdate,
-) -> ContextSwitchThresholdResponse:
-    """Set the context usage percentage threshold for auto-switching providers.
-
-    Set to 100 to disable context-based switching (only error-based switching).
-    """
-    config_mgr = get_config_manager()
-    config_mgr.set_context_switch_threshold(request.threshold)
-
-    return ContextSwitchThresholdResponse(threshold=request.threshold)
-
-
-@router.get("/mock-context-remaining/{account_name}", response_model=MockContextRemainingResponse)
-async def get_mock_context_remaining(account_name: str) -> MockContextRemainingResponse:
-    """Get mock context remaining for a mock provider account.
-
-    Used for testing context-based provider switching without real providers.
-    """
-    config_mgr = get_config_manager()
-    remaining = config_mgr.get_mock_context_remaining(account_name)
-
-    return MockContextRemainingResponse(account_name=account_name, remaining=remaining)
-
-
-@router.put("/mock-context-remaining", response_model=MockContextRemainingResponse)
-async def set_mock_context_remaining(
-    request: MockContextRemainingUpdate,
-) -> MockContextRemainingResponse:
-    """Set mock context remaining for a mock provider account.
-
-    Used for testing context-based provider switching without real providers.
-    """
-    config_mgr = get_config_manager()
-    config_mgr.set_mock_context_remaining(request.account_name, request.remaining)
-
-    return MockContextRemainingResponse(
-        account_name=request.account_name,
-        remaining=request.remaining,
-    )
 
 
 @router.get("/mock-run-duration/{account_name}", response_model=MockRunDurationResponse)

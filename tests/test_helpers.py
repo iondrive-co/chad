@@ -353,7 +353,6 @@ def cli_config_parity_check() -> ConfigParityResult:
         "preferences",
         "projects",
         "mock_remaining_usage",
-        "mock_context_remaining",
     }
 
     # Gradio-only keys
@@ -376,7 +375,6 @@ def cli_config_parity_check() -> ConfigParityResult:
         ],
         "provider_fallback_order": ["fallback_order"],
         "usage_switch_threshold": ["usage_threshold", "usage_switch"],
-        "context_switch_threshold": ["context_threshold", "context_switch"],
         "max_verification_attempts": [
             "max_verification_attempts",
             "verification_attempts",

@@ -195,7 +195,6 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
             "account card",
             "provider settings",
             "mock usage slider",
-            "mock context slider",
             "mock run duration",
         ],
     ),

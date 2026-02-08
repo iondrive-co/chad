@@ -1195,18 +1195,6 @@ class AIProvider(ABC):
         """
         return None
 
-    def get_context_remaining(self) -> float:
-        """Get remaining context window capacity as 0.0-1.0.
-
-        This indicates how much of the context window is still available
-        for the current session. Used for proactive handover before
-        context limits are hit.
-
-        Returns:
-            Remaining context as 0.0-1.0 (1.0 = full context available).
-            Default returns 1.0 (unknown/unlimited).
-        """
-        return 1.0
 
 
 class ClaudeCodeProvider(AIProvider):
