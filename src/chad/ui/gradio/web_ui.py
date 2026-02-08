@@ -2596,6 +2596,17 @@ class ChadWebUI:
                                     phase_message_split_done = True
                                 phase_output_chunks = []
                             message_queue.put(("status", status_text))
+                    elif event_type == "progress":
+                        summary = str(event.data.get("summary", "")).strip()
+                        if summary:
+                            progress = ProgressUpdate(
+                                summary=summary,
+                                location=str(event.data.get("location", "") or ""),
+                                next_step=event.data.get("next_step"),
+                                before_screenshot=event.data.get("before_screenshot"),
+                                before_description=event.data.get("before_description"),
+                            )
+                            message_queue.put(("progress", progress))
                     elif event_type == "terminal_output":
                         # Fallback for parsed terminal output from EventLog
                         # This ensures content is shown even if raw PTY parsing fails
@@ -3873,6 +3884,44 @@ class ChadWebUI:
                             summary=summary_text,
                             task_state="running",
                         )
+                        last_yield_time = time_module.time()
+
+                    elif msg_type == "progress":
+                        if progress_emitted:
+                            continue
+
+                        progress_data = msg[1] if len(msg) > 1 else None
+                        progress_update = None
+                        if isinstance(progress_data, ProgressUpdate):
+                            progress_update = progress_data
+                        elif isinstance(progress_data, dict):
+                            summary = str(progress_data.get("summary", "")).strip()
+                            if summary:
+                                progress_update = ProgressUpdate(
+                                    summary=summary,
+                                    location=str(progress_data.get("location", "") or ""),
+                                    next_step=progress_data.get("next_step"),
+                                    before_screenshot=progress_data.get("before_screenshot"),
+                                    before_description=progress_data.get("before_description"),
+                                )
+
+                        if progress_update is None:
+                            continue
+
+                        progress_emitted = True
+                        progress_msg = make_progress_message(progress_update)
+                        if pending_message_idx is not None:
+                            chat_history.insert(pending_message_idx, progress_msg)
+                            pending_message_idx += 1
+                            # Start a fresh live buffer after the progress handoff.
+                            display_buffer = LiveStreamDisplayBuffer()
+                            latest_pyte_html = ""
+                            render_state.reset()
+                        else:
+                            chat_history.append(progress_msg)
+
+                        # Keep last rendered live content visible while new chunks arrive.
+                        yield make_yield(chat_history, current_status, last_live_stream, task_state="running")
                         last_yield_time = time_module.time()
 
                     elif msg_type == "session_id":
