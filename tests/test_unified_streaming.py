@@ -1417,6 +1417,7 @@ class TestMockRunDurationAPI:
         resp = client.get("/api/v1/config/mock-run-duration/duration-mock-1")
         assert resp.json()["seconds"] == 60
 
+
 class TestEventMultiplexer:
     """Tests for the EventMultiplexer class."""
 

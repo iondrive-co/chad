@@ -1817,6 +1817,23 @@ class ProviderUIManager:
                 login_success, _ = self._check_provider_login(provider_type, account_name)
 
                 if not login_success:
+                    # Pre-create settings.json so the CLI skips the interactive
+                    # auth-type selection dialog and goes straight to browser
+                    # OAuth. Without this, the Ink TUI renders a dialog that
+                    # needs an Enter press to proceed, which is fragile to
+                    # detect through ANSI-heavy output.
+                    import json as _json
+
+                    gemini_dir = Path.home() / ".gemini"
+                    gemini_settings = gemini_dir / "settings.json"
+                    if not gemini_settings.exists():
+                        gemini_dir.mkdir(parents=True, exist_ok=True)
+                        gemini_settings.write_text(
+                            _json.dumps(
+                                {"security": {"auth": {"selectedType": "oauth-personal"}}}
+                            )
+                        )
+
                     try:
                         if is_windows:
                             CREATE_NEW_CONSOLE = 0x00000010
@@ -1845,29 +1862,32 @@ class ProviderUIManager:
                             env = os.environ.copy()
                             env["TERM"] = "xterm-256color"
 
-                            # Set terminal dimensions for proper rendering
+                            # With settings.json pre-created, the CLI goes
+                            # straight to browser OAuth without an interactive
+                            # dialog. Poll for the oauth_creds.json file while
+                            # draining PTY output to prevent buffer blocking.
                             child = pexpect.spawn(
                                 gemini_cli, timeout=120, encoding="utf-8", env=env, dimensions=(50, 120)
                             )
 
                             try:
-                                # Gemini CLI shows auth prompts on first run
-                                # Wait for it to render, then send Enter to proceed
-                                time.sleep(2)
-                                child.send("\r")
-                                time.sleep(2)
-                                child.send("\r")
-
-                                # Poll for oauth file while process runs
                                 start_time = time.time()
                                 timeout_secs = 120
                                 while time.time() - start_time < timeout_secs:
                                     if gemini_oauth.exists():
                                         login_success = True
+                                        # Let the CLI finish sending its HTTP
+                                        # response to the browser before we
+                                        # kill it.
+                                        time.sleep(2)
                                         break
                                     if not child.isalive():
                                         break
-                                    time.sleep(2)
+                                    try:
+                                        child.read_nonblocking(size=10000, timeout=0.1)
+                                    except (pexpect.TIMEOUT, pexpect.EOF):
+                                        pass
+                                    time.sleep(0.5)
                             except (pexpect.TIMEOUT, pexpect.EOF):
                                 pass
                             finally:

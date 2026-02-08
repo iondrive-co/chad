@@ -90,7 +90,6 @@ class MockRemainingUsageUpdate(BaseModel):
     )
 
 
-
 class MockRunDurationResponse(BaseModel):
     """Response for mock run duration endpoint."""
 
@@ -319,8 +318,6 @@ async def set_mock_remaining_usage(
         account_name=request.account_name,
         remaining=request.remaining,
     )
-
-
 
 
 @router.get("/mock-run-duration/{account_name}", response_model=MockRunDurationResponse)
