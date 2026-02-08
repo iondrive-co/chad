@@ -264,6 +264,12 @@ class TestTerminalEmulatorEdgeCases:
         html = emu.render_html()
         assert "color:rgb" in html
 
+    def test_private_sgr_sequence_is_ignored_without_crashing(self):
+        """Private CSI m sequences should not crash pyte parsing."""
+        emu = TerminalEmulator(80, 24)
+        emu.feed("\x1b[?2004mHello")
+        assert "Hello" in emu.get_text()
+
 
 class TestTerminalLayoutForDisplay:
     """Tests that terminal output renders correctly for UI display.
