@@ -1379,6 +1379,104 @@ class TestLiveStreamScrollPreservation:
         )
 
 
+class TestLiveStreamSearch:
+    """Test the live stream search field functionality."""
+
+    SEARCH_CONTENT = (
+        '<p>The quick brown fox jumps over the lazy dog.</p>'
+        '<p>Another line with some fox content here.</p>'
+        '<p>Final line of output text.</p>'
+    )
+
+    def _inject_with_header(self, page: Page):
+        """Inject content with the search bar header into the live stream box."""
+        from chad.ui.gradio.web_ui import build_live_stream_html_from_pyte
+        full_html = build_live_stream_html_from_pyte(self.SEARCH_CONTENT, "TEST AI")
+        page.evaluate(
+            """
+(html) => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    if (!box) return false;
+    box.classList.add('live-stream-box');
+    let node = box;
+    while (node) {
+        if (node.classList) {
+            node.classList.remove('hide-container');
+            node.classList.remove('live-stream-hidden');
+        }
+        if (node.style) {
+            node.style.setProperty('display', 'block', 'important');
+            node.style.setProperty('visibility', 'visible', 'important');
+            node.style.setProperty('opacity', '1', 'important');
+            node.style.setProperty('height', 'auto', 'important');
+        }
+        node = node.parentElement;
+    }
+    box.style.minHeight = '300px';
+    box.innerHTML = html;
+    box.scrollIntoView({ behavior: 'instant', block: 'center' });
+    return true;
+}
+""",
+            full_html,
+        )
+        page.wait_for_timeout(600)
+
+    def test_search_input_visible_in_header(self, page: Page):
+        """Search input should be visible when live content is present."""
+        self._inject_with_header(page)
+        search_input = page.locator(".live-search-input").last
+        expect(search_input).to_be_visible()
+
+    def test_search_highlights_matches(self, page: Page):
+        """Typing a search term should highlight matching text."""
+        self._inject_with_header(page)
+        search_input = page.locator(".live-search-input").last
+        search_input.fill("fox")
+        page.wait_for_timeout(400)
+        marks = page.locator("mark.live-search-match")
+        assert marks.count() == 2, f"Expected 2 'fox' matches, got {marks.count()}"
+
+    def test_search_count_display(self, page: Page):
+        """Match count should display correctly."""
+        self._inject_with_header(page)
+        search_input = page.locator(".live-search-input").last
+        search_input.fill("fox")
+        page.wait_for_timeout(400)
+        count_el = page.locator(".live-search-count").last
+        assert count_el.text_content() == "1/2"
+
+    def test_search_navigation(self, page: Page):
+        """Next button should advance the current match index."""
+        self._inject_with_header(page)
+        search_input = page.locator(".live-search-input").last
+        search_input.fill("fox")
+        page.wait_for_timeout(400)
+        # First match should be current
+        current = page.locator("mark.live-search-match.current")
+        assert current.count() == 1
+        count_el = page.locator(".live-search-count").last
+        assert count_el.text_content() == "1/2"
+        # Click next
+        next_btn = page.locator(".live-search-nav").last
+        next_btn.click()
+        page.wait_for_timeout(200)
+        assert count_el.text_content() == "2/2"
+
+    def test_escape_clears_search(self, page: Page):
+        """Pressing Escape should clear highlights."""
+        self._inject_with_header(page)
+        search_input = page.locator(".live-search-input").last
+        search_input.fill("fox")
+        page.wait_for_timeout(400)
+        marks = page.locator("mark.live-search-match")
+        assert marks.count() == 2
+        search_input.press("Escape")
+        page.wait_for_timeout(300)
+        marks_after = page.locator("mark.live-search-match")
+        assert marks_after.count() == 0
+
+
 class TestTUIContentRendering:
     """Test that TUI-style content (boxes, cursor positioning) renders correctly.
 

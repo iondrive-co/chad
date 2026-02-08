@@ -154,10 +154,12 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
     "LIVE_STREAM": UIComponent(
         tab="run",
         component="live-view",  # Dedicated live stream panel (bottom of run tab)
-        tests=["TestLiveViewFormat", "TestRealisticLiveContent", "TestLiveActivityFormat", "TestLiveStreamScrollPreservation"],
+        tests=["TestLiveViewFormat", "TestRealisticLiveContent", "TestLiveActivityFormat",
+               "TestLiveStreamScrollPreservation", "TestLiveStreamSearch"],
         source_file="chad/web_ui.py",
         keywords=["live view", "activity", "stream", "output", "live activity", "live stream panel",
-                  "verification live", "verification stream", "verification output"],
+                  "verification live", "verification stream", "verification output", "search",
+                  "live search", "find in output", "search field"],
     ),
     "MERGE_CONTROLS": UIComponent(
         tab="run",
@@ -364,6 +366,7 @@ VISUAL_TEST_MAP: dict[str, list[str]] = {
         "TestLiveViewFormat",
         "TestRealisticLiveContent",
         "TestLiveStreamScrollPreservation",
+        "TestLiveStreamSearch",
         "TestNoStatusBox",
         "TestScreenshots",
         "TestProviderTwoColumnLayout",

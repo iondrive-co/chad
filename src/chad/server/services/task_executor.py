@@ -501,7 +501,12 @@ def build_agent_command(
 
     elif provider == "mock":
         # Mock provider - simulates an agent CLI with ANSI output
-        cmd = _build_mock_agent_command(project_path, task_description, mock_run_duration_seconds)
+        cmd = _build_mock_agent_command(
+            project_path,
+            task_description,
+            phase=phase,
+            run_duration_seconds=mock_run_duration_seconds,
+        )
 
     else:
         # Fallback - try running provider name as command
@@ -515,6 +520,7 @@ def build_agent_command(
 def _build_mock_agent_command(
     project_path: Path,
     task_description: str | None,
+    phase: str = "exploration",
     run_duration_seconds: int = 0,
 ) -> list[str]:
     """Build mock agent command that simulates a real agent CLI."""
@@ -542,6 +548,7 @@ def writeln(text=""):
 # Header
 writeln(f"{{BLUE}}{{BOLD}}Mock Agent v1.0{{RESET}}")
 writeln(f"{{GRAY}}Working in: {project_path}{{RESET}}")
+writeln(f"{{CYAN}}Prompt: {phase.capitalize()}{{RESET}}")
 writeln()
 
 # Thinking

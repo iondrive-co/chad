@@ -173,6 +173,29 @@ class APIClient:
         resp.raise_for_status()
         return resp.json()
 
+    def get_session_events(
+        self,
+        session_id: str,
+        since_seq: int = 0,
+        event_types: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch structured session events from the EventLog API."""
+        params: dict[str, Any] = {"since_seq": since_seq}
+        if event_types:
+            params["event_types"] = event_types
+        resp = self._client.get(self._url(f"/sessions/{session_id}/events"), params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_session_latest_seq(self, session_id: str) -> int:
+        """Get the latest persisted EventLog sequence for a session."""
+        data = self.get_session_events(session_id=session_id, since_seq=0)
+        latest_seq = data.get("latest_seq", 0)
+        try:
+            return int(latest_seq)
+        except (TypeError, ValueError):
+            return 0
+
     def _parse_session(self, data: dict) -> Session:
         """Parse session response data."""
         return Session(
