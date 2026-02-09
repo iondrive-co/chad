@@ -1063,7 +1063,9 @@ mark.live-search-match.current {
   margin: 0 !important;
   min-width: 0 !important;
   width: auto !important;
-  overflow: hidden !important;
+  flex-grow: 1 !important;
+  max-width: 100% !important;
+  overflow: visible !important;
 }
 
 #workspace-display .workspace-inline,
@@ -1071,7 +1073,10 @@ mark.live-search-match.current {
   margin: 0 !important;
   font-size: 12px;
   color: #cdd6f4;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-all;
+  overflow-wrap: break-word;
+  line-height: 1.2;
 }
 
 /* Agent communication chatbot - preserve scroll position */
@@ -2369,12 +2374,12 @@ class ChadWebUI:
         got_complete_event = False
 
         # Detect if this is a provider that outputs stream-json (needs parsing)
-        # Both anthropic (Claude) and qwen use similar JSON formats
+        # Claude/Qwen/Gemini/Kimi share line-delimited JSON output modes.
         json_parser = None
         try:
             accounts = self.api_client.list_accounts()
             for acc in accounts:
-                if acc.name == coding_account and acc.provider in ("anthropic", "qwen"):
+                if acc.name == coding_account and acc.provider in ("anthropic", "qwen", "gemini", "kimi"):
                     json_parser = ClaudeStreamJsonParser()
                     break
         except Exception:
@@ -3208,7 +3213,7 @@ class ChadWebUI:
             # and restart attempts will be blocked by the "already running" guard.
             server_shutdown_confirmed = self._request_server_cancel(
                 session.server_session_id,
-                timeout_seconds=3.0,
+                timeout_seconds=15.0,
             )
         if session.provider:
             session.provider.stop_session()
@@ -3414,7 +3419,7 @@ class ChadWebUI:
                     # User just cancelled and immediately restarted: complete server-side
                     # cancellation first so restart can proceed on the happy path.
                     if prior_cancel_requested:
-                        cancelled = self._request_server_cancel(session.server_session_id, timeout_seconds=3.0)
+                        cancelled = self._request_server_cancel(session.server_session_id, timeout_seconds=15.0)
                         if cancelled:
                             server_session = self.api_client.get_session(session.server_session_id)
 

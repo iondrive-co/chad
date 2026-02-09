@@ -170,16 +170,68 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
             return False, f"Login error: {e}"
 
     elif provider == "opencode":
-        # OpenCode has no OAuth step; it relies on backend credentials.
-        if shutil.which("opencode") is None:
+        # OpenCode uses browser OAuth via `opencode auth login`
+        auth_file = Path.home() / ".local" / "share" / "opencode" / "auth.json"
+        if auth_file.exists():
+            try:
+                data = json.loads(auth_file.read_text(encoding="utf-8"))
+                if data:
+                    return True, "Already logged in"
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        opencode_cli = shutil.which("opencode")
+        if not opencode_cli:
             return False, "OpenCode CLI not found"
-        return True, "No login required"
+
+        print("Opening browser for OpenCode login...")
+        try:
+            result = subprocess.run(
+                [opencode_cli, "auth", "login"],
+                timeout=120,
+            )
+            if result.returncode == 0 and auth_file.exists():
+                return True, "Login successful"
+            return False, "Login failed or was cancelled"
+        except FileNotFoundError:
+            return False, "OpenCode CLI not found"
+        except subprocess.TimeoutExpired:
+            return False, "Login timed out"
+        except Exception as e:
+            return False, f"Login error: {e}"
 
     elif provider == "kimi":
-        kimi_config = Path.home() / ".kimi" / "config.toml"
-        if kimi_config.exists():
+        # Check isolated credentials for this account
+        kimi_home = Path.home() / ".chad" / "kimi-homes" / account_name
+        creds_file = kimi_home / ".kimi" / "credentials" / "kimi-code.json"
+        global_creds = Path.home() / ".kimi" / "credentials" / "kimi-code.json"
+        if creds_file.exists() or global_creds.exists():
             return True, "Already logged in"
-        return False, "Kimi is not logged in. Run `kimi` and use `/login` first."
+
+        # Run interactive kimi login in the terminal
+        kimi_cli = shutil.which("kimi")
+        if not kimi_cli:
+            return False, "Kimi CLI not found. Install with: npm install -g @anthropic-ai/kimi-code"
+
+        kimi_home.mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env["HOME"] = str(kimi_home)
+
+        print("Starting Kimi login...")
+        print()
+        try:
+            result = subprocess.run(
+                [kimi_cli, "login"],
+                env=env,
+                timeout=120,
+            )
+            if result.returncode == 0 and creds_file.exists():
+                return True, "Logged in successfully"
+            return False, "Kimi login did not complete"
+        except subprocess.TimeoutExpired:
+            return False, "Login timed out"
+        except Exception as e:
+            return False, f"Login error: {e}"
 
     else:
         return False, f"Unsupported provider: {provider}"
