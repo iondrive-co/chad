@@ -520,16 +520,25 @@ class TestChadWebUI:
         assert "vibe --setup" in result
         mock_api_client.create_account.assert_not_called()
 
-    def test_add_provider_kimi_requires_login_before_account_creation(self, web_ui, mock_api_client):
-        """Kimi accounts should only be created after successful Kimi login."""
+    def test_add_provider_kimi_login_flow_failure(self, web_ui, mock_api_client):
+        """Kimi login flow cleans up and shows error on failure."""
         mock_api_client.list_accounts.return_value = []
         web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/kimi"))
+        web_ui.provider_ui.installer.find_tool_path = Mock(return_value="/tmp/kimi")
 
-        with patch.object(web_ui.provider_ui, "_check_provider_login", return_value=(False, "Not logged in")):
-            result = web_ui.add_provider("kimi-1", "kimi")[0]
+        # Mock subprocess.Popen to simulate a failed login (no success event)
+        mock_proc = Mock()
+        mock_proc.stdout.readline.return_value = b""
+        mock_proc.poll.return_value = 0  # Process exited immediately
+        mock_proc.terminate = Mock()
+        mock_proc.wait = Mock()
+
+        import subprocess as _subprocess
+        with patch.object(_subprocess, "Popen", return_value=mock_proc):
+            with patch("chad.ui.gradio.provider_ui.shutil.which", return_value="/tmp/kimi"):
+                result = web_ui.add_provider("kimi-1", "kimi")[0]
 
         assert "❌" in result
-        assert "/login" in result
         mock_api_client.create_account.assert_not_called()
 
     def test_get_models_includes_stored_model(self, web_ui, mock_api_client, tmp_path):
@@ -1070,6 +1079,60 @@ class TestClaudeJsonParsingIntegration:
         assert "1 file read" in combined, "Tool summary should be included before text"
         assert '{"type":"system"' not in combined, "Raw JSON should not appear"
         assert '{"type":"result"' not in combined, "Result events should be filtered"
+
+    def test_run_task_parses_gemini_json_for_gemini_provider(self, web_ui, mock_api_client, git_repo):
+        """run_task_via_api should parse Gemini stream-json output for gemini accounts."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="gem", provider="gemini", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-123"
+        mock_api_client.create_session.return_value = mock_session
+
+        gemini_json_lines = (
+            b'{"type":"init","model":"gemini-2.5-pro","session_id":"abc123"}' + b'\n'
+            b'{"type":"message","role":"assistant","content":"Hello from Gemini!"}' + b'\n'
+            b'{"type":"result","stats":{"input_tokens":10,"output_tokens":20}}' + b'\n'
+        )
+
+        mock_stream_event = Mock()
+        mock_stream_event.event_type = "terminal"
+        mock_stream_event.data = {"data": base64.b64encode(gemini_json_lines).decode()}
+
+        mock_complete_event = Mock()
+        mock_complete_event.event_type = "complete"
+        mock_complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="gem",
+            message_queue=message_queue,
+        )
+
+        stream_messages = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "stream":
+                stream_messages.append(msg[1])
+
+        combined = "\n".join(stream_messages)
+        assert success is True
+        assert "Hello from Gemini!" in combined
+        assert '{"type":"message"' not in combined
+        assert '{"type":"result"' not in combined
 
     def test_run_task_emits_progress_messages_from_structured_events(self, web_ui, mock_api_client, git_repo):
         """run_task_via_api should convert structured progress events into queue progress messages."""
@@ -1947,46 +2010,39 @@ class TestGeminiUsage:
         assert "Not logged in" in result
 
     @patch("pathlib.Path.home")
-    def test_gemini_logged_in_no_sessions(self, mock_home, web_ui, tmp_path):
-        """Test Gemini usage when logged in but no session data."""
+    def test_gemini_logged_in_no_usage(self, mock_home, web_ui, tmp_path):
+        """Test Gemini usage when logged in but no usage data."""
         mock_home.return_value = tmp_path
         gemini_dir = tmp_path / ".gemini"
         gemini_dir.mkdir()
         (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
-        # No tmp directory
 
-        result = web_ui._get_gemini_usage()
+        with patch("chad.util.providers._read_gemini_usage", return_value=[]):
+            result = web_ui._get_gemini_usage()
 
         assert "✅" in result
         assert "Logged in" in result
-        assert "Usage data unavailable" in result
+        assert "No usage data yet" in result
 
     @patch("pathlib.Path.home")
     def test_gemini_usage_aggregates_models(self, mock_home, web_ui, tmp_path):
-        """Test Gemini usage aggregates token counts by model."""
-        import json
-
+        """Test Gemini usage aggregates token counts by model from JSONL."""
         mock_home.return_value = tmp_path
         gemini_dir = tmp_path / ".gemini"
         gemini_dir.mkdir()
         (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
 
-        # Create session file with model usage data
-        session_dir = gemini_dir / "tmp" / "project123" / "chats"
-        session_dir.mkdir(parents=True)
+        records = [
+            {"timestamp": "2026-01-01T12:00:00+00:00", "model": "gemini-2.5-pro",
+             "input_tokens": 1000, "output_tokens": 100, "cached_tokens": 500},
+            {"timestamp": "2026-01-01T13:00:00+00:00", "model": "gemini-2.5-pro",
+             "input_tokens": 2000, "output_tokens": 200, "cached_tokens": 1000},
+            {"timestamp": "2026-01-01T14:00:00+00:00", "model": "gemini-2.5-flash",
+             "input_tokens": 500, "output_tokens": 50, "cached_tokens": 200},
+        ]
 
-        session_data = {
-            "sessionId": "test-session",
-            "messages": [
-                {"type": "gemini", "model": "gemini-2.5-pro", "tokens": {"input": 1000, "output": 100, "cached": 500}},
-                {"type": "gemini", "model": "gemini-2.5-pro", "tokens": {"input": 2000, "output": 200, "cached": 1000}},
-                {"type": "gemini", "model": "gemini-2.5-flash", "tokens": {"input": 500, "output": 50, "cached": 200}},
-                {"type": "user", "content": "test"},  # Should be ignored
-            ],
-        }
-        (session_dir / "session-test.json").write_text(json.dumps(session_data))
-
-        result = web_ui._get_gemini_usage()
+        with patch("chad.util.providers._read_gemini_usage", return_value=records):
+            result = web_ui._get_gemini_usage()
 
         assert "✅" in result
         assert "Model Usage" in result
@@ -2156,8 +2212,9 @@ class TestRemainingUsage:
         gemini_dir.mkdir()
         (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
 
-        result = web_ui._get_gemini_remaining_usage()
-        assert result == 1.0  # Logged in, no sessions = full capacity
+        with patch("chad.util.providers._read_gemini_usage", return_value=[]):
+            result = web_ui._get_gemini_remaining_usage()
+        assert result == 1.0  # Logged in, no usage = full capacity
 
     @patch("pathlib.Path.home")
     def test_mistral_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
@@ -2217,9 +2274,8 @@ class TestRemainingUsage:
         assert result == 0.0
 
     @patch("pathlib.Path.home")
-    def test_gemini_remaining_usage_with_sessions(self, mock_home, web_ui, tmp_path):
-        """Gemini calculates remaining usage from today's requests."""
-        import json
+    def test_gemini_remaining_usage_with_records(self, mock_home, web_ui, tmp_path):
+        """Gemini calculates remaining usage from today's JSONL records."""
         from datetime import datetime, timezone
 
         mock_home.return_value = tmp_path
@@ -2227,16 +2283,12 @@ class TestRemainingUsage:
         gemini_dir.mkdir()
         (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
 
-        session_dir = gemini_dir / "tmp" / "project1" / "chats"
-        session_dir.mkdir(parents=True)
-
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        today = datetime.now(timezone.utc).isoformat()
         # 200 requests = 10% of 2000 limit
-        messages = [{"type": "gemini", "timestamp": today} for _ in range(200)]
-        session_data = {"messages": messages}
-        (session_dir / "session-1.json").write_text(json.dumps(session_data))
+        records = [{"timestamp": today, "model": "gemini-pro"} for _ in range(200)]
 
-        result = web_ui._get_gemini_remaining_usage()
+        with patch("chad.util.providers._read_gemini_usage", return_value=records):
+            result = web_ui._get_gemini_remaining_usage()
         assert result == pytest.approx(0.9, abs=0.01)  # 90% remaining
 
     @patch("pathlib.Path.home")
@@ -2603,6 +2655,44 @@ class TestClaudeMultiAccount:
 
         assert logged_in_1 is True
         assert logged_in_2 is False
+
+    def test_opencode_login_check_detects_auth_file(self, web_ui, monkeypatch, tmp_path):
+        """OpenCode login check succeeds when OAuth auth.json exists."""
+        import json
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        auth_dir = tmp_path / ".local" / "share" / "opencode"
+        auth_dir.mkdir(parents=True)
+        (auth_dir / "auth.json").write_text(json.dumps({"token": "test-token"}))
+        logged_in, msg = web_ui.provider_ui._check_provider_login("opencode", "oc-test")
+        assert logged_in is True
+        assert "Logged in" in msg
+
+    def test_opencode_login_check_fails_without_auth(self, web_ui, monkeypatch, tmp_path):
+        """OpenCode login check fails when no OAuth credentials exist."""
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        logged_in, msg = web_ui.provider_ui._check_provider_login("opencode", "oc-test")
+        assert logged_in is False
+        assert "Not logged in" in msg
+
+    def test_kimi_add_provider_no_shutil_error(self, web_ui, mock_api_client):
+        """Kimi add_provider should not raise UnboundLocalError for shutil."""
+        mock_api_client.list_accounts.return_value = []
+        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/kimi"))
+        web_ui.provider_ui.installer.find_tool_path = Mock(return_value="/tmp/kimi")
+
+        # Mock subprocess.Popen to simulate a failed login
+        mock_proc = Mock()
+        mock_proc.stdout.readline.return_value = b""
+        mock_proc.poll.return_value = 0
+        mock_proc.terminate = Mock()
+        mock_proc.wait = Mock()
+
+        import subprocess as _subprocess
+        with patch.object(_subprocess, "Popen", return_value=mock_proc):
+            with patch("chad.ui.gradio.provider_ui.shutil.which", return_value="/tmp/kimi"):
+                # This should NOT raise UnboundLocalError: local variable 'shutil'
+                result = web_ui.add_provider("kimi-test", "kimi")[0]
+        assert "❌" in result
 
     def test_delete_provider_cleans_up_claude_config(self, mock_api_client, tmp_path):
         """Deleting Claude provider removes its config directory."""

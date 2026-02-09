@@ -66,6 +66,9 @@ class ClaudeStreamJsonParser:
         self._tool_counts: dict[str, int] = {}
         self._tool_details: list[str] = []
         self._pending_summary = False  # True when we have tools to summarize
+        # Usage stats captured from result events (Gemini stream-json)
+        self.result_stats: dict = {}
+        self.init_model: str | None = None
 
     def feed(self, data: bytes) -> list[str]:
         """Feed raw bytes and return list of human-readable text chunks.
@@ -105,6 +108,32 @@ class ClaudeStreamJsonParser:
 
         return results
 
+    def flush(self) -> list[str]:
+        """Process any remaining bytes in the buffer as a final line.
+
+        Call this after the PTY process exits to handle the case where the
+        last JSON event has no trailing newline.
+        """
+        if not self._buffer or not self._buffer.strip():
+            self._buffer.clear()
+            return []
+        line = bytes(self._buffer)
+        self._buffer.clear()
+        results = []
+        try:
+            obj = json.loads(line.decode("utf-8", errors="replace"))
+            text = self._format_json_event(obj)
+            if text:
+                if self._pending_summary:
+                    summary = self.get_tool_summary()
+                    if summary:
+                        results.append(summary)
+                    self.clear_tool_tracking()
+                results.append(text)
+        except json.JSONDecodeError:
+            results.append(line.decode("utf-8", errors="replace"))
+        return results
+
     def _format_json_event(self, obj: dict) -> str | None:
         """Convert a stream-json event to human-readable text.
 
@@ -120,6 +149,10 @@ class ClaudeStreamJsonParser:
             # System init - don't display raw, just note session started
             subtype = obj.get("subtype", "")
             if subtype == "init":
+                # Capture model name from init event for usage tracking
+                model = obj.get("model")
+                if model:
+                    self.init_model = model
                 return None  # Skip init, already shown in UI
             return None
 
@@ -151,7 +184,17 @@ class ClaudeStreamJsonParser:
             return "\n".join(parts) if parts else None
 
         elif event_type == "result":
-            # Final result - could show summary but usually redundant
+            # Capture usage stats from result event (Gemini stream-json)
+            stats = obj.get("stats")
+            if stats and isinstance(stats, dict):
+                self.result_stats = stats
+            return None
+
+        elif event_type == "init":
+            # Gemini CLI format: {type: "init", model: "...", session_id: "..."}
+            model = obj.get("model")
+            if model:
+                self.init_model = model
             return None
 
         elif event_type == "message":
@@ -474,12 +517,13 @@ def build_agent_command(
             initial_input = full_prompt + "\n"
 
     elif provider == "gemini":
-        # Gemini CLI in YOLO mode
-        cmd = [resolve_tool("gemini"), "-y"]
+        # Gemini CLI in YOLO mode with stream-json output.
+        # Use -p for headless execution; positional prompts keep the CLI interactive.
+        cmd = [resolve_tool("gemini"), "-y", "--output-format", "stream-json"]
         if model and model != "default":
             cmd.extend(["-m", model])
         if full_prompt:
-            initial_input = full_prompt + "\n"
+            cmd.extend(["-p", full_prompt])
 
     elif provider == "qwen":
         # Qwen Code CLI - pass prompt directly to -p to trigger non-interactive mode
@@ -499,6 +543,25 @@ def build_agent_command(
             cmd.extend(["--model", model])
         if full_prompt:
             initial_input = full_prompt + "\n"
+
+    elif provider == "opencode":
+        # OpenCode CLI v1.1+ — uses `opencode run` with --format json
+        oc_model = model if model and model != "default" else "anthropic/claude-sonnet-4-5"
+        cmd = [resolve_tool("opencode"), "run", "--format", "json"]
+        cmd.extend(["-m", oc_model])
+        if full_prompt:
+            cmd.append(full_prompt)
+
+    elif provider == "kimi":
+        # Kimi Code CLI - prompt via -p, stream-json output, --print for non-interactive
+        kimi_home = Path.home() / ".chad" / "kimi-homes" / account_name
+        cmd = [resolve_tool("kimi"), "--output-format", "stream-json", "--print"]
+        # Kimi CLI requires an explicit model; config default_model is empty after fresh login
+        kimi_model = model if model and model != "default" else "kimi-k2.5"
+        cmd.extend(["-m", kimi_model])
+        if full_prompt:
+            cmd.extend(["-p", full_prompt])
+        env["HOME"] = str(kimi_home)
 
     elif provider == "mock":
         # Mock provider - simulates an agent CLI with ANSI output
@@ -875,7 +938,7 @@ class TaskExecutor:
         use_stdin_pipe = coding_provider == "openai"
 
         # Create JSON parser for providers that use stream-json output
-        json_parser = ClaudeStreamJsonParser() if coding_provider in ("anthropic", "qwen") else None
+        json_parser = ClaudeStreamJsonParser() if coding_provider in ("anthropic", "qwen", "gemini", "kimi") else None
 
         def log_pty_event(event: PTYEvent):
             nonlocal last_output_time
@@ -1072,8 +1135,24 @@ class TaskExecutor:
         if codex_output_buffer:
             captured_output.append(codex_output_buffer)
 
+        # Flush any remaining data in the JSON parser (last event may lack trailing newline)
+        if json_parser:
+            remaining = json_parser.flush()
+            if remaining:
+                captured_output.extend(remaining)
+
         flush_terminal_buffer()
         pty_service.cleanup_session(stream_id)
+
+        # Write Gemini usage stats captured from stream-json result event
+        if json_parser and coding_provider == "gemini":
+            from chad.util.providers import _append_gemini_usage
+            model = json_parser.init_model or coding_model or "default"
+            if json_parser.result_stats:
+                _append_gemini_usage(coding_account, model, json_parser.result_stats)
+            else:
+                # Fallback: write a minimal usage record so the session shows activity
+                _append_gemini_usage(coding_account, model, {"num_api_requests": 1})
 
         return exit_code, "\n".join(captured_output)
 
@@ -1123,10 +1202,13 @@ class TaskExecutor:
                         ))
                 except Exception:
                     pass
-            try:
-                self._touch_activity(task.id)
-            except Exception:
-                pass
+            # Idle timeout should be driven by real provider output/tool activity only.
+            # Synthetic status/progress events can otherwise keep stuck sessions alive.
+            if event_type in {"stream", "activity"}:
+                try:
+                    self._touch_activity(task.id)
+                except Exception:
+                    pass
             if on_event:
                 try:
                     on_event(event)

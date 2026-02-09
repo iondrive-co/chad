@@ -1915,19 +1915,6 @@ class TestOpenCodeProvider:
         provider = OpenCodeProvider(config)
         assert provider.get_response(timeout=1) == ""
 
-    def test_get_isolated_data_dir_with_account(self):
-        config = ModelConfig(provider="opencode", model_name="default", account_name="myaccount")
-        provider = OpenCodeProvider(config)
-        data_dir = provider._get_isolated_data_dir()
-        assert "opencode-data" in str(data_dir)
-        assert "myaccount" in str(data_dir)
-
-    def test_get_isolated_data_dir_without_account(self):
-        config = ModelConfig(provider="opencode", model_name="default")
-        provider = OpenCodeProvider(config)
-        data_dir = provider._get_isolated_data_dir()
-        assert ".local/share" in str(data_dir) or "share" in str(data_dir)
-
 
 class TestKimiCodeProvider:
     """Test cases for KimiCodeProvider."""
@@ -2076,6 +2063,43 @@ class TestGeminiCodeAssistProvider:
         response = provider.get_response(timeout=5.0)
         assert "result" in response
         mock_popen.assert_called_once()
+        cmd = mock_popen.call_args[0][0]
+        assert "-p" in cmd
+        assert "hello" in cmd[cmd.index("-p") + 1]
+        assert provider.current_message is None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
+    @patch("chad.util.providers.select.select")
+    @patch("chad.util.providers.os.read")
+    @patch("chad.util.providers.os.close")
+    @patch("chad.util.providers.pty.openpty")
+    @patch("subprocess.Popen")
+    def test_get_response_resume_uses_non_interactive_prompt(
+        self, mock_popen, mock_openpty, mock_close, mock_read, mock_select
+    ):
+        mock_openpty.return_value = (10, 11)
+
+        mock_stdin = Mock()
+        mock_process = Mock()
+        mock_process.stdin = mock_stdin
+        mock_process.poll.side_effect = [None, 0, 0, 0]
+        mock_popen.return_value = mock_process
+
+        mock_select.side_effect = [([10], [], []), ([], [], [])]
+        mock_read.side_effect = [b"result\n", b""]
+
+        provider = GeminiCodeAssistProvider(ModelConfig(provider="gemini", model_name="default"))
+        provider.project_path = "/tmp/test"
+        provider.session_id = "existing-session"
+        provider.send_message("continue")
+
+        response = provider.get_response(timeout=5.0)
+        assert "result" in response
+        cmd = mock_popen.call_args[0][0]
+        assert "--resume" in cmd
+        assert "existing-session" in cmd
+        assert "-p" in cmd
+        assert "continue" in cmd[cmd.index("-p") + 1]
         assert provider.current_message is None
 
     @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
@@ -2521,8 +2545,8 @@ class TestUsagePercentageCalculation:
             result = _get_gemini_usage_percentage("")
             assert result is None
 
-    def test_gemini_usage_logged_in_no_sessions(self, tmp_path):
-        """Gemini returns 0% when logged in but no session files exist."""
+    def test_gemini_usage_logged_in_no_usage(self, tmp_path):
+        """Gemini returns 0% when logged in but no usage JSONL exists."""
         from chad.util.providers import _get_gemini_usage_percentage
 
         gemini_dir = tmp_path / ".gemini"
@@ -2534,7 +2558,7 @@ class TestUsagePercentageCalculation:
             assert result == 0.0
 
     def test_gemini_usage_counts_today_requests(self, tmp_path):
-        """Gemini correctly counts today's requests from session files."""
+        """Gemini correctly counts today's requests from usage JSONL."""
         import json
         from datetime import datetime, timezone
         from chad.util.providers import _get_gemini_usage_percentage
@@ -2543,27 +2567,49 @@ class TestUsagePercentageCalculation:
         gemini_dir.mkdir()
         (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
 
-        # Create session directory structure
-        session_dir = gemini_dir / "tmp" / "project1" / "chats"
-        session_dir.mkdir(parents=True)
+        # Create usage JSONL file
+        chad_dir = tmp_path / ".chad"
+        chad_dir.mkdir(parents=True, exist_ok=True)
 
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        yesterday = "2020-01-01T12:00:00.000Z"
+        today = datetime.now(timezone.utc).isoformat()
+        yesterday = "2020-01-01T12:00:00+00:00"
 
-        session_data = {
-            "messages": [
-                {"type": "gemini", "timestamp": today, "model": "gemini-pro"},
-                {"type": "gemini", "timestamp": today, "model": "gemini-pro"},
-                {"type": "gemini", "timestamp": yesterday, "model": "gemini-pro"},  # Not today
-                {"type": "user", "timestamp": today},  # Not a gemini message
-            ]
-        }
-        (session_dir / "session-1.json").write_text(json.dumps(session_data))
+        lines = [
+            json.dumps({"timestamp": today, "model": "gemini-pro", "input_tokens": 100, "output_tokens": 50}),
+            json.dumps({"timestamp": today, "model": "gemini-pro", "input_tokens": 200, "output_tokens": 80}),
+            json.dumps({"timestamp": yesterday, "model": "gemini-pro", "input_tokens": 50}),  # Not today
+        ]
+        (chad_dir / "gemini-usage.jsonl").write_text("\n".join(lines) + "\n")
 
         with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
             result = _get_gemini_usage_percentage("")
             # 2 requests today out of 2000 limit = 0.1%
             assert result == pytest.approx(0.1, abs=0.01)
+
+    def test_append_gemini_usage_writes_jsonl(self, tmp_path):
+        """_append_gemini_usage writes a JSONL record."""
+        from chad.util.providers import _append_gemini_usage, _read_gemini_usage
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            _append_gemini_usage("gem-1", "gemini-2.5-pro", {
+                "input_tokens": 1000,
+                "output_tokens": 200,
+                "cached": 500,
+                "total_tokens": 1700,
+                "tool_calls": 3,
+                "duration_ms": 4500,
+            })
+            records = _read_gemini_usage()
+            assert len(records) == 1
+            rec = records[0]
+            assert rec["account"] == "gem-1"
+            assert rec["model"] == "gemini-2.5-pro"
+            assert rec["input_tokens"] == 1000
+            assert rec["output_tokens"] == 200
+            assert rec["cached_tokens"] == 500
+            assert rec["total_tokens"] == 1700
+            assert rec["tool_calls"] == 3
+            assert "timestamp" in rec
 
     def test_qwen_usage_not_logged_in(self, tmp_path):
         """Qwen returns None when oauth credentials don't exist."""
@@ -2660,21 +2706,29 @@ class TestUsagePercentageCalculation:
             # 5 requests today out of 1000 limit = 0.5%
             assert result == pytest.approx(0.5, abs=0.01)
 
-    def test_gemini_usage_handles_malformed_json(self, tmp_path):
-        """Gemini gracefully handles malformed session files."""
+    def test_gemini_usage_handles_malformed_jsonl(self, tmp_path):
+        """Gemini gracefully handles malformed JSONL lines."""
+        import json
+        from datetime import datetime, timezone
         from chad.util.providers import _get_gemini_usage_percentage
 
         gemini_dir = tmp_path / ".gemini"
         gemini_dir.mkdir()
         (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
 
-        session_dir = gemini_dir / "tmp" / "project1" / "chats"
-        session_dir.mkdir(parents=True)
-        (session_dir / "session-1.json").write_text("not valid json")
+        chad_dir = tmp_path / ".chad"
+        chad_dir.mkdir(parents=True, exist_ok=True)
+        today = datetime.now(timezone.utc).isoformat()
+        lines = [
+            "not valid json",
+            json.dumps({"timestamp": today, "model": "gemini-pro", "input_tokens": 100}),
+        ]
+        (chad_dir / "gemini-usage.jsonl").write_text("\n".join(lines) + "\n")
 
         with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
             result = _get_gemini_usage_percentage("")
-            assert result == 0.0  # No valid requests counted
+            # 1 valid request out of 2000
+            assert result == pytest.approx(0.05, abs=0.01)
 
     def test_qwen_usage_handles_malformed_jsonl(self, tmp_path):
         """Qwen gracefully handles malformed jsonl lines."""
@@ -2712,14 +2766,13 @@ class TestUsagePercentageCalculation:
         gemini_dir.mkdir()
         (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
 
-        session_dir = gemini_dir / "tmp" / "project1" / "chats"
-        session_dir.mkdir(parents=True)
+        chad_dir = tmp_path / ".chad"
+        chad_dir.mkdir(parents=True, exist_ok=True)
 
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        today = datetime.now(timezone.utc).isoformat()
         # Create more requests than the daily limit (2000)
-        messages = [{"type": "gemini", "timestamp": today} for _ in range(2500)]
-        session_data = {"messages": messages}
-        (session_dir / "session-1.json").write_text(json.dumps(session_data))
+        lines = [json.dumps({"timestamp": today, "model": "gemini-pro"}) for _ in range(2500)]
+        (chad_dir / "gemini-usage.jsonl").write_text("\n".join(lines) + "\n")
 
         with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
             result = _get_gemini_usage_percentage("")
@@ -2747,8 +2800,8 @@ class TestUsagePercentageCalculation:
         from datetime import datetime, timezone
         from chad.util.providers import _get_opencode_usage_percentage
 
-        # Create session directory structure for account
-        data_dir = tmp_path / ".chad" / "opencode-data" / "testaccount" / "opencode" / "sessions"
+        # Create session directory at ~/.local/share/opencode/sessions
+        data_dir = tmp_path / ".local" / "share" / "opencode" / "sessions"
         data_dir.mkdir(parents=True)
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -2774,7 +2827,7 @@ class TestUsagePercentageCalculation:
         from datetime import datetime, timezone
         from chad.util.providers import _get_opencode_usage_percentage
 
-        data_dir = tmp_path / ".chad" / "opencode-data" / "testaccount" / "opencode" / "sessions"
+        data_dir = tmp_path / ".local" / "share" / "opencode" / "sessions"
         data_dir.mkdir(parents=True)
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -2798,13 +2851,13 @@ class TestUsagePercentageCalculation:
             result = _get_kimi_usage_percentage("")
             assert result is None
 
-    def test_kimi_usage_configured_no_sessions(self, tmp_path):
-        """Kimi returns 0% when configured but no session files exist."""
+    def test_kimi_usage_logged_in_no_sessions(self, tmp_path):
+        """Kimi returns 0% when logged in but no session files exist."""
         from chad.util.providers import _get_kimi_usage_percentage
 
-        kimi_dir = tmp_path / ".kimi"
-        kimi_dir.mkdir()
-        (kimi_dir / "config.toml").write_text('[providers]\ndefault = "kimi"')
+        creds_dir = tmp_path / ".kimi" / "credentials"
+        creds_dir.mkdir(parents=True)
+        (creds_dir / "kimi-code.json").write_text('{"token": "test"}')
 
         with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
             result = _get_kimi_usage_percentage("")
@@ -2816,10 +2869,12 @@ class TestUsagePercentageCalculation:
         from datetime import datetime, timezone
         from chad.util.providers import _get_kimi_usage_percentage
 
-        # Create config and session directory structure for account
+        # Create credentials and session directory structure for account
         kimi_dir = tmp_path / ".chad" / "kimi-homes" / "testaccount" / ".kimi"
         kimi_dir.mkdir(parents=True)
-        (kimi_dir / "config.toml").write_text('[providers]\ndefault = "kimi"')
+        creds_dir = kimi_dir / "credentials"
+        creds_dir.mkdir(parents=True)
+        (creds_dir / "kimi-code.json").write_text('{"token": "test"}')
 
         sessions_dir = kimi_dir / "sessions"
         sessions_dir.mkdir()
@@ -2850,7 +2905,9 @@ class TestUsagePercentageCalculation:
 
         kimi_dir = tmp_path / ".chad" / "kimi-homes" / "testaccount" / ".kimi"
         kimi_dir.mkdir(parents=True)
-        (kimi_dir / "config.toml").write_text('[providers]\ndefault = "kimi"')
+        creds_dir = kimi_dir / "credentials"
+        creds_dir.mkdir(parents=True)
+        (creds_dir / "kimi-code.json").write_text('{"token": "test"}')
 
         sessions_dir = kimi_dir / "sessions"
         sessions_dir.mkdir()

@@ -73,7 +73,7 @@ class AIToolInstaller:
                 name="OpenCode",
                 binary="opencode",
                 installer="shell",
-                package="https://raw.githubusercontent.com/opencode-ai/opencode/refs/heads/main/install",
+                package="https://opencode.ai/install",
                 version=None,
             ),
             "kimi": CLIToolSpec(

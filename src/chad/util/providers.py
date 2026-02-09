@@ -796,11 +796,57 @@ def _get_codex_usage_percentage(account_name: str) -> float | None:
     return None
 
 
+def _gemini_usage_path() -> Path:
+    """Get the path to the Gemini usage JSONL file."""
+    return Path(safe_home()) / ".chad" / "gemini-usage.jsonl"
+
+
+def _append_gemini_usage(account: str, model: str, stats: dict) -> None:
+    """Append a usage record to the Gemini usage JSONL file."""
+    from datetime import datetime, timezone
+
+    usage_file = _gemini_usage_path()
+    usage_file.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "account": account,
+        "model": model,
+        "input_tokens": stats.get("input_tokens", 0),
+        "output_tokens": stats.get("output_tokens", 0),
+        "cached_tokens": stats.get("cached", 0),
+        "total_tokens": stats.get("total_tokens", 0),
+        "tool_calls": stats.get("tool_calls", 0),
+        "duration_ms": stats.get("duration_ms", 0),
+    }
+    with open(usage_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+def _read_gemini_usage() -> list[dict]:
+    """Read all records from the Gemini usage JSONL file."""
+    usage_file = _gemini_usage_path()
+    if not usage_file.exists():
+        return []
+    records = []
+    try:
+        with open(usage_file, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass
+    return records
+
+
 def _get_gemini_usage_percentage(account_name: str) -> float | None:
-    """Get Gemini usage percentage by counting today's requests.
+    """Get Gemini usage percentage by counting today's requests from JSONL.
 
     Gemini free tier allows ~2000 requests/day.
-    We count today's requests from local session files.
 
     Args:
         account_name: The account name (unused for Gemini, single account only)
@@ -815,37 +861,22 @@ def _get_gemini_usage_percentage(account_name: str) -> float | None:
     if not oauth_file.exists():
         return None
 
-    # Gemini stores sessions in tmp/*/chats/session-*.json
-    tmp_dir = gemini_dir / "tmp"
-    if not tmp_dir.exists():
+    records = _read_gemini_usage()
+    if not records:
         return 0.0  # Logged in but no usage yet
 
-    # Count today's requests from all session files
-    today_requests = 0
     today = datetime.now(timezone.utc).date()
+    today_requests = 0
+    for rec in records:
+        ts = rec.get("timestamp", "")
+        if ts:
+            try:
+                rec_date = datetime.fromisoformat(ts).date()
+                if rec_date == today:
+                    today_requests += 1
+            except (ValueError, AttributeError):
+                pass
 
-    for session_file in tmp_dir.glob("*/chats/session-*.json"):
-        try:
-            with open(session_file, encoding="utf-8") as f:
-                session_data = json.load(f)
-
-            for msg in session_data.get("messages", []):
-                if msg.get("type") == "gemini":
-                    # Check if this message was from today
-                    timestamp = msg.get("timestamp", "")
-                    if timestamp:
-                        try:
-                            msg_date = datetime.fromisoformat(
-                                timestamp.replace("Z", "+00:00")
-                            ).date()
-                            if msg_date == today:
-                                today_requests += 1
-                        except (ValueError, AttributeError):
-                            pass
-        except (json.JSONDecodeError, OSError, KeyError):
-            continue
-
-    # Free tier: ~2000 requests/day (conservative estimate)
     daily_limit = 2000
     return min((today_requests / daily_limit) * 100, 100.0)
 
@@ -974,16 +1005,9 @@ def _get_opencode_usage_percentage(account_name: str) -> float | None:
     """
     from datetime import datetime, timezone
 
-    # Get isolated data directory for this account
+    # OpenCode v1.1+ stores session data at ~/.local/share/opencode
     base_home = safe_home()
-    if account_name:
-        data_dir = Path(base_home) / ".chad" / "opencode-data" / account_name / "opencode"
-    else:
-        xdg_data = os.environ.get("XDG_DATA_HOME")
-        if xdg_data:
-            data_dir = Path(xdg_data) / "opencode"
-        else:
-            data_dir = Path(base_home) / ".local" / "share" / "opencode"
+    data_dir = Path(base_home) / ".local" / "share" / "opencode"
 
     sessions_dir = data_dir / "sessions"
     if not sessions_dir.exists():
@@ -1044,12 +1068,11 @@ def _get_kimi_usage_percentage(account_name: str) -> float | None:
     else:
         kimi_dir = Path(base_home) / ".kimi"
 
-    config_file = kimi_dir / "config.toml"
-    if not config_file.exists():
-        return None  # Not configured
+    creds_file = kimi_dir / "credentials" / "kimi-code.json"
+    if not creds_file.exists():
+        return None  # Not logged in
 
     # Kimi stores sessions - count today's requests
-    # Session files may be in different locations depending on version
     sessions_dir = kimi_dir / "sessions"
     if not sessions_dir.exists():
         return 0.0  # Configured but no sessions yet
@@ -2069,13 +2092,14 @@ class GeminiCodeAssistProvider(AIProvider):
                 "stream-json",
                 "--resume",
                 self.session_id,
+                "-p",
                 self.current_message,
             ]
         else:
             cmd = [gemini_cli, "-y", "--output-format", "stream-json"]
             if self.config.model_name and self.config.model_name != "default":
                 cmd.extend(["-m", self.config.model_name])
-            cmd.append(self.current_message)
+            cmd.extend(["-p", self.current_message])
 
         try:
             env = os.environ.copy()
@@ -2083,6 +2107,8 @@ class GeminiCodeAssistProvider(AIProvider):
 
             json_events = []
             response_parts = []
+            usage_stats = {}
+            init_model = [None]  # mutable for closure
 
             def handle_chunk(decoded: str) -> None:
                 # Stream raw output for live display
@@ -2097,15 +2123,24 @@ class GeminiCodeAssistProvider(AIProvider):
                         if not isinstance(event, dict):
                             continue
                         json_events.append(event)
+                        evt_type = event.get("type")
                         # Extract session_id from init event
-                        if event.get("type") == "init" and "session_id" in event:
-                            self.session_id = event["session_id"]
+                        if evt_type == "init":
+                            if "session_id" in event:
+                                self.session_id = event["session_id"]
+                            if "model" in event:
+                                init_model[0] = event["model"]
                         # Collect response content
-                        if event.get("type") == "message" and event.get("role") == "assistant":
+                        elif evt_type == "message" and event.get("role") == "assistant":
                             content = event.get("content", "")
                             if content:
                                 response_parts.append(content)
                                 self._notify_activity("text", content[:80])
+                        # Capture usage stats from result event
+                        elif evt_type == "result":
+                            stats = event.get("stats")
+                            if stats and isinstance(stats, dict):
+                                usage_stats.update(stats)
                     except json.JSONDecodeError:
                         # Non-JSON line (warnings, etc.) - just notify
                         if line and len(line) > 10:
@@ -2117,6 +2152,12 @@ class GeminiCodeAssistProvider(AIProvider):
                 self.process.stdin.close()
 
             output, timed_out, idle_stalled = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
+
+            # Record usage stats if we got any
+            if usage_stats:
+                model = init_model[0] or self.config.model_name or "default"
+                account = self.config.account_name or ""
+                _append_gemini_usage(account, model, usage_stats)
 
             self.current_message = None
             self.process = None
@@ -2394,13 +2435,6 @@ class OpenCodeProvider(AIProvider):
         self.master_fd: int | None = None
         self.session_id: str | None = None  # For multi-turn support
 
-    def _get_isolated_data_dir(self) -> Path:
-        """Get isolated XDG_DATA_HOME for this account."""
-        base_home = safe_home()
-        if self.config.account_name:
-            return Path(base_home) / ".chad" / "opencode-data" / self.config.account_name
-        return Path(base_home) / ".local" / "share"
-
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         ok, detail = _ensure_cli_tool("opencode", self._notify_activity)
         if not ok:
@@ -2426,30 +2460,18 @@ class OpenCodeProvider(AIProvider):
 
         opencode_cli = getattr(self, "cli_path", None) or find_cli_executable("opencode")
 
-        # Build command - use -p for prompt, -f json for structured output, -q for quiet
+        # Build command - use `opencode run` with --format json
+        cmd = [opencode_cli, "run", "--format", "json"]
         if self.session_id:
-            cmd = [
-                opencode_cli,
-                "-p", self.current_message,
-                "-f", "json",
-                "-q",  # Quiet mode (non-interactive)
-                "--session", self.session_id,
-            ]
-        else:
-            cmd = [
-                opencode_cli,
-                "-p", self.current_message,
-                "-f", "json",
-                "-q",
-            ]
-            if self.config.model_name and self.config.model_name != "default":
-                cmd.extend(["--model", self.config.model_name])
+            cmd.extend(["--session", self.session_id])
+        elif self.config.model_name and self.config.model_name != "default":
+            cmd.extend(["-m", self.config.model_name])
+        cmd.append(self.current_message)
 
         try:
             env = os.environ.copy()
             env["TERM"] = "xterm-256color"
-            # Set isolated data directory via XDG_DATA_HOME
-            env["XDG_DATA_HOME"] = str(self._get_isolated_data_dir())
+            # No need to set XDG_DATA_HOME; OpenCode v1.1+ uses ~/.local/share/opencode
 
             json_events = []
             response_parts = []

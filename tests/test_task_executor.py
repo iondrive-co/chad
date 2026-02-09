@@ -76,12 +76,40 @@ class TestClaudeStreamJsonParser:
         results = parser.feed(data)
         assert results == []
 
-    def test_ignores_result(self):
-        """Parser skips result messages."""
+    def test_result_captures_stats(self):
+        """Parser captures usage stats from result events."""
+        parser = ClaudeStreamJsonParser()
+        data = b'{"type":"result","stats":{"total_tokens":1500,"input_tokens":1000,"output_tokens":500,"cached":100,"duration_ms":3000,"tool_calls":2}}\n'
+        results = parser.feed(data)
+        assert results == []  # No display output
+        assert parser.result_stats["total_tokens"] == 1500
+        assert parser.result_stats["input_tokens"] == 1000
+        assert parser.result_stats["output_tokens"] == 500
+        assert parser.result_stats["tool_calls"] == 2
+
+    def test_result_without_stats_does_nothing(self):
+        """Parser ignores result events without stats."""
         parser = ClaudeStreamJsonParser()
         data = b'{"type":"result","result":"Done"}\n'
         results = parser.feed(data)
         assert results == []
+        assert parser.result_stats == {}
+
+    def test_init_captures_model_from_system_event(self):
+        """Parser captures model name from Claude-style system init events."""
+        parser = ClaudeStreamJsonParser()
+        data = b'{"type":"system","subtype":"init","model":"claude-sonnet-4-5"}\n'
+        results = parser.feed(data)
+        assert results == []
+        assert parser.init_model == "claude-sonnet-4-5"
+
+    def test_init_captures_model_from_gemini_event(self):
+        """Parser captures model name from Gemini-style init events."""
+        parser = ClaudeStreamJsonParser()
+        data = b'{"type":"init","model":"gemini-2.5-pro","session_id":"abc123"}\n'
+        results = parser.feed(data)
+        assert results == []
+        assert parser.init_model == "gemini-2.5-pro"
 
     def test_handles_incomplete_lines(self):
         """Parser buffers incomplete JSON lines."""
@@ -147,6 +175,36 @@ class TestClaudeStreamJsonParser:
         # Should show actual tool names, not "3 other"
         assert summary == "• 1 file read, 1 edit, AskUserQuestion, 2 TodoWrite"
 
+    def test_flush_processes_remaining_buffer(self):
+        """flush() should process any remaining bytes without trailing newline."""
+        parser = ClaudeStreamJsonParser()
+        # Feed data without trailing newline - feed() won't process it
+        parser.feed(b'{"type":"result","stats":{"input_tokens":100,"output_tokens":50}}')
+        assert parser.result_stats == {}  # Not yet processed
+
+        remaining = parser.flush()
+        # result events return None for display but capture stats
+        assert remaining == []
+        assert parser.result_stats == {"input_tokens": 100, "output_tokens": 50}
+
+    def test_flush_returns_text_from_incomplete_line(self):
+        """flush() should return text from a message without trailing newline."""
+        parser = ClaudeStreamJsonParser()
+        parser.feed(b'{"type":"message","role":"assistant","content":"Final answer"}')
+        results = parser.flush()
+        assert results == ["Final answer"]
+
+    def test_flush_empty_buffer_returns_nothing(self):
+        """flush() with empty buffer returns empty list."""
+        parser = ClaudeStreamJsonParser()
+        assert parser.flush() == []
+
+    def test_flush_whitespace_only_buffer_returns_nothing(self):
+        """flush() with whitespace-only buffer returns empty list."""
+        parser = ClaudeStreamJsonParser()
+        parser.feed(b"   \n")  # This gets consumed by feed, leaving empty buffer
+        assert parser.flush() == []
+
 
 class TestBuildAgentCommand:
     """Tests for build_agent_command function."""
@@ -179,6 +237,21 @@ class TestBuildAgentCommand:
         assert "--output-format" in cmd and "stream-json" in cmd
         assert "--permission-mode" in cmd
         assert len(cmd) == 7  # claude, -p, --verbose, --output-format, stream-json, --permission-mode, bypassPermissions
+        assert initial_input is None
+
+    def test_gemini_uses_non_interactive_prompt_flag(self, tmp_path):
+        """Gemini must run headless with -p so the process exits after each phase."""
+        cmd, env, initial_input = build_agent_command(
+            "gemini", "test-account", tmp_path, "Fix the bug"
+        )
+
+        assert "gemini" in Path(cmd[0]).name
+        assert "-y" in cmd
+        assert "--output-format" in cmd and "stream-json" in cmd
+        assert "-p" in cmd
+        prompt_idx = cmd.index("-p")
+        assert "Fix the bug" in cmd[prompt_idx + 1]
+        assert "Phase 1: Exploration" in cmd[prompt_idx + 1]
         assert initial_input is None
 
     def test_mock_provider_produces_output(self, tmp_path):
@@ -288,6 +361,37 @@ class TestBuildAgentCommand:
         prompt_arg = [arg for arg in cmd if "Custom exploration prompt" in arg]
         assert len(prompt_arg) == 1
 
+    def test_opencode_uses_run_with_json_format(self, tmp_path):
+        """OpenCode build_agent_command uses 'opencode run --format json'."""
+        cmd, env, initial_input = build_agent_command(
+            "opencode", "test-oc", tmp_path, "Fix the bug"
+        )
+
+        assert "run" in cmd
+        assert "--format" in cmd
+        assert "json" in cmd
+        # Prompt is positional after 'run'
+        assert "Fix the bug" in cmd[-1]
+
+    def test_opencode_passes_model_flag(self, tmp_path):
+        """OpenCode passes -m with the model in provider/model format."""
+        cmd, env, initial_input = build_agent_command(
+            "opencode", "test-oc", tmp_path, "Fix the bug",
+            model="openai/gpt-4o",
+        )
+
+        m_idx = cmd.index("-m")
+        assert cmd[m_idx + 1] == "openai/gpt-4o"
+
+    def test_opencode_default_model(self, tmp_path):
+        """OpenCode uses anthropic/claude-sonnet-4-5 as default model."""
+        cmd, env, initial_input = build_agent_command(
+            "opencode", "test-oc", tmp_path, "Fix the bug"
+        )
+
+        m_idx = cmd.index("-m")
+        assert cmd[m_idx + 1] == "anthropic/claude-sonnet-4-5"
+
 
 def _init_git_repo(repo_path: Path) -> None:
     repo_path.mkdir(parents=True, exist_ok=True)
@@ -357,6 +461,47 @@ def test_task_executor_times_out_hung_agent(tmp_path, monkeypatch):
 
     # Ensure the PTY session was cleaned up
     assert get_pty_stream_service().list_sessions() == []
+
+
+def test_status_events_do_not_refresh_activity_timer(tmp_path, monkeypatch):
+    """Synthetic status events should not count as agent activity."""
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"accounts": {"idle": {"provider": "mock"}}}), encoding="utf-8")
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+    session_manager = SessionManager()
+    session = session_manager.create_session(project_path=str(repo_path), name="status-activity-test")
+    executor = TaskExecutor(ConfigManager(), session_manager, inactivity_timeout=30.0)
+
+    import chad.server.services.task_executor as te
+
+    def silent_command(provider, account_name, project_path, task_description=None,
+                       screenshots=None, phase="combined", exploration_output=None, **kwargs):
+        return ["bash", "-c", "exit 0"], {}, None
+
+    monkeypatch.setattr(te, "build_agent_command", silent_command)
+
+    touched: list[str] = []
+
+    def touch_spy(task_id: str) -> None:
+        touched.append(task_id)
+
+    monkeypatch.setattr(executor, "_touch_activity", touch_spy)
+
+    task = executor.start_task(
+        session_id=session.id,
+        project_path=str(repo_path),
+        task_description="No output task",
+        coding_account="idle",
+    )
+    task._thread.join(timeout=10)
+
+    assert task.completed_at is not None
+    assert touched == []
 
 
 def test_terminal_output_is_periodically_flushed_and_decoded(tmp_path, monkeypatch):

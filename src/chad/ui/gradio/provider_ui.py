@@ -325,43 +325,34 @@ class ProviderUIManager:
     def _get_gemini_remaining_usage(self) -> float:
         """Get Gemini remaining usage (0.0-1.0) by counting today's requests.
 
-        Calculates remaining daily quota based on local session files.
+        Reads from the Gemini usage JSONL file written by the provider.
         """
         from datetime import datetime, timezone
+
+        from chad.util.providers import _read_gemini_usage
 
         oauth_file = Path.home() / ".gemini" / "oauth_creds.json"
         if not oauth_file.exists():
             return 0.0
 
-        tmp_dir = Path.home() / ".gemini" / "tmp"
-        if not tmp_dir.exists():
+        records = _read_gemini_usage()
+        if not records:
             return 1.0  # Logged in, no usage yet
 
         today_requests = 0
         today = datetime.now(timezone.utc).date()
         daily_limit = 2000
 
-        for session_file in tmp_dir.glob("*/chats/session-*.json"):
-            try:
-                with open(session_file, encoding="utf-8") as f:
-                    session_data = json.load(f)
+        for rec in records:
+            ts = rec.get("timestamp", "")
+            if ts:
+                try:
+                    rec_date = datetime.fromisoformat(ts).date()
+                    if rec_date == today:
+                        today_requests += 1
+                except (ValueError, AttributeError):
+                    pass
 
-                for msg in session_data.get("messages", []):
-                    if msg.get("type") == "gemini":
-                        timestamp = msg.get("timestamp", "")
-                        if timestamp:
-                            try:
-                                msg_date = datetime.fromisoformat(
-                                    timestamp.replace("Z", "+00:00")
-                                ).date()
-                                if msg_date == today:
-                                    today_requests += 1
-                            except (ValueError, AttributeError):
-                                pass
-            except (json.JSONDecodeError, OSError, KeyError):
-                continue
-
-        # Return remaining as 0.0-1.0 (1.0 = full capacity)
         used_pct = today_requests / daily_limit
         return max(0.0, min(1.0, 1.0 - used_pct))
 
@@ -932,9 +923,11 @@ class ProviderUIManager:
             return f"⚠️ **Error:** {str(exc)}"
 
     def _get_gemini_usage(self) -> str:  # noqa: C901
-        """Get usage info from Gemini by parsing session files."""
+        """Get usage info from Gemini by reading the usage JSONL file."""
         from collections import defaultdict
         from datetime import datetime, timezone
+
+        from chad.util.providers import _read_gemini_usage
 
         gemini_dir = Path.home() / ".gemini"
         oauth_file = gemini_dir / "oauth_creds.json"
@@ -942,65 +935,32 @@ class ProviderUIManager:
         if not oauth_file.exists():
             return "❌ **Not logged in**\n\nRun `gemini` in terminal to authenticate."
 
-        tmp_dir = gemini_dir / "tmp"
-        if not tmp_dir.exists():
-            return (
-                "✅ **Logged in**\n\n"
-                "⚠️ **Usage data unavailable**\n\n"
-                "Google Gemini only provides usage information after the first model interaction. "
-                "Start a coding session to see token usage details.\n\n"
-                "*Press refresh after using this provider to see current data*"
-            )
-
-        session_files = list(tmp_dir.glob("*/chats/session-*.json"))
-        if not session_files:
-            return (
-                "✅ **Logged in**\n\n"
-                "⚠️ **Usage data unavailable**\n\n"
-                "Google Gemini only provides usage information after the first model interaction. "
-                "Start a coding session to see token usage details.\n\n"
-                "*Press refresh after using this provider to see current data*"
-            )
+        records = _read_gemini_usage()
+        if not records:
+            return "✅ **Logged in**\n\n*No usage data yet*"
 
         model_usage: dict[str, dict[str, int]] = defaultdict(
             lambda: {"requests": 0, "input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
         )
         today_requests = 0
         today = datetime.now(timezone.utc).date()
-        daily_limit = 2000  # Free tier limit
+        daily_limit = 2000
 
-        for session_file in session_files:
-            try:
-                with open(session_file, encoding="utf-8") as f:
-                    session_data = json.load(f)
+        for rec in records:
+            model = rec.get("model", "unknown")
+            model_usage[model]["requests"] += 1
+            model_usage[model]["input_tokens"] += rec.get("input_tokens", 0)
+            model_usage[model]["output_tokens"] += rec.get("output_tokens", 0)
+            model_usage[model]["cached_tokens"] += rec.get("cached_tokens", 0)
 
-                messages = session_data.get("messages", [])
-                for msg in messages:
-                    if msg.get("type") == "gemini":
-                        tokens = msg.get("tokens", {})
-                        model = msg.get("model", "unknown")
-
-                        model_usage[model]["requests"] += 1
-                        model_usage[model]["input_tokens"] += tokens.get("input", 0)
-                        model_usage[model]["output_tokens"] += tokens.get("output", 0)
-                        model_usage[model]["cached_tokens"] += tokens.get("cached", 0)
-
-                        # Count today's requests
-                        timestamp = msg.get("timestamp", "")
-                        if timestamp:
-                            try:
-                                msg_date = datetime.fromisoformat(
-                                    timestamp.replace("Z", "+00:00")
-                                ).date()
-                                if msg_date == today:
-                                    today_requests += 1
-                            except (ValueError, AttributeError):
-                                pass
-            except (json.JSONDecodeError, OSError, KeyError):
-                continue
-
-        if not model_usage:
-            return "✅ **Logged in**\n\n*No usage data yet*"
+            ts = rec.get("timestamp", "")
+            if ts:
+                try:
+                    rec_date = datetime.fromisoformat(ts).date()
+                    if rec_date == today:
+                        today_requests += 1
+                except (ValueError, AttributeError):
+                    pass
 
         # Calculate usage percentage
         util_pct = min((today_requests / daily_limit) * 100, 100.0)
@@ -1022,7 +982,6 @@ class ProviderUIManager:
         total_input = 0
         total_output = 0
         total_cached = 0
-        total_requests = 0
 
         for model, usage in sorted(model_usage.items()):
             reqs = usage["requests"]
@@ -1030,7 +989,6 @@ class ProviderUIManager:
             output_tok = usage["output_tokens"]
             cached_tok = usage["cached_tokens"]
 
-            total_requests += reqs
             total_input += input_tok
             total_output += output_tok
             total_cached += cached_tok
@@ -1187,20 +1145,13 @@ class ProviderUIManager:
         """
         from datetime import datetime, timezone
 
-        # Get isolated data directory for this account
-        if account_name:
-            data_dir = Path.home() / ".chad" / "opencode-data" / account_name / "opencode"
-        else:
-            xdg_data = os.environ.get("XDG_DATA_HOME")
-            if xdg_data:
-                data_dir = Path(xdg_data) / "opencode"
-            else:
-                data_dir = Path.home() / ".local" / "share" / "opencode"
+        # OpenCode v1.1+ stores session data at ~/.local/share/opencode
+        data_dir = Path.home() / ".local" / "share" / "opencode"
 
         sessions_dir = data_dir / "sessions"
 
         if not sessions_dir.exists():
-            return "✅ **Ready**\n\nRun `opencode` in terminal to start.\n\nNo sessions yet."
+            return "✅ **Ready**\n\nNo sessions yet."
 
         # Count today's requests from session files
         today_requests = 0
@@ -1249,15 +1200,8 @@ class ProviderUIManager:
         """Get OpenCode remaining usage (0.0-1.0) by counting today's requests."""
         from datetime import datetime, timezone
 
-        # Get isolated data directory for this account
-        if account_name:
-            data_dir = Path.home() / ".chad" / "opencode-data" / account_name / "opencode"
-        else:
-            xdg_data = os.environ.get("XDG_DATA_HOME")
-            if xdg_data:
-                data_dir = Path(xdg_data) / "opencode"
-            else:
-                data_dir = Path.home() / ".local" / "share" / "opencode"
+        # OpenCode v1.1+ stores session data at ~/.local/share/opencode
+        data_dir = Path.home() / ".local" / "share" / "opencode"
 
         sessions_dir = data_dir / "sessions"
         if not sessions_dir.exists():
@@ -1308,10 +1252,10 @@ class ProviderUIManager:
         else:
             kimi_dir = Path.home() / ".kimi"
 
-        config_file = kimi_dir / "config.toml"
+        creds_file = kimi_dir / "credentials" / "kimi-code.json"
 
-        if not config_file.exists():
-            return "❌ **Not configured**\n\nRun `kimi` in terminal and use `/login` to authenticate."
+        if not creds_file.exists():
+            return "❌ **Not logged in**\n\nAdd this provider again to start the login flow."
 
         # Count today's requests from session files
         sessions_dir = kimi_dir / "sessions"
@@ -1368,8 +1312,8 @@ class ProviderUIManager:
         else:
             kimi_dir = Path.home() / ".kimi"
 
-        config_file = kimi_dir / "config.toml"
-        if not config_file.exists():
+        creds_file = kimi_dir / "credentials" / "kimi-code.json"
+        if not creds_file.exists():
             return 0.0  # Not configured
 
         sessions_dir = kimi_dir / "sessions"
@@ -1449,14 +1393,24 @@ class ProviderUIManager:
                 return False, "Not logged in"
 
             if provider_type == "opencode":
-                # OpenCode doesn't require login, uses backend credentials
-                return True, "Ready (uses backend credentials)"
+                # Check for OAuth credentials from `opencode auth login`
+                auth_file = Path(safe_home()) / ".local" / "share" / "opencode" / "auth.json"
+                if auth_file.exists():
+                    try:
+                        auth_data = json.loads(auth_file.read_text(encoding="utf-8"))
+                        if auth_data:
+                            return True, "Logged in"
+                    except (json.JSONDecodeError, OSError):
+                        pass
+                return False, "Not logged in"
 
             if provider_type == "kimi":
-                # Prefer account-isolated config when account_name is available.
-                isolated_kimi_config = safe_home() / ".chad" / "kimi-homes" / account_name / ".kimi" / "config.toml"
-                global_kimi_config = safe_home() / ".kimi" / "config.toml"
-                if isolated_kimi_config.exists() or global_kimi_config.exists():
+                # Check for actual OAuth credentials (config.toml always exists after first run).
+                isolated_creds = (
+                    safe_home() / ".chad" / "kimi-homes" / account_name / ".kimi" / "credentials" / "kimi-code.json"
+                )
+                global_creds = safe_home() / ".kimi" / "credentials" / "kimi-code.json"
+                if isolated_creds.exists() or global_creds.exists():
                     return True, "Logged in"
                 return False, "Not logged in"
 
@@ -1499,7 +1453,7 @@ class ProviderUIManager:
 
     def add_provider(self, provider_name: str, provider_type: str, card_slots: int):  # noqa: C901
         """Add a new provider and return refreshed provider panel state."""
-        import subprocess
+        import subprocess  # not at module level to avoid circular imports
 
         name_field_value = provider_name
         add_btn_state = gr.update(interactive=bool(provider_name.strip()))
@@ -1526,8 +1480,6 @@ class ProviderUIManager:
                 counter += 1
 
             if provider_type == "openai":
-                import os
-                import shutil as shutil_mod
                 import time
 
                 codex_home = Path(self._setup_codex_account(account_name))
@@ -1592,7 +1544,7 @@ class ProviderUIManager:
                                         if tokens.get("access_token"):
                                             # Copy to isolated directory
                                             isolated_auth_file.parent.mkdir(parents=True, exist_ok=True)
-                                            shutil_mod.copy2(real_auth_file, isolated_auth_file)
+                                            shutil.copy2(real_auth_file, isolated_auth_file)
                                             login_success = True
                                             break
                                 except (json.JSONDecodeError, KeyError, OSError):
@@ -1620,7 +1572,6 @@ class ProviderUIManager:
 
                 except FileNotFoundError:
                     # CLI not found - provide helpful message
-                    import shutil
                     codex_home_path = self._get_codex_home(account_name)
                     if codex_home_path.exists():
                         shutil.rmtree(codex_home_path, ignore_errors=True)
@@ -1642,8 +1593,6 @@ class ProviderUIManager:
                     add_btn_state = gr.update(interactive=False)
                     accordion_state = gr.update(open=False)
                 else:
-                    import shutil
-
                     codex_home_path = self._get_codex_home(account_name)
                     if codex_home_path.exists():
                         shutil.rmtree(codex_home_path, ignore_errors=True)
@@ -1671,7 +1620,6 @@ class ProviderUIManager:
                     # Use browser OAuth flow to get all scopes (user:inference, user:profile)
                     # Token auto-refreshes via _refresh_claude_token when expired
                     import time
-                    import os
 
                     creds_file = config_dir / ".credentials.json"
                     is_windows = self._is_windows()
@@ -1680,7 +1628,6 @@ class ProviderUIManager:
                         if is_windows:
                             # On Windows, open Claude in a new console window for user interaction
                             # and poll for credentials in the background
-                            import subprocess
 
                             # Set up environment
                             env = os.environ.copy()
@@ -1768,7 +1715,6 @@ class ProviderUIManager:
 
                     except FileNotFoundError:
                         # CLI not found - provide helpful message
-                        import shutil
                         if config_dir.exists():
                             shutil.rmtree(config_dir, ignore_errors=True)
                         result = (
@@ -1790,8 +1736,6 @@ class ProviderUIManager:
                     accordion_state = gr.update(open=False)
                 else:
                     # Login failed/timed out - clean up
-                    import shutil
-
                     if config_dir.exists():
                         shutil.rmtree(config_dir, ignore_errors=True)
 
@@ -1809,7 +1753,6 @@ class ProviderUIManager:
             elif provider_type == "gemini":
                 # Gemini uses browser OAuth
                 import time
-                import os
 
                 gemini_cli = cli_detail or "gemini"
                 is_windows = self._is_windows()
@@ -1929,7 +1872,6 @@ class ProviderUIManager:
             elif provider_type == "qwen":
                 # Qwen uses QwenChat OAuth (fork of Gemini CLI)
                 import time
-                import os
 
                 qwen_cli = cli_detail or "qwen"
                 is_windows = self._is_windows()
@@ -2035,12 +1977,157 @@ class ProviderUIManager:
                     base_response = self.provider_action_response(result, card_slots)
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
 
+            elif provider_type == "kimi":
+                # Kimi login via `kimi login --json` which emits structured JSON events
+                import time
+                import webbrowser
+
+                login_success = False
+                kimi_home = Path(safe_home()) / ".chad" / "kimi-homes" / account_name
+                kimi_home.mkdir(parents=True, exist_ok=True)
+                creds_file = kimi_home / ".kimi" / "credentials" / "kimi-code.json"
+
+                # Check if already logged in
+                if creds_file.exists():
+                    login_success = True
+                else:
+                    resolved = self.installer.resolve_tool_path("kimi")
+                    kimi_cli = str(resolved) if resolved else shutil.which("kimi")
+                    if not kimi_cli:
+                        result = (
+                            "❌ Kimi CLI not found.\n\n"
+                            "Please install Kimi Code first:\n"
+                            "```\nnpm install -g @anthropic-ai/kimi-code\n```"
+                        )
+                        base_response = self.provider_action_response(result, card_slots)
+                        return (*base_response, name_field_value, add_btn_state, accordion_state)
+
+                    env = os.environ.copy()
+                    env["HOME"] = str(kimi_home)
+                    env["TERM"] = "xterm-256color"
+
+                    try:
+                        proc = subprocess.Popen(
+                            [kimi_cli, "login", "--json"],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            env=env,
+                        )
+                        start_time = time.time()
+                        timeout_secs = 120
+
+                        while time.time() - start_time < timeout_secs:
+                            line = proc.stdout.readline()
+                            if not line:
+                                if proc.poll() is not None:
+                                    break
+                                time.sleep(0.5)
+                                continue
+                            try:
+                                event = json.loads(line.decode("utf-8", errors="replace").strip())
+                                evt_type = event.get("type", "")
+                                if evt_type == "verification_url":
+                                    url = event.get("data", {}).get("verification_url", "")
+                                    if url:
+                                        webbrowser.open(url)
+                                elif evt_type == "success":
+                                    login_success = True
+                                    break
+                                elif evt_type == "error":
+                                    break
+                            except (json.JSONDecodeError, UnicodeDecodeError):
+                                continue
+
+                        try:
+                            proc.terminate()
+                            proc.wait(timeout=5)
+                        except Exception:
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
+                    except FileNotFoundError:
+                        result = "❌ Kimi CLI not found."
+                        base_response = self.provider_action_response(result, card_slots)
+                        return (*base_response, name_field_value, add_btn_state, accordion_state)
+
+                if login_success:
+                    self.api_client.create_account(account_name, provider_type)
+                    result = f"✅ Provider '{account_name}' added and logged in!"
+                    name_field_value = ""
+                    add_btn_state = gr.update(interactive=False)
+                    accordion_state = gr.update(open=False)
+                else:
+                    if kimi_home.exists():
+                        shutil.rmtree(kimi_home, ignore_errors=True)
+                    result = f"❌ Kimi login failed for '{account_name}'. Please try again."
+                    base_response = self.provider_action_response(result, card_slots)
+                    return (*base_response, name_field_value, add_btn_state, accordion_state)
+
+            elif provider_type == "opencode":
+                # OpenCode uses browser OAuth via `opencode auth login`
+                import time
+
+                opencode_cli = cli_detail or "opencode"
+                auth_file = Path(safe_home()) / ".local" / "share" / "opencode" / "auth.json"
+
+                login_success, _ = self._check_provider_login(provider_type, account_name)
+
+                if not login_success:
+                    try:
+                        # `opencode auth login` opens browser and waits for callback
+                        proc = subprocess.Popen(
+                            [opencode_cli, "auth", "login"],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                        )
+
+                        start_time = time.time()
+                        timeout_secs = 120
+                        while time.time() - start_time < timeout_secs:
+                            if auth_file.exists():
+                                try:
+                                    data = json.loads(auth_file.read_text(encoding="utf-8"))
+                                    if data:
+                                        login_success = True
+                                        time.sleep(1)
+                                        break
+                                except (json.JSONDecodeError, OSError):
+                                    pass
+                            if proc.poll() is not None:
+                                break
+                            time.sleep(1)
+
+                        try:
+                            proc.terminate()
+                            proc.wait(timeout=5)
+                        except Exception:
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
+
+                    except FileNotFoundError:
+                        result = "❌ OpenCode CLI not found."
+                        base_response = self.provider_action_response(result, card_slots)
+                        return (*base_response, name_field_value, add_btn_state, accordion_state)
+
+                if login_success:
+                    self.api_client.create_account(account_name, provider_type)
+                    result = f"✅ Provider '{account_name}' added and logged in!"
+                    name_field_value = ""
+                    add_btn_state = gr.update(interactive=False)
+                    accordion_state = gr.update(open=False)
+                else:
+                    result = f"❌ OpenCode login timed out for '{account_name}'. Please try again."
+                    base_response = self.provider_action_response(result, card_slots)
+                    return (*base_response, name_field_value, add_btn_state, accordion_state)
+
             else:
                 # Generic flow for mistral and other providers
                 login_success, login_msg = self._check_provider_login(provider_type, account_name)
                 auth_info = {
                     "mistral": ("vibe --setup", "Set up your Mistral API key"),
-                    "kimi": ("kimi", "Run `/login` to authenticate"),
                 }
 
                 # Gate account creation for providers that require up-front CLI auth.
@@ -2071,8 +2158,6 @@ class ProviderUIManager:
             base_response = self.provider_action_response(result, card_slots)
             return (*base_response, name_field_value, add_btn_state, accordion_state)
         except subprocess.TimeoutExpired:
-            import shutil
-
             codex_home_path = self._get_codex_home(account_name)
             if codex_home_path.exists():
                 shutil.rmtree(codex_home_path, ignore_errors=True)
@@ -2315,8 +2400,6 @@ class ProviderUIManager:
 
     def delete_provider(self, account_name: str, confirmed: bool, card_slots: int):
         """Delete a provider after confirmation and refresh the provider panel."""
-        import shutil
-
         try:
             if not account_name:
                 return self.provider_action_response("❌ No provider selected", card_slots)

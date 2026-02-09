@@ -155,6 +155,16 @@ def build_agent_command(
         # Vibe CLI (Mistral)
         cmd = ["vibe"]
 
+    elif provider == "opencode":
+        # OpenCode CLI v1.1+ — interactive TUI mode
+        cmd = ["opencode"]
+
+    elif provider == "kimi":
+        # Kimi Code CLI with isolated HOME
+        kimi_home = Path.home() / ".chad" / "kimi-homes" / account_name
+        cmd = ["kimi", "-y"]
+        env["HOME"] = str(kimi_home)
+
     elif provider == "mock":
         # Mock provider for testing - creates a file to simulate agent work
         mock_script = f'''

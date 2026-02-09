@@ -11,18 +11,21 @@ Event loop
 Option to resume task once usage limit has reset (rather than switch to another provider)
 Receive tasks from slack
 
-v0.12 Slip Slop Slap
+v0.12 Agent Ick
 
-Full inter-provider handoff including summarize progress and resume from checkpoints
-Load balance based on usage, user preference, context limits hit, etc.
-Session branching and resume session at startup
-Repeated failures
-Queue of bugs/features
+Replace exploration phase with multiple progress updates extracted from the stream without requiring agent response
+Repeated failures (see below)
 
 v0.13 Intentionality Reduction
 
 Packaging for different platforms
 Renamed web_ui to gradio_ui. Make Remix static site ui which downloads and talks to the server on localhost
+
+v0.14 Slip Slop Slap
+
+Session branching and resume session at startup
+Queue of bugs/features
+
 
 ---- Repeated failures ----
 
