@@ -404,6 +404,29 @@ def _init_git_repo(repo_path: Path) -> None:
     subprocess.run(["git", "commit", "-m", "init"], cwd=repo_path, check=True)
 
 
+def test_idle_warning_threshold_for_default_timeout(tmp_path, monkeypatch):
+    """Long inactivity timeouts should still warn users quickly."""
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"accounts": {}}), encoding="utf-8")
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+
+    executor = TaskExecutor(ConfigManager(), SessionManager())
+
+    assert executor.inactivity_timeout == 900.0
+    assert executor._idle_warning_threshold() == 60.0
+
+
+def test_idle_warning_threshold_stays_below_timeout(tmp_path, monkeypatch):
+    """Warning threshold should stay below very short inactivity timeouts."""
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"accounts": {}}), encoding="utf-8")
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+
+    executor = TaskExecutor(ConfigManager(), SessionManager(), inactivity_timeout=2.0)
+
+    assert executor._idle_warning_threshold() == 1.0
+
+
 def test_task_executor_times_out_hung_agent(tmp_path, monkeypatch):
     """Hung agent processes are terminated after inactivity and logged as timeout."""
     repo_path = tmp_path / "repo"

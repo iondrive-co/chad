@@ -8,12 +8,12 @@ Repo map and next step field in initial update
 v0.11 Epochalypse
 
 Event loop
-Option to resume task once usage limit has reset (rather than switch to another provider)
-Receive tasks from slack
+Use loop to extract progress updates from agent stream and notify API listeners, who can now get rid of exploration phase
+Use loop to make option to resume task once usage limit has reset (rather than switch to another provider)
 
 v0.12 Agent Ick
 
-Replace exploration phase with multiple progress updates extracted from the stream without requiring agent response
+Receive tasks from slack and output progress from event loop
 Repeated failures (see below)
 
 v0.13 Intentionality Reduction

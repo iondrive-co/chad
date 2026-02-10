@@ -676,6 +676,10 @@ writeln(f"{{GRAY}}Changes made to BUGS.md{{RESET}}")
 class TaskExecutor:
     """Executes coding tasks using PTY-based agent CLIs."""
 
+    IDLE_WARNING_MIN_SECONDS = 5.0
+    IDLE_WARNING_MAX_SECONDS = 60.0
+    IDLE_WARNING_RATIO = 0.2
+
     def __init__(
         self,
         config_manager,
@@ -692,6 +696,18 @@ class TaskExecutor:
         # don't ignore heavy Read/Grep usage with no terminal writes.
         self._activity_times: dict[str, float] = {}
         self._lock = threading.RLock()
+
+    def _idle_warning_threshold(self) -> float:
+        """Seconds of silence before first idle status warning."""
+        if self.inactivity_timeout is None:
+            return float("inf")
+        warn_after = min(
+            self.IDLE_WARNING_MAX_SECONDS,
+            max(self.IDLE_WARNING_MIN_SECONDS, self.inactivity_timeout * self.IDLE_WARNING_RATIO),
+        )
+        if warn_after >= self.inactivity_timeout:
+            return max(0.5, self.inactivity_timeout * 0.5)
+        return warn_after
 
     def _check_provider_threshold(
         self,
@@ -1109,9 +1125,16 @@ class TaskExecutor:
                     last_any_activity = self._activity_times.get(task.id, last_output_time)
 
                 idle_secs = now - last_any_activity
-                warn_after = self.inactivity_timeout * 0.8
-                if idle_secs > warn_after and (now - last_warning_time) > 5.0:
-                    emit("status", status=f"⚠️ Agent idle for {int(idle_secs)}s — will time out at {int(self.inactivity_timeout)}s")
+                warn_after = self._idle_warning_threshold()
+                warn_interval = min(60.0, max(5.0, warn_after))
+                if idle_secs >= warn_after and (now - last_warning_time) >= warn_interval:
+                    emit(
+                        "status",
+                        status=(
+                            f"ℹ️ No agent output for {int(idle_secs)}s during {phase} phase "
+                            f"(timeout at {int(self.inactivity_timeout)}s)"
+                        ),
+                    )
                     last_warning_time = now
 
                 if idle_secs > self.inactivity_timeout:

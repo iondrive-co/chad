@@ -7,6 +7,7 @@ eliminating the dual-path complexity in the SSE endpoint.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, AsyncIterator
@@ -154,6 +155,13 @@ class EventMultiplexer:
         """
         pty_session = None
 
+        async def _cancel_pending_next(next_task: asyncio.Task | None) -> None:
+            if next_task is None or next_task.done():
+                return
+            next_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                await next_task
+
         # If terminal output is requested, keep polling for the PTY session while
         # still streaming EventLog and ping events. This avoids the previous
         # race where we fell back permanently after a fixed wait.
@@ -187,103 +195,124 @@ class EventMultiplexer:
             try:
                 subscriber = pty_service.subscribe(pty_session.stream_id)
                 pty_iter = subscriber.__aiter__()
+                pty_next_task: asyncio.Task | None = None
+                try:
+                    while True:
+                        # Check if we should send a ping (keepalive for long waits)
+                        if self._should_ping():
+                            yield self._create_ping()
 
-                while True:
-                    # Check if we should send a ping (keepalive for long waits)
-                    if self._should_ping():
-                        yield self._create_ping()
+                        if pty_next_task is None:
+                            pty_next_task = asyncio.create_task(pty_iter.__anext__())
 
-                    try:
-                        # Get next PTY event - the subscribe generator already has
-                        # internal polling with short sleeps, so we don't need wait_for.
-                        # Using wait_for here would cancel the generator on timeout,
-                        # which closes it and causes StopAsyncIteration on next call.
-                        pty_event = await pty_iter.__anext__()
-                    except StopAsyncIteration:
-                        # PTY stream ended - but the task may have continuation phases
-                        # that run in sequence. Wait for session_ended event before
-                        # emitting complete to avoid premature verification.
-                        self._sync_seq_with_log()
-                        exit_code = pty_session.exit_code if pty_session else None
+                        done, _ = await asyncio.wait({pty_next_task}, timeout=0.1)
+                        if not done:
+                            # PTY is quiet: keep draining structured events so idle
+                            # status updates and phase markers continue to reach UI.
+                            if include_events and self.event_log:
+                                for event in self._drain_event_log(skip_terminal=True):
+                                    yield event
+                                    if event.data.get("type") == "session_ended":
+                                        await _cancel_pending_next(pty_next_task)
+                                        yield MuxEvent(
+                                            type="complete",
+                                            data={"exit_code": pty_session.exit_code if pty_session else None},
+                                            seq=self._next_seq(),
+                                        )
+                                        return
+                            continue
 
-                        if include_events and self.event_log:
-                            for event in self._drain_event_log(skip_terminal=True):
-                                yield event
-                                if event.data.get("type") == "session_ended":
-                                    yield MuxEvent(
-                                        type="complete",
-                                        data={"exit_code": exit_code},
-                                        seq=self._next_seq(),
-                                    )
-                                    return
-
-                            # No session_ended yet - fall through to EventLog polling
-                            # to wait for continuation phases to complete
-                            break
-
-                        # No event_log to poll - emit complete immediately
-                        yield MuxEvent(
-                            type="complete",
-                            data={"exit_code": exit_code},
-                            seq=self._next_seq(),
-                        )
-                        return
-
-                    if pty_event.type == "output":
-                        # Align seq with EventLog which has already logged the chunk
-                        if self.event_log:
+                        try:
+                            pty_event = pty_next_task.result()
+                        except StopAsyncIteration:
+                            # PTY stream ended - but the task may have continuation phases
+                            # that run in sequence. Wait for session_ended event before
+                            # emitting complete to avoid premature verification.
                             self._sync_seq_with_log()
+                            exit_code = pty_session.exit_code if pty_session else None
 
-                        # Yield the terminal output
-                        yield MuxEvent(
-                            type="terminal",
-                            data={
-                                "data": pty_event.data,
-                                "has_ansi": pty_event.has_ansi,
-                            },
-                            seq=self._seq or self._next_seq(),
-                        )
+                            if include_events and self.event_log:
+                                for event in self._drain_event_log(skip_terminal=True):
+                                    yield event
+                                    if event.data.get("type") == "session_ended":
+                                        yield MuxEvent(
+                                            type="complete",
+                                            data={"exit_code": exit_code},
+                                            seq=self._next_seq(),
+                                        )
+                                        return
 
-                        # Drain any pending EventLog events (skip terminal_output)
-                        if include_events:
-                            for event in self._drain_event_log(skip_terminal=True):
-                                yield event
+                                # No session_ended yet - fall through to EventLog polling
+                                # to wait for continuation phases to complete
+                                break
 
-                    elif pty_event.type == "exit":
-                        self._sync_seq_with_log()
-                        # Drain remaining EventLog events - wait for session_ended
-                        # to handle continuation phases properly
-                        if include_events and self.event_log:
-                            for event in self._drain_event_log(skip_terminal=True):
-                                yield event
-                                if event.data.get("type") == "session_ended":
-                                    yield MuxEvent(
-                                        type="complete",
-                                        data={"exit_code": pty_event.exit_code},
-                                        seq=self._next_seq(),
-                                    )
-                                    return
+                            # No event_log to poll - emit complete immediately
+                            yield MuxEvent(
+                                type="complete",
+                                data={"exit_code": exit_code},
+                                seq=self._next_seq(),
+                            )
+                            return
+                        finally:
+                            pty_next_task = None
 
-                            # No session_ended yet - fall through to EventLog polling
-                            # to wait for continuation phases to complete
-                            break
+                        if pty_event.type == "output":
+                            # Align seq with EventLog which has already logged the chunk
+                            if self.event_log:
+                                self._sync_seq_with_log()
 
-                        # No event_log to poll - emit complete immediately
-                        yield MuxEvent(
-                            type="complete",
-                            data={"exit_code": pty_event.exit_code},
-                            seq=self._next_seq(),
-                        )
-                        return
+                            # Yield the terminal output
+                            yield MuxEvent(
+                                type="terminal",
+                                data={
+                                    "data": pty_event.data,
+                                    "has_ansi": pty_event.has_ansi,
+                                },
+                                seq=self._seq or self._next_seq(),
+                            )
 
-                    elif pty_event.type == "error":
-                        self._sync_seq_with_log()
-                        yield MuxEvent(
-                            type="error",
-                            data={"error": pty_event.error},
-                            seq=self._next_seq(),
-                        )
-                        return
+                            # Drain any pending EventLog events (skip terminal_output)
+                            if include_events:
+                                for event in self._drain_event_log(skip_terminal=True):
+                                    yield event
+
+                        elif pty_event.type == "exit":
+                            self._sync_seq_with_log()
+                            # Drain remaining EventLog events - wait for session_ended
+                            # to handle continuation phases properly
+                            if include_events and self.event_log:
+                                for event in self._drain_event_log(skip_terminal=True):
+                                    yield event
+                                    if event.data.get("type") == "session_ended":
+                                        yield MuxEvent(
+                                            type="complete",
+                                            data={"exit_code": pty_event.exit_code},
+                                            seq=self._next_seq(),
+                                        )
+                                        return
+
+                                # No session_ended yet - fall through to EventLog polling
+                                # to wait for continuation phases to complete
+                                break
+
+                            # No event_log to poll - emit complete immediately
+                            yield MuxEvent(
+                                type="complete",
+                                data={"exit_code": pty_event.exit_code},
+                                seq=self._next_seq(),
+                            )
+                            return
+
+                        elif pty_event.type == "error":
+                            self._sync_seq_with_log()
+                            yield MuxEvent(
+                                type="error",
+                                data={"error": pty_event.error},
+                                seq=self._next_seq(),
+                            )
+                            return
+                finally:
+                    await _cancel_pending_next(pty_next_task)
 
             except Exception as e:
                 yield MuxEvent(
@@ -328,68 +357,91 @@ class EventMultiplexer:
                     try:
                         subscriber = pty_service.subscribe(pty_session.stream_id)
                         pty_iter = subscriber.__aiter__()
+                        continuation_next_task: asyncio.Task | None = None
+                        try:
+                            while True:
+                                if self._should_ping():
+                                    yield self._create_ping()
 
-                        while True:
-                            if self._should_ping():
-                                yield self._create_ping()
+                                if continuation_next_task is None:
+                                    continuation_next_task = asyncio.create_task(pty_iter.__anext__())
 
-                            try:
-                                pty_event = await pty_iter.__anext__()
-                            except StopAsyncIteration:
-                                # This PTY ended - check for session_ended or more continuation
-                                self._sync_seq_with_log()
-                                exit_code = pty_session.exit_code if pty_session else None
+                                done, _ = await asyncio.wait({continuation_next_task}, timeout=0.1)
+                                if not done:
+                                    if include_events and self.event_log:
+                                        for event in self._drain_event_log(skip_terminal=True):
+                                            yield event
+                                            if event.data.get("type") == "session_ended":
+                                                await _cancel_pending_next(continuation_next_task)
+                                                yield MuxEvent(
+                                                    type="complete",
+                                                    data={"exit_code": pty_session.exit_code if pty_session else None},
+                                                    seq=self._next_seq(),
+                                                )
+                                                return
+                                    continue
 
-                                if include_events and self.event_log:
-                                    for event in self._drain_event_log(skip_terminal=True):
-                                        yield event
-                                        if event.data.get("type") == "session_ended":
-                                            yield MuxEvent(
-                                                type="complete",
-                                                data={"exit_code": exit_code},
-                                                seq=self._next_seq(),
-                                            )
-                                            return
-                                # Break inner loop to check for another continuation
-                                break
-
-                            if pty_event.type == "output":
-                                if self.event_log:
+                                try:
+                                    pty_event = continuation_next_task.result()
+                                except StopAsyncIteration:
+                                    # This PTY ended - check for session_ended or more continuation
                                     self._sync_seq_with_log()
-                                yield MuxEvent(
-                                    type="terminal",
-                                    data={
-                                        "data": pty_event.data,
-                                        "has_ansi": pty_event.has_ansi,
-                                    },
-                                    seq=self._seq or self._next_seq(),
-                                )
-                                if include_events:
-                                    for event in self._drain_event_log(skip_terminal=True):
-                                        yield event
-                            elif pty_event.type == "exit":
-                                self._sync_seq_with_log()
-                                exit_code = pty_event.exit_code
-                                if include_events and self.event_log:
-                                    for event in self._drain_event_log(skip_terminal=True):
-                                        yield event
-                                        if event.data.get("type") == "session_ended":
-                                            yield MuxEvent(
-                                                type="complete",
-                                                data={"exit_code": exit_code},
-                                                seq=self._next_seq(),
-                                            )
-                                            return
-                                # Break inner loop to check for another continuation
-                                break
-                            elif pty_event.type == "error":
-                                self._sync_seq_with_log()
-                                yield MuxEvent(
-                                    type="error",
-                                    data={"error": pty_event.error},
-                                    seq=self._next_seq(),
-                                )
-                                return
+                                    exit_code = pty_session.exit_code if pty_session else None
+
+                                    if include_events and self.event_log:
+                                        for event in self._drain_event_log(skip_terminal=True):
+                                            yield event
+                                            if event.data.get("type") == "session_ended":
+                                                yield MuxEvent(
+                                                    type="complete",
+                                                    data={"exit_code": exit_code},
+                                                    seq=self._next_seq(),
+                                                )
+                                                return
+                                    # Break inner loop to check for another continuation
+                                    break
+                                finally:
+                                    continuation_next_task = None
+
+                                if pty_event.type == "output":
+                                    if self.event_log:
+                                        self._sync_seq_with_log()
+                                    yield MuxEvent(
+                                        type="terminal",
+                                        data={
+                                            "data": pty_event.data,
+                                            "has_ansi": pty_event.has_ansi,
+                                        },
+                                        seq=self._seq or self._next_seq(),
+                                    )
+                                    if include_events:
+                                        for event in self._drain_event_log(skip_terminal=True):
+                                            yield event
+                                elif pty_event.type == "exit":
+                                    self._sync_seq_with_log()
+                                    exit_code = pty_event.exit_code
+                                    if include_events and self.event_log:
+                                        for event in self._drain_event_log(skip_terminal=True):
+                                            yield event
+                                            if event.data.get("type") == "session_ended":
+                                                yield MuxEvent(
+                                                    type="complete",
+                                                    data={"exit_code": exit_code},
+                                                    seq=self._next_seq(),
+                                                )
+                                                return
+                                    # Break inner loop to check for another continuation
+                                    break
+                                elif pty_event.type == "error":
+                                    self._sync_seq_with_log()
+                                    yield MuxEvent(
+                                        type="error",
+                                        data={"error": pty_event.error},
+                                        seq=self._next_seq(),
+                                    )
+                                    return
+                        finally:
+                            await _cancel_pending_next(continuation_next_task)
 
                     except Exception as e:
                         yield MuxEvent(
