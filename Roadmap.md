@@ -1,10 +1,3 @@
-v0.10 Hack-Propagation
-
-Expanded event log and implemented inter-provider handoff
-Search for text in agent streams
-Improve the mistral and gemini and qwen providers data 
-Repo map and next step field in initial update
-
 v0.11 Epochalypse
 
 Event loop

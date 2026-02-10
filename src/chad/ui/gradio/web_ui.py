@@ -4877,7 +4877,6 @@ class ChadWebUI:
         chat_history = (
             current_history if len(current_history) >= len(session.chat_history) else session.chat_history.copy()
         )
-        task_description = session.task_description or ""
         verification_log: list[dict[str, object]] = []
 
         # Stable live_id for DOM patching across the session
@@ -4918,6 +4917,11 @@ class ChadWebUI:
 
         # Capture raw message before screenshot/resume-prompt modifications
         raw_followup_message = followup_message
+
+        # The follow-up message IS the new task — use it as the task description
+        # for verification (session.task_description may be empty after merge/discard)
+        task_description = raw_followup_message
+        session.task_description = raw_followup_message
 
         # Append screenshot paths to message if provided
         if screenshots:
