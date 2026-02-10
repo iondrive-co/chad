@@ -1073,7 +1073,7 @@ mark.live-search-match.current {
 .workspace-display .workspace-inline {
   margin: 0 !important;
   font-size: 12px;
-  color: #cdd6f4;
+  color: #000000;
   white-space: normal;
   word-break: break-all;
   overflow-wrap: break-word;
@@ -6552,6 +6552,7 @@ class ChadWebUI:
                             cancel_btn = gr.Button(
                                 "Cancel",
                                 variant="stop",
+                                size="sm",
                                 interactive=False,
                                 key=f"cancel-btn-{session_id}",
                                 elem_id="cancel-task-btn" if is_first else None,
