@@ -9,8 +9,21 @@ allowed-tools: Bash, Read
 ## Recommended: Use Python verification function
 
 ```bash
-python -c "
-from chad.verification.tools import verify
+# Detect Python executable (prefers project venv, falls back to system)
+if [ -f ./.venv/bin/python ]; then
+    PYTHON=./.venv/bin/python
+elif [ -f ./.venv/Scripts/python.exe ]; then
+    PYTHON=./.venv/Scripts/python.exe
+elif [ -f ./venv/bin/python ]; then
+    PYTHON=./venv/bin/python
+elif [ -f ./venv/Scripts/python.exe ]; then
+    PYTHON=./venv/Scripts/python.exe
+else
+    PYTHON=python3
+fi
+
+$PYTHON -c "
+from chad.ui.gradio.verification.tools import verify
 result = verify()
 print('✓ Verification passed' if result['success'] else f'✗ Failed at {result.get(\"failed_phase\", \"unknown\")}')
 exit(0 if result['success'] else 1)
