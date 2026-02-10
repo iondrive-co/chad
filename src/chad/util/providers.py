@@ -877,7 +877,7 @@ def _get_gemini_usage_percentage(account_name: str) -> float | None:
             except (ValueError, AttributeError):
                 pass
 
-    daily_limit = 2000
+    daily_limit = 100  # Conservative estimate for free-tier Gemini
     return min((today_requests / daily_limit) * 100, 100.0)
 
 

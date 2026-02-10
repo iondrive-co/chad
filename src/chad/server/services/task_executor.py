@@ -556,9 +556,11 @@ def build_agent_command(
         # Kimi Code CLI - prompt via -p, stream-json output, --print for non-interactive
         kimi_home = Path.home() / ".chad" / "kimi-homes" / account_name
         cmd = [resolve_tool("kimi"), "--output-format", "stream-json", "--print"]
-        # Kimi CLI requires an explicit model; config default_model is empty after fresh login
-        kimi_model = model if model and model != "default" else "kimi-k2.5"
-        cmd.extend(["-m", kimi_model])
+        # Only pass -m for explicit model selection. The CLI uses config default_model
+        # otherwise. Model keys must include the platform prefix (e.g. "kimi-code/kimi-k2.5").
+        if model and model != "default":
+            kimi_model = model if "/" in model else f"kimi-code/{model}"
+            cmd.extend(["-m", kimi_model])
         if full_prompt:
             cmd.extend(["-p", full_prompt])
         env["HOME"] = str(kimi_home)

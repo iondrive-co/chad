@@ -2583,8 +2583,8 @@ class TestUsagePercentageCalculation:
 
         with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
             result = _get_gemini_usage_percentage("")
-            # 2 requests today out of 2000 limit = 0.1%
-            assert result == pytest.approx(0.1, abs=0.01)
+            # 2 requests today out of 100 limit = 2.0%
+            assert result == pytest.approx(2.0, abs=0.1)
 
     def test_append_gemini_usage_writes_jsonl(self, tmp_path):
         """_append_gemini_usage writes a JSONL record."""
@@ -2727,8 +2727,8 @@ class TestUsagePercentageCalculation:
 
         with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
             result = _get_gemini_usage_percentage("")
-            # 1 valid request out of 2000
-            assert result == pytest.approx(0.05, abs=0.01)
+            # 1 valid request out of 100 limit = 1.0%
+            assert result == pytest.approx(1.0, abs=0.1)
 
     def test_qwen_usage_handles_malformed_jsonl(self, tmp_path):
         """Qwen gracefully handles malformed jsonl lines."""

@@ -521,7 +521,7 @@ class TestChadWebUI:
         mock_api_client.create_account.assert_not_called()
 
     def test_add_provider_kimi_login_flow_failure(self, web_ui, mock_api_client):
-        """Kimi login flow cleans up and shows error on failure."""
+        """Kimi login flow shows error on failure (no creds written)."""
         mock_api_client.list_accounts.return_value = []
         web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/kimi"))
         web_ui.provider_ui.installer.find_tool_path = Mock(return_value="/tmp/kimi")
@@ -540,6 +540,47 @@ class TestChadWebUI:
 
         assert "❌" in result
         mock_api_client.create_account.assert_not_called()
+
+    def test_add_provider_kimi_creds_saved_but_error_event(self, web_ui, mock_api_client, tmp_path):
+        """Kimi login should succeed when CLI saves creds but emits error (model listing fails)."""
+        mock_api_client.list_accounts.return_value = []
+        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/kimi"))
+        web_ui.provider_ui.installer.find_tool_path = Mock(return_value="/tmp/kimi")
+
+        # The CLI emits: verification_url → waiting → error (model listing 401)
+        # BUT it saves credentials before trying to list models.
+        events = [
+            b'{"type": "verification_url", "data": {"verification_url": "https://example.com"}}\n',
+            b'{"type": "error", "message": "Failed to get models: 401"}\n',
+        ]
+        event_iter = iter(events)
+
+        mock_proc = Mock()
+        mock_proc.stdout.readline.side_effect = lambda: next(event_iter, b"")
+        mock_proc.poll.side_effect = [None, None, 0]
+        mock_proc.terminate = Mock()
+        mock_proc.wait = Mock()
+
+        def fake_popen(cmd, **kwargs):
+            # Simulate the CLI writing creds (it saves before model listing)
+            kimi_home = Path(kwargs["env"]["HOME"])
+            creds_dir = kimi_home / ".kimi" / "credentials"
+            creds_dir.mkdir(parents=True, exist_ok=True)
+            (creds_dir / "kimi-code.json").write_text('{"token": "test"}')
+            return mock_proc
+
+        import subprocess as _subprocess
+        with patch.object(_subprocess, "Popen", side_effect=fake_popen):
+            with patch("chad.ui.gradio.provider_ui.shutil.which", return_value="/tmp/kimi"):
+                with patch("chad.ui.gradio.provider_ui.safe_home", return_value=str(tmp_path)):
+                    result = web_ui.add_provider("kimi-1", "kimi")[0]
+
+        assert "✅" in result
+        mock_api_client.create_account.assert_called_once()
+        # Config should be written by Chad since CLI didn't write it
+        config_file = tmp_path / ".chad" / "kimi-homes" / "kimi-1" / ".kimi" / "config.toml"
+        assert config_file.exists()
+        assert "[models." in config_file.read_text()
 
     def test_get_models_includes_stored_model(self, web_ui, mock_api_client, tmp_path):
         """Stored models should always be present in dropdown choices."""
@@ -2284,8 +2325,8 @@ class TestRemainingUsage:
         (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
 
         today = datetime.now(timezone.utc).isoformat()
-        # 200 requests = 10% of 2000 limit
-        records = [{"timestamp": today, "model": "gemini-pro"} for _ in range(200)]
+        # 10 requests = 10% of 100 limit
+        records = [{"timestamp": today, "model": "gemini-pro"} for _ in range(10)]
 
         with patch("chad.util.providers._read_gemini_usage", return_value=records):
             result = web_ui._get_gemini_remaining_usage()
@@ -2680,7 +2721,7 @@ class TestClaudeMultiAccount:
         web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/kimi"))
         web_ui.provider_ui.installer.find_tool_path = Mock(return_value="/tmp/kimi")
 
-        # Mock subprocess.Popen to simulate a failed login
+        # Mock subprocess.Popen to simulate a failed login (no creds written)
         mock_proc = Mock()
         mock_proc.stdout.readline.return_value = b""
         mock_proc.poll.return_value = 0

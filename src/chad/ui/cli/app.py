@@ -25,6 +25,26 @@ def _get_claude_config_dir(account_name: str) -> Path:
     return Path.home() / ".chad" / "claude-configs" / account_name
 
 
+def _write_kimi_default_config(config_file: Path) -> None:
+    """Write default Kimi config when creds exist but config wasn't populated."""
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(
+        'default_model = "kimi-code/kimi-k2.5"\n\n'
+        '[models."kimi-code/kimi-k2.5"]\n'
+        'provider = "managed:kimi-code"\n'
+        'model = "kimi-k2.5"\n'
+        'max_context_size = 131072\n\n'
+        '[providers."managed:kimi-code"]\n'
+        'type = "kimi"\n'
+        'base_url = "https://api.kimi.com/coding/v1"\n'
+        'api_key = ""\n\n'
+        '[providers."managed:kimi-code".oauth]\n'
+        'storage = "file"\n'
+        'key = "kimi-code"\n',
+        encoding="utf-8",
+    )
+
+
 def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
     """Run the OAuth flow for a provider.
 
@@ -170,7 +190,7 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
             return False, f"Login error: {e}"
 
     elif provider == "opencode":
-        # OpenCode uses browser OAuth via `opencode auth login`
+        # OpenCode stores credentials at ~/.local/share/opencode/auth.json
         auth_file = Path.home() / ".local" / "share" / "opencode" / "auth.json"
         if auth_file.exists():
             try:
@@ -180,32 +200,34 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
             except (json.JSONDecodeError, OSError):
                 pass
 
-        opencode_cli = shutil.which("opencode")
-        if not opencode_cli:
-            return False, "OpenCode CLI not found"
-
-        print("Opening browser for OpenCode login...")
+        print("OpenCode requires an API key.")
+        print("Get one at https://opencode.ai/auth")
+        print()
         try:
-            result = subprocess.run(
-                [opencode_cli, "auth", "login"],
-                timeout=120,
-            )
-            if result.returncode == 0 and auth_file.exists():
-                return True, "Login successful"
-            return False, "Login failed or was cancelled"
-        except FileNotFoundError:
-            return False, "OpenCode CLI not found"
-        except subprocess.TimeoutExpired:
-            return False, "Login timed out"
-        except Exception as e:
-            return False, f"Login error: {e}"
+            api_key = input("Paste your API key (or press Enter to skip): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            api_key = ""
+        if api_key:
+            auth_file.parent.mkdir(parents=True, exist_ok=True)
+            auth_data = {"opencode": {"type": "api", "key": api_key}}
+            auth_file.write_text(json.dumps(auth_data), encoding="utf-8")
+            return True, "API key stored"
+        return False, "No API key provided"
 
     elif provider == "kimi":
         # Check isolated credentials for this account
         kimi_home = Path.home() / ".chad" / "kimi-homes" / account_name
         creds_file = kimi_home / ".kimi" / "credentials" / "kimi-code.json"
         global_creds = Path.home() / ".kimi" / "credentials" / "kimi-code.json"
+        config_file = kimi_home / ".kimi" / "config.toml"
+        # Only consider fully logged in if creds exist AND config has models populated.
+        # A partial login leaves creds but empty config, causing "LLM not set".
         if creds_file.exists() or global_creds.exists():
+            if config_file.exists() and "[models." in config_file.read_text(encoding="utf-8"):
+                return True, "Already logged in"
+            # Creds exist but config wasn't populated — write config directly
+            # rather than re-doing OAuth (which fails with "already approved").
+            _write_kimi_default_config(config_file)
             return True, "Already logged in"
 
         # Run interactive kimi login in the terminal

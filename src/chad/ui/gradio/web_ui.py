@@ -1,6 +1,7 @@
 """Gradio web interface for Chad."""
 
 import base64
+import math
 import os
 import json
 import re
@@ -3150,8 +3151,8 @@ class ChadWebUI:
             error = result.stderr.strip() if result.stderr else "Unknown error"
             return f"⚠️ **Login may have failed**\n\n{error}\n\nTry refreshing Usage Statistics to check status."
 
-    def add_provider(self, provider_name: str, provider_type: str):  # noqa: C901
-        return self.provider_ui.add_provider(provider_name, provider_type, self.provider_card_count)
+    def add_provider(self, provider_name: str, provider_type: str, api_key: str = ""):  # noqa: C901
+        return self.provider_ui.add_provider(provider_name, provider_type, self.provider_card_count, api_key=api_key)
 
     def _unassign_account_roles(self, account_name: str) -> None:
         self.provider_ui._unassign_account_roles(account_name)
@@ -3173,7 +3174,7 @@ class ChadWebUI:
         """Create a phase milestone chat message with live usage metrics."""
         try:
             usage_remaining = self.provider_ui.get_remaining_usage(account_name)
-            usage_pct = int((1.0 - usage_remaining) * 100)
+            usage_pct = math.ceil((1.0 - usage_remaining) * 100)
         except Exception:
             usage_pct = None
         return make_phase_milestone(phase_name, account_name, model_name, usage_pct)
@@ -7456,6 +7457,12 @@ class ChadWebUI:
                 label="Provider Type",
                 value="anthropic",
             )
+            new_provider_api_key = gr.Textbox(
+                label="API Key",
+                type="password",
+                placeholder="Paste your OpenCode API key here",
+                visible=False,
+            )
             add_btn = gr.Button("Add Provider", variant="primary", interactive=False)
 
         with gr.Accordion(
@@ -7670,19 +7677,27 @@ class ChadWebUI:
             outputs=[add_btn],
         )
 
-        def add_provider_handler(provider_name, provider_type):
-            base = self.add_provider(provider_name, provider_type)
+        # Show API key field only for OpenCode
+        new_provider_type.change(
+            lambda ptype: gr.update(visible=(ptype == "opencode")),
+            inputs=[new_provider_type],
+            outputs=[new_provider_api_key],
+        )
+
+        def add_provider_handler(provider_name, provider_type, api_key):
+            base = self.add_provider(provider_name, provider_type, api_key=api_key)
             return (
                 *base[: len(provider_outputs)],
                 "",
                 gr.update(interactive=False),
                 gr.update(open=False),
+                gr.update(value="", visible=False),
             )
 
         add_btn.click(
             add_provider_handler,
-            inputs=[new_provider_name, new_provider_type],
-            outputs=provider_outputs + [new_provider_name, add_btn, add_provider_accordion],
+            inputs=[new_provider_name, new_provider_type, new_provider_api_key],
+            outputs=provider_outputs + [new_provider_name, add_btn, add_provider_accordion, new_provider_api_key],
         )
 
         def on_retention_change(days):
