@@ -4929,3 +4929,38 @@ class TestFollowupEventLogging:
         verify_events = [e for e in events if e["type"] == "verification_attempt"]
         assert verify_events[0]["passed"] is False
         assert verify_events[1]["passed"] is True
+
+    def test_followup_verification_uses_followup_message_as_task_description(
+        self, web_ui, git_repo, monkeypatch
+    ):
+        """Follow-up after merge (empty task_description) should use the follow-up message for verification."""
+        session = self._setup_session(web_ui, "event-log-empty-desc", git_repo, monkeypatch)
+
+        # Simulate post-merge state: task_description cleared
+        session.task_description = ""
+
+        # Track what task_description is passed to _run_verification
+        captured_args = {}
+
+        def mock_verification(*args, **kwargs):
+            # _run_verification(path, coding_output, task_description, ...)
+            captured_args["task_description"] = args[2] if len(args) > 2 else kwargs.get("task_description")
+            return (True, "All checks passed")
+
+        monkeypatch.setattr(web_ui, "_run_verification", mock_verification)
+
+        followup_msg = "Refactor the database layer"
+        list(web_ui.send_followup(
+            "event-log-empty-desc",
+            followup_msg,
+            session.chat_history,
+            coding_agent="claude",
+            verification_agent="claude",
+        ))
+
+        # Verification must receive the follow-up message, not an empty string
+        assert captured_args.get("task_description") == followup_msg, (
+            f"Expected task_description='{followup_msg}', got '{captured_args.get('task_description')}'"
+        )
+        # session.task_description should also be updated
+        assert session.task_description == followup_msg
