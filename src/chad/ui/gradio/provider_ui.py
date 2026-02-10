@@ -326,6 +326,7 @@ class ProviderUIManager:
         """Get Gemini remaining usage (0.0-1.0) by counting today's requests.
 
         Reads from the Gemini usage JSONL file written by the provider.
+        Uses a conservative daily limit based on free-tier Gemini API limits.
         """
         from datetime import datetime, timezone
 
@@ -341,7 +342,6 @@ class ProviderUIManager:
 
         today_requests = 0
         today = datetime.now(timezone.utc).date()
-        daily_limit = 2000
 
         for rec in records:
             ts = rec.get("timestamp", "")
@@ -353,6 +353,9 @@ class ProviderUIManager:
                 except (ValueError, AttributeError):
                     pass
 
+        # Free-tier flash models allow ~500 RPD; use conservative limit so
+        # the percentage is meaningful even with a few requests.
+        daily_limit = 100
         used_pct = today_requests / daily_limit
         return max(0.0, min(1.0, 1.0 - used_pct))
 
@@ -944,7 +947,8 @@ class ProviderUIManager:
         )
         today_requests = 0
         today = datetime.now(timezone.utc).date()
-        daily_limit = 2000
+        # Conservative daily limit based on free-tier Gemini API limits
+        daily_limit = 100
 
         for rec in records:
             model = rec.get("model", "unknown")
@@ -962,17 +966,17 @@ class ProviderUIManager:
                 except (ValueError, AttributeError):
                     pass
 
-        # Calculate usage percentage
-        util_pct = min((today_requests / daily_limit) * 100, 100.0)
+        # Calculate usage percentage — ceil so any usage shows at least 1%
+        util_pct = min(math.ceil((today_requests / daily_limit) * 100), 100)
         bar = self._progress_bar(util_pct)
 
         result = "✅ **Logged in**\n\n"
 
         # Daily usage progress bar
         result += "**Daily Usage**\n"
-        result += f"[{bar}] {util_pct:.0f}% used\n"
-        result += f"{today_requests:,} / {daily_limit:,} requests\n"
-        result += "Resets at Midnight PT\n\n"
+        result += f"[{bar}] {util_pct}% used\n"
+        result += f"{today_requests:,} / ~{daily_limit:,} requests\n"
+        result += "Resets at Midnight UTC\n\n"
 
         # Model usage breakdown
         result += "**Model Usage** (all time)\n\n"
@@ -1405,14 +1409,19 @@ class ProviderUIManager:
                 return False, "Not logged in"
 
             if provider_type == "kimi":
-                # Check for actual OAuth credentials (config.toml always exists after first run).
+                # Check for credentials AND populated config (models/providers).
+                # A partial login leaves creds but empty config, causing "LLM not set".
                 isolated_creds = (
                     safe_home() / ".chad" / "kimi-homes" / account_name / ".kimi" / "credentials" / "kimi-code.json"
                 )
                 global_creds = safe_home() / ".kimi" / "credentials" / "kimi-code.json"
-                if isolated_creds.exists() or global_creds.exists():
-                    return True, "Logged in"
-                return False, "Not logged in"
+                if not (isolated_creds.exists() or global_creds.exists()):
+                    return False, "Not logged in"
+                config_file = safe_home() / ".chad" / "kimi-homes" / account_name / ".kimi" / "config.toml"
+                if not (config_file.exists() and "[models." in config_file.read_text(encoding="utf-8")):
+                    # Repair: write default config so the CLI has model/provider entries
+                    self._write_kimi_default_config(config_file)
+                return True, "Logged in"
 
             if provider_type == "mock":
                 return True, "Mock provider (no login required)"
@@ -1435,6 +1444,29 @@ class ProviderUIManager:
         config_dir.mkdir(parents=True, exist_ok=True)
         return config_dir
 
+    @staticmethod
+    def _write_kimi_default_config(config_file: Path) -> None:
+        """Write default Kimi config with model/provider entries.
+
+        Called when OAuth creds exist but config wasn't populated (partial login).
+        """
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        config_file.write_text(
+            'default_model = "kimi-code/kimi-k2.5"\n\n'
+            '[models."kimi-code/kimi-k2.5"]\n'
+            'provider = "managed:kimi-code"\n'
+            'model = "kimi-k2.5"\n'
+            'max_context_size = 131072\n\n'
+            '[providers."managed:kimi-code"]\n'
+            'type = "kimi"\n'
+            'base_url = "https://api.kimi.com/coding/v1"\n'
+            'api_key = ""\n\n'
+            '[providers."managed:kimi-code".oauth]\n'
+            'storage = "file"\n'
+            'key = "kimi-code"\n',
+            encoding="utf-8",
+        )
+
     def _ensure_provider_cli(self, provider_type: str) -> tuple[bool, str]:
         """Ensure the provider's CLI is present; install if missing."""
         tool_map = {
@@ -1451,7 +1483,7 @@ class ProviderUIManager:
             return True, ""
         return self.installer.ensure_tool(tool_key)
 
-    def add_provider(self, provider_name: str, provider_type: str, card_slots: int):  # noqa: C901
+    def add_provider(self, provider_name: str, provider_type: str, card_slots: int, api_key: str = ""):  # noqa: C901
         """Add a new provider and return refreshed provider panel state."""
         import subprocess  # not at module level to avoid circular imports
 
@@ -1978,17 +2010,20 @@ class ProviderUIManager:
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
 
             elif provider_type == "kimi":
-                # Kimi login via `kimi login --json` which emits structured JSON events
+                # Kimi login via `kimi login --json` which emits structured JSON events.
+                # The CLI itself opens the browser — we must NOT open it again.
                 import time
-                import webbrowser
 
                 login_success = False
                 kimi_home = Path(safe_home()) / ".chad" / "kimi-homes" / account_name
                 kimi_home.mkdir(parents=True, exist_ok=True)
                 creds_file = kimi_home / ".kimi" / "credentials" / "kimi-code.json"
+                config_file = kimi_home / ".kimi" / "config.toml"
 
-                # Check if already logged in
                 if creds_file.exists():
+                    # Creds already exist — ensure config is populated and skip login.
+                    if not (config_file.exists() and "[models." in config_file.read_text(encoding="utf-8")):
+                        self._write_kimi_default_config(config_file)
                     login_success = True
                 else:
                     resolved = self.installer.resolve_tool_path("kimi")
@@ -2026,11 +2061,8 @@ class ProviderUIManager:
                             try:
                                 event = json.loads(line.decode("utf-8", errors="replace").strip())
                                 evt_type = event.get("type", "")
-                                if evt_type == "verification_url":
-                                    url = event.get("data", {}).get("verification_url", "")
-                                    if url:
-                                        webbrowser.open(url)
-                                elif evt_type == "success":
+                                # Don't open browser — the CLI already does it.
+                                if evt_type == "success":
                                     login_success = True
                                     break
                                 elif evt_type == "error":
@@ -2051,6 +2083,14 @@ class ProviderUIManager:
                         base_response = self.provider_action_response(result, card_slots)
                         return (*base_response, name_field_value, add_btn_state, accordion_state)
 
+                    # The CLI saves creds before listing models. Even if model
+                    # listing fails (emitting "error"), creds are on disk.
+                    # Check for creds and write config ourselves if needed.
+                    if not login_success and creds_file.exists():
+                        if not (config_file.exists() and "[models." in config_file.read_text(encoding="utf-8")):
+                            self._write_kimi_default_config(config_file)
+                        login_success = True
+
                 if login_success:
                     self.api_client.create_account(account_name, provider_type)
                     result = f"✅ Provider '{account_name}' added and logged in!"
@@ -2058,59 +2098,34 @@ class ProviderUIManager:
                     add_btn_state = gr.update(interactive=False)
                     accordion_state = gr.update(open=False)
                 else:
-                    if kimi_home.exists():
-                        shutil.rmtree(kimi_home, ignore_errors=True)
                     result = f"❌ Kimi login failed for '{account_name}'. Please try again."
                     base_response = self.provider_action_response(result, card_slots)
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
 
             elif provider_type == "opencode":
-                # OpenCode uses browser OAuth via `opencode auth login`
-                import time
-
-                opencode_cli = cli_detail or "opencode"
+                # OpenCode stores credentials at ~/.local/share/opencode/auth.json.
+                # Check if already logged in; if not, require an API key via the UI.
                 auth_file = Path(safe_home()) / ".local" / "share" / "opencode" / "auth.json"
 
                 login_success, _ = self._check_provider_login(provider_type, account_name)
 
                 if not login_success:
-                    try:
-                        # `opencode auth login` opens browser and waits for callback
-                        proc = subprocess.Popen(
-                            [opencode_cli, "auth", "login"],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
+                    if not api_key or not api_key.strip():
+                        import webbrowser
+                        webbrowser.open("https://opencode.ai/auth")
+                        result = (
+                            "❌ OpenCode requires an API key.\n\n"
+                            "A browser tab has been opened to **opencode.ai/auth** — "
+                            "create a key there, then paste it in the API Key field above and click Add Provider again."
                         )
-
-                        start_time = time.time()
-                        timeout_secs = 120
-                        while time.time() - start_time < timeout_secs:
-                            if auth_file.exists():
-                                try:
-                                    data = json.loads(auth_file.read_text(encoding="utf-8"))
-                                    if data:
-                                        login_success = True
-                                        time.sleep(1)
-                                        break
-                                except (json.JSONDecodeError, OSError):
-                                    pass
-                            if proc.poll() is not None:
-                                break
-                            time.sleep(1)
-
-                        try:
-                            proc.terminate()
-                            proc.wait(timeout=5)
-                        except Exception:
-                            try:
-                                proc.kill()
-                            except Exception:
-                                pass
-
-                    except FileNotFoundError:
-                        result = "❌ OpenCode CLI not found."
                         base_response = self.provider_action_response(result, card_slots)
                         return (*base_response, name_field_value, add_btn_state, accordion_state)
+
+                    # Write auth.json in the format the OpenCode CLI expects
+                    auth_file.parent.mkdir(parents=True, exist_ok=True)
+                    auth_data = {"opencode": {"type": "api", "key": api_key.strip()}}
+                    auth_file.write_text(json.dumps(auth_data), encoding="utf-8")
+                    login_success = True
 
                 if login_success:
                     self.api_client.create_account(account_name, provider_type)
@@ -2119,7 +2134,7 @@ class ProviderUIManager:
                     add_btn_state = gr.update(interactive=False)
                     accordion_state = gr.update(open=False)
                 else:
-                    result = f"❌ OpenCode login timed out for '{account_name}'. Please try again."
+                    result = f"❌ OpenCode login failed for '{account_name}'."
                     base_response = self.provider_action_response(result, card_slots)
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
 
@@ -2182,6 +2197,7 @@ class ProviderUIManager:
         """Format usage remaining as a compact string."""
         try:
             usage_remaining = self.get_remaining_usage(account_name)
+            # Use floor for remaining so any usage reduces from 100%
             usage_pct = int(usage_remaining * 100)
             return f"[Usage: {usage_pct}%]"
         except Exception:
