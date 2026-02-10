@@ -1903,6 +1903,60 @@ def test_workspace_display_allows_full_path():
         f"Workspace inline should not use ellipsis truncation to allow full path display: {workspace_inline_css}"
 
 
+def test_workspace_font_color_is_black():
+    """Workspace font should be black (#000000) for better readability."""
+    from chad.ui.gradio import web_ui
+
+    # Check that workspace display CSS uses black font color
+    css = web_ui.PROVIDER_PANEL_CSS
+
+    # Look for workspace-inline style block that controls text color
+    workspace_inline_pattern = r"\.workspace-inline[^}]*\{([^}]*)\}"
+    matches = re.findall(workspace_inline_pattern, css, re.MULTILINE | re.DOTALL)
+
+    assert matches, "Expected workspace-inline CSS style block"
+
+    workspace_inline_css = matches[0]
+
+    # The workspace font should be black for better readability
+    # This test ensures the color is #000000 (black) instead of light gray
+    assert "color: #000000" in workspace_inline_css, \
+        f"Workspace font should be black (#000000), found: {workspace_inline_css}"
+
+
+def test_cancel_and_save_buttons_same_size():
+    """Cancel and Save buttons should have consistent size properties."""
+    from chad.ui.gradio import web_ui
+
+    # Read the web UI source to check button properties
+    import inspect
+    source = inspect.getsource(web_ui.ChadWebUI)
+
+    # Find both button definitions
+    cancel_btn_pattern = r'cancel_btn = gr\.Button\(\s*"Cancel"[^)]+\)'
+    save_btn_pattern = r'project_save_btn = gr\.Button\(\s*"Save"[^)]+\)'
+
+    cancel_match = re.search(cancel_btn_pattern, source, re.MULTILINE | re.DOTALL)
+    save_match = re.search(save_btn_pattern, source, re.MULTILINE | re.DOTALL)
+
+    assert cancel_match, "Could not find Cancel button definition"
+    assert save_match, "Could not find Save button definition"
+
+    cancel_def = cancel_match.group(0)
+    save_def = save_match.group(0)
+
+    # Both buttons should have size="sm" for consistency
+    assert 'size="sm"' in cancel_def, f"Cancel button should have size='sm': {cancel_def}"
+    assert 'size="sm"' in save_def, f"Save button should have size='sm': {save_def}"
+
+    # Both buttons should have same min_width and scale for consistent sizing
+    assert 'min_width=80' in cancel_def, f"Cancel button should have min_width=80: {cancel_def}"
+    assert 'min_width=80' in save_def, f"Save button should have min_width=80: {save_def}"
+
+    assert 'scale=0' in cancel_def, f"Cancel button should have scale=0: {cancel_def}"
+    assert 'scale=0' in save_def, f"Save button should have scale=0: {save_def}"
+
+
 class TestChadWebUIInterface:
     """Test cases for Gradio interface creation."""
 
