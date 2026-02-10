@@ -32,10 +32,14 @@ from chad.util.model_catalog import ModelCatalog
 
 # Re-export from chad.util.prompts
 from chad.util.prompts import (
-    CODING_AGENT_PROMPT,
+    EXPLORATION_PROMPT,
+    IMPLEMENTATION_PROMPT,
+    CODING_AGENT_PROMPT,  # Legacy - use EXPLORATION_PROMPT + IMPLEMENTATION_PROMPT
     VERIFICATION_AGENT_PROMPT,
     SUMMARY_COMPLETION_PROMPT,
-    build_coding_prompt,
+    build_exploration_prompt,
+    build_implementation_prompt,
+    build_coding_prompt,  # Legacy - use build_exploration_prompt + build_implementation_prompt
     get_verification_prompt,
     parse_verification_response,
     extract_coding_summary,
@@ -102,9 +106,13 @@ __all__ = [
     # Model catalog
     "ModelCatalog",
     # Prompts
+    "EXPLORATION_PROMPT",
+    "IMPLEMENTATION_PROMPT",
     "CODING_AGENT_PROMPT",
     "VERIFICATION_AGENT_PROMPT",
     "SUMMARY_COMPLETION_PROMPT",
+    "build_exploration_prompt",
+    "build_implementation_prompt",
     "build_coding_prompt",
     "get_verification_prompt",
     "parse_verification_response",

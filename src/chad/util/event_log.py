@@ -19,6 +19,8 @@ from typing import Any, Literal
 # Event types
 EventType = Literal[
     "session_started",
+    "status",
+    "progress",
     "model_selected",
     "provider_switched",
     "user_message",
@@ -94,6 +96,24 @@ class SessionStartedEvent(EventBase):
     coding_provider: str = ""
     coding_account: str = ""
     coding_model: str | None = None
+
+
+@dataclass
+class StatusEvent(EventBase):
+    """Logged when task execution status changes."""
+
+    status: str = ""
+
+
+@dataclass
+class ProgressEvent(EventBase):
+    """Logged when exploration emits a structured progress update."""
+
+    summary: str = ""
+    location: str | None = None
+    next_step: str | None = None
+    before_screenshot: str | None = None
+    before_description: str | None = None
 
 
 @dataclass
@@ -200,11 +220,23 @@ class VerificationAttemptEvent(EventBase):
 
 @dataclass
 class ContextCondensedEvent(EventBase):
-    """Logged when context is condensed/summarized."""
+    """Logged when context is condensed/summarized.
+
+    Used for both context window management and provider handoffs.
+    When policy="provider_handoff", the structured fields contain
+    progress data for resuming on a different provider.
+    """
 
     replaces_seq_range: tuple[int, int] = (0, 0)
     summary_text: str = ""
     policy: str = "rolling_window"
+    # Handoff context (populated when policy="provider_handoff")
+    original_task: str = ""
+    files_changed: list[str] = field(default_factory=list)
+    files_created: list[str] = field(default_factory=list)
+    key_commands: list[str] = field(default_factory=list)
+    remaining_work: str = ""
+    provider_session_id: str | None = None  # For native resume (thread_id, session_id)
 
 
 @dataclass

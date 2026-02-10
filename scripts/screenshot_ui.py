@@ -8,7 +8,7 @@ Usage:
     python scripts/screenshot_ui.py [--output /path/to/screenshot.png] [--tab providers]
 
 Examples:
-    # Take screenshot of default (Run Task) tab
+    # Take screenshot of default (Run Task) tab (no auto-open)
     python scripts/screenshot_ui.py
 
     # Screenshot specific tab
@@ -18,8 +18,8 @@ Examples:
     python scripts/screenshot_ui.py --tab run --selector "#run-top-inputs"
     python scripts/screenshot_ui.py --tab providers --selector "#provider-card-0"
 
-    # Capture both dark and light variants and open them when finished (handy in PyCharm)
-    python scripts/screenshot_ui.py
+    # Capture both dark and light variants and open them when finished
+    python scripts/screenshot_ui.py --open
 
     # Custom output path
     python scripts/screenshot_ui.py --output /tmp/chad-ui.png
@@ -70,6 +70,18 @@ except ImportError as e:
 DEFAULT_OUTPUT = Path("/tmp/chad/screenshot.png")
 
 
+def maybe_open_paths(paths: list[Path], open_images: bool = False) -> None:
+    """Optionally open screenshot paths in the default browser."""
+    if not open_images:
+        return
+    for path in paths:
+        try:
+            webbrowser.open(path.as_uri())
+        except Exception:
+            # Don't block screenshot flow if browser fails
+            continue
+
+
 def screenshot_element(page, selector: str, output_path: Path) -> Path:
     """Screenshot a specific element by CSS selector."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -114,6 +126,13 @@ def screenshot_page(page, output_path: Path) -> Path:
     return output_path
 
 
+def resolve_color_schemes(choice: str) -> list[str]:
+    """Return the list of color schemes to capture based on user choice."""
+    if choice == "both":
+        return ["dark", "light"]
+    return [choice]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Take a screenshot of Chad's Gradio UI")
     parser.add_argument(
@@ -137,6 +156,12 @@ def main():
     parser.add_argument("--height", type=int, default=900, help="Viewport height (default: 900)")
     parser.add_argument("--headless", action="store_true", help="Run browser in headless mode (no window)")
     parser.add_argument(
+        "--open",
+        dest="open_images",
+        action="store_true",
+        help="Open captured screenshots after saving (default: disabled)",
+    )
+    parser.add_argument(
         "--with-chat-screenshots",
         action="store_true",
         help="Populate chatbot with sample message containing before/after screenshots",
@@ -144,8 +169,8 @@ def main():
     parser.add_argument(
         "--color-scheme",
         choices=["dark", "light", "both"],
-        default="both",
-        help=argparse.SUPPRESS,
+        default="light",
+        help="Color scheme to capture (default: light). Use 'both' to capture dark and light.",
     )
 
     args = parser.parse_args()
@@ -159,8 +184,8 @@ def main():
         print(f"Chad running on port {instance.port}")
 
         viewport = {"width": args.width, "height": args.height}
-        schemes = ["dark", "light"]
-        multi = True
+        schemes = resolve_color_schemes(args.color_scheme)
+        multi = len(schemes) > 1
         outputs = []
 
         # Create sample screenshots if needed
@@ -196,8 +221,7 @@ def main():
             outputs.append(target_path)
             print(f"Saved: {target_path}")
 
-        for path in outputs:
-            webbrowser.open(path.as_uri())
+        maybe_open_paths(outputs, open_images=args.open_images)
 
     except PlaywrightUnavailable as e:
         print(f"Playwright error: {e}", file=sys.stderr)

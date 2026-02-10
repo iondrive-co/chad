@@ -19,6 +19,7 @@ from typing import Callable
 from chad.util.utils import platform_path, safe_home
 from .installer import AIToolInstaller
 from .installer import DEFAULT_TOOLS_DIR
+import json
 
 try:
     import pty
@@ -51,6 +52,34 @@ CODEX_THINKING_TIMEOUT = _get_env_float("CODEX_THINKING_TIMEOUT", 60.0)
 # Maximum exploration commands without implementation before triggering early timeout
 # Prevents agents from getting stuck in endless search/read loops
 CODEX_MAX_EXPLORATION_WITHOUT_IMPL = int(_get_env_float("CODEX_MAX_EXPLORATION_WITHOUT_IMPL", 40.0))
+
+
+def _codex_needs_continuation(agent_message: str) -> bool:
+    """Check if a Codex agent message indicates incomplete work needing continuation.
+
+    Detects when the model outputs a progress checkpoint (progress markers without
+    completion summary), which in exec mode causes early session termination.
+
+    Args:
+        agent_message: The text from the agent_message item
+
+    Returns:
+        True if the message looks like an incomplete checkpoint that needs continuation
+    """
+    if not agent_message:
+        return False
+
+    # Progress markers that indicate the model intended to continue
+    progress_markers = ["**Progress:**", "**Location:**", "**Next:**"]
+    has_progress = any(marker in agent_message for marker in progress_markers)
+
+    # Completion markers that indicate the task is done
+    # These come from the JSON summary block at the end of a completed task
+    completion_markers = ['"change_summary"', '"completion_status"', '"files_changed"']
+    has_completion = any(marker in agent_message for marker in completion_markers)
+
+    # Needs continuation if has progress markers but no completion markers
+    return has_progress and not has_completion
 
 
 def find_cli_executable(name: str) -> str:
@@ -643,6 +672,445 @@ def _stream_pty_output(
     return "".join(output_chunks), timed_out, idle_stalled
 
 
+def _get_claude_usage_percentage(account_name: str) -> float | None:
+    """Get Claude usage percentage from Anthropic API.
+
+    Args:
+        account_name: The account name to check usage for
+
+    Returns:
+        Usage percentage (0-100), or None if unavailable
+    """
+    import requests
+
+    # Get the isolated config directory for this account
+    base_home = safe_home()
+    if account_name:
+        config_dir = Path(base_home) / ".chad" / "claude_homes" / account_name / ".claude"
+    else:
+        config_dir = Path(base_home) / ".claude"
+
+    creds_file = config_dir / ".credentials.json"
+    if not creds_file.exists():
+        return None
+
+    try:
+        with open(creds_file, encoding="utf-8") as f:
+            creds = json.load(f)
+
+        oauth_data = creds.get("claudeAiOauth", {})
+        access_token = oauth_data.get("accessToken", "")
+        if not access_token:
+            return None
+
+        response = requests.get(
+            "https://api.anthropic.com/api/oauth/usage",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "anthropic-beta": "oauth-2025-04-20",
+                "User-Agent": "claude-code/2.0.32",
+                "Content-Type": "application/json",
+            },
+            timeout=10,
+        )
+
+        if response.status_code != 200:
+            return None
+
+        usage_data = response.json()
+        five_hour = usage_data.get("five_hour", {})
+        util = five_hour.get("utilization")
+        if util is not None:
+            try:
+                return float(util)
+            except (ValueError, TypeError):
+                pass
+
+        return None
+
+    except Exception:
+        return None
+
+
+def _get_codex_usage_percentage(account_name: str) -> float | None:
+    """Get Codex usage percentage from session files.
+
+    Args:
+        account_name: The account name to check usage for
+
+    Returns:
+        Usage percentage (0-100), or None if unavailable
+    """
+    # Get the isolated home directory for this account
+    base_home = safe_home()
+    if account_name:
+        codex_home = Path(base_home) / ".chad" / "codex_homes" / account_name
+    else:
+        codex_home = Path(base_home)
+
+    sessions_dir = codex_home / ".codex" / "sessions"
+    if not sessions_dir.exists():
+        return None
+
+    # Find the most recent session file
+    session_files: list[tuple[float, Path]] = []
+    for root, _, files in os.walk(sessions_dir):
+        for filename in files:
+            if filename.endswith(".jsonl"):
+                path = platform_path(root) / filename
+                try:
+                    session_files.append((path.stat().st_mtime, path))
+                except OSError:
+                    pass
+
+    if not session_files:
+        return None
+
+    session_files.sort(reverse=True)
+    latest_session = session_files[0][1]
+
+    try:
+        rate_limits = None
+        with open(latest_session, encoding="utf-8") as f:
+            for line in f:
+                if "rate_limits" in line:
+                    data = json.loads(line.strip())
+                    if data.get("type") == "event_msg":
+                        payload = data.get("payload", {})
+                        if payload.get("type") == "token_count":
+                            rate_limits = payload.get("rate_limits")
+
+        if rate_limits:
+            primary = rate_limits.get("primary", {})
+            if primary:
+                util = primary.get("used_percent")
+                if util is not None:
+                    try:
+                        return float(util)
+                    except (ValueError, TypeError):
+                        pass
+
+    except Exception:
+        pass
+
+    return None
+
+
+def _gemini_usage_path() -> Path:
+    """Get the path to the Gemini usage JSONL file."""
+    return Path(safe_home()) / ".chad" / "gemini-usage.jsonl"
+
+
+def _append_gemini_usage(account: str, model: str, stats: dict) -> None:
+    """Append a usage record to the Gemini usage JSONL file."""
+    from datetime import datetime, timezone
+
+    usage_file = _gemini_usage_path()
+    usage_file.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "account": account,
+        "model": model,
+        "input_tokens": stats.get("input_tokens", 0),
+        "output_tokens": stats.get("output_tokens", 0),
+        "cached_tokens": stats.get("cached", 0),
+        "total_tokens": stats.get("total_tokens", 0),
+        "tool_calls": stats.get("tool_calls", 0),
+        "duration_ms": stats.get("duration_ms", 0),
+    }
+    with open(usage_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+def _read_gemini_usage() -> list[dict]:
+    """Read all records from the Gemini usage JSONL file."""
+    usage_file = _gemini_usage_path()
+    if not usage_file.exists():
+        return []
+    records = []
+    try:
+        with open(usage_file, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass
+    return records
+
+
+def _get_gemini_usage_percentage(account_name: str) -> float | None:
+    """Get Gemini usage percentage by counting today's requests from JSONL.
+
+    Gemini free tier allows ~2000 requests/day.
+
+    Args:
+        account_name: The account name (unused for Gemini, single account only)
+
+    Returns:
+        Usage percentage (0-100), or None if unavailable
+    """
+    from datetime import datetime, timezone
+
+    gemini_dir = Path(safe_home()) / ".gemini"
+    oauth_file = gemini_dir / "oauth_creds.json"
+    if not oauth_file.exists():
+        return None
+
+    records = _read_gemini_usage()
+    if not records:
+        return 0.0  # Logged in but no usage yet
+
+    today = datetime.now(timezone.utc).date()
+    today_requests = 0
+    for rec in records:
+        ts = rec.get("timestamp", "")
+        if ts:
+            try:
+                rec_date = datetime.fromisoformat(ts).date()
+                if rec_date == today:
+                    today_requests += 1
+            except (ValueError, AttributeError):
+                pass
+
+    daily_limit = 100  # Conservative estimate for free-tier Gemini
+    return min((today_requests / daily_limit) * 100, 100.0)
+
+
+def _get_qwen_usage_percentage(account_name: str) -> float | None:
+    """Get Qwen usage percentage by counting today's requests.
+
+    Qwen free tier allows 2000 requests/day.
+    We count today's requests from local session files.
+
+    Args:
+        account_name: The account name (unused for Qwen, single account only)
+
+    Returns:
+        Usage percentage (0-100), or None if unavailable
+    """
+    from datetime import datetime, timezone
+
+    qwen_dir = Path(safe_home()) / ".qwen"
+    oauth_file = qwen_dir / "oauth_creds.json"
+    if not oauth_file.exists():
+        return None
+
+    projects_dir = qwen_dir / "projects"
+    if not projects_dir.exists():
+        return 0.0  # Logged in but no usage yet
+
+    # Count today's requests from all session files (jsonl format)
+    today_requests = 0
+    today = datetime.now(timezone.utc).date()
+
+    for session_file in projects_dir.glob("*/chats/*.jsonl"):
+        try:
+            with open(session_file, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        # Count assistant responses (each is one API call)
+                        if event.get("type") == "assistant":
+                            timestamp = event.get("timestamp", "")
+                            if timestamp:
+                                try:
+                                    msg_date = datetime.fromisoformat(
+                                        timestamp.replace("Z", "+00:00")
+                                    ).date()
+                                    if msg_date == today:
+                                        today_requests += 1
+                                except (ValueError, AttributeError):
+                                    pass
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            continue
+
+    # Free tier: 2000 requests/day
+    daily_limit = 2000
+    return min((today_requests / daily_limit) * 100, 100.0)
+
+
+def _get_mistral_usage_percentage(account_name: str) -> float | None:
+    """Get Mistral usage percentage by counting today's requests.
+
+    Mistral Vibe uses a daily request limit.
+    We count today's requests from local session files.
+
+    Args:
+        account_name: The account name (unused for Mistral, single account only)
+
+    Returns:
+        Usage percentage (0-100), or None if unavailable
+    """
+    from datetime import datetime, timezone
+
+    vibe_dir = Path(safe_home()) / ".vibe"
+    config_file = vibe_dir / "config.toml"
+    if not config_file.exists():
+        return None
+
+    sessions_dir = vibe_dir / "logs" / "session"
+    if not sessions_dir.exists():
+        return 0.0  # Logged in but no usage yet
+
+    # Count today's requests from session files
+    today_requests = 0
+    today = datetime.now(timezone.utc).date()
+
+    for session_file in sessions_dir.glob("session_*.json"):
+        try:
+            # Check file modification time to see if it's from today
+            mtime = datetime.fromtimestamp(session_file.stat().st_mtime, tz=timezone.utc)
+            if mtime.date() != today:
+                continue
+
+            with open(session_file, encoding="utf-8") as f:
+                data = json.load(f)
+
+            # Each session file represents one or more requests
+            # Count based on metadata stats
+            metadata = data.get("metadata", {})
+            stats = metadata.get("stats", {})
+            # Use prompt_count if available, otherwise count as 1 session
+            prompt_count = stats.get("prompt_count", 1)
+            today_requests += prompt_count
+        except (json.JSONDecodeError, OSError, KeyError):
+            continue
+
+    # Free tier: ~1000 requests/day (conservative estimate for Mistral API)
+    daily_limit = 1000
+    return min((today_requests / daily_limit) * 100, 100.0)
+
+
+def _get_opencode_usage_percentage(account_name: str) -> float | None:
+    """Get OpenCode usage percentage by counting today's requests.
+
+    OpenCode supports multiple backends (Anthropic, OpenAI, etc.) and stores
+    session data in XDG_DATA_HOME/opencode/sessions/.
+
+    Args:
+        account_name: The account name for isolated data directory
+
+    Returns:
+        Usage percentage (0-100), or None if unavailable
+    """
+    from datetime import datetime, timezone
+
+    # OpenCode v1.1+ stores session data at ~/.local/share/opencode
+    base_home = safe_home()
+    data_dir = Path(base_home) / ".local" / "share" / "opencode"
+
+    sessions_dir = data_dir / "sessions"
+    if not sessions_dir.exists():
+        return 0.0  # No sessions yet
+
+    # Count today's requests from session files (JSONL format)
+    today_requests = 0
+    today = datetime.now(timezone.utc).date()
+
+    for session_file in sessions_dir.glob("*.jsonl"):
+        try:
+            with open(session_file, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        # Count assistant responses
+                        if event.get("type") == "assistant":
+                            timestamp = event.get("timestamp", "")
+                            if timestamp:
+                                try:
+                                    msg_date = datetime.fromisoformat(
+                                        timestamp.replace("Z", "+00:00")
+                                    ).date()
+                                    if msg_date == today:
+                                        today_requests += 1
+                                except (ValueError, AttributeError):
+                                    pass
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            continue
+
+    # Default daily limit (varies by backend provider)
+    daily_limit = 2000
+    return min((today_requests / daily_limit) * 100, 100.0)
+
+
+def _get_kimi_usage_percentage(account_name: str) -> float | None:
+    """Get Kimi Code usage percentage by counting today's requests.
+
+    Kimi Code stores session data in ~/.kimi/ directory.
+
+    Args:
+        account_name: The account name for isolated config directory
+
+    Returns:
+        Usage percentage (0-100), or None if unavailable
+    """
+    from datetime import datetime, timezone
+
+    # Get isolated config directory for this account
+    base_home = safe_home()
+    if account_name:
+        kimi_dir = Path(base_home) / ".chad" / "kimi-homes" / account_name / ".kimi"
+    else:
+        kimi_dir = Path(base_home) / ".kimi"
+
+    creds_file = kimi_dir / "credentials" / "kimi-code.json"
+    if not creds_file.exists():
+        return None  # Not logged in
+
+    # Kimi stores sessions - count today's requests
+    sessions_dir = kimi_dir / "sessions"
+    if not sessions_dir.exists():
+        return 0.0  # Configured but no sessions yet
+
+    today_requests = 0
+    today = datetime.now(timezone.utc).date()
+
+    for session_file in sessions_dir.glob("*.jsonl"):
+        try:
+            with open(session_file, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        # Count assistant responses
+                        if event.get("type") == "assistant" or event.get("role") == "assistant":
+                            timestamp = event.get("timestamp", "") or event.get("created_at", "")
+                            if timestamp:
+                                try:
+                                    msg_date = datetime.fromisoformat(
+                                        timestamp.replace("Z", "+00:00")
+                                    ).date()
+                                    if msg_date == today:
+                                        today_requests += 1
+                                except (ValueError, AttributeError):
+                                    pass
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            continue
+
+    # Kimi has generous limits, estimate 2000/day
+    daily_limit = 2000
+    return min((today_requests / daily_limit) * 100, 100.0)
+
+
 class AIProvider(ABC):
     """Abstract base class for AI providers."""
 
@@ -717,6 +1185,38 @@ class AIProvider(ABC):
             Default implementation returns is_alive() for multi-turn providers.
         """
         return self.supports_multi_turn() and self.is_alive()
+
+    def get_session_id(self) -> str | None:
+        """Get the native session ID for this provider.
+
+        Returns the provider-specific session identifier that can be used
+        for resuming sessions natively (e.g., Codex thread_id, Gemini/Qwen
+        session_id). Used during handoffs to preserve native resume capability.
+
+        Returns:
+            Provider session ID if available, None otherwise.
+        """
+        return None
+
+    def supports_usage_reporting(self) -> bool:
+        """Check if this provider reports usage statistics.
+
+        Providers that support usage reporting can trigger auto-switching
+        based on usage percentage thresholds. Providers that don't support
+        this will only trigger switching on error detection.
+
+        Returns:
+            True if the provider reports usage data, False otherwise.
+        """
+        return False
+
+    def get_usage_percentage(self) -> float | None:
+        """Get the current usage as a percentage of the limit.
+
+        Returns:
+            Usage percentage (0-100), or None if not available.
+        """
+        return None
 
 
 class ClaudeCodeProvider(AIProvider):
@@ -939,6 +1439,14 @@ class ClaudeCodeProvider(AIProvider):
     def supports_multi_turn(self) -> bool:
         return True
 
+    def supports_usage_reporting(self) -> bool:
+        """Claude supports usage reporting via Anthropic API."""
+        return True
+
+    def get_usage_percentage(self) -> float | None:
+        """Get Claude usage percentage from Anthropic API."""
+        return _get_claude_usage_percentage(self.config.account_name)
+
 
 class OpenAICodexProvider(AIProvider):
     """Provider for OpenAI Codex CLI.
@@ -1064,9 +1572,20 @@ class OpenAICodexProvider(AIProvider):
                 """Convert a JSON event to human-readable text for streaming."""
                 event_type = event.get("type", "")
 
+                # Skip events that contain user or system content (don't show system prompt)
+                if event.get("role") in ("user", "system"):
+                    return None
+
                 if event_type == "item.completed":
                     item = event.get("item", {})
                     item_type = item.get("type", "")
+
+                    # Skip user/system message items
+                    if item_type in ("user_message", "system_message", "input_message"):
+                        return None
+                    # Skip message items with user/system role
+                    if item.get("role") in ("user", "system"):
+                        return None
 
                     if item_type == "reasoning":
                         text = item.get("text", "")
@@ -1118,10 +1637,22 @@ class OpenAICodexProvider(AIProvider):
                         params = item.get("params", {})
                         path = params.get("path", params.get("file_path", ""))
                         desc = tool_descriptions.get(tool, f"Using {tool}")
+
+                        result_parts = []
+                        # Include any reasoning/thought from the tool call item
+                        reasoning = item.get("reasoning") or item.get("thought") or item.get("explanation")
+                        if reasoning:
+                            clean_reason = reasoning.replace("**", "").replace("*", "").strip()
+                            if clean_reason:
+                                result_parts.append(f"\033[36m• {clean_reason[:200]}\033[0m\n")
+
+                        # Show the tool operation
                         if path:
-                            # Show green for file operations
-                            return f"\033[32m• {desc}: {path}\033[0m\n"
-                        return f"\033[32m• {desc}\033[0m\n"
+                            result_parts.append(f"\033[32m• {desc}: {path}\033[0m\n")
+                        else:
+                            result_parts.append(f"\033[32m• {desc}\033[0m\n")
+
+                        return "".join(result_parts) if result_parts else None
                     elif item_type == "command_execution":
                         cmd = item.get("command", "")[:80]
                         output = item.get("aggregated_output", "")
@@ -1136,6 +1667,20 @@ class OpenAICodexProvider(AIProvider):
                             if len(lines) > 5:
                                 result += f"\033[90m  ... ({len(lines) - 5} more lines)\033[0m\n"
                         return result
+                    elif item_type in ("tool_call", "function_call", "tool_use"):
+                        # Handle other tool call formats
+                        tool = item.get("name") or item.get("tool") or item.get("function", {}).get("name", "tool")
+                        args = item.get("arguments") or item.get("params") or item.get("input", {})
+                        if isinstance(args, str):
+                            try:
+                                import json as json_mod
+                                args = json_mod.loads(args)
+                            except (json_mod.JSONDecodeError, ValueError):
+                                args = {}
+                        path = args.get("path", args.get("file_path", "")) if isinstance(args, dict) else ""
+                        if path:
+                            return f"\033[32m• Using {tool}: {path}\033[0m\n"
+                        return f"\033[32m• Using {tool}\033[0m\n"
 
                 return None
 
@@ -1355,18 +1900,43 @@ class OpenAICodexProvider(AIProvider):
 
             # Extract response from JSON events
             response_parts = []
+            agent_message_parts = []  # Track agent messages separately for checkpoint detection
             for event in json_events:
                 if event.get("type") == "item.completed":
                     item = event.get("item", {})
                     if item.get("type") == "agent_message":
-                        response_parts.append(item.get("text", ""))
+                        text = item.get("text", "")
+                        response_parts.append(text)
+                        agent_message_parts.append(text)
                     elif item.get("type") == "reasoning":
                         text = item.get("text", "")
                         if text:
                             response_parts.insert(0, f"*Thinking: {text}*\n\n")
 
             if response_parts:
-                return "".join(response_parts).strip()
+                full_response = "".join(response_parts).strip()
+
+                # Check for progress checkpoint: model output progress markers but no completion
+                # This indicates the model wanted to continue but exec mode terminated the session
+                # Note: This logic is primarily for direct provider usage. The task executor
+                # handles checkpoint detection separately for PTY-based execution.
+                agent_message_text = "\n".join(agent_message_parts)
+                if self.thread_id and not _is_recovery and _codex_needs_continuation(agent_message_text):
+                    self._notify_activity(
+                        "stream",
+                        "\033[33m• Progress checkpoint detected, continuing task...\033[0m\n"
+                    )
+                    self.current_message = (
+                        "Continue with the next steps you outlined. Complete the remaining work "
+                        "and end with the JSON summary block containing change_summary, "
+                        "files_changed, and completion_status."
+                    )
+                    # Recursively call with recovery flag to prevent infinite loops
+                    continuation_response = self.get_response(timeout=timeout, _is_recovery=True)
+                    # Combine the progress checkpoint with the continuation response
+                    return f"{full_response}\n\n---\n\n{continuation_response}"
+
+                return full_response
 
             # Fallback to raw output if no JSON events parsed
             output = _strip_ansi_codes(output)
@@ -1458,6 +2028,18 @@ class OpenAICodexProvider(AIProvider):
     def supports_multi_turn(self) -> bool:
         return True
 
+    def get_session_id(self) -> str | None:
+        """Get the Codex thread_id for native resume."""
+        return self.thread_id
+
+    def supports_usage_reporting(self) -> bool:
+        """Codex supports usage reporting via session files."""
+        return True
+
+    def get_usage_percentage(self) -> float | None:
+        """Get Codex usage percentage from session files."""
+        return _get_codex_usage_percentage(self.config.account_name)
+
 
 class GeminiCodeAssistProvider(AIProvider):
     """Provider for Gemini Code Assist with multi-turn support.
@@ -1510,13 +2092,14 @@ class GeminiCodeAssistProvider(AIProvider):
                 "stream-json",
                 "--resume",
                 self.session_id,
+                "-p",
                 self.current_message,
             ]
         else:
             cmd = [gemini_cli, "-y", "--output-format", "stream-json"]
             if self.config.model_name and self.config.model_name != "default":
                 cmd.extend(["-m", self.config.model_name])
-            cmd.append(self.current_message)
+            cmd.extend(["-p", self.current_message])
 
         try:
             env = os.environ.copy()
@@ -1524,6 +2107,8 @@ class GeminiCodeAssistProvider(AIProvider):
 
             json_events = []
             response_parts = []
+            usage_stats = {}
+            init_model = [None]  # mutable for closure
 
             def handle_chunk(decoded: str) -> None:
                 # Stream raw output for live display
@@ -1538,15 +2123,24 @@ class GeminiCodeAssistProvider(AIProvider):
                         if not isinstance(event, dict):
                             continue
                         json_events.append(event)
+                        evt_type = event.get("type")
                         # Extract session_id from init event
-                        if event.get("type") == "init" and "session_id" in event:
-                            self.session_id = event["session_id"]
+                        if evt_type == "init":
+                            if "session_id" in event:
+                                self.session_id = event["session_id"]
+                            if "model" in event:
+                                init_model[0] = event["model"]
                         # Collect response content
-                        if event.get("type") == "message" and event.get("role") == "assistant":
+                        elif evt_type == "message" and event.get("role") == "assistant":
                             content = event.get("content", "")
                             if content:
                                 response_parts.append(content)
                                 self._notify_activity("text", content[:80])
+                        # Capture usage stats from result event
+                        elif evt_type == "result":
+                            stats = event.get("stats")
+                            if stats and isinstance(stats, dict):
+                                usage_stats.update(stats)
                     except json.JSONDecodeError:
                         # Non-JSON line (warnings, etc.) - just notify
                         if line and len(line) > 10:
@@ -1558,6 +2152,12 @@ class GeminiCodeAssistProvider(AIProvider):
                 self.process.stdin.close()
 
             output, timed_out, idle_stalled = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
+
+            # Record usage stats if we got any
+            if usage_stats:
+                model = init_model[0] or self.config.model_name or "default"
+                account = self.config.account_name or ""
+                _append_gemini_usage(account, model, usage_stats)
 
             self.current_message = None
             self.process = None
@@ -1608,6 +2208,18 @@ class GeminiCodeAssistProvider(AIProvider):
 
     def supports_multi_turn(self) -> bool:
         return True
+
+    def get_session_id(self) -> str | None:
+        """Get the Gemini session_id for native resume."""
+        return self.session_id
+
+    def supports_usage_reporting(self) -> bool:
+        """Gemini supports usage reporting via local session files."""
+        return True
+
+    def get_usage_percentage(self) -> float | None:
+        """Get Gemini usage percentage from local session files."""
+        return _get_gemini_usage_percentage(self.config.account_name)
 
 
 class QwenCodeProvider(AIProvider):
@@ -1704,13 +2316,9 @@ class QwenCodeProvider(AIProvider):
                         # Extract session_id from system/init event
                         if event.get("type") == "system" and "session_id" in event:
                             self.session_id = event["session_id"]
-                        # Collect response content from assistant messages
-                        if event.get("type") == "message" and event.get("role") == "assistant":
-                            content = event.get("content", "")
-                            if content:
-                                response_parts.append(content)
-                                self._notify_activity("text", content[:80])
-                        # Handle assistant type directly (Qwen CLI format)
+                        # Handle assistant type with content blocks (preferred format)
+                        # Skip 'message' events with role='assistant' as they duplicate
+                        # the content from 'assistant' type events
                         if event.get("type") == "assistant":
                             message = event.get("message", {})
                             content_blocks = message.get("content", [])
@@ -1793,6 +2401,392 @@ class QwenCodeProvider(AIProvider):
 
     def supports_multi_turn(self) -> bool:
         return True
+
+    def get_session_id(self) -> str | None:
+        """Get the Qwen session_id for native resume."""
+        return self.session_id
+
+    def supports_usage_reporting(self) -> bool:
+        """Qwen supports usage reporting via local session files."""
+        return True
+
+    def get_usage_percentage(self) -> float | None:
+        """Get Qwen usage percentage from local session files."""
+        return _get_qwen_usage_percentage(self.config.account_name)
+
+
+class OpenCodeProvider(AIProvider):
+    """Provider for OpenCode CLI with multi-turn support.
+
+    Uses the `opencode` command-line interface with JSON output format
+    for real-time streaming. Supports multi-turn via `--session <id>` or `--continue`.
+
+    OpenCode is an open-source AI coding agent supporting multiple backends
+    (Anthropic, OpenAI, Gemini, etc.) with session persistence.
+    Model format: provider/model (e.g., anthropic/claude-sonnet-4-5)
+    """
+
+    def __init__(self, config: ModelConfig):
+        super().__init__(config)
+        self.project_path: str | None = None
+        self.system_prompt: str | None = None
+        self.current_message: str | None = None
+        self.process: object | None = None
+        self.master_fd: int | None = None
+        self.session_id: str | None = None  # For multi-turn support
+
+    def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
+        ok, detail = _ensure_cli_tool("opencode", self._notify_activity)
+        if not ok:
+            return False
+
+        self.project_path = project_path
+        self.system_prompt = system_prompt
+        self.cli_path = detail
+        return True
+
+    def send_message(self, message: str) -> None:
+        # Only prepend system prompt on first message (no session_id yet)
+        if self.system_prompt and not self.session_id:
+            self.current_message = f"{self.system_prompt}\n\n---\n\n{message}"
+        else:
+            self.current_message = message
+
+    def get_response(self, timeout: float = 1800.0) -> str:  # noqa: C901
+        import json
+
+        if not self.current_message:
+            return ""
+
+        opencode_cli = getattr(self, "cli_path", None) or find_cli_executable("opencode")
+
+        # Build command - use `opencode run` with --format json
+        cmd = [opencode_cli, "run", "--format", "json"]
+        if self.session_id:
+            cmd.extend(["--session", self.session_id])
+        elif self.config.model_name and self.config.model_name != "default":
+            cmd.extend(["-m", self.config.model_name])
+        cmd.append(self.current_message)
+
+        try:
+            env = os.environ.copy()
+            env["TERM"] = "xterm-256color"
+            # No need to set XDG_DATA_HOME; OpenCode v1.1+ uses ~/.local/share/opencode
+
+            json_events = []
+            response_parts = []
+            final_result = [None]  # Store final result from result event
+
+            def handle_chunk(decoded: str) -> None:
+                # Stream raw output for live display
+                self._notify_activity("stream", decoded)
+                # Parse JSON lines
+                for line in decoded.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        if not isinstance(event, dict):
+                            continue
+                        json_events.append(event)
+                        # Extract session_id from system/init event or session event
+                        if event.get("type") == "system" and "session_id" in event:
+                            self.session_id = event["session_id"]
+                        elif event.get("type") == "session" and "id" in event:
+                            self.session_id = event["id"]
+                        # Handle assistant type with content blocks
+                        if event.get("type") == "assistant":
+                            message = event.get("message", {})
+                            content_blocks = message.get("content", [])
+                            for block in content_blocks:
+                                if isinstance(block, dict) and block.get("type") == "text":
+                                    text = block.get("text", "")
+                                    if text:
+                                        response_parts.append(text)
+                                        self._notify_activity("text", text[:80])
+                        # Capture final result from result event
+                        if event.get("type") == "result" and "result" in event:
+                            final_result[0] = event["result"]
+                    except json.JSONDecodeError:
+                        # Non-JSON line (warnings, etc.) - just notify
+                        if line and len(line) > 10:
+                            self._notify_activity("text", line[:80])
+
+            self.process, self.master_fd = _start_pty_process(cmd, cwd=self.project_path, env=env)
+
+            # Close stdin immediately - prompt is passed via -p argument
+            if self.process.stdin:
+                self.process.stdin.close()
+
+            output, timed_out, idle_stalled = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
+
+            self.current_message = None
+            self.process = None
+            self.master_fd = None
+
+            if idle_stalled:
+                return f"Error: OpenCode execution stalled (no output for {int(timeout)}s)"
+            if timed_out:
+                return f"Error: OpenCode execution timed out ({int(timeout / 60)} minutes)"
+
+            # Prefer final result from result event (most reliable)
+            if final_result[0]:
+                return str(final_result[0]).strip()
+
+            # Return collected response parts if any
+            if response_parts:
+                return "".join(response_parts).strip()
+
+            # Fallback to raw output
+            output = _strip_ansi_codes(output)
+            return output.strip() if output else "No response from OpenCode"
+
+        except FileNotFoundError:
+            self.current_message = None
+            self.process = None
+            _close_master_fd(self.master_fd)
+            self.master_fd = None
+            return (
+                "Failed to run OpenCode: command not found\n\n"
+                "Install with: curl -fsSL https://raw.githubusercontent.com/opencode-ai/opencode/refs/heads/main/install | bash"
+            )
+        except (PermissionError, OSError) as exc:
+            self.current_message = None
+            self.process = None
+            _close_master_fd(self.master_fd)
+            self.master_fd = None
+            return f"Failed to run OpenCode: {exc}"
+
+    def stop_session(self) -> None:
+        self.current_message = None
+        self.session_id = None  # Clear session_id to end multi-turn
+        _close_master_fd(self.master_fd)
+        self.master_fd = None
+        if self.process:
+            try:
+                self.process.kill()
+                self.process.wait(timeout=5)
+            except Exception:
+                pass
+            self.process = None
+
+    def is_alive(self) -> bool:
+        # Session is "alive" if we have a session_id for resuming
+        return self.session_id is not None or (self.process is not None and self.process.poll() is None)
+
+    def supports_multi_turn(self) -> bool:
+        return True
+
+    def get_session_id(self) -> str | None:
+        """Get the OpenCode session_id for native resume."""
+        return self.session_id
+
+    def supports_usage_reporting(self) -> bool:
+        """OpenCode supports usage reporting via local session files."""
+        return True
+
+    def get_usage_percentage(self) -> float | None:
+        """Get OpenCode usage percentage from local session files."""
+        return _get_opencode_usage_percentage(self.config.account_name)
+
+
+class KimiCodeProvider(AIProvider):
+    """Provider for Kimi Code CLI with multi-turn support.
+
+    Uses the `kimi` command-line interface with stream-json output format
+    for real-time streaming. Supports multi-turn via `--session <id>` or `--continue`.
+
+    Kimi Code is an AI coding agent from Moonshot AI, powered by Kimi K2.5 model.
+    Config stored in ~/.kimi/config.toml.
+    """
+
+    def __init__(self, config: ModelConfig):
+        super().__init__(config)
+        self.project_path: str | None = None
+        self.system_prompt: str | None = None
+        self.current_message: str | None = None
+        self.process: object | None = None
+        self.master_fd: int | None = None
+        self.session_id: str | None = None  # For multi-turn support
+
+    def _get_isolated_config_dir(self) -> Path:
+        """Get isolated ~/.kimi directory for this account."""
+        base_home = safe_home()
+        if self.config.account_name:
+            return Path(base_home) / ".chad" / "kimi-homes" / self.config.account_name
+        return Path(base_home)
+
+    def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
+        ok, detail = _ensure_cli_tool("kimi", self._notify_activity)
+        if not ok:
+            return False
+
+        self.project_path = project_path
+        self.system_prompt = system_prompt
+        self.cli_path = detail
+        return True
+
+    def send_message(self, message: str) -> None:
+        # Only prepend system prompt on first message (no session_id yet)
+        if self.system_prompt and not self.session_id:
+            self.current_message = f"{self.system_prompt}\n\n---\n\n{message}"
+        else:
+            self.current_message = message
+
+    def get_response(self, timeout: float = 1800.0) -> str:  # noqa: C901
+        import json
+
+        if not self.current_message:
+            return ""
+
+        kimi_cli = getattr(self, "cli_path", None) or find_cli_executable("kimi")
+
+        # Build command using Kimi CLI flags:
+        # -p/--prompt: pass prompt
+        # --output-format stream-json: structured JSON output
+        # --print: non-interactive mode (implies --yolo)
+        # --session: resume specific session
+        if self.session_id:
+            cmd = [
+                kimi_cli,
+                "-p", self.current_message,
+                "--output-format", "stream-json",
+                "--print",
+                "--session", self.session_id,
+            ]
+        else:
+            cmd = [
+                kimi_cli,
+                "-p", self.current_message,
+                "--output-format", "stream-json",
+                "--print",
+            ]
+            if self.config.model_name and self.config.model_name != "default":
+                cmd.extend(["-m", self.config.model_name])
+
+        try:
+            env = os.environ.copy()
+            env["TERM"] = "xterm-256color"
+            # Set isolated home directory for config
+            env["HOME"] = str(self._get_isolated_config_dir())
+
+            json_events = []
+            response_parts = []
+            final_result = [None]
+
+            def handle_chunk(decoded: str) -> None:
+                # Stream raw output for live display
+                self._notify_activity("stream", decoded)
+                # Parse JSON lines
+                for line in decoded.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        if not isinstance(event, dict):
+                            continue
+                        json_events.append(event)
+                        # Extract session_id from session/system event
+                        if event.get("type") == "session" and "id" in event:
+                            self.session_id = event["id"]
+                        elif event.get("type") == "system" and "session_id" in event:
+                            self.session_id = event["session_id"]
+                        # Handle assistant type with content blocks
+                        if event.get("type") == "assistant":
+                            message = event.get("message", {})
+                            content_blocks = message.get("content", [])
+                            for block in content_blocks:
+                                if isinstance(block, dict) and block.get("type") == "text":
+                                    text = block.get("text", "")
+                                    if text:
+                                        response_parts.append(text)
+                                        self._notify_activity("text", text[:80])
+                        # Capture final result from result event
+                        if event.get("type") == "result" and "result" in event:
+                            final_result[0] = event["result"]
+                    except json.JSONDecodeError:
+                        # Non-JSON line - just notify
+                        if line and len(line) > 10:
+                            self._notify_activity("text", line[:80])
+
+            self.process, self.master_fd = _start_pty_process(cmd, cwd=self.project_path, env=env)
+
+            # Close stdin immediately - prompt is passed via -p argument
+            if self.process.stdin:
+                self.process.stdin.close()
+
+            output, timed_out, idle_stalled = _stream_pty_output(self.process, self.master_fd, handle_chunk, timeout)
+
+            self.current_message = None
+            self.process = None
+            self.master_fd = None
+
+            if idle_stalled:
+                return f"Error: Kimi execution stalled (no output for {int(timeout)}s)"
+            if timed_out:
+                return f"Error: Kimi execution timed out ({int(timeout / 60)} minutes)"
+
+            # Prefer final result from result event (most reliable)
+            if final_result[0]:
+                return str(final_result[0]).strip()
+
+            # Return collected response parts if any
+            if response_parts:
+                return "".join(response_parts).strip()
+
+            # Fallback to raw output
+            output = _strip_ansi_codes(output)
+            return output.strip() if output else "No response from Kimi Code"
+
+        except FileNotFoundError:
+            self.current_message = None
+            self.process = None
+            _close_master_fd(self.master_fd)
+            self.master_fd = None
+            return (
+                "Failed to run Kimi Code: command not found\n\n"
+                "Install with: pip install kimi-cli"
+            )
+        except (PermissionError, OSError) as exc:
+            self.current_message = None
+            self.process = None
+            _close_master_fd(self.master_fd)
+            self.master_fd = None
+            return f"Failed to run Kimi Code: {exc}"
+
+    def stop_session(self) -> None:
+        self.current_message = None
+        self.session_id = None  # Clear session_id to end multi-turn
+        _close_master_fd(self.master_fd)
+        self.master_fd = None
+        if self.process:
+            try:
+                self.process.kill()
+                self.process.wait(timeout=5)
+            except Exception:
+                pass
+            self.process = None
+
+    def is_alive(self) -> bool:
+        # Session is "alive" if we have a session_id for resuming
+        return self.session_id is not None or (self.process is not None and self.process.poll() is None)
+
+    def supports_multi_turn(self) -> bool:
+        return True
+
+    def get_session_id(self) -> str | None:
+        """Get the Kimi session_id for native resume."""
+        return self.session_id
+
+    def supports_usage_reporting(self) -> bool:
+        """Kimi supports usage reporting via local session files."""
+        return True
+
+    def get_usage_percentage(self) -> float | None:
+        """Get Kimi usage percentage from local session files."""
+        return _get_kimi_usage_percentage(self.config.account_name)
 
 
 class MistralVibeProvider(AIProvider):
@@ -1913,6 +2907,20 @@ class MistralVibeProvider(AIProvider):
     def supports_multi_turn(self) -> bool:
         return True
 
+    def supports_usage_reporting(self) -> bool:
+        """Mistral supports usage reporting via local session files."""
+        return True
+
+    def get_usage_percentage(self) -> float | None:
+        """Get Mistral usage percentage from local session files."""
+        return _get_mistral_usage_percentage(self.config.account_name)
+
+
+class MockProviderQuotaError(Exception):
+    """Raised when MockProvider simulates quota exhaustion."""
+
+    pass
+
 
 class MockProvider(AIProvider):
     """Mock provider for testing UI without real API calls.
@@ -1922,11 +2930,20 @@ class MockProvider(AIProvider):
     - Makes actual file changes to BUGS.md in the worktree
     - Returns proper JSON responses
     - Rejects first verification attempt, accepts second
+    - Simulates quota exhaustion when mock_remaining_usage is 0
+
+    Quota Simulation:
+        Set mock_remaining_usage to 0 via ConfigManager to trigger quota errors.
+        This enables testing provider handover without real API costs.
+        The error message matches patterns detected by is_quota_exhaustion_error().
     """
 
     # Class-level state to persist across provider instances (keyed by project path)
     _verification_counts: dict[str, int] = {}
     _coding_turn_counts: dict[str, int] = {}
+
+    # Usage decrement per response (configurable for testing)
+    USAGE_DECREMENT_PER_RESPONSE = 0.01
 
     def __init__(self, config: ModelConfig):
         super().__init__(config)
@@ -1935,21 +2952,91 @@ class MockProvider(AIProvider):
         self._response_queue: list[str] = []
         self._project_path: str | None = None
         self._is_verification_mode = False
+        self._verification_phase: str | None = None
 
     def queue_response(self, response: str) -> None:
         """Queue a response to be returned by get_response (for unit tests)."""
         self._response_queue.append(response)
 
+    def _get_remaining_usage(self) -> float:
+        """Get the configured mock remaining usage for this account.
+
+        Returns:
+            Remaining usage as 0.0-1.0 (1.0 = full capacity)
+        """
+        from .config_manager import ConfigManager
+
+        account_name = self.config.account_name
+        if not account_name:
+            return 0.5  # Default when no account configured
+
+        config_mgr = ConfigManager()
+        return config_mgr.get_mock_remaining_usage(account_name)
+
+    def _decrement_usage(self, amount: float | None = None) -> None:
+        """Decrement the mock remaining usage after a response.
+
+        Args:
+            amount: Amount to decrement (0.0-1.0), defaults to USAGE_DECREMENT_PER_RESPONSE
+        """
+        from .config_manager import ConfigManager
+
+        account_name = self.config.account_name
+        if not account_name:
+            return
+
+        decrement = amount if amount is not None else self.USAGE_DECREMENT_PER_RESPONSE
+        config_mgr = ConfigManager()
+        current = config_mgr.get_mock_remaining_usage(account_name)
+        new_value = max(0.0, current - decrement)
+        config_mgr.set_mock_remaining_usage(account_name, new_value)
+
+    def _check_quota_and_raise_if_exhausted(self) -> None:
+        """Check if quota is exhausted and raise MockProviderQuotaError if so.
+
+        This method checks the mock_remaining_usage config value and raises
+        an error with a message that matches quota exhaustion patterns,
+        enabling testing of provider handover.
+
+        Raises:
+            MockProviderQuotaError: When mock_remaining_usage is 0
+        """
+        remaining = self._get_remaining_usage()
+        if remaining <= 0.0:
+            account = self.config.account_name or "mock"
+            # Use error message that matches is_quota_exhaustion_error() patterns
+            raise MockProviderQuotaError(
+                f"Quota exceeded for mock provider account '{account}'. "
+                "Insufficient credits remaining. "
+                "Set mock_remaining_usage > 0 to restore capacity."
+            )
+
     def start_session(self, project_path: str, system_prompt: str | None = None) -> bool:
         self._alive = True
         self._project_path = project_path
+        self._is_verification_mode = False
+        self._verification_phase = None
         self._notify_activity("text", "Mock session started")
         return True
 
     def send_message(self, message: str) -> None:
         self._messages.append(message)
-        # Detect if this is a verification prompt
-        self._is_verification_mode = "DO NOT modify or create any files" in message
+        # Two-phase verification flow:
+        # 1) Exploration prompt (free-form analysis)
+        # 2) Conclusion prompt (strict JSON verdict)
+        if "DO NOT modify or create any files" in message:
+            self._is_verification_mode = True
+            self._verification_phase = "exploration"
+            return
+
+        if "Based on your analysis, provide your final verdict." in message:
+            self._is_verification_mode = True
+            self._verification_phase = "conclusion"
+            return
+
+        # Any other prompt is coding/follow-up mode.
+        self._is_verification_mode = False
+        self._verification_phase = None
 
     def _simulate_delay(self, seconds: float = 0.1) -> None:
         """Simulate processing delay."""
@@ -2067,9 +3154,11 @@ I modified BUGS.md to add a test marker.
         return response
 
     def _generate_verification_response(self) -> str:
-        """Generate a realistic verification agent response."""
-        verification_count = self._get_verification_count()
+        """Generate a realistic verification agent response.
 
+        Exploration phase returns analysis text.
+        Conclusion phase returns JSON verdict (fail first, then pass).
+        """
         # Simulate verification activities
         self._notify_activity("tool", "Read: BUGS.md")
         self._simulate_delay(0.15)
@@ -2080,7 +3169,13 @@ I modified BUGS.md to add a test marker.
         self._notify_activity("stream", "Checking diff output...\n")
         self._simulate_delay(0.1)
 
-        # First verification: reject with a reason
+        if self._verification_phase != "conclusion":
+            self._notify_activity("stream", "Exploration complete. Ready to provide final verdict.\n")
+            return "I reviewed BUGS.md and the diff. Please ask for the final verdict."
+
+        verification_count = self._get_verification_count()
+
+        # First verification conclusion: reject with a reason
         if verification_count == 1:
             self._notify_activity("stream", "Found an issue with the changes.\n")
             return """{
@@ -2092,7 +3187,7 @@ I modified BUGS.md to add a test marker.
   ]
 }"""
 
-        # Subsequent verifications: accept
+        # Subsequent conclusions: accept
         self._notify_activity("stream", "Changes look good.\n")
         return """{
   "passed": true,
@@ -2106,6 +3201,10 @@ I modified BUGS.md to add a test marker.
         if self._response_queue:
             return self._response_queue.pop(0)
 
+        # Check quota before generating response (simulates API quota check)
+        # This raises MockProviderQuotaError if mock_remaining_usage is 0
+        self._check_quota_and_raise_if_exhausted()
+
         # Check for explicit breakdown requests (for unit test compatibility)
         last_msg = self._messages[-1] if self._messages else ""
         if "break down into subtasks" in last_msg.lower() or "breakdown" in last_msg.lower():
@@ -2113,9 +3212,15 @@ I modified BUGS.md to add a test marker.
 
         # Generate appropriate response based on mode
         if self._is_verification_mode:
-            return self._generate_verification_response()
+            response = self._generate_verification_response()
         else:
-            return self._generate_coding_response()
+            response = self._generate_coding_response()
+
+        # Decrement usage after successful response (simulates token consumption)
+        # This allows testing gradual quota depletion
+        self._decrement_usage()
+
+        return response
 
     def stop_session(self) -> None:
         self._alive = False
@@ -2147,6 +3252,10 @@ def create_provider(config: ModelConfig) -> AIProvider:
         return GeminiCodeAssistProvider(config)
     elif config.provider == "qwen":
         return QwenCodeProvider(config)
+    elif config.provider == "opencode":
+        return OpenCodeProvider(config)
+    elif config.provider == "kimi":
+        return KimiCodeProvider(config)
     elif config.provider == "mistral":
         return MistralVibeProvider(config)
     elif config.provider == "mock":

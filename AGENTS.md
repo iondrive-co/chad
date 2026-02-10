@@ -5,9 +5,104 @@ to clear roadblocks yourself without involving a user. You are allowed to develo
 researching and developing tools required to complete your tasks. Use these abilities to find creative ways to deliver
 flawlessly working features.
 
+## Class Map
+
+Consult this map before exploring to find the right starting point. Chad is a multi-provider AI coding assistant with a FastAPI backend and Gradio/CLI frontends.
+
+### Architecture
+
+```
+Entry: __main__.py → server + UI
+Server: SessionManager → TaskExecutor → PTYStreamService → EventMultiplexer → SSE
+Client: APIClient (REST) + StreamClient (SSE) + WSClient (WebSocket)
+UI: ChadWebUI (Gradio) or app.py (CLI), both use TerminalEmulator
+```
+
+### Provider Layer (`chad.util.providers`)
+
+| Class | Description |
+|-------|-------------|
+| ModelConfig | Dataclass: account name, provider type, model ID, reasoning effort, project path. |
+| AIProvider | Abstract base for providers. Methods: start_session, send_message, get_response, stop_session, is_alive. |
+| ClaudeCodeProvider | Anthropic Claude Code CLI. Streaming JSON, isolated CLAUDE_CONFIG_DIR per account. |
+| OpenAICodexProvider | OpenAI Codex CLI. Isolated HOME per account, reasoning effort levels. |
+| GeminiCodeAssistProvider | Google Gemini CLI in YOLO mode. |
+| QwenCodeProvider | Alibaba Qwen CLI. Stream-json output like Claude. |
+| MistralVibeProvider | Mistral Vibe CLI. |
+| MockProvider | Test provider simulating agent behavior with ANSI output. |
+
+### Server Services (`chad.server.services`)
+
+| Class | Description |
+|-------|-------------|
+| Session | Per-session state: ID, provider, worktree info, chat history, task, project path. |
+| SessionManager | Thread-safe CRUD for sessions. Global singleton via `get_session_manager()`. |
+| Task | Running/completed task: state, progress, result, PTY stream_id, EventLog. |
+| TaskState | Enum: PENDING, RUNNING, COMPLETED, FAILED, CANCELLED. |
+| TaskExecutor | Orchestrates tasks via PTY. Spawns provider CLIs, manages timeouts, routes events. |
+| ClaudeStreamJsonParser | Parses stream-json from Claude/Qwen. Buffers bytes, yields readable text. |
+| PTYSession | Active PTY: stream_id, PID, master FD, subscribers, event buffer. |
+| PTYEvent | PTY event: type (output/exit/error), stream_id, base64 data. |
+| PTYStreamService | Manages PTYs. Uses subprocess+openpty to avoid deadlocks. Global singleton via `get_pty_stream_service()`. |
+| MuxEvent | Unified event: type (terminal/event/complete/error/ping), data, sequence. |
+| EventMultiplexer | Unifies PTY + EventLog into single SSE stream with keepalive pings. |
+
+### Event Logging (`chad.util.event_log`)
+
+| Class | Description |
+|-------|-------------|
+| EventLog | JSONL logging per session in `~/.chad/logs/`. Large artifacts stored separately. |
+| EventBase | Base event: event_id, timestamp, sequence, session_id, turn_id. |
+| SessionStartedEvent | Task description, project path, provider/account/model. |
+| UserMessageEvent | User input message. |
+| AssistantMessageEvent | AI response with message blocks. |
+| ToolCallStartedEvent | Tool invocation: name, args, status. |
+| ToolCallFinishedEvent | Tool result, is_error flag. |
+| TerminalOutputEvent | Raw terminal chunk. |
+| SessionEndedEvent | Reason, success, summary. |
+
+### Git Integration (`chad.util.git_worktree`)
+
+| Class | Description |
+|-------|-------------|
+| GitWorktreeManager | Manages worktrees in `.chad-worktrees/`. Create, diff, merge, cleanup. |
+| FileDiff | Diff for one file: paths, hunks, new/deleted/binary flags. |
+| MergeConflict | Conflicts in a file: path + list of ConflictHunks. |
+
+### Configuration (`chad.util.config_manager`)
+
+| Class | Description |
+|-------|-------------|
+| ConfigManager | App config in `~/.chad.conf`. Password hashing, API key encryption, accounts, preferences. |
+
+### Client Layer (`chad.ui.client`)
+
+| Class | Description |
+|-------|-------------|
+| APIClient | REST client for server. Sessions, accounts, tasks, worktrees, config. |
+| StreamClient | Async SSE client. Parses events, yields StreamEvent. |
+| SyncStreamClient | Sync wrapper for Gradio (needs sync generators). |
+| WSClient | Sync WebSocket client. |
+| AsyncWSClient | Async WebSocket client. |
+
+### UI Layer
+
+| Class | File | Description |
+|-------|------|-------------|
+| ChadWebUI | `chad.ui.gradio.web_ui` | Gradio interface. Sessions, provider cards, streaming, merge resolution. |
+| ProviderUIManager | `chad.ui.gradio.provider_ui` | Provider management: accounts, models, OAuth. |
+| TerminalEmulator | `chad.ui.terminal_emulator` | Pyte-based emulator. ANSI to HTML with scrollback. |
+| ModelCatalog | `chad.util.model_catalog` | Discovers/caches models per provider from config files. |
+| AIToolInstaller | `chad.util.installer` | Installs CLIs (claude, codex, etc.) in `~/.chad/tools/`. |
+| ProcessRegistry | `chad.util.process_registry` | Process lifecycle with cleanup guarantees. SIGTERM→SIGKILL escalation. |
+
+### API Schemas (`chad.server.api.schemas`)
+
+Pydantic models for request/response validation: SessionCreate, TaskCreate, AccountCreate, WorktreeStatus, etc.
+
 ## Before making changes
 
-When exploring the codebase, note that ripgrep (`rg`) is not installed here. Use `grep -R`, `find`, or language-aware 
+When exploring the codebase, note that ripgrep (`rg`) is not installed here. Use `grep -R`, `find`, or language-aware
 tools instead—do not invoke `rg`.
 
 When designing new code, never make fallback code to handle paths other than the happy one, instead spend as much effort
@@ -15,6 +110,15 @@ as necessary to make sure that everyone using your feature sees the same happy p
 config options, instead decide which option makes the most sense and implement that without writing code to handle other
 options. Keep code simple rather than using abstractions, and find and delete unused or redundant code and tests as
 part of your change. Don't worry about backwards compatibility.
+
+**Provider Prompt Parity**: All providers MUST use the same prompts. Never create provider-specific prompt variants or
+customize prompts based on provider type. If a provider has different execution characteristics (e.g., terminates on
+certain output), handle that by restructuring the task execution phases rather than modifying prompts.
+
+**Dev-only Logging**: Diagnostic output (timing, internal state) must only appear when `--dev` is passed. In the Gradio
+UI, `ChadWebUI` has `self.dev_mode` and a `_startup_log(msg)` helper that checks it. In `launch_web_ui()`, gate prints
+behind the local `dev_mode` parameter. Never add unconditional `print()` for diagnostic info — user-visible output
+should be limited to essential status messages (e.g. "Loading web interface...", port conflicts).
 
 When fixing bugs, first describe the behavior of the software in detail, and then describe how the code makes that 
 happen. From that description generate plausible theories for the bug, then use tests and research to eliminate 
@@ -65,6 +169,16 @@ wrong thing. Here are some suggested steps for proving:
    # CLI UI
    timeout 5 .venv/bin/python -c "from chad.ui.cli import launch_cli_ui" 2>&1 || echo "CLI startup failed"
    ```
+4. **Run provider integration tests** when changing prompts, PTY handling, or task execution:
+   ```bash
+   # Changes to these files require provider testing:
+   # - src/chad/util/prompts.py
+   # - src/chad/server/services/task_executor.py
+   # - src/chad/server/services/pty_stream.py
+   CHAD_RUN_PROVIDER_TESTS=1 .venv/bin/python -m pytest tests/provider_integration/ -v -k codex
+   ```
+   See the `provider-testing` skill for the full guide. Unit tests mock providers and cannot
+   catch CLI-specific behaviors like early exit on certain output formats.
    This catches NameErrors, missing imports, and other issues that flake8 and tests may miss.
 4. Perform a critical self-review, note down all the issues you find, and then output them one by one noting whether
 each one is a problem that will require rework of your changes. If any do, then go back and rework and then go through
@@ -73,7 +187,7 @@ this process again
 
 ## Screenshots
 
-For UI changes, take before/after screenshots to verify visual correctness:
+For UI changes, take before/after screenshots to verify visual correctness. **Both Gradio and CLI can be screenshotted.**
 
 1. **Before starting**: Take a screenshot showing the current state
 2. **After changes**: Take a screenshot showing the result of your changes
@@ -88,10 +202,17 @@ For UI changes, take before/after screenshots to verify visual correctness:
 }
 ```
 
-When working on Gradio UI components:
+### Gradio UI Screenshots
+- Use `scripts/screenshot_ui.py` for web UI screenshots
 - Check `src/chad/ui/gradio/verification/visual_test_map.py` for existing screenshot tests
 - If you add or change UI components, update `visual_test_map.py` so future runs pick the right visual tests
 - See `src/chad/ui/gradio/verification/screenshot_fixtures.py` for example fixture data to use in screenshots
+
+### CLI Terminal Screenshots
+- Use `scripts/screenshot_cli.py` for CLI/terminal screenshots
+- Example: `./.venv/bin/python scripts/screenshot_cli.py --command "chad --help" --output /tmp/chad/cli.png`
+- For interactive menus, capture output to a file first, then screenshot the file
+- **Never say "CLI cannot be screenshotted"** - it can, using this script
 
 ## Visual Test Targeting
 
@@ -135,6 +256,28 @@ To connect to an existing API server instead of starting a local one:
 chad --server-url http://localhost:8000
 chad --server-url http://localhost:8000 --ui cli
 ```
+
+### Adding New Config Options
+
+**IMPORTANT**: All user-editable config options MUST be exposed in BOTH Gradio and CLI UIs.
+Tests in `test_config_manager.py::TestConfigUIParity` will FAIL if you add a new config key
+without proper UI support.
+
+When adding a new config option:
+1. Add the key to `CONFIG_BASE_KEYS` in `src/chad/util/config_manager.py`
+2. Add getter/setter methods to `ConfigManager`
+3. Add API endpoint in `src/chad/server/api/routes/config.py`
+4. Add `APIClient` method in `src/chad/ui/client/api_client.py`
+5. Add UI element in `src/chad/ui/gradio/web_ui.py` (in the config panel)
+6. Add menu option in `src/chad/ui/cli/app.py` (in `run_settings_menu`)
+7. Update `tests/test_config_manager.py`:
+   - Add to `REQUIRED_UI_CONFIG_KEYS` if user-editable in both UIs
+   - Add to `GRADIO_ONLY_KEYS` if only relevant for web UI
+   - Add to `INTERNAL_KEYS` if system-managed (not user-editable)
+   - Add to `KEY_PATTERNS` if the UI uses different naming
+
+The `test_all_config_keys_categorized` test ensures you can't add a new key to
+`CONFIG_BASE_KEYS` without explicitly categorizing it.
 
 ## Running Tests
 
@@ -180,6 +323,38 @@ Tests are organized by module and marked for efficient targeting:
 - `api`: API endpoint tests
 
 Use `-m "not visual"` to skip browser tests for faster iteration.
+
+## Test Utility Tools
+
+Reusable helpers in `tests/test_helpers.py` for bug reproduction and feature verification.
+Import them in any test file or use interactively via `pytest` fixtures.
+
+| Tool | Signature | Description |
+|------|-----------|-------------|
+| `collect_stream_events` | `(client, session_id, timeout=10, poll_interval=0.3, wait_for_completion=True) → CollectedEvents` | Polls `GET /api/v1/sessions/{id}/events` until `session_ended` or timeout. Returns `.all_events`, `.terminal_events`, `.structured_events`, `.decoded_output`. |
+| `ProviderOutputSimulator` | `(monkeypatch, scenario)` | Monkeypatches `build_agent_command()` to emit canned byte sequences. Scenarios: `qwen_duplicate`, `codex_system_prompt`, `codex_tool_calls_only`, `codex_garbled_binary`. |
+| `TaskPhaseMonitor` | `(events) → .phases, .phase_names(), .terminal_counts_by_phase()` | Scans events for phase transitions (coding → verification → continuation). Detects structured markers and text-based "Phase N:" markers. |
+| `capture_provider_command` | `(provider, account_name, project_path, ...) → CapturedCommand` | Calls `build_agent_command()` directly. Returns `.cmd`, `.env`, `.initial_input`. No monkeypatching needed. |
+| `cli_config_parity_check` | `() → ConfigParityResult` | Checks which user-editable config keys are missing from `cli/app.py`. Returns `.api_keys`, `.cli_keys`, `.missing_from_cli`. |
+| `inspect_stream_output` | `(decoded_output) → StreamInspection` | Scans decoded terminal text for raw JSON patterns and binary garbage. Returns `.has_raw_json`, `.json_fragments`, `.has_binary_data`, `.binary_fragments`. |
+
+### Usage Examples
+
+```python
+from test_helpers import collect_stream_events, inspect_stream_output, ProviderOutputSimulator
+
+# Collect events from a running task
+events = collect_stream_events(client, session_id, timeout=15)
+assert len(events.terminal_events) > 0
+
+# Check for raw JSON leaking into terminal output
+inspection = inspect_stream_output(events.decoded_output)
+assert not inspection.has_raw_json, f"Raw JSON in output: {inspection.json_fragments}"
+
+# Simulate a provider scenario
+sim = ProviderOutputSimulator(monkeypatch, "qwen_duplicate")
+# Now start a task via the API — it will run the simulated output
+```
 
 ## Virtual Environment
 

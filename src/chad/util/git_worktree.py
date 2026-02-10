@@ -2,6 +2,7 @@
 
 import re
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -140,10 +141,22 @@ class GitWorktreeManager:
     """Manages git worktrees for Chad tasks."""
 
     WORKTREE_DIR = ".chad-worktrees"
+    _repo_locks: dict[str, threading.RLock] = {}
+    _repo_locks_guard = threading.Lock()
 
     def __init__(self, project_path: Path):
         self.project_path = Path(project_path).resolve()
         self.worktree_base = self.project_path / self.WORKTREE_DIR
+
+    def _repo_lock(self) -> threading.RLock:
+        """Get the shared lock for this repository path."""
+        key = str(self.project_path)
+        with self._repo_locks_guard:
+            lock = self._repo_locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                self._repo_locks[key] = lock
+            return lock
 
     def _run_git(self, *args: str, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
         """Run a git command and return the result."""
@@ -297,7 +310,7 @@ class GitWorktreeManager:
         if result.stdout.strip():
             return True
 
-        # Check for commits ahead of main
+        # Check for commits ahead of main (even if working tree clean)
         main_branch = self.get_main_branch()
         branch_name = self._branch_name(task_id)
         result = self._run_git("rev-list", "--count", f"{main_branch}..{branch_name}", check=False)
@@ -305,112 +318,90 @@ class GitWorktreeManager:
         return ahead_count > 0
 
     def get_diff_summary(self, task_id: str, base_commit: str | None = None) -> str:
-        """Get a summary of changes in the worktree.
-
-        Args:
-            task_id: The task ID
-            base_commit: Commit SHA to compare against (default: main branch)
-        """
+        """Get a summary of *uncommitted* changes in the worktree."""
         worktree_path = self._worktree_path(task_id)
         if not worktree_path.exists():
             return ""
 
-        # Use provided base commit or fall back to main
-        base = base_commit or self.get_main_branch()
-        branch_name = self._branch_name(task_id)
+        # Staged + unstaged diff against HEAD
+        stat_result = self._run_git("diff", "--stat", "HEAD", cwd=worktree_path, check=False)
+        stat = stat_result.stdout.strip()
 
-        # Get diff stat against base
-        result = self._run_git("diff", "--stat", f"{base}...{branch_name}", cwd=worktree_path, check=False)
-        stat = result.stdout.strip()
+        status_result = self._run_git("status", "--porcelain", cwd=worktree_path, check=False)
+        status = status_result.stdout.strip()
 
-        # Get list of changed files
-        result = self._run_git("diff", "--name-status", f"{base}...{branch_name}", cwd=worktree_path, check=False)
-        files = result.stdout.strip()
+        if not status and not stat:
+            return ""
 
-        # Also check for uncommitted changes
-        result = self._run_git("status", "--porcelain", cwd=worktree_path, check=False)
-        uncommitted = result.stdout.strip()
+        summary_lines = ["**Uncommitted changes:**"]
+        if stat:
+            summary_lines.append("```\n" + stat + "\n```")
+        else:
+            # Fall back to porcelain output for clarity when --stat is empty (e.g., rename only)
+            summary_lines.append("```\n" + status + "\n```")
 
-        summary_parts = []
-        if files:
-            summary_parts.append(f"**Committed changes:**\n```\n{stat}\n```")
-        if uncommitted:
-            summary_parts.append(f"**Uncommitted changes:**\n```\n{uncommitted}\n```")
-
-        return "\n\n".join(summary_parts)
+        return "\n".join(summary_lines)
 
     def get_full_diff(self, task_id: str, base_commit: str | None = None) -> str:
-        """Get the full diff content for the worktree changes.
-
-        Args:
-            task_id: The task ID
-            base_commit: Commit SHA to compare against (default: main branch)
-        """
+        """Get the full diff content for *uncommitted* worktree changes."""
         worktree_path = self._worktree_path(task_id)
         if not worktree_path.exists():
             return ""
 
-        # Use provided base commit or fall back to main
-        base = base_commit or self.get_main_branch()
-        branch_name = self._branch_name(task_id)
-
-        diff_parts = []
-
-        # Get committed diff
-        result = self._run_git("diff", f"{base}...{branch_name}", cwd=worktree_path, check=False)
-        if result.stdout.strip():
-            diff_parts.append(result.stdout.strip())
-
-        # Get uncommitted diff
-        result = self._run_git("diff", cwd=worktree_path, check=False)
-        if result.stdout.strip():
-            if diff_parts:
-                diff_parts.append("\n# Uncommitted changes:\n")
-            diff_parts.append(result.stdout.strip())
-
-        # Get staged diff
-        result = self._run_git("diff", "--cached", cwd=worktree_path, check=False)
-        if result.stdout.strip():
-            if diff_parts:
-                diff_parts.append("\n# Staged changes:\n")
-            diff_parts.append(result.stdout.strip())
-
-        return "\n".join(diff_parts) if diff_parts else "No changes"
+        result = self._run_git("diff", "HEAD", cwd=worktree_path, check=False)
+        return result.stdout.strip() or "No changes"
 
     def get_parsed_diff(self, task_id: str, base_commit: str | None = None) -> list[FileDiff]:
-        """Get structured diff data for the worktree changes.
-
-        Args:
-            task_id: The task ID
-            base_commit: Commit SHA to compare against (default: main branch)
-
-        Returns:
-            List of FileDiff objects for side-by-side rendering
-        """
+        """Get structured diff data for *uncommitted* worktree changes."""
         worktree_path = self._worktree_path(task_id)
         if not worktree_path.exists():
             return []
 
-        base = base_commit or self.get_main_branch()
-        branch_name = self._branch_name(task_id)
+        diff_texts = []
 
-        # Collect all diffs
-        all_diff_text = []
-
-        # Committed changes
-        result = self._run_git("diff", f"{base}...{branch_name}", cwd=worktree_path, check=False)
-        if result.stdout.strip():
-            all_diff_text.append(result.stdout)
-
-        # Uncommitted changes (staged and unstaged)
+        # Staged + unstaged changes (tracked files)
         result = self._run_git("diff", "HEAD", cwd=worktree_path, check=False)
         if result.stdout.strip():
-            all_diff_text.append(result.stdout)
+            diff_texts.append(result.stdout)
 
-        if not all_diff_text:
+        # Untracked files - include their content as a diff against /dev/null
+        untracked = self._run_git("ls-files", "--others", "--exclude-standard", cwd=worktree_path, check=False)
+        for path in filter(None, untracked.stdout.splitlines()):
+            file_path = worktree_path / path
+            if not file_path.exists():
+                continue
+            # git diff --no-index to generate a unified diff for new file
+            new_file_diff = self._run_git(
+                "diff", "--no-index", "--", "/dev/null", str(file_path),
+                cwd=worktree_path, check=False
+            )
+            if new_file_diff.stdout.strip():
+                diff_texts.append(new_file_diff.stdout)
+
+        if not diff_texts:
             return []
 
-        return self._parse_unified_diff("\n".join(all_diff_text))
+        parsed = self._parse_unified_diff("\n".join(diff_texts))
+
+        # Filter to files that actually appear in status/untracked to avoid showing committed-only files
+        status = self._run_git("status", "--porcelain", cwd=worktree_path, check=False).stdout.splitlines()
+        changed_files = {line[3:].strip() for line in status if line.strip()}
+        changed_files.update(
+            path for path in
+            self._run_git("ls-files", "--others", "--exclude-standard", cwd=worktree_path, check=False).stdout.splitlines()
+            if path.strip()
+        )
+
+        def _matches(file_path: str) -> bool:
+            p = Path(file_path)
+            try:
+                rel = p.resolve().relative_to(worktree_path.resolve())
+                rel_str = rel.as_posix()
+            except Exception:
+                rel_str = p.name
+            return rel_str in changed_files or p.name in {Path(c).name for c in changed_files}
+
+        return [f for f in parsed if _matches(f.new_path)]
 
     def _parse_unified_diff(self, diff_text: str) -> list[FileDiff]:
         """Parse unified diff output into structured FileDiff objects."""
@@ -585,71 +576,76 @@ class GitWorktreeManager:
         or a list of MergeConflict objects on failure. error_message is populated for
         non-conflict failures (e.g., commit hooks preventing commits).
         """
-        worktree_path = self._worktree_path(task_id)
-        branch_name = self._branch_name(task_id)
-        merge_target = target_branch or self.get_main_branch()
+        with self._repo_lock():
+            worktree_path = self._worktree_path(task_id)
+            branch_name = self._branch_name(task_id)
+            merge_target = target_branch or self.get_main_branch()
 
-        if not worktree_path.exists():
-            return False, None, "Worktree not found"
+            if not worktree_path.exists():
+                return False, None, "Worktree not found"
 
-        # First commit any uncommitted changes in the worktree
-        # Message doesn't matter since we'll squash everything into one commit
-        commit_ok, commit_error = self.commit_all_changes(task_id, "WIP")
-        if not commit_ok:
-            status_result = self._run_git("status", "--short", cwd=worktree_path, check=False)
-            status = status_result.stdout.strip()
-            detail = commit_error or status or "Failed to commit worktree changes"
-            if commit_error and status:
-                detail = f"{commit_error}: {status}"
-            return False, None, detail
+            # If there is nothing to merge, surface a clear error early
+            if not self.has_changes(task_id):
+                return False, None, "No changes to merge"
 
-        # Stash any uncommitted changes in main repo before checkout/merge
-        stashed = self._stash_main_changes()
-
-        # Switch to target branch in the main repo
-        current_branch = self.get_current_branch()
-        if current_branch != merge_target:
-            result = self._run_git("checkout", merge_target, check=False)
-            if result.returncode != 0:
-                # Restore stash if checkout failed
-                if stashed:
-                    self._pop_stash()
-                detail = result.stderr.strip() or result.stdout.strip() or "Failed to checkout target branch"
+            # First commit any uncommitted changes in the worktree
+            # Message doesn't matter since we'll squash everything into one commit
+            commit_ok, commit_error = self.commit_all_changes(task_id, "WIP")
+            if not commit_ok:
+                status_result = self._run_git("status", "--short", cwd=worktree_path, check=False)
+                status = status_result.stdout.strip()
+                detail = commit_error or status or "Failed to commit worktree changes"
+                if commit_error and status:
+                    detail = f"{commit_error}: {status}"
                 return False, None, detail
 
-        # Build commit message
-        final_msg = commit_message or f"Merge {branch_name}"
+            # Stash any uncommitted changes in main repo before checkout/merge
+            stashed = self._stash_main_changes()
 
-        # Use squash merge to combine all changes into a single commit
-        result = self._run_git("merge", "--squash", branch_name, check=False)
+            # Switch to target branch in the main repo
+            current_branch = self.get_current_branch()
+            if current_branch != merge_target:
+                result = self._run_git("checkout", merge_target, check=False)
+                if result.returncode != 0:
+                    # Restore stash if checkout failed
+                    if stashed:
+                        self._pop_stash()
+                    detail = result.stderr.strip() or result.stdout.strip() or "Failed to checkout target branch"
+                    return False, None, detail
 
-        if result.returncode != 0:
-            # Check for conflicts
-            if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
-                conflicts = self._parse_conflicts()
-                # Don't pop stash yet - let user resolve merge conflicts first
-                return False, conflicts, None
+            # Build commit message
+            final_msg = commit_message or f"Merge {branch_name}"
 
-            # Other error - restore stash
+            # Use squash merge to combine all changes into a single commit
+            result = self._run_git("merge", "--squash", branch_name, check=False)
+
+            if result.returncode != 0:
+                # Check for conflicts
+                if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
+                    conflicts = self._parse_conflicts()
+                    # Don't pop stash yet - let user resolve merge conflicts first
+                    return False, conflicts, None
+
+                # Other error - restore stash
+                if stashed:
+                    self._pop_stash()
+                detail = result.stderr.strip() or result.stdout.strip() or "Merge failed"
+                return False, None, detail
+
+            # Squash merge succeeded - now commit with the user's message
+            commit_result = self._run_git("commit", "-m", final_msg, check=False)
+            if commit_result.returncode != 0:
+                # Commit failed - abort the merge and restore state
+                self._run_git("reset", "--hard", "HEAD", check=False)
+                if stashed:
+                    self._pop_stash()
+                detail = commit_result.stderr.strip() or commit_result.stdout.strip() or "Commit failed"
+                return False, None, detail
+
+            # Pop stash after successful merge
             if stashed:
                 self._pop_stash()
-            detail = result.stderr.strip() or result.stdout.strip() or "Merge failed"
-            return False, None, detail
-
-        # Squash merge succeeded - now commit with the user's message
-        commit_result = self._run_git("commit", "-m", final_msg, check=False)
-        if commit_result.returncode != 0:
-            # Commit failed - abort the merge and restore state
-            self._run_git("reset", "--hard", "HEAD", check=False)
-            if stashed:
-                self._pop_stash()
-            detail = commit_result.stderr.strip() or commit_result.stdout.strip() or "Commit failed"
-            return False, None, detail
-
-        # Pop stash after successful merge
-        if stashed:
-            self._pop_stash()
-        return True, None, None
+            return True, None, None
 
     def _parse_conflicts(self) -> list[MergeConflict]:
         """Parse conflict markers from conflicted files."""
@@ -807,25 +803,26 @@ class GitWorktreeManager:
 
     def abort_merge(self) -> bool:
         """Abort an in-progress merge (regular or squash)."""
-        if self._is_regular_merge_in_progress():
-            # Regular merge - use git merge --abort
-            result = self._run_git("merge", "--abort", check=False)
-            if result.returncode != 0:
+        with self._repo_lock():
+            if self._is_regular_merge_in_progress():
+                # Regular merge - use git merge --abort
+                result = self._run_git("merge", "--abort", check=False)
+                if result.returncode != 0:
+                    return False
+            elif self._is_squash_merge_in_progress():
+                # Squash merge - reset to HEAD and clean up SQUASH_MSG
+                result = self._run_git("reset", "--hard", "HEAD", check=False)
+                if result.returncode != 0:
+                    return False
+                squash_msg = self.project_path / ".git" / "SQUASH_MSG"
+                if squash_msg.exists():
+                    squash_msg.unlink()
+            else:
+                # No merge in progress
                 return False
-        elif self._is_squash_merge_in_progress():
-            # Squash merge - reset to HEAD and clean up SQUASH_MSG
-            result = self._run_git("reset", "--hard", "HEAD", check=False)
-            if result.returncode != 0:
-                return False
-            squash_msg = self.project_path / ".git" / "SQUASH_MSG"
-            if squash_msg.exists():
-                squash_msg.unlink()
-        else:
-            # No merge in progress
-            return False
-        # Restore any stashed changes from before the merge
-        self._pop_chad_stash_if_exists()
-        return True
+            # Restore any stashed changes from before the merge
+            self._pop_chad_stash_if_exists()
+            return True
 
     def complete_merge(self, commit_message: str | None = None) -> bool:
         """Complete the merge after all conflicts resolved.
@@ -833,48 +830,49 @@ class GitWorktreeManager:
         Args:
             commit_message: Optional custom commit message (required for squash merge)
         """
-        # Stage all resolved files
-        result = self._run_git("add", "-A", check=False)
-        if result.returncode != 0:
-            return False
+        with self._repo_lock():
+            # Stage all resolved files
+            result = self._run_git("add", "-A", check=False)
+            if result.returncode != 0:
+                return False
 
-        # Check if merge is complete
-        result = self._run_git("diff", "--name-only", "--diff-filter=U", check=False)
-        if result.stdout.strip():
-            return False  # Still have conflicts
+            # Check if merge is complete
+            result = self._run_git("diff", "--name-only", "--diff-filter=U", check=False)
+            if result.stdout.strip():
+                return False  # Still have conflicts
 
-        # Check if there's anything to commit (may be empty if conflict resolved to no changes)
-        result = self._run_git("diff", "--cached", "--quiet", check=False)
-        is_squash = self._is_squash_merge_in_progress()
+            # Check if there's anything to commit (may be empty if conflict resolved to no changes)
+            result = self._run_git("diff", "--cached", "--quiet", check=False)
+            is_squash = self._is_squash_merge_in_progress()
 
-        if result.returncode == 0:
-            # Nothing to commit - this is OK if we resolved conflict to no net changes
-            # Clean up the squash merge state if present
+            if result.returncode == 0:
+                # Nothing to commit - this is OK if we resolved conflict to no net changes
+                # Clean up the squash merge state if present
+                if is_squash:
+                    squash_msg = self.project_path / ".git" / "SQUASH_MSG"
+                    if squash_msg.exists():
+                        squash_msg.unlink()
+                self._pop_chad_stash_if_exists()
+                return True
+
+            # Commit the merge
             if is_squash:
-                squash_msg = self.project_path / ".git" / "SQUASH_MSG"
-                if squash_msg.exists():
-                    squash_msg.unlink()
+                # Squash merge - need to provide a message or use SQUASH_MSG
+                if commit_message:
+                    result = self._run_git("commit", "-m", commit_message, check=False)
+                else:
+                    # Use the default SQUASH_MSG
+                    result = self._run_git("commit", "--no-edit", check=False)
+            else:
+                # Regular merge - can use --no-edit
+                result = self._run_git("commit", "--no-edit", check=False)
+
+            if result.returncode != 0:
+                return False
+
+            # Pop any stashed changes from before the merge
             self._pop_chad_stash_if_exists()
             return True
-
-        # Commit the merge
-        if is_squash:
-            # Squash merge - need to provide a message or use SQUASH_MSG
-            if commit_message:
-                result = self._run_git("commit", "-m", commit_message, check=False)
-            else:
-                # Use the default SQUASH_MSG
-                result = self._run_git("commit", "--no-edit", check=False)
-        else:
-            # Regular merge - can use --no-edit
-            result = self._run_git("commit", "--no-edit", check=False)
-
-        if result.returncode != 0:
-            return False
-
-        # Pop any stashed changes from before the merge
-        self._pop_chad_stash_if_exists()
-        return True
 
     def cleanup_after_merge(self, task_id: str) -> bool:
         """Delete worktree and branch after successful merge."""

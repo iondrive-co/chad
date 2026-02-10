@@ -10,8 +10,21 @@ metadata:
 ## Recommended: Use Python verification function
 
 ```bash
-python -c "
-from chad.verification.tools import verify
+# Detect Python executable (prefers project venv, falls back to system)
+if [ -f ./.venv/bin/python ]; then
+    PYTHON=./.venv/bin/python
+elif [ -f ./.venv/Scripts/python.exe ]; then
+    PYTHON=./.venv/Scripts/python.exe
+elif [ -f ./venv/bin/python ]; then
+    PYTHON=./venv/bin/python
+elif [ -f ./venv/Scripts/python.exe ]; then
+    PYTHON=./venv/Scripts/python.exe
+else
+    PYTHON=python3
+fi
+
+$PYTHON -c "
+from chad.ui.gradio.verification.tools import verify
 result = verify()
 print('✓ Verification passed' if result['success'] else f'✗ Failed at {result.get(\"failed_phase\", \"unknown\")}')
 exit(0 if result['success'] else 1)
@@ -43,7 +56,7 @@ $PYTHON -m pytest tests/ -v --tb=short -n auto -m "not visual"
 # Targeted visual tests (only those mapped to files you changed)
 VTESTS=$($PYTHON - <<'PY'
 import subprocess
-from chad.verification.visual_test_map import tests_for_paths
+from chad.ui.gradio.verification.visual_test_map import tests_for_paths
 changed = subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines()
 tests = tests_for_paths(changed)
 print(" or ".join(tests))
@@ -52,7 +65,7 @@ PY
 if [ -n "$VTESTS" ]; then
   $PYTHON -m pytest tests/test_ui_integration.py tests/test_ui_playwright_runner.py -v --tb=short -m "visual" -k "$VTESTS"
 fi
-# If you add/change UI, update src/chad/verification/visual_test_map.py so this stays accurate.
+# If you add/change UI, update src/chad/ui/gradio/verification/visual_test_map.py so this stays accurate.
 ```
 
 **Success**: Both exit 0

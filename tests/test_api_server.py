@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from chad.server.main import create_app
 from chad.server.services import reset_session_manager, reset_task_executor
-from chad.server.state import reset_state
+from chad.server.state import get_config_manager, reset_state
 
 
 @pytest.fixture
@@ -123,6 +123,29 @@ class TestProviderEndpoints:
         assert "anthropic" in provider_types
         assert "openai" in provider_types
         assert "gemini" in provider_types
+        assert "opencode" in provider_types
+        assert "kimi" in provider_types
+
+    @pytest.mark.parametrize("provider", ["opencode", "kimi"])
+    def test_create_account_accepts_new_provider_types(self, client, provider):
+        """Account create API should accept all provider types exposed in the setup UI."""
+        config_mgr = get_config_manager()
+        config_mgr.save_config(
+            {
+                "password_hash": "",
+                "encryption_salt": "dGVzdHNhbHQ=",
+                "accounts": {},
+            }
+        )
+
+        response = client.post(
+            "/api/v1/accounts",
+            json={"name": f"{provider}-test", "provider": provider},
+        )
+        assert response.status_code == 201, response.text
+        data = response.json()
+        assert data["name"] == f"{provider}-test"
+        assert data["provider"] == provider
 
     def test_list_accounts_empty(self, client):
         """List accounts returns empty list when no accounts configured."""
@@ -207,6 +230,33 @@ class TestConfigEndpoints:
         assert get_response.status_code == 200
         get_data = get_response.json()
         assert get_data["account_name"] is None
+
+    def test_set_provider_fallback_order_invalid_account_returns_400(self, client):
+        """Fallback order should return 400 when any account does not exist."""
+        response = client.put(
+            "/api/v1/config/provider-fallback-order",
+            json={"order": ["codex-work"]},
+        )
+
+        assert response.status_code == 400
+        assert "Unknown account(s): codex-work" in response.json()["detail"]
+
+    def test_mock_run_duration_endpoints(self, client):
+        """Can get/set per-account mock run duration."""
+        get_default = client.get("/api/v1/config/mock-run-duration/mock-runner")
+        assert get_default.status_code == 200
+        assert get_default.json()["seconds"] == 0
+
+        set_resp = client.put(
+            "/api/v1/config/mock-run-duration",
+            json={"account_name": "mock-runner", "seconds": 60},
+        )
+        assert set_resp.status_code == 200
+        assert set_resp.json()["seconds"] == 60
+
+        get_after = client.get("/api/v1/config/mock-run-duration/mock-runner")
+        assert get_after.status_code == 200
+        assert get_after.json()["seconds"] == 60
 
 
 class TestWorktreeEndpoints:

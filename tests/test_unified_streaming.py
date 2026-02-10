@@ -1,5 +1,6 @@
 """Comprehensive tests for unified PTY streaming through API."""
 
+import asyncio
 import anyio
 import base64
 import html
@@ -19,7 +20,7 @@ from chad.server.services.pty_stream import reset_pty_stream_service
 from chad.server.state import reset_state
 from chad.ui.client.stream_client import StreamClient, decode_terminal_data
 from chad.ui.terminal_emulator import TerminalEmulator
-from chad.util.event_log import EventLog, SessionStartedEvent, TerminalOutputEvent
+from chad.util.event_log import EventLog, SessionEndedEvent, SessionStartedEvent, StatusEvent, TerminalOutputEvent
 
 
 @pytest.fixture
@@ -873,6 +874,8 @@ class TestPlainTextTerminalEvents:
                 terminal_rows=None,
                 terminal_cols=None,
                 screenshots=None,
+                override_exploration_prompt=None,
+                override_implementation_prompt=None,
             ):
                 return None
 
@@ -894,7 +897,7 @@ class TestPlainTextTerminalEvents:
 
         msg_queue = queue.Queue()
 
-        success, final_output, server_session_id = ui.run_task_via_api(
+        success, final_output, server_session_id, _ = ui.run_task_via_api(
             session_id="local-plain",
             project_path="/tmp",
             task_description="Handle plain text terminal event",
@@ -1287,6 +1290,134 @@ class TestAgentHandover:
         assert events[0]["data"] == screen_text
 
 
+class TestUsageBasedProviderSwitch:
+    """Tests for proactive usage-based provider switching."""
+
+    def test_mock_usage_api_endpoints(self, client):
+        """Test mock usage API endpoints for get/set operations."""
+        # Create a mock provider account
+        client.post("/api/v1/accounts", json={"name": "usage-mock-1", "provider": "mock"})
+
+        # Default mock usage should be 0.5 (50%)
+        resp = client.get("/api/v1/config/mock-remaining-usage/usage-mock-1")
+        assert resp.status_code == 200
+        assert resp.json()["remaining"] == 0.5
+
+        # Set mock usage to 0.2 (20% remaining = 80% used)
+        resp = client.put(
+            "/api/v1/config/mock-remaining-usage",
+            json={"account_name": "usage-mock-1", "remaining": 0.2}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["remaining"] == 0.2
+
+        # Verify it persisted
+        resp = client.get("/api/v1/config/mock-remaining-usage/usage-mock-1")
+        assert resp.json()["remaining"] == 0.2
+
+    def test_usage_threshold_triggers_switch(self, client, git_repo):
+        """Test that exceeding usage threshold triggers provider switch.
+
+        When the primary provider's usage exceeds the configured threshold,
+        the system should automatically switch to the next fallback provider.
+        """
+        # Create two mock provider accounts
+        client.post("/api/v1/accounts", json={"name": "primary-mock", "provider": "mock"})
+        client.post("/api/v1/accounts", json={"name": "fallback-mock", "provider": "mock"})
+
+        # Set up fallback order: primary-mock -> fallback-mock
+        resp = client.put(
+            "/api/v1/config/provider-fallback-order",
+            json={"order": ["primary-mock", "fallback-mock"]}
+        )
+        assert resp.status_code == 200
+
+        # Set usage threshold to 50% (switch when usage exceeds 50%)
+        resp = client.put(
+            "/api/v1/config/usage-switch-threshold",
+            json={"threshold": 50}
+        )
+        assert resp.status_code == 200
+
+        # Set primary-mock to have 30% remaining (70% used) - exceeds 50% threshold
+        resp = client.put(
+            "/api/v1/config/mock-remaining-usage",
+            json={"account_name": "primary-mock", "remaining": 0.3}
+        )
+        assert resp.status_code == 200
+
+        # Set fallback-mock to have 80% remaining (20% used) - under threshold
+        resp = client.put(
+            "/api/v1/config/mock-remaining-usage",
+            json={"account_name": "fallback-mock", "remaining": 0.8}
+        )
+        assert resp.status_code == 200
+
+        # Verify the configuration was set correctly
+        resp = client.get("/api/v1/config/mock-remaining-usage/primary-mock")
+        assert resp.json()["remaining"] == 0.3
+
+        resp = client.get("/api/v1/config/mock-remaining-usage/fallback-mock")
+        assert resp.json()["remaining"] == 0.8
+
+        resp = client.get("/api/v1/config/usage-switch-threshold")
+        assert resp.json()["threshold"] == 50
+
+        resp = client.get("/api/v1/config/provider-fallback-order")
+        assert resp.json()["order"] == ["primary-mock", "fallback-mock"]
+
+    def test_no_switch_when_under_threshold(self, client, git_repo):
+        """Test that no switch occurs when usage is under threshold."""
+        # Create a mock provider
+        client.post("/api/v1/accounts", json={"name": "healthy-mock", "provider": "mock"})
+
+        # Set threshold to 90%
+        client.put("/api/v1/config/usage-switch-threshold", json={"threshold": 90})
+
+        # Set usage to 70% (30% remaining) - under the 90% threshold
+        client.put(
+            "/api/v1/config/mock-remaining-usage",
+            json={"account_name": "healthy-mock", "remaining": 0.3}
+        )
+
+        # Verify the remaining usage is correctly set
+        resp = client.get("/api/v1/config/mock-remaining-usage/healthy-mock")
+        assert resp.json()["remaining"] == 0.3
+
+    def test_switch_disabled_at_100_percent(self, client):
+        """Test that usage-based switching is disabled when threshold is 100%."""
+        # Set threshold to 100% (disabled)
+        resp = client.put("/api/v1/config/usage-switch-threshold", json={"threshold": 100})
+        assert resp.status_code == 200
+        assert resp.json()["threshold"] == 100
+
+
+class TestMockRunDurationAPI:
+    """Tests for mock run duration API endpoints."""
+
+    def test_mock_run_duration_api_endpoints(self, client):
+        """Test mock run duration API endpoints for get/set operations."""
+        # Create a mock provider account
+        client.post("/api/v1/accounts", json={"name": "duration-mock-1", "provider": "mock"})
+
+        # Default mock duration should be 0 seconds
+        resp = client.get("/api/v1/config/mock-run-duration/duration-mock-1")
+        assert resp.status_code == 200
+        assert resp.json()["seconds"] == 0
+
+        # Set mock duration to 60 seconds
+        resp = client.put(
+            "/api/v1/config/mock-run-duration",
+            json={"account_name": "duration-mock-1", "seconds": 60}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["seconds"] == 60
+
+        # Verify it persisted
+        resp = client.get("/api/v1/config/mock-run-duration/duration-mock-1")
+        assert resp.json()["seconds"] == 60
+
+
 class TestEventMultiplexer:
     """Tests for the EventMultiplexer class."""
 
@@ -1509,6 +1640,88 @@ class TestEventMultiplexer:
         pty_service.cleanup_session(second_stream)
         reset_pty_stream_service()
 
+    @pytest.mark.asyncio
+    async def test_mux_complete_event_on_iterator_end(self, tmp_path):
+        """Multiplexer emits complete event even when PTY iterator ends prematurely.
+
+        This tests the fix for "Stream ended unexpectedly" errors - when the PTY
+        iterator raises StopAsyncIteration without first sending an explicit "exit"
+        event, the multiplexer should still emit a complete event.
+        """
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import get_pty_stream_service, reset_pty_stream_service
+
+        reset_pty_stream_service()
+        pty_service = get_pty_stream_service()
+        session_id = "mux-complete-test"
+
+        # Start a very short-lived process that completes quickly
+        stream_id = pty_service.start_pty_session(
+            session_id=session_id,
+            cmd=["bash", "-c", "exit 0"],
+            cwd=tmp_path,
+        )
+
+        got_complete_event = False
+        mux = EventMultiplexer(session_id)
+        async for event in mux.stream_events(pty_service):
+            if event.type == "complete":
+                got_complete_event = True
+                # Exit code should be available
+                assert "exit_code" in event.data
+                break
+
+        assert got_complete_event, "Should receive a complete event when stream ends"
+
+        pty_service.cleanup_session(stream_id)
+        reset_pty_stream_service()
+
+    @pytest.mark.asyncio
+    async def test_mux_delivers_status_events_while_pty_is_idle(self, tmp_path):
+        """Status events should stream immediately even when PTY has no output."""
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import get_pty_stream_service, reset_pty_stream_service
+
+        reset_pty_stream_service()
+        pty_service = get_pty_stream_service()
+        session_id = "mux-idle-status"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Idle test",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+
+        pty_service.start_pty_session(
+            session_id=session_id,
+            cmd=["bash", "-c", "sleep 2"],
+            cwd=tmp_path,
+        )
+
+        mux = EventMultiplexer(session_id, log, ping_interval=0.1)
+
+        async def write_status():
+            await anyio.sleep(0.2)
+            log.log(StatusEvent(status="still running"))
+
+        async def wait_for_status() -> float:
+            start = time.monotonic()
+            async for event in mux.stream_events(pty_service, include_terminal=True, include_events=True):
+                if event.type == "event" and event.data.get("type") == "status":
+                    return time.monotonic() - start
+            return 999.0
+
+        elapsed = await asyncio.gather(wait_for_status(), write_status())
+        status_elapsed = elapsed[0]
+
+        assert status_elapsed < 1.0, (
+            f"Expected status event while PTY was idle, but delivery took {status_elapsed:.2f}s"
+        )
+
+        reset_pty_stream_service()
+
     def test_format_sse_event(self):
         """format_sse_event produces valid SSE format."""
         from chad.server.services.event_mux import MuxEvent, format_sse_event
@@ -1544,6 +1757,562 @@ class TestEventMultiplexer:
 
         # After ping, should not need another immediately
         assert not mux._should_ping()
+
+    @pytest.mark.asyncio
+    async def test_mux_multi_phase_delivers_complete(self, tmp_path):
+        """Multiplexer delivers complete after exploration→implementation phase transition.
+
+        Simulates the real task flow:
+        1. Exploration PTY starts, produces output, exits
+        2. Brief gap (task executor processes output)
+        3. Implementation PTY starts, produces output, exits
+        4. session_ended written to EventLog
+        5. Multiplexer should yield complete event
+
+        This covers the bug where the UI showed only the initial progress
+        update and never received the implementation phase completion.
+        """
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import get_pty_stream_service, reset_pty_stream_service
+
+        reset_pty_stream_service()
+        pty_service = get_pty_stream_service()
+        session_id = "mux-multi-phase"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Test multi-phase",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+
+        mux = EventMultiplexer(session_id, log)
+
+        collected_events = []
+        got_complete = False
+
+        async def collect():
+            nonlocal got_complete
+            async for event in mux.stream_events(pty_service):
+                collected_events.append(event)
+                if event.type == "complete":
+                    got_complete = True
+                    break
+
+        async def simulate_phases():
+            # Phase 1: Exploration
+            await anyio.sleep(0.1)
+            pty_service.start_pty_session(
+                session_id=session_id,
+                cmd=["bash", "-c", "echo 'exploring...'; sleep 0.2; echo 'progress found'"],
+                cwd=tmp_path,
+            )
+
+            # Wait for exploration to finish
+            await anyio.sleep(1.0)
+
+            # Log some terminal output (like flush_terminal_buffer does)
+            log.log(TerminalOutputEvent(data="exploring...\nprogress found"))
+
+            # Cleanup exploration session (like _run_phase does)
+            sessions = pty_service.list_sessions()
+            for sid in sessions:
+                sess = pty_service.get_session(sid)
+                if sess and sess.session_id == session_id:
+                    pty_service.cleanup_session(sid)
+
+            # Brief gap (simulates extract_progress, check_thresholds, etc.)
+            await anyio.sleep(0.3)
+
+            # Phase 2: Implementation
+            pty_service.start_pty_session(
+                session_id=session_id,
+                cmd=["bash", "-c", "echo 'implementing...'; sleep 0.2; echo 'done'"],
+                cwd=tmp_path,
+            )
+
+            # Wait for implementation to finish
+            await anyio.sleep(1.0)
+
+            # Log implementation output
+            log.log(TerminalOutputEvent(data="implementing...\ndone"))
+
+            # Cleanup implementation session
+            sessions = pty_service.list_sessions()
+            for sid in sessions:
+                sess = pty_service.get_session(sid)
+                if sess and sess.session_id == session_id:
+                    pty_service.cleanup_session(sid)
+
+            # Brief gap (simulates extract_coding_summary, etc.)
+            await anyio.sleep(0.2)
+
+            # Write session_ended (like _run_task does at the end)
+            log.log(SessionEndedEvent(success=True, reason="completed"))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(collect)
+            tg.start_soon(simulate_phases)
+
+        assert got_complete, (
+            f"Should receive complete event after multi-phase task. "
+            f"Got {len(collected_events)} events: {[e.type for e in collected_events]}"
+        )
+
+        # Verify we got terminal events from both phases
+        terminal_events = [e for e in collected_events if e.type == "terminal"]
+        assert len(terminal_events) >= 2, (
+            f"Should get terminal events from both phases, got {len(terminal_events)}"
+        )
+
+        reset_pty_stream_service()
+
+    @pytest.mark.asyncio
+    async def test_mux_multi_phase_no_premature_complete(self, tmp_path):
+        """Multiplexer must NOT emit complete when first PTY phase exits.
+
+        The multiplexer should wait for session_ended in EventLog rather than
+        emitting complete after the exploration PTY exits.
+        """
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import get_pty_stream_service, reset_pty_stream_service
+
+        reset_pty_stream_service()
+        pty_service = get_pty_stream_service()
+        session_id = "mux-no-premature"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Test",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+
+        mux = EventMultiplexer(session_id, log)
+
+        events_before_phase2 = []
+        phase2_started = anyio.Event()
+        complete_received = anyio.Event()
+
+        async def collect():
+            async for event in mux.stream_events(pty_service):
+                if not phase2_started.is_set():
+                    events_before_phase2.append(event)
+                if event.type == "complete":
+                    complete_received.set()
+                    break
+
+        async def simulate():
+            # Phase 1: Start and let exploration finish
+            await anyio.sleep(0.1)
+            stream1 = pty_service.start_pty_session(
+                session_id=session_id,
+                cmd=["bash", "-c", "echo phase1"],
+                cwd=tmp_path,
+            )
+            await anyio.sleep(0.5)
+            pty_service.cleanup_session(stream1)
+
+            # Gap between phases - multiplexer should NOT emit complete here
+            await anyio.sleep(0.5)
+
+            # Check that no complete event was emitted yet
+            types_so_far = [e.type for e in events_before_phase2]
+            assert "complete" not in types_so_far, (
+                f"Premature complete emitted after phase 1! Events: {types_so_far}"
+            )
+
+            # Phase 2: Implementation
+            phase2_started.set()
+            pty_service.start_pty_session(
+                session_id=session_id,
+                cmd=["bash", "-c", "echo phase2"],
+                cwd=tmp_path,
+            )
+            await anyio.sleep(0.5)
+
+            # Write session_ended
+            log.log(SessionEndedEvent(success=True, reason="completed"))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(collect)
+            tg.start_soon(simulate)
+
+        assert complete_received.is_set(), "Should eventually receive complete"
+
+        reset_pty_stream_service()
+
+    @pytest.mark.asyncio
+    async def test_mux_stream_with_since_multi_phase(self, tmp_path):
+        """Full SSE-like flow using stream_with_since for multi-phase tasks.
+
+        Tests the actual code path used by the SSE endpoint, including
+        the catchup phase followed by live streaming.
+        """
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import get_pty_stream_service, reset_pty_stream_service
+
+        reset_pty_stream_service()
+        pty_service = get_pty_stream_service()
+        session_id = "mux-since-multi"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Test",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+
+        mux = EventMultiplexer(session_id, log)
+
+        collected = []
+        got_complete = False
+
+        async def collect():
+            nonlocal got_complete
+            # Use stream_with_since like the SSE endpoint does
+            async for event in mux.stream_with_since(
+                pty_service,
+                since_seq=0,
+                include_terminal=True,
+                include_events=True,
+            ):
+                collected.append(event)
+                if event.type == "complete":
+                    got_complete = True
+                    break
+
+        async def simulate():
+            # Phase 1
+            await anyio.sleep(0.1)
+            stream1 = pty_service.start_pty_session(
+                session_id=session_id,
+                cmd=["bash", "-c", "echo exploration; sleep 0.2"],
+                cwd=tmp_path,
+            )
+            await anyio.sleep(0.8)
+            log.log(TerminalOutputEvent(data="exploration"))
+            pty_service.cleanup_session(stream1)
+            await anyio.sleep(0.3)
+
+            # Phase 2
+            stream2 = pty_service.start_pty_session(
+                session_id=session_id,
+                cmd=["bash", "-c", "echo implementation; sleep 0.2"],
+                cwd=tmp_path,
+            )
+            await anyio.sleep(0.8)
+            log.log(TerminalOutputEvent(data="implementation"))
+            pty_service.cleanup_session(stream2)
+            await anyio.sleep(0.2)
+
+            log.log(SessionEndedEvent(success=True, reason="completed"))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(collect)
+            tg.start_soon(simulate)
+
+        assert got_complete, (
+            f"Should receive complete via stream_with_since. "
+            f"Events: {[e.type for e in collected]}"
+        )
+
+        # Should have gotten session_started from catchup and terminal events
+        event_types = [e.type for e in collected]
+        assert "event" in event_types, "Should get structured events"
+        assert "terminal" in event_types, "Should get terminal events"
+
+        reset_pty_stream_service()
+
+    @pytest.mark.asyncio
+    async def test_mux_cleanup_before_subscribe_race(self, tmp_path):
+        """Test race where PTY is cleaned up between detection and subscription.
+
+        Simulates: multiplexer detects implementation PTY, but by the time
+        it subscribes, the session has been cleaned up.
+        """
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import get_pty_stream_service, reset_pty_stream_service
+
+        reset_pty_stream_service()
+        pty_service = get_pty_stream_service()
+        session_id = "mux-race"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Test",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+
+        mux = EventMultiplexer(session_id, log)
+
+        collected = []
+        got_complete = False
+
+        async def collect():
+            nonlocal got_complete
+            async for event in mux.stream_events(pty_service):
+                collected.append(event)
+                if event.type == "complete":
+                    got_complete = True
+                    break
+
+        async def simulate():
+            # Phase 1: Very short-lived
+            await anyio.sleep(0.1)
+            stream1 = pty_service.start_pty_session(
+                session_id=session_id,
+                cmd=["bash", "-c", "echo fast"],
+                cwd=tmp_path,
+            )
+            await anyio.sleep(0.3)
+            pty_service.cleanup_session(stream1)
+
+            # Phase 2: Also very short-lived - might be cleaned up before
+            # multiplexer can subscribe
+            stream2 = pty_service.start_pty_session(
+                session_id=session_id,
+                cmd=["bash", "-c", "echo fast2"],
+                cwd=tmp_path,
+            )
+            # Immediately clean up - simulates a very fast phase
+            await anyio.sleep(0.3)
+            pty_service.cleanup_session(stream2)
+
+            # Write session_ended - multiplexer should find it via polling
+            await anyio.sleep(0.2)
+            log.log(SessionEndedEvent(success=True, reason="completed"))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(collect)
+            tg.start_soon(simulate)
+
+        assert got_complete, (
+            f"Should receive complete even with cleanup race. "
+            f"Events: {[e.type for e in collected]}"
+        )
+
+        reset_pty_stream_service()
+
+
+class TestEventMuxCompletionBugs:
+    """Tests for EventMux completion event handling bugs.
+
+    Covers:
+    - stream_events initial wait loop yielding "complete" after session_ended
+    - stream_with_since catchup yielding "complete" after session_ended
+    - Safety timeout on polling loops
+    """
+
+    @pytest.mark.asyncio
+    async def test_stream_events_initial_wait_yields_complete_on_session_ended(self, tmp_path):
+        """stream_events initial wait loop must yield 'complete' after session_ended.
+
+        Regression: previously returned without yielding complete, leaving clients
+        without a termination signal.
+        """
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import PTYStreamService
+
+        pty_service = PTYStreamService()
+        session_id = "wait-complete-test"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Test",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+        # Task already ended before SSE connection - no PTY will ever appear
+        log.log(SessionEndedEvent(success=True, reason="completed"))
+
+        mux = EventMultiplexer(session_id, log)
+
+        collected = []
+        async for event in mux.stream_events(pty_service, include_terminal=True):
+            collected.append(event)
+            if event.type == "complete":
+                break
+
+        event_types = [e.type for e in collected]
+        # Must find session_ended as a structured event
+        session_ended_events = [
+            e for e in collected
+            if e.type == "event" and e.data.get("type") == "session_ended"
+        ]
+        assert len(session_ended_events) == 1, f"Expected session_ended event, got: {event_types}"
+        # Must find complete event AFTER session_ended
+        assert event_types[-1] == "complete", f"Last event should be 'complete', got: {event_types}"
+
+    @pytest.mark.asyncio
+    async def test_stream_with_since_catchup_yields_complete_on_session_ended(self, tmp_path):
+        """stream_with_since must yield 'complete' when session_ended is in catchup.
+
+        Regression: previously fell through to stream_events() which polled forever
+        because _event_log_seq was past the session_ended event.
+        """
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import PTYStreamService
+
+        pty_service = PTYStreamService()
+        session_id = "catchup-complete-test"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Test",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+        # Log several terminal events and then session_ended
+        for i in range(5):
+            log.log(TerminalOutputEvent(data=f"output chunk {i}"))
+        log.log(SessionEndedEvent(success=True, reason="completed"))
+
+        mux = EventMultiplexer(session_id, log)
+
+        collected = []
+
+        # Use asyncio.wait_for to detect infinite hang
+        async def stream():
+            async for event in mux.stream_with_since(
+                pty_service,
+                since_seq=0,
+                include_terminal=True,
+                include_events=True,
+            ):
+                collected.append(event)
+                if event.type == "complete":
+                    return
+
+        await asyncio.wait_for(stream(), timeout=5.0)
+
+        event_types = [e.type for e in collected]
+        assert "complete" in event_types, f"Must get complete event, got: {event_types}"
+
+        # session_ended should appear as structured event before complete
+        session_ended_found = any(
+            e.type == "event" and e.data.get("type") == "session_ended"
+            for e in collected
+        )
+        assert session_ended_found, f"session_ended must be in catchup events: {event_types}"
+
+    @pytest.mark.asyncio
+    async def test_stream_with_since_mid_sequence_catchup(self, tmp_path):
+        """stream_with_since catchup with since_seq > 0 still detects session_ended.
+
+        Simulates a client reconnecting after receiving some events.
+        """
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import PTYStreamService
+
+        pty_service = PTYStreamService()
+        session_id = "mid-catchup-test"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Test",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+        for i in range(10):
+            log.log(TerminalOutputEvent(data=f"chunk {i}"))
+        log.log(SessionEndedEvent(success=True, reason="completed"))
+
+        mux = EventMultiplexer(session_id, log)
+
+        collected = []
+
+        # Reconnect from seq 5 - should still get session_ended and complete
+        async def stream():
+            async for event in mux.stream_with_since(
+                pty_service,
+                since_seq=5,
+                include_terminal=True,
+                include_events=True,
+            ):
+                collected.append(event)
+                if event.type == "complete":
+                    return
+
+        await asyncio.wait_for(stream(), timeout=5.0)
+
+        event_types = [e.type for e in collected]
+        assert "complete" in event_types, f"Must get complete on reconnect, got: {event_types}"
+
+    @pytest.mark.asyncio
+    async def test_polling_loop_safety_timeout(self, tmp_path):
+        """Polling loop must not hang forever if session_ended is never written.
+
+        The safety timeout should emit a complete event with timeout flag.
+        """
+        from unittest.mock import patch
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import get_pty_stream_service, reset_pty_stream_service
+
+        reset_pty_stream_service()
+        pty_service = get_pty_stream_service()
+        session_id = "timeout-safety-test"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Test",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+
+        # Use a very short timeout for testing
+        mux = EventMultiplexer(session_id, log, ping_interval=0.5)
+
+        collected = []
+
+        async def stream():
+            async for event in mux.stream_events(
+                pty_service,
+                include_terminal=False,
+                include_events=True,
+            ):
+                collected.append(event)
+                if event.type == "complete":
+                    return
+
+        # Patch the deadline to be very short (0.5 seconds from now)
+        from datetime import datetime
+        original_now = datetime.now
+
+        call_count = [0]
+
+        def fake_now(tz=None):
+            call_count[0] += 1
+            result = original_now(tz) if tz else original_now()
+            # After a few calls, jump time forward past the deadline
+            if call_count[0] > 10:
+                from datetime import timedelta
+                return result + timedelta(minutes=50)
+            return result
+
+        with patch("chad.server.services.event_mux.datetime") as mock_dt:
+            mock_dt.now = fake_now
+            mock_dt.side_effect = lambda *a, **k: datetime(*a, **k)
+            # timezone needs to be accessible
+            await asyncio.wait_for(stream(), timeout=5.0)
+
+        event_types = [e.type for e in collected]
+        assert "complete" in event_types, f"Safety timeout should emit complete: {event_types}"
+
+        # Check the timeout flag
+        complete_events = [e for e in collected if e.type == "complete"]
+        assert complete_events[0].data.get("timeout") is True
+
+        reset_pty_stream_service()
 
 
 class TestPTYCursorResponse:

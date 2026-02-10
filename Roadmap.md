@@ -1,18 +1,24 @@
-v0.10 Hack-Propagation
+v0.11 Epochalypse
 
-Full inter-provider handoff including summarize progress and resume from checkpoints
-Improve the mistral and gemini and qwen providers data 
-Load balance based on usage, user preference, context limits hit, etc.
+Event loop
+Use loop to extract progress updates from agent stream and notify API listeners, who can now get rid of exploration phase
+Use loop to make option to resume task once usage limit has reset (rather than switch to another provider)
 
-v0.11 Slip Slop Slap
+v0.12 Agent Ick
 
-Use of /agents
-Repeated failures
+Receive tasks from slack and output progress from event loop
+Repeated failures (see below)
 
-v0.12 Intentionality Reduction
+v0.13 Intentionality Reduction
 
-Telegram and slack integrations
 Packaging for different platforms
+Renamed web_ui to gradio_ui. Make Remix static site ui which downloads and talks to the server on localhost
+
+v0.14 Slip Slop Slap
+
+Session branching and resume session at startup
+Queue of bugs/features
+
 
 ---- Repeated failures ----
 

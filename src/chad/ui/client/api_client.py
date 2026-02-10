@@ -173,6 +173,29 @@ class APIClient:
         resp.raise_for_status()
         return resp.json()
 
+    def get_session_events(
+        self,
+        session_id: str,
+        since_seq: int = 0,
+        event_types: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch structured session events from the EventLog API."""
+        params: dict[str, Any] = {"since_seq": since_seq}
+        if event_types:
+            params["event_types"] = event_types
+        resp = self._client.get(self._url(f"/sessions/{session_id}/events"), params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_session_latest_seq(self, session_id: str) -> int:
+        """Get the latest persisted EventLog sequence for a session."""
+        data = self.get_session_events(session_id=session_id, since_seq=0)
+        latest_seq = data.get("latest_seq", 0)
+        try:
+            return int(latest_seq)
+        except (TypeError, ValueError):
+            return 0
+
     def _parse_session(self, data: dict) -> Session:
         """Parse session response data."""
         return Session(
@@ -282,6 +305,8 @@ class APIClient:
         terminal_rows: int | None = None,
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
+        override_exploration_prompt: str | None = None,
+        override_implementation_prompt: str | None = None,
     ) -> TaskStatus:
         """Start a new coding task.
 
@@ -289,6 +314,8 @@ class APIClient:
             terminal_rows: Terminal height in rows (for PTY sizing)
             terminal_cols: Terminal width in columns (for PTY sizing)
             screenshots: Optional list of screenshot file paths for agent reference
+            override_exploration_prompt: User-edited exploration prompt override
+            override_implementation_prompt: User-edited implementation prompt override
         """
         data = {
             "project_path": project_path,
@@ -313,6 +340,10 @@ class APIClient:
             data["terminal_cols"] = terminal_cols
         if screenshots:
             data["screenshots"] = screenshots
+        if override_exploration_prompt:
+            data["override_exploration_prompt"] = override_exploration_prompt
+        if override_implementation_prompt:
+            data["override_implementation_prompt"] = override_implementation_prompt
 
         resp = self._client.post(
             self._url(f"/sessions/{session_id}/tasks"),
@@ -552,3 +583,174 @@ class APIClient:
         )
         resp.raise_for_status()
         return resp.json().get("model")
+
+    def get_provider_fallback_order(self) -> list[str]:
+        """Get the ordered list of account names for auto-switching on quota exhaustion.
+
+        Returns:
+            List of account names in fallback priority order
+        """
+        resp = self._client.get(self._url("/config/provider-fallback-order"))
+        resp.raise_for_status()
+        return resp.json().get("order", [])
+
+    def set_provider_fallback_order(self, account_names: list[str]) -> list[str]:
+        """Set the ordered list of account names for auto-switching.
+
+        Args:
+            account_names: List of account names in fallback priority order
+
+        Returns:
+            The order that was set
+        """
+        resp = self._client.put(
+            self._url("/config/provider-fallback-order"),
+            json={"order": account_names},
+        )
+        resp.raise_for_status()
+        return resp.json().get("order", [])
+
+    def get_next_fallback_provider(self, current_account: str) -> str | None:
+        """Get the next provider in the fallback order after the current one.
+
+        Args:
+            current_account: The currently active account name
+
+        Returns:
+            Next account name in fallback order, or None if no more fallbacks
+        """
+        order = self.get_provider_fallback_order()
+        if not order:
+            return None
+
+        try:
+            current_idx = order.index(current_account)
+            if current_idx + 1 < len(order):
+                return order[current_idx + 1]
+        except ValueError:
+            # Current account not in fallback order, return first in order
+            if order:
+                return order[0]
+
+        return None
+
+    def get_usage_switch_threshold(self) -> int:
+        """Get the usage percentage threshold for auto-switching providers.
+
+        Returns:
+            Percentage threshold (0-100), defaults to 90
+        """
+        resp = self._client.get(self._url("/config/usage-switch-threshold"))
+        resp.raise_for_status()
+        return resp.json().get("threshold", 90)
+
+    def set_usage_switch_threshold(self, threshold: int) -> int:
+        """Set the usage percentage threshold for auto-switching providers.
+
+        Args:
+            threshold: Percentage threshold (0-100). Use 100 to disable
+                      usage-based switching.
+
+        Returns:
+            The threshold that was set
+        """
+        resp = self._client.put(
+            self._url("/config/usage-switch-threshold"),
+            json={"threshold": threshold},
+        )
+        resp.raise_for_status()
+        return resp.json().get("threshold", threshold)
+
+    def get_mock_remaining_usage(self, account_name: str) -> float:
+        """Get mock remaining usage for a mock provider account.
+
+        Used for testing usage-based provider switching.
+
+        Args:
+            account_name: The mock account name
+
+        Returns:
+            Remaining usage as 0.0-1.0 (1.0 = full capacity remaining)
+        """
+        resp = self._client.get(self._url(f"/config/mock-remaining-usage/{account_name}"))
+        resp.raise_for_status()
+        return resp.json().get("remaining", 0.5)
+
+    def set_mock_remaining_usage(self, account_name: str, remaining: float) -> float:
+        """Set mock remaining usage for a mock provider account.
+
+        Used for testing usage-based provider switching.
+
+        Args:
+            account_name: The mock account name
+            remaining: Remaining usage as 0.0-1.0 (1.0 = full capacity remaining)
+
+        Returns:
+            The remaining usage that was set
+        """
+        resp = self._client.put(
+            self._url("/config/mock-remaining-usage"),
+            json={"account_name": account_name, "remaining": remaining},
+        )
+        resp.raise_for_status()
+        return resp.json().get("remaining", remaining)
+
+    def get_mock_run_duration_seconds(self, account_name: str) -> int:
+        """Get mock run duration for a mock provider account.
+
+        Used for testing handover timing.
+
+        Args:
+            account_name: The mock account name
+
+        Returns:
+            Run duration in seconds (0-3600)
+        """
+        resp = self._client.get(self._url(f"/config/mock-run-duration/{account_name}"))
+        resp.raise_for_status()
+        return resp.json().get("seconds", 0)
+
+    def set_mock_run_duration_seconds(self, account_name: str, seconds: int) -> int:
+        """Set mock run duration for a mock provider account.
+
+        Used for testing handover timing.
+
+        Args:
+            account_name: The mock account name
+            seconds: Run duration in seconds (0-3600)
+
+        Returns:
+            The run duration that was set
+        """
+        resp = self._client.put(
+            self._url("/config/mock-run-duration"),
+            json={"account_name": account_name, "seconds": seconds},
+        )
+        resp.raise_for_status()
+        return resp.json().get("seconds", seconds)
+
+    def get_max_verification_attempts(self) -> int:
+        """Get the maximum number of verification attempts.
+
+        Returns:
+            Maximum attempts (default 5)
+        """
+        resp = self._client.get(self._url("/config/max-verification-attempts"))
+        resp.raise_for_status()
+        return resp.json().get("attempts", 5)
+
+    def set_max_verification_attempts(self, attempts: int) -> int:
+        """Set the maximum number of verification attempts.
+
+        Args:
+            attempts: Maximum attempts (1-20)
+
+        Returns:
+            The attempts that was set
+        """
+        resp = self._client.put(
+            self._url("/config/max-verification-attempts"),
+            json={"attempts": attempts},
+        )
+        resp.raise_for_status()
+        return resp.json().get("attempts", attempts)

@@ -820,3 +820,435 @@ class TestProjectConfig:
 
         assert result is not None
         assert result["project_type"] == "go"
+
+
+class TestProviderFallbackOrder:
+    """Test cases for provider fallback order configuration."""
+
+    def test_get_fallback_order_empty(self, tmp_path):
+        """Test getting fallback order when none is set."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        order = mgr.get_provider_fallback_order()
+        assert order == []
+
+    def test_set_and_get_fallback_order(self, tmp_path):
+        """Test setting and getting fallback order."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # Need to set up accounts first
+        mgr.save_config({
+            "password_hash": mgr.hash_password("test"),
+            "encryption_salt": "dGVzdHNhbHQ=",
+            "accounts": {
+                "work-claude": {"provider": "anthropic", "key": "xxx"},
+                "personal-gpt": {"provider": "openai", "key": "xxx"},
+                "backup-gemini": {"provider": "gemini", "key": "xxx"},
+            },
+        })
+
+        mgr.set_provider_fallback_order(["work-claude", "personal-gpt", "backup-gemini"])
+        order = mgr.get_provider_fallback_order()
+
+        assert order == ["work-claude", "personal-gpt", "backup-gemini"]
+
+    def test_fallback_order_filters_invalid_accounts(self, tmp_path):
+        """Test that fallback order filters out accounts that no longer exist."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # Set up with some accounts
+        mgr.save_config({
+            "password_hash": mgr.hash_password("test"),
+            "encryption_salt": "dGVzdHNhbHQ=",
+            "accounts": {
+                "work-claude": {"provider": "anthropic", "key": "xxx"},
+            },
+            "provider_fallback_order": ["work-claude", "deleted-account", "also-deleted"],
+        })
+
+        order = mgr.get_provider_fallback_order()
+        assert order == ["work-claude"]
+
+    def test_set_fallback_order_validates_accounts(self, tmp_path):
+        """Test that setting fallback order validates account names."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        # Set up with one account
+        mgr.save_config({
+            "password_hash": mgr.hash_password("test"),
+            "encryption_salt": "dGVzdHNhbHQ=",
+            "accounts": {
+                "work-claude": {"provider": "anthropic", "key": "xxx"},
+            },
+        })
+
+        with pytest.raises(ValueError, match="Unknown account"):
+            mgr.set_provider_fallback_order(["work-claude", "nonexistent"])
+
+    def test_get_next_fallback_provider(self, tmp_path):
+        """Test getting the next provider in fallback order."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        mgr.save_config({
+            "password_hash": mgr.hash_password("test"),
+            "encryption_salt": "dGVzdHNhbHQ=",
+            "accounts": {
+                "first": {"provider": "anthropic", "key": "xxx"},
+                "second": {"provider": "openai", "key": "xxx"},
+                "third": {"provider": "gemini", "key": "xxx"},
+            },
+            "provider_fallback_order": ["first", "second", "third"],
+        })
+
+        assert mgr.get_next_fallback_provider("first") == "second"
+        assert mgr.get_next_fallback_provider("second") == "third"
+        assert mgr.get_next_fallback_provider("third") is None
+
+    def test_get_next_fallback_provider_not_in_order(self, tmp_path):
+        """Test getting next fallback when current is not in order."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        mgr.save_config({
+            "password_hash": mgr.hash_password("test"),
+            "encryption_salt": "dGVzdHNhbHQ=",
+            "accounts": {
+                "first": {"provider": "anthropic", "key": "xxx"},
+                "second": {"provider": "openai", "key": "xxx"},
+                "other": {"provider": "gemini", "key": "xxx"},
+            },
+            "provider_fallback_order": ["first", "second"],
+        })
+
+        # When current account is not in order, return first in order
+        assert mgr.get_next_fallback_provider("other") == "first"
+
+    def test_get_next_fallback_provider_empty_order(self, tmp_path):
+        """Test getting next fallback when order is empty."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        assert mgr.get_next_fallback_provider("anything") is None
+
+    def test_fallback_order_persists(self, tmp_path):
+        """Test that fallback order persists across instances."""
+        config_path = tmp_path / "test.conf"
+
+        mgr1 = ConfigManager(config_path)
+        mgr1.save_config({
+            "password_hash": mgr1.hash_password("test"),
+            "encryption_salt": "dGVzdHNhbHQ=",
+            "accounts": {
+                "a": {"provider": "anthropic", "key": "xxx"},
+                "b": {"provider": "openai", "key": "xxx"},
+            },
+        })
+        mgr1.set_provider_fallback_order(["a", "b"])
+
+        mgr2 = ConfigManager(config_path)
+        assert mgr2.get_provider_fallback_order() == ["a", "b"]
+
+
+class TestUsageSwitchThreshold:
+    """Test cases for usage switch threshold configuration."""
+
+    def test_get_usage_threshold_default(self, tmp_path):
+        """Test that default threshold is 90%."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        assert mgr.get_usage_switch_threshold() == 90
+
+    def test_set_and_get_usage_threshold(self, tmp_path):
+        """Test setting and getting the usage threshold."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        mgr.set_usage_switch_threshold(75)
+        assert mgr.get_usage_switch_threshold() == 75
+
+    def test_set_threshold_to_100_disables_usage_switching(self, tmp_path):
+        """Test that 100% threshold effectively disables usage-based switching."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        mgr.set_usage_switch_threshold(100)
+        assert mgr.get_usage_switch_threshold() == 100
+
+    def test_set_threshold_validates_range(self, tmp_path):
+        """Test that threshold must be between 0 and 100."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        with pytest.raises(ValueError, match="must be between 0 and 100"):
+            mgr.set_usage_switch_threshold(-1)
+
+        with pytest.raises(ValueError, match="must be between 0 and 100"):
+            mgr.set_usage_switch_threshold(101)
+
+    def test_threshold_persists(self, tmp_path):
+        """Test that threshold persists across instances."""
+        config_path = tmp_path / "test.conf"
+
+        mgr1 = ConfigManager(config_path)
+        mgr1.set_usage_switch_threshold(80)
+
+        mgr2 = ConfigManager(config_path)
+        assert mgr2.get_usage_switch_threshold() == 80
+
+
+class TestMockRemainingUsage:
+    """Test cases for mock remaining usage (for testing usage-based switching)."""
+
+    def test_get_mock_usage_default(self, tmp_path):
+        """Test that default mock usage is 0.5 (50%)."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        assert mgr.get_mock_remaining_usage("any-mock") == 0.5
+
+    def test_set_and_get_mock_usage(self, tmp_path):
+        """Test setting and getting mock remaining usage."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        mgr.set_mock_remaining_usage("mock-1", 0.3)
+        assert mgr.get_mock_remaining_usage("mock-1") == 0.3
+
+        mgr.set_mock_remaining_usage("mock-2", 0.8)
+        assert mgr.get_mock_remaining_usage("mock-2") == 0.8
+
+        # mock-1 should still be 0.3
+        assert mgr.get_mock_remaining_usage("mock-1") == 0.3
+
+    def test_mock_usage_validates_range(self, tmp_path):
+        """Test that mock usage must be between 0.0 and 1.0."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        with pytest.raises(ValueError, match="must be between 0.0 and 1.0"):
+            mgr.set_mock_remaining_usage("mock-1", -0.1)
+
+        with pytest.raises(ValueError, match="must be between 0.0 and 1.0"):
+            mgr.set_mock_remaining_usage("mock-1", 1.1)
+
+    def test_mock_usage_persists(self, tmp_path):
+        """Test that mock usage persists across instances."""
+        config_path = tmp_path / "test.conf"
+
+        mgr1 = ConfigManager(config_path)
+        mgr1.set_mock_remaining_usage("test-mock", 0.25)
+
+        mgr2 = ConfigManager(config_path)
+        assert mgr2.get_mock_remaining_usage("test-mock") == 0.25
+
+
+class TestMockRunDuration:
+    """Tests for mock run duration configuration."""
+
+    def test_get_mock_run_duration_default(self, tmp_path):
+        """Default mock run duration should be 0 seconds."""
+        mgr = ConfigManager(tmp_path / "test.conf")
+        assert mgr.get_mock_run_duration_seconds("any-mock") == 0
+
+    def test_set_and_get_mock_run_duration(self, tmp_path):
+        """Can set and retrieve mock run duration per account."""
+        mgr = ConfigManager(tmp_path / "test.conf")
+
+        mgr.set_mock_run_duration_seconds("mock-1", 60)
+        assert mgr.get_mock_run_duration_seconds("mock-1") == 60
+
+        mgr.set_mock_run_duration_seconds("mock-2", 15)
+        assert mgr.get_mock_run_duration_seconds("mock-2") == 15
+
+        # Ensure account isolation
+        assert mgr.get_mock_run_duration_seconds("mock-1") == 60
+
+    def test_set_mock_run_duration_validates_range(self, tmp_path):
+        """Mock run duration must be between 0 and 3600 seconds."""
+        mgr = ConfigManager(tmp_path / "test.conf")
+
+        with pytest.raises(ValueError, match="must be between 0 and 3600"):
+            mgr.set_mock_run_duration_seconds("mock-1", -1)
+
+        with pytest.raises(ValueError, match="must be between 0 and 3600"):
+            mgr.set_mock_run_duration_seconds("mock-1", 3601)
+
+    def test_mock_run_duration_persists(self, tmp_path):
+        """Mock run duration persists across instances."""
+        config_path = tmp_path / "test.conf"
+
+        mgr1 = ConfigManager(config_path)
+        mgr1.set_mock_run_duration_seconds("test-mock", 75)
+
+        mgr2 = ConfigManager(config_path)
+        assert mgr2.get_mock_run_duration_seconds("test-mock") == 75
+
+
+class TestConfigUIParity:
+    """Test that both Gradio and CLI UIs expose all required config options.
+
+    These tests enforce that any user-editable config key is exposed in BOTH UIs.
+    If a new config option is added to CONFIG_BASE_KEYS that should be user-editable,
+    it must be added to REQUIRED_UI_CONFIG_KEYS and exposed in both UIs.
+
+    IMPORTANT: When adding a new config option:
+    1. Add getter/setter to ConfigManager
+    2. Add API endpoint in routes/config.py
+    3. Add APIClient method in api_client.py
+    4. Add UI element in web_ui.py (Gradio)
+    5. Add menu option in cli/app.py (CLI)
+    6. Add the key to REQUIRED_UI_CONFIG_KEYS below (or INTERNAL_KEYS if not user-editable)
+
+    The test_all_config_keys_categorized test will FAIL if you add a new key
+    to CONFIG_BASE_KEYS without categorizing it here. This is intentional -
+    it forces you to decide whether the key needs UI exposure.
+    """
+
+    # Internal keys that are NOT user-editable via UI
+    # These are system-managed or accessed via other UI paths (like account management)
+    INTERNAL_KEYS = {
+        "password_hash",      # Security - never exposed
+        "encryption_salt",    # Security - never exposed
+        "accounts",           # Managed via provider cards, not direct config
+        "role_assignments",   # Managed via account role dropdowns
+        "preferences",        # Container object, individual prefs exposed separately
+        "projects",           # Per-project settings, not global config
+        "mock_remaining_usage",    # Testing only - per-account mock via provider cards
+        "mock_run_duration_seconds",  # Testing only - per-account mock via provider cards
+    }
+
+    # Config keys that MUST be editable in both Gradio and CLI UIs
+    REQUIRED_UI_CONFIG_KEYS = {
+        "verification_agent",
+        "preferred_verification_model",
+        "cleanup_days",
+        "provider_fallback_order",
+        "usage_switch_threshold",
+        "max_verification_attempts",
+    }
+
+    # Keys that are only in Gradio UI (makes sense for web-only settings)
+    GRADIO_ONLY_KEYS = {"ui_mode"}
+
+    def test_required_keys_subset_of_config_base_keys(self):
+        """Ensure all required UI keys are valid CONFIG_BASE_KEYS."""
+        all_required = self.REQUIRED_UI_CONFIG_KEYS | self.GRADIO_ONLY_KEYS
+        invalid_keys = all_required - CONFIG_BASE_KEYS
+        assert not invalid_keys, (
+            f"Keys in REQUIRED_UI_CONFIG_KEYS not in CONFIG_BASE_KEYS: {invalid_keys}. "
+            f"Either add them to CONFIG_BASE_KEYS or remove from REQUIRED_UI_CONFIG_KEYS."
+        )
+
+    def test_all_config_keys_categorized(self):
+        """Ensure every CONFIG_BASE_KEY is categorized as internal, required, or gradio-only.
+
+        This test FAILS if you add a new key to CONFIG_BASE_KEYS without deciding
+        whether it needs UI exposure. This forces explicit categorization of all config keys.
+
+        If you add a new config key:
+        - Add to INTERNAL_KEYS if it's system-managed (not user-editable)
+        - Add to REQUIRED_UI_CONFIG_KEYS if users should edit it in both UIs
+        - Add to GRADIO_ONLY_KEYS if it only makes sense in the web UI
+        """
+        all_categorized = self.INTERNAL_KEYS | self.REQUIRED_UI_CONFIG_KEYS | self.GRADIO_ONLY_KEYS
+        uncategorized = CONFIG_BASE_KEYS - all_categorized
+        assert not uncategorized, (
+            f"CONFIG_BASE_KEYS contains uncategorized keys: {uncategorized}. "
+            f"Add each key to one of: INTERNAL_KEYS (system-managed), "
+            f"REQUIRED_UI_CONFIG_KEYS (both UIs), or GRADIO_ONLY_KEYS (web UI only). "
+            f"See TestConfigUIParity docstring for details."
+        )
+
+    # Mapping from config keys to patterns that indicate the key is exposed in UI
+    # Some keys use different naming conventions in the UI code
+    KEY_PATTERNS = {
+        "verification_agent": ["verification_agent", "verification_pref"],
+        "preferred_verification_model": ["verification_model", "preferred_verification_model"],
+        "cleanup_days": ["cleanup_days", "retention_days", "cleanup_settings", "retention_input"],
+        "provider_fallback_order": ["fallback_order"],
+        "usage_switch_threshold": ["usage_threshold", "usage_switch"],
+        "max_verification_attempts": ["max_verification_attempts", "verification_attempts"],
+        "ui_mode": ["ui_mode"],
+    }
+
+    def test_gradio_ui_exposes_all_required_keys(self):
+        """Verify Gradio web_ui.py references all required config keys."""
+        import pathlib
+        import re
+
+        web_ui_path = pathlib.Path(__file__).parent.parent / "src" / "chad" / "ui" / "gradio" / "web_ui.py"
+        content = web_ui_path.read_text()
+
+        all_gradio_keys = self.REQUIRED_UI_CONFIG_KEYS | self.GRADIO_ONLY_KEYS
+        missing_keys = []
+
+        for key in all_gradio_keys:
+            # Get patterns for this key, or use the key itself as fallback
+            patterns_to_check = self.KEY_PATTERNS.get(key, [key])
+
+            # Check for any of the patterns in various forms
+            found = False
+            for pattern in patterns_to_check:
+                search_patterns = [
+                    rf'"{pattern}"',
+                    rf"'{pattern}'",
+                    rf"get_{pattern}",
+                    rf"set_{pattern}",
+                    rf"{pattern}_input",
+                    rf"{pattern}_pref",
+                    rf"on_{pattern}_change",
+                    pattern,  # Direct reference
+                ]
+                if any(re.search(p, content, re.IGNORECASE) for p in search_patterns):
+                    found = True
+                    break
+
+            if not found:
+                missing_keys.append(key)
+
+        assert not missing_keys, (
+            f"Gradio web_ui.py is missing UI elements for config keys: {missing_keys}. "
+            f"Add UI elements (input fields, sliders, etc.) and change handlers for these keys."
+        )
+
+    def test_cli_ui_exposes_all_required_keys(self):
+        """Verify CLI app.py references all required config keys."""
+        import pathlib
+        import re
+
+        cli_app_path = pathlib.Path(__file__).parent.parent / "src" / "chad" / "ui" / "cli" / "app.py"
+        content = cli_app_path.read_text()
+
+        missing_keys = []
+
+        for key in self.REQUIRED_UI_CONFIG_KEYS:
+            # Get patterns for this key, or use the key itself as fallback
+            patterns_to_check = self.KEY_PATTERNS.get(key, [key])
+
+            # Check for any of the patterns in various forms
+            found = False
+            for pattern in patterns_to_check:
+                search_patterns = [
+                    rf'"{pattern}"',
+                    rf"'{pattern}'",
+                    rf"get_{pattern}",
+                    rf"set_{pattern}",
+                    pattern,  # Direct reference
+                ]
+                if any(re.search(p, content, re.IGNORECASE) for p in search_patterns):
+                    found = True
+                    break
+
+            if not found:
+                missing_keys.append(key)
+
+        assert not missing_keys, (
+            f"CLI app.py is missing menu options for config keys: {missing_keys}. "
+            f"Add settings menu options for these keys in run_settings_menu()."
+        )

@@ -64,6 +64,23 @@ def page(chad_server):
         yield page
 
 
+def _expand_project_information(page: Page) -> None:
+    """Expand the Project Information accordion if it is collapsed."""
+    project_path = page.get_by_label("Project Path")
+    if project_path.is_visible():
+        return
+    page.get_by_text("Project Information", exact=True).first.click()
+    expect(project_path).to_be_visible()
+
+
+def _collapse_project_information(page: Page) -> None:
+    """Collapse the Project Information accordion if it is expanded."""
+    project_path = page.get_by_label("Project Path")
+    if project_path.is_visible():
+        page.get_by_text("Project Information", exact=True).first.click()
+    expect(project_path).to_be_hidden()
+
+
 class TestUIElements:
     """Test that UI elements are present and correctly configured."""
 
@@ -89,18 +106,23 @@ class TestUIElements:
         expect(tab).to_be_visible()
 
     def test_project_path_field(self, page: Page):
-        """Project path field should be present."""
-        # Use label to find the field
+        """Project path field should be visible after opening project information."""
+        _expand_project_information(page)
         field = page.get_by_label("Project Path")
         expect(field).to_be_visible()
 
+    def test_project_information_collapsed_by_default(self, page: Page):
+        """Project Information should be collapsed at startup."""
+        field = page.get_by_label("Project Path")
+        expect(field).to_be_hidden()
+
     def test_project_setup_commands_visible(self, page: Page):
-        """Project setup lint and test commands should be visible without clicking anything."""
-        # Lint command input should be visible immediately (not hidden in accordion)
+        """Project setup lint and test commands should be visible after expanding project info."""
+        _expand_project_information(page)
+
         lint_cmd = page.get_by_label("Lint Command")
         expect(lint_cmd).to_be_visible()
 
-        # Test command input should be visible immediately (not hidden in accordion)
         test_cmd = page.get_by_label("Test Command")
         expect(test_cmd).to_be_visible()
 
@@ -111,6 +133,7 @@ class TestUIElements:
 
     def test_project_type_shown_in_label(self, page: Page):
         """Project type should sit inline with the project path label to save space."""
+        _expand_project_information(page)
         label = page.locator("#project-path-input label")
         expect(label).to_be_visible()
         text = label.text_content()
@@ -118,6 +141,7 @@ class TestUIElements:
 
     def test_project_commands_share_row(self, page: Page):
         """Lint and test commands should sit on the same horizontal row."""
+        _expand_project_information(page)
         lint_cmd = page.get_by_label("Lint Command")
         test_cmd = page.get_by_label("Test Command")
         expect(lint_cmd).to_be_visible()
@@ -130,6 +154,7 @@ class TestUIElements:
 
     def test_command_test_buttons_align_with_headers(self, page: Page):
         """Test buttons should sit beside their corresponding command headers."""
+        _expand_project_information(page)
         lint_label = page.locator(".lint-command-label")
         lint_btn = page.locator(".lint-test-btn")
         test_label = page.locator(".test-command-label")
@@ -151,6 +176,7 @@ class TestUIElements:
 
     def test_project_doc_paths_visible(self, page: Page):
         """Project doc path inputs should be visible for editing."""
+        _expand_project_information(page)
         instructions = page.get_by_label("Agent Instructions Path")
         architecture = page.get_by_label("Architecture Doc Path")
         expect(instructions).to_be_visible()
@@ -158,14 +184,15 @@ class TestUIElements:
 
     def test_task_description_field(self, page: Page):
         """Task description field should be present."""
-        # Look for the task description textarea by its label
-        textarea = page.get_by_label("Task Description")
-        expect(textarea).to_be_visible()
+        # Look for the task description multimodal textbox by its class
+        # MultimodalTextbox uses a different structure than TextArea
+        task_input = page.locator(".task-desc-input")
+        expect(task_input).to_be_visible()
 
-    def test_start_button_present(self, page: Page):
-        """Start Task button should be present."""
+    def test_start_button_hidden(self, page: Page):
+        """Standalone Start Task button should remain hidden (submit arrow starts task)."""
         button = page.locator("#start-task-btn")
-        expect(button).to_be_visible()
+        expect(button).to_be_hidden()
 
     def test_cancel_button_disabled_initially(self, page: Page):
         """Cancel button should be disabled before task starts."""
@@ -206,58 +233,89 @@ class TestUIElements:
 
 
 class TestReadyStatus:
-    """Test the Ready status display with model assignments."""
+    """Test that the role_status row was removed (milestone info is now in chatbot)."""
 
-    def test_ready_status_shows_model_info(self, page: Page):
-        """Ready status should include model assignment info."""
-        # In tab-based UI, the first session is shown by default
-        status = page.locator("#role-config-status")
-        expect(status).to_be_visible(timeout=10000)
-
-        # Should contain model assignment info
-        text = status.text_content()
-        assert "Ready" in text or "Missing" in text
+    def test_role_config_status_removed(self, page: Page):
+        """The #role-config-status element should no longer exist."""
+        assert page.locator("#role-config-status").count() == 0
 
 
 class TestCodingAgentLayout:
     """Ensure the coding agent selector and controls are properly laid out."""
 
-    def test_status_row_spans_top_bar(self, page: Page):
-        """Status row should sit beneath project path within the header area."""
-        top_row = page.locator("#run-top-row")
+    def test_action_row_visible_when_project_info_collapsed(self, page: Page):
+        """Action row should stay visible even when project info is collapsed."""
+        _collapse_project_information(page)
         status_row = page.locator("#role-status-row")
         cancel_btn = page.locator("#cancel-task-btn")
-        expect(top_row).to_be_visible()
-
-        project_path = top_row.get_by_label("Project Path")
-        coding_agent = top_row.get_by_label("Coding Agent")
         expect(status_row).to_be_visible()
+        expect(cancel_btn).to_be_visible()
 
+        inside_project_accordion = page.evaluate(
+            """
+() => {
+  const status = document.querySelector("#role-status-row");
+  const accordion = document.querySelector(".project-info-accordion");
+  if (!status || !accordion) return null;
+  return accordion.contains(status);
+}
+            """
+        )
+        assert inside_project_accordion is False
+
+    def test_status_row_below_config_panel(self, page: Page):
+        """Action row should sit under project info, not in the right-side agent columns."""
+        _expand_project_information(page)
+        top_row = page.locator("#run-top-row")
+        status_row = page.locator("#role-status-row")
+        project_path = page.get_by_label("Project Path")
+        coding_agent = page.get_by_label("Coding Agent")
+        verification_agent = page.get_by_label("Verification Agent")
+        cancel_btn = page.locator("#cancel-task-btn")
+        expect(top_row).to_be_visible()
+        expect(status_row).to_be_visible()
         expect(project_path).to_be_visible()
         expect(coding_agent).to_be_visible()
+        expect(verification_agent).to_be_visible()
+        expect(cancel_btn).to_be_visible()
 
-        status_box = status_row.bounding_box()
         row_box = top_row.bounding_box()
-        cancel_box = cancel_btn.bounding_box()
+        button_row_box = status_row.bounding_box()
         project_box = project_path.bounding_box()
+        coding_box = coding_agent.bounding_box()
+        verification_box = verification_agent.bounding_box()
 
-        assert status_box and row_box and cancel_box and project_box, "Missing bounding box data for layout assertions"
+        assert row_box and button_row_box, (
+            "Missing bounding box data for layout assertions"
+        )
+        assert project_box and coding_box and verification_box
 
-        # Status should sit below project path within the top row column
+        # Action row should remain inside the top panel.
         assert (
-            status_box["y"] >= project_box["y"] + project_box["height"] - 2
-        ), "Status row should appear below the project path input"
+            button_row_box["y"] >= row_box["y"] - 2
+        ), "Button row should remain inside the top panel"
+        assert (
+            button_row_box["y"] <= row_box["y"] + row_box["height"] + 2
+        ), "Button row should remain inside the top panel"
 
-        # Status should align to project path column rather than the cancel column
-        assert status_box["x"] <= project_box["x"] + 4
-        available_width = row_box["width"] - cancel_box["width"]
-        assert status_box["width"] <= available_width
+        # Action row should live under project info (left section), not the right columns.
+        assert (
+            button_row_box["y"] >= project_box["y"] + project_box["height"] - 4
+        ), "Action row should be below the project info section"
+        assert (
+            button_row_box["x"] < coding_box["x"] - 60
+        ), "Action row should be left of the coding/verification columns"
+        assert (
+            button_row_box["x"] < verification_box["x"] - 60
+        ), "Action row should not drift into the verification column"
 
     def test_run_top_controls_stack_with_matching_widths(self, page: Page):
-        """Model/Reasoning controls should stack under matching agent selectors with aligned widths."""
+        """Model/Reasoning controls should stack under agents and action row stays with project info."""
+        _expand_project_information(page)
         project_path = page.get_by_label("Project Path")
-        status = page.locator("#role-config-status")
         session_log = page.locator("#session-log-btn")
+        workspace = page.locator("#workspace-display")
+        status_row = page.locator("#role-status-row")
         coding_agent = page.get_by_label("Coding Agent")
         coding_model = page.get_by_label("Model", exact=True)
         coding_reasoning = page.get_by_label("Reasoning Effort", exact=True)
@@ -266,8 +324,9 @@ class TestCodingAgentLayout:
         verification_reasoning = page.get_by_label("Verification Reasoning Effort")
 
         expect(project_path).to_be_visible()
-        expect(status).to_be_visible()
         expect(session_log).to_be_visible()
+        expect(workspace).to_be_visible()
+        expect(status_row).to_be_visible()
         expect(coding_agent).to_be_visible()
         expect(coding_model).to_be_visible()
         expect(coding_reasoning).to_be_visible()
@@ -275,9 +334,9 @@ class TestCodingAgentLayout:
         expect(verification_model).to_be_visible()
         expect(verification_reasoning).to_be_visible()
 
-        project_box = project_path.bounding_box()
-        status_box = status.bounding_box()
         log_box = session_log.bounding_box()
+        workspace_box = workspace.bounding_box()
+        status_row_box = status_row.bounding_box()
         coding_box = coding_agent.bounding_box()
         model_box = coding_model.bounding_box()
         coding_reasoning_box = coding_reasoning.bounding_box()
@@ -286,9 +345,9 @@ class TestCodingAgentLayout:
         verification_reasoning_box = verification_reasoning.bounding_box()
 
         assert (
-            project_box
-            and status_box
-            and log_box
+            log_box
+            and workspace_box
+            and status_row_box
             and coding_box
             and model_box
             and coding_reasoning_box
@@ -298,11 +357,17 @@ class TestCodingAgentLayout:
         )
 
         assert (
-            status_box["y"] >= project_box["y"] + project_box["height"] - 2
-        ), "Status should appear beneath the Project Path field"
+            log_box["y"] >= status_row_box["y"] - 4
+        ), "Session log button should align with the action row"
         assert (
-            log_box["y"] >= project_box["y"] + project_box["height"] - 2
-        ), "Session log button should appear beneath the Project Path field"
+            log_box["x"] >= status_row_box["x"] - 10
+        ), "Session log button should sit in the action row cluster"
+        assert (
+            log_box["x"] < coding_box["x"] - 60
+        ), "Action row cluster should be left of coding/verification columns"
+        assert (
+            workspace_box["x"] >= log_box["x"] - 4
+        ), "Workspace label should sit with the action cluster next to session log"
 
         assert (
             model_box["y"] >= coding_box["y"] + coding_box["height"] - 2
@@ -326,6 +391,30 @@ class TestCodingAgentLayout:
         assert abs(verification_reasoning_box["x"] - verification_box["x"]) <= 4
         assert abs(verification_reasoning_box["width"] - verification_box["width"]) <= 4
 
+    def test_doc_paths_visible_and_action_row_under_project_info(self, page: Page):
+        """Doc paths should be visible and action row should remain in the project-info area."""
+        _expand_project_information(page)
+        instructions = page.get_by_label("Agent Instructions Path")
+        architecture = page.get_by_label("Architecture Doc Path")
+        doc_paths_row = page.locator(".doc-paths-row")
+        status_row = page.locator("#role-status-row")
+        coding_agent = page.get_by_label("Coding Agent")
+
+        expect(instructions).to_be_visible()
+        expect(architecture).to_be_visible()
+        expect(doc_paths_row).to_be_visible()
+        expect(status_row).to_be_visible()
+        expect(coding_agent).to_be_visible()
+
+        action_box = status_row.bounding_box()
+        coding_box = coding_agent.bounding_box()
+
+        assert action_box and coding_box
+
+        assert (
+            action_box["x"] < coding_box["x"] - 60
+        ), "Action row should stay under project info, not in the right agent panel"
+
     def test_cancel_button_in_status_row(self, page: Page):
         """Cancel button should be in the status row, to the left of the save button."""
         cancel_btn = page.locator("#cancel-task-btn")
@@ -342,9 +431,11 @@ class TestCodingAgentLayout:
 
         assert cancel_box and save_box and status_box
 
-        # Cancel button should be in the status row (vertically aligned)
-        assert abs(cancel_box["y"] - status_box["y"]) < 20, (
-            f"Cancel button (y={cancel_box['y']}) should be in the status row (y={status_box['y']})"
+        # Cancel and Save should share the same action-row baseline.
+        # Some Gradio wrappers report slightly different row-box offsets, so
+        # validate button-to-button alignment directly.
+        assert abs(cancel_box["y"] - save_box["y"]) < 40, (
+            f"Cancel button (y={cancel_box['y']}) should align with save button (y={save_box['y']})"
         )
 
         # Cancel button should be to the left of the save button
@@ -664,9 +755,9 @@ class TestTaskTabs:
         # Wait for content to render
         page.wait_for_timeout(1000)
 
-        # Check that we can see a Start Task button (should be visible in Task 2)
-        start_btns = page.locator('button:has-text("Start Task"):visible')
-        expect(start_btns.first).to_be_visible(timeout=5000)
+        # Check task input content is visible for Task 2 (start uses submit arrow).
+        task_inputs = page.locator(".task-desc-input")
+        expect(task_inputs.last).to_be_visible(timeout=5000)
 
     def test_task_2_session_log_stays_single_line(self, page: Page):
         """Task 2 session log button should keep icon and filename on one line."""
@@ -995,10 +1086,12 @@ Line 4: Fourth line"""
     const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
     if (!box) return false;
     const container = box.querySelector('.live-output-content') || box;
-    // Simulate user scrolling to top: scrollTop=0 and savedScrollTop=0 (not null)
+    // Simulate user scrolling to top: scrollTop=0
     container.scrollTop = 0;
-    if (window._liveStreamScroll && window._liveStreamScroll.has(container)) {
-        const state = window._liveStreamScroll.get(container);
+    // Update the scroll state using the current API (keyed by parent ID)
+    const parentId = box.id || box.dataset.scrollTrackId;
+    if (parentId && window._liveStreamScrollState && window._liveStreamScrollState[parentId]) {
+        const state = window._liveStreamScrollState[parentId];
         state.userScrolledUp = true;  // User actively scrolled away from bottom
         state.savedScrollTop = 0;  // User's scroll position (0 = top of content)
     }
@@ -1178,6 +1271,348 @@ class TestLiveStreamScrollPreservation:
         assert after["height"] > before["height"], "Patch should increase scrollable content height"
         assert abs(after["top"] - before["top"]) <= 5, (
             f"Scroll position should be preserved. Before={before['top']}, After={after['top']}"
+        )
+
+    def test_no_javascript_errors_during_live_patching(self, page: Page):
+        """Live patching should not throw ReferenceErrors or other JS errors."""
+        errors = []
+        page.on("pageerror", lambda err: errors.append(str(err)))
+
+        live_id = "live-jserror-test"
+
+        # Set up content and trigger a patch
+        page.evaluate(
+            """
+({ liveId }) => {
+  const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+  if (!box) return;
+  box.innerHTML = `<div class="live-output-wrapper" data-live-id="${liveId}"><div class="live-output-content" style="height:200px; overflow:auto; white-space:pre">Initial content</div></div>`;
+}
+""",
+            {"liveId": live_id},
+        )
+
+        page.evaluate(
+            """
+({ liveId }) => {
+  const trigger = document.querySelector('.live-patch-trigger');
+  if (!trigger) return;
+  const newHtml = `<div class="live-output-wrapper" data-live-id="${liveId}"><div class="live-output-content" style="height:200px; overflow:auto; white-space:pre">Patched content line 1\\nPatched content line 2</div></div>`;
+  const escapeHtml = (str) => str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  trigger.innerHTML = `<div data-live-patch="${liveId}" style="display:none">${escapeHtml(newHtml)}</div>`;
+}
+""",
+            {"liveId": live_id},
+        )
+
+        page.wait_for_timeout(500)
+
+        assert len(errors) == 0, (
+            f"JavaScript errors during live patching: {errors}"
+        )
+
+    def test_rapid_patches_respect_user_scroll_up(self, page: Page):
+        """User scroll-up should be sticky across rapid patches."""
+        live_id = "live-rapid-test"
+
+        # Create initial content and scroll to middle
+        setup = page.evaluate(
+            """
+({ liveId }) => {
+  const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+  if (!box) return null;
+  const lines = Array.from({length: 200}, (_, i) => `Line ${i + 1}`).join('\\n');
+  box.innerHTML = `<div class="live-output-wrapper" data-live-id="${liveId}"><div class="live-output-content" style="height:420px; overflow:auto; white-space:pre">${lines}</div></div>`;
+  const content = box.querySelector('.live-output-content');
+  content.scrollTop = 500;
+  // Set shared state: user has scrolled up
+  const parentId = box.id || box.dataset.scrollTrackId;
+  if (parentId && window._liveStreamScrollState && window._liveStreamScrollState[parentId]) {
+    const state = window._liveStreamScrollState[parentId];
+    state.userScrolledUp = true;
+    state.savedScrollTop = 500;
+  }
+  return { top: content.scrollTop, height: content.scrollHeight };
+}
+""",
+            {"liveId": live_id},
+        )
+        assert setup is not None, "Setup should succeed"
+
+        # Fire 10 rapid patches at ~100ms intervals
+        for i in range(10):
+            page.evaluate(
+                """
+({ liveId, iteration }) => {
+  const trigger = document.querySelector('.live-patch-trigger');
+  if (!trigger) return;
+  const lines = Array.from({length: 200 + iteration * 5}, (_, j) => `Rapid ${iteration} line ${j + 1}`).join('\\n');
+  const newHtml = `<div class="live-output-wrapper" data-live-id="${liveId}"><div class="live-output-content" style="height:420px; overflow:auto; white-space:pre">${lines}</div></div>`;
+  const escapeHtml = (str) => str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  trigger.innerHTML = `<div data-live-patch="${liveId}" style="display:none">${escapeHtml(newHtml)}</div>`;
+}
+""",
+                {"liveId": live_id, "iteration": i},
+            )
+            page.wait_for_timeout(100)
+
+        page.wait_for_timeout(300)
+
+        after = page.evaluate(
+            """
+({ liveId }) => {
+  const content = document.querySelector(`[data-live-id="${liveId}"] .live-output-content`);
+  if (!content) return null;
+  return { top: content.scrollTop, height: content.scrollHeight };
+}
+""",
+            {"liveId": live_id},
+        )
+
+        assert after is not None, "Content should exist after rapid patches"
+        assert after["height"] > setup["height"], "Content should have grown"
+        assert abs(after["top"] - setup["top"]) <= 20, (
+            f"Scroll should stay near original position during rapid patches. "
+            f"Before={setup['top']}, After={after['top']}"
+        )
+
+    def test_auto_scroll_works_when_user_at_bottom(self, page: Page):
+        """Auto-scroll should follow new content when user is at the bottom."""
+        live_id = "live-autoscroll-test"
+
+        # Create content and scroll to bottom
+        setup = page.evaluate(
+            """
+({ liveId }) => {
+  const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+  if (!box) return null;
+  const lines = Array.from({length: 100}, (_, i) => `Line ${i + 1}`).join('\\n');
+  box.innerHTML = `<div class="live-output-wrapper" data-live-id="${liveId}"><div class="live-output-content" style="height:420px; overflow:auto; white-space:pre">${lines}</div></div>`;
+  const content = box.querySelector('.live-output-content');
+  content.scrollTop = content.scrollHeight;
+  // Ensure state reflects at-bottom
+  const parentId = box.id || box.dataset.scrollTrackId;
+  if (parentId && window._liveStreamScrollState && window._liveStreamScrollState[parentId]) {
+    const state = window._liveStreamScrollState[parentId];
+    state.userScrolledUp = false;
+    state.savedScrollTop = content.scrollTop;
+  }
+  return { top: content.scrollTop, height: content.scrollHeight };
+}
+""",
+            {"liveId": live_id},
+        )
+        assert setup is not None, "Setup should succeed"
+
+        # Patch with more content
+        page.evaluate(
+            """
+({ liveId }) => {
+  const trigger = document.querySelector('.live-patch-trigger');
+  if (!trigger) return;
+  const lines = Array.from({length: 150}, (_, i) => `Extended ${i + 1}`).join('\\n');
+  const newHtml = `<div class="live-output-wrapper" data-live-id="${liveId}"><div class="live-output-content" style="height:420px; overflow:auto; white-space:pre">${lines}</div></div>`;
+  const escapeHtml = (str) => str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  trigger.innerHTML = `<div data-live-patch="${liveId}" style="display:none">${escapeHtml(newHtml)}</div>`;
+}
+""",
+            {"liveId": live_id},
+        )
+
+        page.wait_for_timeout(400)
+
+        after = page.evaluate(
+            """
+({ liveId }) => {
+  const content = document.querySelector(`[data-live-id="${liveId}"] .live-output-content`);
+  if (!content) return null;
+  const isAtBottom = content.scrollTop + content.clientHeight >= content.scrollHeight - 10;
+  return { top: content.scrollTop, height: content.scrollHeight, atBottom: isAtBottom };
+}
+""",
+            {"liveId": live_id},
+        )
+
+        assert after is not None, "Content should exist after patch"
+        assert after["height"] > setup["height"], "Content should have grown"
+        assert after["atBottom"], (
+            f"Should auto-scroll to bottom when user was at bottom. "
+            f"scrollTop={after['top']}, scrollHeight={after['height']}"
+        )
+
+
+class TestLiveStreamSearch:
+    """Test the live stream search field functionality."""
+
+    SEARCH_CONTENT = (
+        '<p>The quick brown fox jumps over the lazy dog.</p>'
+        '<p>Another line with some fox content here.</p>'
+        '<p>Final line of output text.</p>'
+    )
+
+    def _inject_with_header(self, page: Page):
+        """Inject content with the search bar header into the live stream box."""
+        from chad.ui.gradio.web_ui import build_live_stream_html_from_pyte
+        full_html = build_live_stream_html_from_pyte(self.SEARCH_CONTENT, "TEST AI")
+        page.evaluate(
+            """
+(html) => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    if (!box) return false;
+    box.classList.add('live-stream-box');
+    let node = box;
+    while (node) {
+        if (node.classList) {
+            node.classList.remove('hide-container');
+            node.classList.remove('live-stream-hidden');
+        }
+        if (node.style) {
+            node.style.setProperty('display', 'block', 'important');
+            node.style.setProperty('visibility', 'visible', 'important');
+            node.style.setProperty('opacity', '1', 'important');
+            node.style.setProperty('height', 'auto', 'important');
+        }
+        node = node.parentElement;
+    }
+    box.style.minHeight = '300px';
+    box.innerHTML = html;
+    box.scrollIntoView({ behavior: 'instant', block: 'center' });
+    return true;
+}
+""",
+            full_html,
+        )
+        page.wait_for_timeout(600)
+
+    def test_search_input_visible_in_header(self, page: Page):
+        """Search input should be visible when live content is present."""
+        self._inject_with_header(page)
+        search_input = page.locator(".live-search-input").last
+        expect(search_input).to_be_visible()
+
+    def test_search_highlights_matches(self, page: Page):
+        """Typing a search term should highlight matching text."""
+        self._inject_with_header(page)
+        search_input = page.locator(".live-search-input").last
+        search_input.fill("fox")
+        page.wait_for_timeout(400)
+        marks = page.locator("mark.live-search-match")
+        assert marks.count() == 2, f"Expected 2 'fox' matches, got {marks.count()}"
+
+    def test_search_count_display(self, page: Page):
+        """Match count should display correctly."""
+        self._inject_with_header(page)
+        search_input = page.locator(".live-search-input").last
+        search_input.fill("fox")
+        page.wait_for_timeout(400)
+        count_el = page.locator(".live-search-count").last
+        assert count_el.text_content() == "1/2"
+
+    def test_search_navigation(self, page: Page):
+        """Next button should advance the current match index."""
+        self._inject_with_header(page)
+        search_input = page.locator(".live-search-input").last
+        search_input.fill("fox")
+        page.wait_for_timeout(400)
+        # First match should be current
+        current = page.locator("mark.live-search-match.current")
+        assert current.count() == 1
+        count_el = page.locator(".live-search-count").last
+        assert count_el.text_content() == "1/2"
+        # Click next
+        next_btn = page.locator(".live-search-nav").last
+        next_btn.click()
+        page.wait_for_timeout(200)
+        assert count_el.text_content() == "2/2"
+
+    def test_escape_clears_search(self, page: Page):
+        """Pressing Escape should clear highlights."""
+        self._inject_with_header(page)
+        search_input = page.locator(".live-search-input").last
+        search_input.fill("fox")
+        page.wait_for_timeout(400)
+        marks = page.locator("mark.live-search-match")
+        assert marks.count() == 2
+        search_input.press("Escape")
+        page.wait_for_timeout(300)
+        marks_after = page.locator("mark.live-search-match")
+        assert marks_after.count() == 0
+
+    def test_navigation_scrolls_to_offscreen_match(self, page: Page):
+        """Navigating to a match that is off-screen should scroll it into view."""
+        # Build content with many lines so the second "NEEDLE" is far below the fold
+        lines = ['<p>The NEEDLE is here on line 1.</p>']
+        for i in range(2, 80):
+            lines.append(f'<p>Filler line {i} with nothing interesting.</p>')
+        lines.append('<p>Another NEEDLE hidden way down at the bottom.</p>')
+        tall_content = '\n'.join(lines)
+        from chad.ui.gradio.web_ui import build_live_stream_html_from_pyte
+        full_html = build_live_stream_html_from_pyte(tall_content, "TEST AI")
+        page.evaluate(
+            """
+(html) => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    if (!box) return false;
+    box.classList.add('live-stream-box');
+    let node = box;
+    while (node) {
+        if (node.classList) {
+            node.classList.remove('hide-container');
+            node.classList.remove('live-stream-hidden');
+        }
+        if (node.style) {
+            node.style.setProperty('display', 'block', 'important');
+            node.style.setProperty('visibility', 'visible', 'important');
+            node.style.setProperty('opacity', '1', 'important');
+            node.style.setProperty('height', 'auto', 'important');
+        }
+        node = node.parentElement;
+    }
+    box.style.minHeight = '300px';
+    box.innerHTML = html;
+    box.scrollIntoView({ behavior: 'instant', block: 'center' });
+    return true;
+}
+""",
+            full_html,
+        )
+        page.wait_for_timeout(600)
+
+        search_input = page.locator(".live-search-input").last
+        search_input.fill("NEEDLE")
+        page.wait_for_timeout(400)
+
+        # First match should be current and near the top
+        count_el = page.locator(".live-search-count").last
+        assert count_el.text_content() == "1/2"
+
+        # Record scroll position before navigating
+        scroll_before = page.evaluate("""
+() => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    const content = box && box.querySelector('.live-output-content');
+    return content ? content.scrollTop : null;
+}
+""")
+
+        # Navigate to the second match (far below)
+        next_btn = page.locator(".live-search-nav").last
+        next_btn.click()
+        page.wait_for_timeout(300)
+        assert count_el.text_content() == "2/2"
+
+        scroll_after = page.evaluate("""
+() => {
+    const box = document.querySelector('#live-stream-box') || document.querySelector('.live-stream-box');
+    const content = box && box.querySelector('.live-output-content');
+    return content ? content.scrollTop : null;
+}
+""")
+
+        assert scroll_after is not None
+        assert scroll_after > scroll_before, (
+            f"Scrollbar should move down to off-screen match. "
+            f"Before={scroll_before}, After={scroll_after}"
         )
 
 
