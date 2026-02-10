@@ -340,7 +340,7 @@ body, .gradio-container, .gradio-container * {
 .project-save-btn button,
 .project-save-btn {
   min-height: 34px !important;
-  width: auto !important;
+  width: 80px !important;
   padding: 8px 14px !important;
 }
 
@@ -365,6 +365,7 @@ body, .gradio-container, .gradio-container * {
   -webkit-text-fill-color: var(--cancel-btn-text) !important;
   font-size: 0.85rem !important;
   min-height: 34px !important;
+  width: 80px !important;
   padding: 8px 14px !important;
   opacity: 1 !important;
 }

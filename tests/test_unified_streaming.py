@@ -20,7 +20,7 @@ from chad.server.services.pty_stream import reset_pty_stream_service
 from chad.server.state import reset_state
 from chad.ui.client.stream_client import StreamClient, decode_terminal_data
 from chad.ui.terminal_emulator import TerminalEmulator
-from chad.util.event_log import EventLog, SessionEndedEvent, SessionStartedEvent, TerminalOutputEvent
+from chad.util.event_log import EventLog, SessionEndedEvent, SessionStartedEvent, StatusEvent, TerminalOutputEvent
 
 
 @pytest.fixture
@@ -1674,6 +1674,52 @@ class TestEventMultiplexer:
         assert got_complete_event, "Should receive a complete event when stream ends"
 
         pty_service.cleanup_session(stream_id)
+        reset_pty_stream_service()
+
+    @pytest.mark.asyncio
+    async def test_mux_delivers_status_events_while_pty_is_idle(self, tmp_path):
+        """Status events should stream immediately even when PTY has no output."""
+        from chad.server.services.event_mux import EventMultiplexer
+        from chad.server.services.pty_stream import get_pty_stream_service, reset_pty_stream_service
+
+        reset_pty_stream_service()
+        pty_service = get_pty_stream_service()
+        session_id = "mux-idle-status"
+
+        log = EventLog(session_id, base_dir=tmp_path)
+        log.log(SessionStartedEvent(
+            task_description="Idle test",
+            project_path="/tmp",
+            coding_provider="mock",
+            coding_account="test",
+        ))
+
+        pty_service.start_pty_session(
+            session_id=session_id,
+            cmd=["bash", "-c", "sleep 2"],
+            cwd=tmp_path,
+        )
+
+        mux = EventMultiplexer(session_id, log, ping_interval=0.1)
+
+        async def write_status():
+            await anyio.sleep(0.2)
+            log.log(StatusEvent(status="still running"))
+
+        async def wait_for_status() -> float:
+            start = time.monotonic()
+            async for event in mux.stream_events(pty_service, include_terminal=True, include_events=True):
+                if event.type == "event" and event.data.get("type") == "status":
+                    return time.monotonic() - start
+            return 999.0
+
+        elapsed = await asyncio.gather(wait_for_status(), write_status())
+        status_elapsed = elapsed[0]
+
+        assert status_elapsed < 1.0, (
+            f"Expected status event while PTY was idle, but delivery took {status_elapsed:.2f}s"
+        )
+
         reset_pty_stream_service()
 
     def test_format_sse_event(self):
