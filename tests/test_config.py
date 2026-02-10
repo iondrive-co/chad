@@ -5,8 +5,10 @@ from pathlib import Path
 from chad.util.config import resolve_project_root
 
 
-def test_resolve_project_root_defaults_to_repo_root():
+def test_resolve_project_root_defaults_to_repo_root(monkeypatch):
     """resolve_project_root should locate the repository root via pyproject/git."""
+    monkeypatch.delenv("CHAD_PROJECT_ROOT", raising=False)
+
     here = Path(__file__).resolve()
     expected = None
     for candidate in [here] + list(here.parents):

@@ -721,6 +721,62 @@ class TestChadWebUI:
         web_ui.api_client.cancel_session.assert_called_once_with("server-session-1")
         assert all("already running" not in (u[2].get("value", "").lower()) for u in updates)
 
+    def test_start_task_after_cancel_detaches_stale_server_session_when_cancel_wait_fails(
+        self,
+        web_ui,
+        git_repo,
+        monkeypatch,
+    ):
+        """Restart after cancel should continue even if stale session still reports active."""
+        session = web_ui.create_session("test")
+        session.server_session_id = "server-session-1"
+        session.cancel_requested = True
+        web_ui.api_client.get_session.return_value = Mock(active=True)
+
+        cancel_attempts = {"count": 0}
+
+        def fake_request_server_cancel(_server_session_id, timeout_seconds=3.0):  # noqa: ARG001
+            cancel_attempts["count"] += 1
+            return False
+
+        monkeypatch.setattr(web_ui, "_request_server_cancel", fake_request_server_cancel)
+
+        started = {"value": False}
+
+        def fake_run_task_via_api(
+            session_id,
+            project_path,
+            task_description,
+            coding_account,
+            message_queue,
+            **kwargs,
+        ):
+            started["value"] = True
+            message_queue.put(("message_complete", "CODING AI", "done"))
+            return True, "done", "server-session-2", {
+                "files_modified": [],
+                "files_created": [],
+                "commands_run": [],
+                "total_tool_calls": 0,
+            }
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        updates = list(
+            web_ui.start_chad_task(
+                session.id,
+                str(git_repo),
+                "do something",
+                "claude",
+                verification_agent=web_ui.VERIFICATION_NONE,
+            )
+        )
+
+        assert cancel_attempts["count"] == 1
+        assert started["value"] is True
+        assert session.server_session_id == "server-session-2"
+        assert all("already running" not in (u[2].get("value", "").lower()) for u in updates)
+
     def test_workspace_label_prefers_worktree_over_project(self, web_ui):
         """Workspace label should show active worktree path when available."""
         session = web_ui.create_session("workspace")

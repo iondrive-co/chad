@@ -2719,6 +2719,30 @@ class ChadWebUI:
             return False
         return self._wait_for_server_session_inactive(server_session_id, timeout_seconds=timeout_seconds)
 
+    def _await_cancel_cleanup(
+        self,
+        session_id: str,
+        server_session_id: str,
+        timeout_seconds: float = 15.0,
+    ) -> None:
+        """Wait for server cancellation to settle, then clean up local worktree state."""
+        if not self._wait_for_server_session_inactive(server_session_id, timeout_seconds=timeout_seconds):
+            return
+
+        session = self.get_session(session_id)
+        if session.server_session_id != server_session_id:
+            return
+        if not session.worktree_path or not session.project_path:
+            return
+
+        try:
+            git_mgr = GitWorktreeManager(Path(session.project_path))
+            git_mgr.delete_worktree(self._worktree_id(session_id))
+        except Exception:
+            pass  # Best effort cleanup
+        session.worktree_path = None
+        session.worktree_base_commit = None
+
     def _workspace_label(self, session: Session) -> str:
         """Format the workspace path label shown next to the session log button."""
         workspace_path = ""
@@ -3202,20 +3226,27 @@ class ChadWebUI:
         """Cancel the running task for a specific session.
 
         Returns a tuple of UI component updates matching the cancel_btn.click outputs:
-        (chatbot, live_stream, task_status, project_path, task_description,
+        (live_stream, chatbot, task_status, project_path, task_description,
          start_btn, cancel_btn, followup_row, merge_section_group)
         """
         session = self.get_session(session_id)
         session.cancel_requested = True
         session.active = False  # Mark session as inactive to allow restart
-        server_shutdown_confirmed = True
+        server_session_id = session.server_session_id
+        cancel_requested = False
         if session.server_session_id:
-            # Cancel the server-side task too; otherwise it keeps running in the background
-            # and restart attempts will be blocked by the "already running" guard.
-            server_shutdown_confirmed = self._request_server_cancel(
-                session.server_session_id,
-                timeout_seconds=15.0,
-            )
+            # Request server cancellation immediately; do not block the UI waiting for shutdown.
+            try:
+                self.api_client.cancel_session(session.server_session_id)
+                cancel_requested = True
+            except Exception:
+                cancel_requested = False
+            if cancel_requested and server_session_id:
+                threading.Thread(
+                    target=self._await_cancel_cleanup,
+                    args=(session_id, server_session_id),
+                    daemon=True,
+                ).start()
         if session.provider:
             session.provider.stop_session()
             session.provider = None
@@ -3227,8 +3258,8 @@ class ChadWebUI:
         except Exception:
             pass  # Best effort cleanup
 
-        # Clean up worktree if it exists
-        if session.worktree_path and session.project_path and server_shutdown_confirmed:
+        # No server-backed task: clean up worktree synchronously.
+        if session.worktree_path and session.project_path and not server_session_id:
             try:
                 git_mgr = GitWorktreeManager(Path(session.project_path))
                 git_mgr.delete_worktree(self._worktree_id(session_id))
@@ -3242,8 +3273,8 @@ class ChadWebUI:
             gr.update(value="🛑 Task cancelled"),  # live_stream
             no_change,  # chatbot - keep existing chat history
             no_change,  # task_status
-            no_change,  # project_path - keep so user can restart
-            no_change,  # task_description - keep so user can modify and restart
+            gr.update(interactive=True),  # project_path - keep editable so user can restart
+            gr.update(interactive=True),  # task_description - re-enable submit/start after cancel
             gr.update(interactive=True),  # start_btn - re-enable to allow new task
             gr.update(interactive=False),  # cancel_btn - disable since nothing to cancel
             gr.update(visible=False),  # followup_row - hide follow-up section
@@ -3423,6 +3454,12 @@ class ChadWebUI:
                         cancelled = self._request_server_cancel(session.server_session_id, timeout_seconds=15.0)
                         if cancelled:
                             server_session = self.api_client.get_session(session.server_session_id)
+                        else:
+                            # Cancel was already requested locally but server state did not
+                            # settle in time. Detach from this stale server session so the
+                            # restart can proceed on a new session.
+                            session.server_session_id = None
+                            server_session = None
 
                     if server_session and getattr(server_session, "active", False):
                         # Task is still running - cancel it first or warn user
@@ -4108,6 +4145,7 @@ class ChadWebUI:
                     "🛑 Task cancelled",
                     cancel_live_stream,
                     summary="🛑 Task cancelled",
+                    interactive=True,
                     show_followup=True,  # Always show follow-up after task starts
                     task_state="failed",
                     task_ended=True,
@@ -4772,7 +4810,7 @@ class ChadWebUI:
                 final_summary,
                 final_live_stream,
                 summary=final_summary,
-                interactive=False,  # Task description locked after work begins
+                interactive=session.cancel_requested,  # Re-enable task input after cancellation
                 show_followup=can_continue,
                 show_merge=show_merge,
                 merge_summary=merge_summary_text if show_merge else "",
@@ -6504,7 +6542,8 @@ class ChadWebUI:
                                     interactive=True,
                                     show_label=False,
                                 )
-                        # Action row under project info accordion
+                        # Action row stays outside the project accordion so it remains
+                        # available when project details are collapsed.
                         with gr.Row(
                             equal_height=True,
                             elem_id="role-status-row" if is_first else None,
@@ -8021,12 +8060,6 @@ class ChadWebUI:
                 };
                 return tryClick();
             };
-            const isPlusSelected = () => {
-                const root = getRoot();
-                return Array.from(root.querySelectorAll('[role="tab"]')).some(
-                    (tab) => isPlus(tab) && tab.getAttribute('aria-selected') === 'true'
-                );
-            };
             const wirePlusButtons = () => {
                 const root = getRoot();
                 const candidates = [
@@ -8038,19 +8071,9 @@ class ChadWebUI:
                     tab._plusClickSetup = true;
                     tab.addEventListener('click', () => setTimeout(clickAddTask, 60));
                 });
-                if (isPlusSelected()) setTimeout(clickAddTask, 60);
                 const addBtn = root.querySelector('#add-new-task-btn');
                 if (addBtn) hideButton(addBtn);
             };
-
-            const observer = new MutationObserver(() => {
-                if (isPlusSelected()) clickAddTask();
-            });
-            observer.observe(document, { childList: true, subtree: true });
-            const rootObserverTarget = getRoot();
-            if (rootObserverTarget && rootObserverTarget !== document) {
-                observer.observe(rootObserverTarget, { childList: true, subtree: true });
-            }
 
             setInterval(wirePlusButtons, 400);
             setTimeout(wirePlusButtons, 80);
@@ -8113,8 +8136,6 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
       tab._plusClickSetup = true;
       tab.addEventListener('click', () => setTimeout(triggerAdd, 60));
     });
-    const activePlus = tabs.find((tab) => tab && isPlus(tab) && tab.getAttribute('aria-selected') === 'true');
-    if (activePlus) triggerAdd();
     const btn = root.querySelector('#add-new-task-btn');
     if (btn) hideButton(btn);
   };
@@ -8543,6 +8564,15 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                     });
                   };
                   const triggerAdd = () => {
+                    const focusLatestTask = () => {
+                      const taskTabs = collectAll('[role="tab"]').filter((tab) => {
+                        const text = (tab.textContent || tab.getAttribute('aria-label') || '').trim();
+                        return /^Task\\s+\\d+$/i.test(text);
+                      });
+                      if (!taskTabs.length) return;
+                      const last = taskTabs[taskTabs.length - 1];
+                      if (last) last.click();
+                    };
                     let attempts = 0;
                     const tick = () => {
                       const root = getRoot();
@@ -8550,6 +8580,7 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                       if (btn) {
                         hideButton(btn);
                         btn.click();
+                        setTimeout(focusLatestTask, 140);
                         return;
                       }
                       if (attempts++ < 15) setTimeout(tick, 80);
@@ -8567,9 +8598,6 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                       tab._plusClickSetup = true;
                       tab.addEventListener('click', () => setTimeout(triggerAdd, 60));
                     });
-                    const activePlus = tabs.find((tab) => tab && isPlus(tab) &&
-                        tab.getAttribute('aria-selected') === 'true');
-                    if (activePlus) triggerAdd();
                     const btn = root.querySelector('#add-new-task-btn');
                     if (btn) hideButton(btn);
                   };
