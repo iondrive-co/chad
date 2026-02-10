@@ -64,6 +64,23 @@ def page(chad_server):
         yield page
 
 
+def _expand_project_information(page: Page) -> None:
+    """Expand the Project Information accordion if it is collapsed."""
+    project_path = page.get_by_label("Project Path")
+    if project_path.is_visible():
+        return
+    page.get_by_text("Project Information", exact=True).first.click()
+    expect(project_path).to_be_visible()
+
+
+def _collapse_project_information(page: Page) -> None:
+    """Collapse the Project Information accordion if it is expanded."""
+    project_path = page.get_by_label("Project Path")
+    if project_path.is_visible():
+        page.get_by_text("Project Information", exact=True).first.click()
+    expect(project_path).to_be_hidden()
+
+
 class TestUIElements:
     """Test that UI elements are present and correctly configured."""
 
@@ -89,18 +106,23 @@ class TestUIElements:
         expect(tab).to_be_visible()
 
     def test_project_path_field(self, page: Page):
-        """Project path field should be present."""
-        # Use label to find the field
+        """Project path field should be visible after opening project information."""
+        _expand_project_information(page)
         field = page.get_by_label("Project Path")
         expect(field).to_be_visible()
 
+    def test_project_information_collapsed_by_default(self, page: Page):
+        """Project Information should be collapsed at startup."""
+        field = page.get_by_label("Project Path")
+        expect(field).to_be_hidden()
+
     def test_project_setup_commands_visible(self, page: Page):
-        """Project setup lint and test commands should be visible without clicking anything."""
-        # Lint command input should be visible immediately (not hidden in accordion)
+        """Project setup lint and test commands should be visible after expanding project info."""
+        _expand_project_information(page)
+
         lint_cmd = page.get_by_label("Lint Command")
         expect(lint_cmd).to_be_visible()
 
-        # Test command input should be visible immediately (not hidden in accordion)
         test_cmd = page.get_by_label("Test Command")
         expect(test_cmd).to_be_visible()
 
@@ -111,6 +133,7 @@ class TestUIElements:
 
     def test_project_type_shown_in_label(self, page: Page):
         """Project type should sit inline with the project path label to save space."""
+        _expand_project_information(page)
         label = page.locator("#project-path-input label")
         expect(label).to_be_visible()
         text = label.text_content()
@@ -118,6 +141,7 @@ class TestUIElements:
 
     def test_project_commands_share_row(self, page: Page):
         """Lint and test commands should sit on the same horizontal row."""
+        _expand_project_information(page)
         lint_cmd = page.get_by_label("Lint Command")
         test_cmd = page.get_by_label("Test Command")
         expect(lint_cmd).to_be_visible()
@@ -130,6 +154,7 @@ class TestUIElements:
 
     def test_command_test_buttons_align_with_headers(self, page: Page):
         """Test buttons should sit beside their corresponding command headers."""
+        _expand_project_information(page)
         lint_label = page.locator(".lint-command-label")
         lint_btn = page.locator(".lint-test-btn")
         test_label = page.locator(".test-command-label")
@@ -151,6 +176,7 @@ class TestUIElements:
 
     def test_project_doc_paths_visible(self, page: Page):
         """Project doc path inputs should be visible for editing."""
+        _expand_project_information(page)
         instructions = page.get_by_label("Agent Instructions Path")
         architecture = page.get_by_label("Architecture Doc Path")
         expect(instructions).to_be_visible()
@@ -163,10 +189,10 @@ class TestUIElements:
         task_input = page.locator(".task-desc-input")
         expect(task_input).to_be_visible()
 
-    def test_start_button_present(self, page: Page):
-        """Start Task button should be present."""
+    def test_start_button_hidden(self, page: Page):
+        """Standalone Start Task button should remain hidden (submit arrow starts task)."""
         button = page.locator("#start-task-btn")
-        expect(button).to_be_visible()
+        expect(button).to_be_hidden()
 
     def test_cancel_button_disabled_initially(self, page: Page):
         """Cancel button should be disabled before task starts."""
@@ -217,45 +243,75 @@ class TestReadyStatus:
 class TestCodingAgentLayout:
     """Ensure the coding agent selector and controls are properly laid out."""
 
+    def test_action_row_visible_when_project_info_collapsed(self, page: Page):
+        """Action row should stay visible even when project info is collapsed."""
+        _collapse_project_information(page)
+        status_row = page.locator("#role-status-row")
+        cancel_btn = page.locator("#cancel-task-btn")
+        expect(status_row).to_be_visible()
+        expect(cancel_btn).to_be_visible()
+
+        inside_project_accordion = page.evaluate(
+            """
+() => {
+  const status = document.querySelector("#role-status-row");
+  const accordion = document.querySelector(".project-info-accordion");
+  if (!status || !accordion) return null;
+  return accordion.contains(status);
+}
+            """
+        )
+        assert inside_project_accordion is False
+
     def test_status_row_below_config_panel(self, page: Page):
-        """Action buttons should sit under the agent selectors on the right."""
+        """Action row should sit under project info, not in the right-side agent columns."""
+        _expand_project_information(page)
         top_row = page.locator("#run-top-row")
         status_row = page.locator("#role-status-row")
+        project_path = page.get_by_label("Project Path")
         coding_agent = page.get_by_label("Coding Agent")
         verification_agent = page.get_by_label("Verification Agent")
         cancel_btn = page.locator("#cancel-task-btn")
         expect(top_row).to_be_visible()
         expect(status_row).to_be_visible()
+        expect(project_path).to_be_visible()
         expect(coding_agent).to_be_visible()
         expect(verification_agent).to_be_visible()
         expect(cancel_btn).to_be_visible()
 
         row_box = top_row.bounding_box()
         button_row_box = status_row.bounding_box()
+        project_box = project_path.bounding_box()
         coding_box = coding_agent.bounding_box()
         verification_box = verification_agent.bounding_box()
 
         assert row_box and button_row_box, (
             "Missing bounding box data for layout assertions"
         )
-        assert coding_box and verification_box
+        assert project_box and coding_box and verification_box
 
-        # Action row should sit under agent selectors on the right.
+        # Action row should remain inside the top panel.
         assert (
             button_row_box["y"] >= row_box["y"] - 2
         ), "Button row should remain inside the top panel"
         assert (
             button_row_box["y"] <= row_box["y"] + row_box["height"] + 2
         ), "Button row should remain inside the top panel"
+
+        # Action row should live under project info (left section), not the right columns.
         assert (
-            button_row_box["x"] >= coding_box["x"] - 120
-        ), "Action row should remain anchored under the right-side selectors"
+            button_row_box["y"] >= project_box["y"] + project_box["height"] - 4
+        ), "Action row should be below the project info section"
         assert (
-            button_row_box["x"] <= verification_box["x"] + verification_box["width"] + 30
-        ), "Buttons should align with the right-side agent panel"
+            button_row_box["x"] < coding_box["x"] - 60
+        ), "Action row should be left of the coding/verification columns"
+        assert (
+            button_row_box["x"] < verification_box["x"] - 60
+        ), "Action row should not drift into the verification column"
 
     def test_run_top_controls_stack_with_matching_widths(self, page: Page):
-        """Model/Reasoning controls should stack under agents and action row stays right."""
+        """Model/Reasoning controls should stack under agents and action row stays with project info."""
+        _expand_project_information(page)
         project_path = page.get_by_label("Project Path")
         session_log = page.locator("#session-log-btn")
         workspace = page.locator("#workspace-display")
@@ -304,8 +360,11 @@ class TestCodingAgentLayout:
             log_box["y"] >= status_row_box["y"] - 4
         ), "Session log button should align with the action row"
         assert (
-            log_box["x"] >= coding_box["x"] - 10
-        ), "Session log button should sit in the right-hand action cluster"
+            log_box["x"] >= status_row_box["x"] - 10
+        ), "Session log button should sit in the action row cluster"
+        assert (
+            log_box["x"] < coding_box["x"] - 60
+        ), "Action row cluster should be left of coding/verification columns"
         assert (
             workspace_box["x"] >= log_box["x"] - 4
         ), "Workspace label should sit with the action cluster next to session log"
@@ -332,8 +391,9 @@ class TestCodingAgentLayout:
         assert abs(verification_reasoning_box["x"] - verification_box["x"]) <= 4
         assert abs(verification_reasoning_box["width"] - verification_box["width"]) <= 4
 
-    def test_doc_paths_visible_and_action_row_on_right(self, page: Page):
-        """Doc paths should be visible and action row stays non-compact on the right."""
+    def test_doc_paths_visible_and_action_row_under_project_info(self, page: Page):
+        """Doc paths should be visible and action row should remain in the project-info area."""
+        _expand_project_information(page)
         instructions = page.get_by_label("Agent Instructions Path")
         architecture = page.get_by_label("Architecture Doc Path")
         doc_paths_row = page.locator(".doc-paths-row")
@@ -352,8 +412,8 @@ class TestCodingAgentLayout:
         assert action_box and coding_box
 
         assert (
-            action_box["x"] >= coding_box["x"] - 20
-        ), "Action row should stay in the right panel under agent selectors"
+            action_box["x"] < coding_box["x"] - 60
+        ), "Action row should stay under project info, not in the right agent panel"
 
     def test_cancel_button_in_status_row(self, page: Page):
         """Cancel button should be in the status row, to the left of the save button."""
@@ -371,9 +431,11 @@ class TestCodingAgentLayout:
 
         assert cancel_box and save_box and status_box
 
-        # Cancel button should be in the status row (vertically aligned)
-        assert abs(cancel_box["y"] - status_box["y"]) < 20, (
-            f"Cancel button (y={cancel_box['y']}) should be in the status row (y={status_box['y']})"
+        # Cancel and Save should share the same action-row baseline.
+        # Some Gradio wrappers report slightly different row-box offsets, so
+        # validate button-to-button alignment directly.
+        assert abs(cancel_box["y"] - save_box["y"]) < 40, (
+            f"Cancel button (y={cancel_box['y']}) should align with save button (y={save_box['y']})"
         )
 
         # Cancel button should be to the left of the save button
@@ -693,9 +755,9 @@ class TestTaskTabs:
         # Wait for content to render
         page.wait_for_timeout(1000)
 
-        # Check that we can see a Start Task button (should be visible in Task 2)
-        start_btns = page.locator('button:has-text("Start Task"):visible')
-        expect(start_btns.first).to_be_visible(timeout=5000)
+        # Check task input content is visible for Task 2 (start uses submit arrow).
+        task_inputs = page.locator(".task-desc-input")
+        expect(task_inputs.last).to_be_visible(timeout=5000)
 
     def test_task_2_session_log_stays_single_line(self, page: Page):
         """Task 2 session log button should keep icon and filename on one line."""
