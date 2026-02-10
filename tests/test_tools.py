@@ -92,6 +92,117 @@ class TestVerify:
         assert "Tests failed to run" in result["message"]
         assert "unrecognized arguments: -n" in result["message"]
 
+    def test_verify_uses_extended_pytest_timeout(self, monkeypatch, tmp_path):
+        """verify should allow enough time for the full suite (including visual tests)."""
+        from chad.ui.gradio.verification.tools import verify
+
+        monkeypatch.setattr("chad.ui.gradio.verification.tools.resolve_project_root", lambda: (tmp_path, "test"))
+        monkeypatch.setattr("chad.ui.gradio.verification.tools.ensure_playwright_browsers", lambda: True)
+
+        calls = []
+
+        class Proc:
+            def __init__(self, returncode, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            if len(cmd) >= 3 and cmd[2] == "flake8":
+                return Proc(0, "")
+            if len(cmd) >= 3 and cmd[2] == "pip":
+                return Proc(0, "")
+            if len(cmd) >= 2 and cmd[1] == "-c":
+                # pytest-xdist probe
+                return Proc(1, "")
+            if len(cmd) >= 3 and cmd[2] == "pytest":
+                return Proc(0, "================ 1 passed in 0.01s ================")
+            return Proc(0, "")
+
+        monkeypatch.setattr("chad.ui.gradio.verification.tools.subprocess.run", fake_run)
+
+        result = verify()
+
+        assert result["success"] is True
+        pytest_calls = [kwargs for cmd, kwargs in calls if len(cmd) >= 3 and cmd[2] == "pytest"]
+        assert pytest_calls, "Expected verify() to invoke pytest"
+        assert pytest_calls[0]["timeout"] >= 300
+
+    def test_verify_defaults_to_non_visual_pytest(self, monkeypatch, tmp_path):
+        """verify() should run non-visual tests by default."""
+        from chad.ui.gradio.verification.tools import verify
+
+        monkeypatch.setattr("chad.ui.gradio.verification.tools.resolve_project_root", lambda: (tmp_path, "test"))
+        monkeypatch.setattr("chad.ui.gradio.verification.tools.ensure_playwright_browsers", lambda: True)
+
+        class Proc:
+            def __init__(self, returncode, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if len(cmd) >= 3 and cmd[2] == "flake8":
+                return Proc(0, "")
+            if len(cmd) >= 3 and cmd[2] == "pip":
+                return Proc(0, "")
+            if len(cmd) >= 2 and cmd[0] == "git":
+                return Proc(0, "")
+            if len(cmd) >= 2 and cmd[1] == "-c":
+                return Proc(1, "")
+            if len(cmd) >= 3 and cmd[2] == "pytest":
+                return Proc(0, "================ 1 passed in 0.01s ================")
+            return Proc(0, "")
+
+        monkeypatch.setattr("chad.ui.gradio.verification.tools.subprocess.run", fake_run)
+
+        result = verify()
+
+        assert result["success"] is True
+        pytest_calls = [cmd for cmd in calls if len(cmd) >= 3 and cmd[2] == "pytest"]
+        assert pytest_calls, "Expected verify() to invoke pytest"
+        assert any("-m" in cmd and "not visual" in cmd for cmd in pytest_calls)
+
+    def test_verify_visual_only_runs_visual_marker(self, monkeypatch, tmp_path):
+        """verify(visual_only=True) should run only visual tests."""
+        from chad.ui.gradio.verification.tools import verify
+
+        monkeypatch.setattr("chad.ui.gradio.verification.tools.resolve_project_root", lambda: (tmp_path, "test"))
+        monkeypatch.setattr("chad.ui.gradio.verification.tools.ensure_playwright_browsers", lambda: True)
+
+        class Proc:
+            def __init__(self, returncode, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if len(cmd) >= 3 and cmd[2] == "flake8":
+                return Proc(0, "")
+            if len(cmd) >= 3 and cmd[2] == "pip":
+                return Proc(0, "")
+            if len(cmd) >= 2 and cmd[1] == "-c":
+                return Proc(1, "")
+            if len(cmd) >= 3 and cmd[2] == "pytest":
+                return Proc(0, "================ 1 passed in 0.01s ================")
+            return Proc(0, "")
+
+        monkeypatch.setattr("chad.ui.gradio.verification.tools.subprocess.run", fake_run)
+
+        result = verify(visual_only=True)
+
+        assert result["success"] is True
+        pytest_calls = [cmd for cmd in calls if len(cmd) >= 3 and cmd[2] == "pytest"]
+        assert pytest_calls, "Expected verify() to invoke pytest"
+        assert all("-m" in cmd and "visual" in cmd for cmd in pytest_calls)
+
 
 class TestScreenshot:
     """Test the screenshot function."""

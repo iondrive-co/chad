@@ -59,6 +59,8 @@ Base path `/api/v1` (except `/status`).
 - `GET/PUT /config/preferences` — `last_project_path`, `dark_mode`, `ui_mode`
 - `GET/PUT /config/verification-agent`
 - `GET/PUT /config/preferred-verification-model`
+- `GET/PUT /config/provider-fallback-order` — ordered list of account names for auto-switching
+- `GET/PUT /config/usage-switch-threshold` — percentage (0-100) to trigger auto-switch
 
 **Streaming**
 - SSE: `GET /sessions/{id}/stream`
@@ -69,6 +71,102 @@ Base path `/api/v1` (except `/status`).
 - Supported providers: Anthropic (Claude Code), OpenAI (Codex), Google (Gemini), Alibaba (Qwen Code), Mistral (Vibe), Mock.
 - CLI resolution/installation lives in `chad.util.providers` + `chad.util.installer`; `task_executor.build_agent_command` assembles the command/env and builds the coding prompt (with doc references and verification instructions).
 - Claude/Qwen stream‑json is parsed by `ClaudeStreamJsonParser`; PTY output is streamed through EventLog and EventMultiplexer.
+
+## Agent Prompt Formats
+
+**CRITICAL: Progress updates MUST use markdown format, NOT JSON.**
+
+The coding prompt asks agents to emit progress updates during multi-step tasks. These updates use markdown:
+
+```
+**Progress:** Found the authentication handler
+**Location:** src/auth.py:45
+**Next:** Adding input validation
+```
+
+The final completion summary uses JSON (to enforce structured output):
+
+```json
+{
+  "change_summary": "Added input validation to auth handler",
+  "files_changed": ["src/auth.py"],
+  "completion_status": "success"
+}
+```
+
+**Why markdown for progress?** The Codex CLI (`codex exec -`) interprets bare JSON objects in assistant output as completion signals and terminates the session immediately. This caused agents to exit after outputting their first progress update, before doing any actual work. Markdown avoids this issue because it's not parsed as a structured completion message.
+
+This was discovered through debugging where Codex would:
+1. Do initial exploration
+2. Output `{"type": "progress", ...}`
+3. Exit immediately (even saying "Will continue now..." which was ignored)
+4. Chad would trigger verification on the incomplete output
+
+The fix (using markdown) was validated by running reproduction tests:
+- JSON progress: Codex exits immediately, no files created
+- Markdown progress: Codex completes full task
+
+**DO NOT reintroduce JSON format for progress updates** without testing against all providers, especially Codex. Future multi-step progress updates should also use markdown. See `tests/test_web_ui.py::TestProgressUpdateExtraction` for format examples.
+
+Related files:
+- `chad.util.prompts.CODING_AGENT_PROMPT`: The prompt template
+- `chad.util.prompts.extract_progress_update()`: Parser supporting both formats
+- `src/chad/server/services/task_executor.py`: Codex runs in `exec` mode with stdin closed after prompt
+
+## Provider Capabilities
+
+Each provider implements `AIProvider` (in `chad.util.providers`) with these capability methods:
+
+| Provider | Multi-turn | Session ID | Usage Reporting |
+|----------|------------|------------|-----------------|
+| Claude Code (anthropic) | Yes | No | **Yes** (via Anthropic OAuth API) |
+| Codex (openai) | Yes | `thread_id` | **Yes** (via session files) |
+| Gemini (gemini) | Yes | `session_id` | No (no quota API) |
+| Qwen (qwen) | Yes | `session_id` | No (no quota API) |
+| Mistral Vibe (mistral) | Yes | No | No (no quota API) |
+| Mock | Yes | No | No |
+
+**Usage Reporting** enables automatic provider switching based on quota consumption:
+- `supports_usage_reporting()`: Returns `True` if the provider can report usage percentage
+- `get_usage_percentage()`: Returns 0-100 usage percentage, or `None` if unavailable
+
+When a provider's usage exceeds the configured threshold (`usage_switch_threshold`, default 90%), Chad can automatically switch to the next provider in `provider_fallback_order`.
+
+For providers without usage reporting, Chad relies on error pattern matching to detect quota exhaustion (rate limits, insufficient credits, etc.) and trigger automatic switching.
+
+**Adding Usage Support to a Provider:**
+1. Implement a way to fetch usage data (API call, session file parsing, etc.)
+2. Override `supports_usage_reporting()` to return `True`
+3. Override `get_usage_percentage()` to return usage as 0-100
+4. Update this table
+
+## Provider Handoff
+
+When switching providers (due to quota exhaustion or user preference), Chad preserves session context for continuity.
+
+**Session Log Strategy:**
+- Terminal output is logged only at session end (not periodically during execution)
+- This produces one `terminal_output` event with the final screen state, avoiding log bloat from repeated screen captures
+- The final state is most relevant for handoff since it shows what the agent was working on when interrupted
+
+**Handoff Flow:**
+1. Quota exhaustion detected via usage threshold (proactive) or error patterns (reactive)
+2. `log_handoff_checkpoint()` writes a `ContextCondensedEvent` with `policy="provider_handoff"` containing:
+   - Original task description
+   - Files changed/created (extracted from `tool_call_started` events)
+   - Key commands run (pytest, npm, etc.)
+   - Optional remaining work description
+   - Provider session ID for native resume (if supported)
+3. Old provider stopped, new provider started
+4. `build_resume_prompt()` reconstructs context from the checkpoint for the new provider
+
+**Key Files:**
+- `chad.util.handoff`: `log_handoff_checkpoint()`, `build_handoff_summary()`, `build_resume_prompt()`, `is_quota_exhaustion_error()`
+- `chad.util.event_log`: `ContextCondensedEvent`, `TerminalOutputEvent`
+- `chad.server.services.task_executor`: Terminal buffer flushing in `finally` block ensures capture on all exit paths
+
+**Error Pattern Detection:**
+`is_quota_exhaustion_error()` matches patterns like `insufficient_quota`, `rate_limit_exceeded`, `billing_hard_limit_reached`, `RESOURCE_EXHAUSTED`, etc. across providers.
 
 ## Project Configuration
 - Per-project settings (lint/test commands, doc paths) are stored in the main `~/.chad.conf` under the `projects` key, keyed by absolute project path. Managed by `ConfigManager.{get,set}_project_config()`.

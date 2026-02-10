@@ -84,6 +84,18 @@ async def list_providers() -> ProviderListResponse:
             description="Mistral models via Vibe CLI",
             supports_reasoning=False,
         ),
+        ProviderInfo(
+            type="opencode",
+            name="OpenCode",
+            description="OpenCode models via OpenCode CLI",
+            supports_reasoning=False,
+        ),
+        ProviderInfo(
+            type="kimi",
+            name="Moonshot (Kimi Code)",
+            description="Kimi models via Kimi Code CLI",
+            supports_reasoning=False,
+        ),
     ]
     return ProviderListResponse(providers=providers)
 

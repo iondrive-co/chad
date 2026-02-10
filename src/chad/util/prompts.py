@@ -15,7 +15,13 @@ from pathlib import Path
 # - {verification_instructions} replaced with project-specific verification commands
 # - {task} replaced with the user's task description
 
-CODING_AGENT_PROMPT = """\
+# =============================================================================
+# PHASE 1: EXPLORATION PROMPT
+# =============================================================================
+# The exploration phase does initial codebase exploration and outputs a progress
+# update. This phase ends after outputting the progress JSON.
+
+EXPLORATION_PROMPT = """\
 {project_docs}
 
 {verification_instructions}
@@ -26,17 +32,52 @@ You need to complete the following task:
 
 {task}
 ---
-Use the following sequence to complete the task:
-1. Explore the code to understand the task.
-2. Once you understand what needs to be done, you MUST output a progress update so the user can see what you found:
+
+## Phase 1: Exploration
+
+CRITICAL: This phase MUST complete within 60 seconds. Read only 2-3 key files to understand the area - do not spend excessive time exploring.
+If the project instructions include a Class Map, use it first to choose your initial files before running broad searches.
+
+When you have completed your quick exploration, IMMEDIATELY output a progress update using this JSON format:
 ```json
-{{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45 - request() method"}}
+{{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45", "next_step": "Writing tests to verify the retry behavior"}}
 ```
-3. Write test(s) that should fail until the fix/feature is implemented.
-4. Make the changes, adjusting tests as needed. If no changes are required, skip to step 7.
-5. Run verification commands (lint and tests) as described above.
-6. Fix ALL failures and retest if required.
-7. End your response with a JSON summary block like this:
+
+This marks the end of the exploration phase. The implementation phase will continue from here.
+"""
+
+# =============================================================================
+# PHASE 2: IMPLEMENTATION PROMPT
+# =============================================================================
+# The implementation phase receives the exploration output and continues with
+# writing tests, making changes, and running verification.
+
+IMPLEMENTATION_PROMPT = """\
+{project_docs}
+
+{verification_instructions}
+
+You need to complete the following task:
+---
+# Task
+
+{task}
+---
+
+## Previous Exploration
+
+The exploration phase found:
+{exploration_output}
+
+## Phase 2: Implementation
+
+Continue from the exploration above. Complete the following steps:
+
+1. Write test(s) that should fail until the fix/feature is implemented (you can explore more code if needed)
+2. Make the changes, adjusting tests and exploring more code as needed. If no changes are required, skip to step 5.
+3. Once you believe your changes will complete the task, run verification commands (lint and tests) as described above.
+4. Fix ALL failures and retest if required.
+5. End your response with a JSON summary block like this:
 ```json
 {{
   "change_summary": "One sentence describing what was changed",
@@ -51,6 +92,52 @@ Required fields:
 - completion_status: One of "success", "partial" (hit context/token limit), "blocked" (needs user input), or "error"
 Optional fields:
 - hypothesis: Include only when investigating a bug
+"""
+
+# =============================================================================
+# COMBINED CODING PROMPT (for providers that support continuous execution)
+# =============================================================================
+# This combines both phases for providers that can execute without interruption.
+# Used as fallback or for testing.
+
+CODING_AGENT_PROMPT = """\
+## URGENT: PROGRESS UPDATE REQUIRED
+
+STOP! Before doing anything else, you MUST:
+1. Spend AT MOST 30 seconds reading 1-2 key files
+2. IMMEDIATELY output a progress update in this exact JSON format:
+```json
+{{"type": "progress", "summary": "Brief description of what you found", "location": "file:line", "next_step": "What you will do next"}}
+```
+
+This progress update tells the user you are working. Output it NOW, within 30 seconds of starting.
+
+---
+
+{project_docs}
+
+{verification_instructions}
+
+# Task
+
+{task}
+
+---
+
+## After your progress update, continue with:
+
+3. Write test(s) that should fail until the fix/feature is implemented
+4. Make the changes, adjusting tests as needed. If no changes are required, skip to step 6.
+5. Run verification commands (lint and tests) and fix ALL failures.
+6. End your response with a JSON summary:
+```json
+{{
+  "change_summary": "One sentence describing what was changed",
+  "files_changed": ["src/auth.py", "tests/test_auth.py"],
+  "completion_status": "success"
+}}
+```
+Fields: change_summary (required), files_changed (required, or "info_only"), completion_status (success/partial/blocked/error), hypothesis (optional, for bugs)
 """
 
 
@@ -81,8 +168,9 @@ IMPORTANT RULE: DO NOT modify or create any files in this codebase. Your only jo
 
 Please verify the work by:
 1. Using Read, Glob, and Grep tools to check that what was actually modified on disk matches the coding agent's output
-2. Checking that the coding agent's changes address everything the user asked for
-3. Reviewing the changes for correctness and completeness
+2. Checking that the coding agent's changes on disk address everything the user asked for
+3. Checking that the coding agent's changes on disk do not include unnecessary changes
+4. Reviewing the changes for correctness and completeness
 
 If the coding agent already ran tests and they passed, you do NOT need to re-run them. Trust the coding agent's test
 output unless you have specific concerns about the implementation.
@@ -159,13 +247,157 @@ Output ONLY the JSON block, no other text.
 """
 
 
+@dataclass
+class PromptPreviews:
+    """Pre-filled prompt templates with project docs but task placeholders."""
+
+    exploration: str
+    implementation: str
+    verification: str
+
+
+def build_prompt_previews(project_path: str | Path | None) -> PromptPreviews:
+    """Build prompt previews with project docs filled in but {task} as placeholder.
+
+    Call this when the project path changes to show users what the prompts
+    will look like before a task is started.
+
+    Args:
+        project_path: Path to the project directory
+
+    Returns:
+        PromptPreviews with all three prompts partially filled
+    """
+    from chad.util.project_setup import build_doc_reference_text
+
+    project_docs = None
+    if project_path:
+        project_docs = build_doc_reference_text(Path(project_path))
+
+    docs_section, verification_section = _build_docs_and_verification(project_docs, project_path)
+
+    exploration = EXPLORATION_PROMPT.format(
+        project_docs=docs_section,
+        verification_instructions=verification_section,
+        task="{task}",
+    )
+    implementation = IMPLEMENTATION_PROMPT.format(
+        project_docs=docs_section,
+        verification_instructions=verification_section,
+        task="{task}",
+        exploration_output="{exploration_output}",
+    )
+    verification = VERIFICATION_EXPLORATION_PROMPT.format(
+        task="{task}",
+        coding_output="{coding_output}",
+    )
+
+    return PromptPreviews(
+        exploration=exploration,
+        implementation=implementation,
+        verification=verification,
+    )
+
+
+def _build_task_with_screenshots(task: str, screenshots: list[str] | None) -> str:
+    """Build task section with screenshots if provided."""
+    if not screenshots:
+        return task
+    screenshot_section = "\n\nThe user has attached the following screenshots for reference. " \
+        "Use the Read tool to view them:\n"
+    for screenshot_path in screenshots:
+        screenshot_section += f"- {screenshot_path}\n"
+    return task + screenshot_section
+
+
+def _build_docs_and_verification(
+    project_docs: str | None,
+    project_path: str | Path | None,
+) -> tuple[str, str]:
+    """Build the docs and verification sections for prompts."""
+    docs_section = ""
+    if project_docs:
+        docs_section = f"# Project Documentation\n\n{project_docs}\n\n"
+
+    verification_section = ""
+    if project_path:
+        from chad.util.project_setup import build_verification_instructions
+        verification_section = build_verification_instructions(Path(project_path))
+
+    return docs_section, verification_section
+
+
+def build_exploration_prompt(
+    task: str,
+    project_docs: str | None = None,
+    project_path: str | Path | None = None,
+    screenshots: list[str] | None = None,
+) -> str:
+    """Build the exploration phase prompt for the coding agent.
+
+    This is Phase 1 of the 3-phase execution. The agent explores the codebase
+    and outputs a progress JSON when done.
+
+    Args:
+        task: The user's task description
+        project_docs: Optional project documentation references (paths to read)
+        project_path: Optional project path for detecting verification commands
+        screenshots: Optional list of screenshot file paths to include
+
+    Returns:
+        Exploration prompt for Phase 1
+    """
+    docs_section, verification_section = _build_docs_and_verification(project_docs, project_path)
+    task_with_screenshots = _build_task_with_screenshots(task, screenshots)
+
+    return EXPLORATION_PROMPT.format(
+        project_docs=docs_section,
+        verification_instructions=verification_section,
+        task=task_with_screenshots,
+    )
+
+
+def build_implementation_prompt(
+    task: str,
+    exploration_output: str,
+    project_docs: str | None = None,
+    project_path: str | Path | None = None,
+) -> str:
+    """Build the implementation phase prompt for the coding agent.
+
+    This is Phase 2 of the 3-phase execution. The agent receives the exploration
+    output and continues with writing tests, making changes, and verification.
+
+    Args:
+        task: The user's task description
+        exploration_output: Output from the exploration phase
+        project_docs: Optional project documentation references (paths to read)
+        project_path: Optional project path for detecting verification commands
+
+    Returns:
+        Implementation prompt for Phase 2
+    """
+    docs_section, verification_section = _build_docs_and_verification(project_docs, project_path)
+
+    return IMPLEMENTATION_PROMPT.format(
+        project_docs=docs_section,
+        verification_instructions=verification_section,
+        task=task,
+        exploration_output=exploration_output,
+    )
+
+
 def build_coding_prompt(
     task: str,
     project_docs: str | None = None,
     project_path: str | Path | None = None,
     screenshots: list[str] | None = None,
 ) -> str:
-    """Build the complete prompt for the coding agent.
+    """Build the complete prompt for the coding agent (combined phases).
+
+    This is the legacy single-prompt approach for providers that support
+    continuous execution without interruption. For 3-phase execution,
+    use build_exploration_prompt() and build_implementation_prompt().
 
     Args:
         task: The user's task description
@@ -176,24 +408,8 @@ def build_coding_prompt(
     Returns:
         Complete prompt for the coding agent including the task
     """
-    docs_section = ""
-    if project_docs:
-        docs_section = f"# Project Documentation\n\n{project_docs}\n\n"
-
-    # Get verification instructions
-    verification_section = ""
-    if project_path:
-        from chad.util.project_setup import build_verification_instructions
-        verification_section = build_verification_instructions(Path(project_path))
-
-    # Build task section with screenshots if provided
-    task_with_screenshots = task
-    if screenshots:
-        screenshot_section = "\n\nThe user has attached the following screenshots for reference. " \
-            "Use the Read tool to view them:\n"
-        for screenshot_path in screenshots:
-            screenshot_section += f"- {screenshot_path}\n"
-        task_with_screenshots = task + screenshot_section
+    docs_section, verification_section = _build_docs_and_verification(project_docs, project_path)
+    task_with_screenshots = _build_task_with_screenshots(task, screenshots)
 
     return CODING_AGENT_PROMPT.format(
         project_docs=docs_section,
@@ -286,6 +502,7 @@ class ProgressUpdate:
 
     summary: str
     location: str
+    next_step: str | None = None
     before_screenshot: str | None = None
     before_description: str | None = None
 
@@ -325,49 +542,91 @@ def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
     # e.g., "*Thinking: **Ensuring valid JSON output***\n\n{..."
     cleaned = re.sub(r"^\s*\*+[Tt]hinking:.*?\*+\s*", "", response, flags=re.DOTALL)
 
-    # Extract JSON from the response (may be wrapped in ```json ... ```)
-    json_match = re.search(r"```json\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
-    if json_match:
-        json_str = json_match.group(1)
-    else:
-        # Try to find JSON object by matching balanced braces
-        # Find the first { and extract a valid JSON object from there
-        brace_start = cleaned.find("{")
-        if brace_start != -1:
-            depth = 0
-            in_string = False
-            escape_next = False
-            json_end = -1
-            for i, char in enumerate(cleaned[brace_start:], brace_start):
-                if escape_next:
-                    escape_next = False
-                    continue
-                if char == "\\" and in_string:
-                    escape_next = True
-                    continue
-                if char == '"' and not escape_next:
-                    in_string = not in_string
-                    continue
-                if in_string:
-                    continue
-                if char == "{":
-                    depth += 1
-                elif char == "}":
-                    depth -= 1
-                    if depth == 0:
-                        json_end = i + 1
-                        break
-            if json_end != -1:
-                json_str = cleaned[brace_start:json_end]
-            else:
-                raise VerificationParseError(f"No valid JSON found in response: {response[:200]}")
-        else:
-            raise VerificationParseError(f"No JSON found in response: {response[:200]}")
+    def _extract_balanced_json_objects(text: str) -> list[str]:
+        objects: list[str] = []
+        depth = 0
+        in_string = False
+        escape_next = False
+        start_idx: int | None = None
 
-    try:
-        data = json.loads(json_str)
-    except json.JSONDecodeError as e:
-        raise VerificationParseError(f"Invalid JSON: {e}")
+        for idx, char in enumerate(text):
+            if escape_next:
+                escape_next = False
+                continue
+
+            if in_string:
+                if char == "\\":
+                    escape_next = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+                continue
+
+            if char == "{":
+                if depth == 0:
+                    start_idx = idx
+                depth += 1
+                continue
+
+            if char == "}":
+                if depth == 0:
+                    continue
+                depth -= 1
+                if depth == 0 and start_idx is not None:
+                    objects.append(text[start_idx: idx + 1])
+                    start_idx = None
+
+        return objects
+
+    # Collect candidate JSON objects from fenced and raw content.
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    for match in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL | re.IGNORECASE):
+        candidate = match.group(1).strip()
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+
+    for candidate in _extract_balanced_json_objects(cleaned):
+        normalized = candidate.strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            candidates.append(normalized)
+
+    if not candidates:
+        raise VerificationParseError(f"No JSON found in response: {response[:200]}")
+
+    # If multiple JSON objects exist, prefer one that includes `passed`.
+    prioritized = sorted(candidates, key=lambda text: '"passed"' not in text)
+    data = None
+    parse_error = None
+    missing_passed_seen = False
+    for candidate in prioritized:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError as e:
+            parse_error = e
+            continue
+
+        if not isinstance(parsed, dict):
+            continue
+
+        if "passed" in parsed:
+            data = parsed
+            break
+
+        missing_passed_seen = True
+
+    if data is None:
+        if missing_passed_seen:
+            raise VerificationParseError("Missing required field 'passed' in JSON response")
+        if parse_error is not None:
+            raise VerificationParseError(f"Invalid JSON: {parse_error}")
+        raise VerificationParseError(f"No valid JSON found in response: {response[:200]}")
 
     if "passed" not in data:
         raise VerificationParseError("Missing required field 'passed' in JSON response")
@@ -435,67 +694,131 @@ _PLACEHOLDER_PATTERNS = [
     "brief description of",
     "src/file.py:123",
     "/path/to/before.png",
+    # The exact example from the prompt - filter if agent copies it verbatim
+    "adding retry logic to handle api rate limits",
+    "src/api/client.py",
+    "writing tests to verify the retry behavior",
 ]
 
 
-def _is_placeholder_text(summary: str) -> bool:
-    """Check if summary looks like placeholder text from the prompt example."""
-    if not summary:
+def _is_placeholder_text(text: str) -> bool:
+    """Check if text looks like placeholder from the prompt example."""
+    if not text:
         return True
-    lower = summary.lower()
+    lower = text.lower()
     return any(pattern in lower for pattern in _PLACEHOLDER_PATTERNS)
 
 
 def extract_progress_update(response: str) -> ProgressUpdate | None:
     """Extract a progress update from coding agent streaming output.
 
+    Supports two formats:
+    1. JSON (preferred):
+       {"type": "progress", "summary": "...", "location": "...", "next_step": "..."}
+    2. Markdown (legacy fallback):
+       ```
+       **Progress:** summary text
+       **Location:** file:line
+       **Next:** next step
+       ```
+
     Args:
         response: Raw response chunk from the coding agent
 
     Returns:
         ProgressUpdate if found, None otherwise. Returns None if the summary
-        appears to be placeholder text copied from the prompt example.
+        or next_step appears to be placeholder text copied from the prompt example.
     """
     import json
     import re
 
+    def _parse_progress_json(json_text: str) -> ProgressUpdate | None:
+        """Parse progress JSON, retrying with newline normalization."""
+        candidates = [json_text, json_text.replace("\r", " ").replace("\n", " ")]
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if data.get("type") != "progress":
+                return None
+            summary = data.get("summary", "")
+            next_step = data.get("next_step")
+            # Filter if summary or next_step looks like placeholder text
+            if _is_placeholder_text(summary):
+                return None
+            if next_step and _is_placeholder_text(next_step):
+                return None
+            return ProgressUpdate(
+                summary=summary,
+                location=data.get("location", ""),
+                next_step=next_step,
+                before_screenshot=data.get("before_screenshot"),
+                before_description=data.get("before_description"),
+            )
+        return None
+
+    # Try JSON format first (preferred)
     # Look for JSON block with type: "progress"
     json_match = re.search(r'```json\s*(\{[^`]*"type"\s*:\s*"progress"[^`]*\})\s*```', response, re.DOTALL)
     if json_match:
-        try:
-            data = json.loads(json_match.group(1))
-            if data.get("type") == "progress":
-                summary = data.get("summary", "")
-                # Filter out placeholder text
-                if _is_placeholder_text(summary):
-                    return None
-                return ProgressUpdate(
-                    summary=summary,
-                    location=data.get("location", ""),
-                    before_screenshot=data.get("before_screenshot"),
-                    before_description=data.get("before_description"),
-                )
-        except json.JSONDecodeError:
-            pass
+        parsed = _parse_progress_json(json_match.group(1))
+        if parsed:
+            return parsed
 
-    # Try to find raw JSON with type: progress (fallback)
-    raw_match = re.search(r'\{\s*"type"\s*:\s*"progress"[^}]+\}', response)
+    # Try to find raw JSON with type: progress
+    raw_match = re.search(r'\{\s*"type"\s*:\s*"progress"[^}]+\}', response, re.DOTALL)
     if raw_match:
-        try:
-            data = json.loads(raw_match.group(0))
-            if data.get("type") == "progress":
-                summary = data.get("summary", "")
-                # Filter out placeholder text
-                if _is_placeholder_text(summary):
+        parsed = _parse_progress_json(raw_match.group(0))
+        if parsed:
+            return parsed
+
+    # Fall back to markdown format for backwards compatibility
+    # Match code block with **Progress:**, **Location:**, **Next:** lines
+    md_block = re.search(r'```\s*\n(.*?\*\*Progress:\*\*.*?)```', response, re.DOTALL | re.IGNORECASE)
+    if md_block:
+        block_content = md_block.group(1)
+    else:
+        # Also try without code block - just the **Progress:** pattern
+        block_content = response
+
+    # Extract markdown fields
+    progress_match = re.search(r'\*\*Progress:\*\*\s*(.+?)(?:\n|$)', block_content, re.IGNORECASE)
+    location_match = re.search(r'\*\*Location:\*\*\s*(.+?)(?:\n|$)', block_content, re.IGNORECASE)
+    next_match = re.search(r'\*\*Next:\*\*\s*(.+?)(?:\n|$)', block_content, re.IGNORECASE)
+
+    if progress_match:
+        summary = progress_match.group(1).strip()
+        location = location_match.group(1).strip() if location_match else ""
+        next_step = next_match.group(1).strip() if next_match else None
+
+        # Filter placeholder text
+        if _is_placeholder_text(summary):
+            return None
+        if next_step and _is_placeholder_text(next_step):
+            return None
+
+        return ProgressUpdate(summary=summary, location=location, next_step=next_step)
+
+    # Last-resort manual extraction (handles malformed JSON with embedded newlines)
+    manual_match = re.search(
+        r'"type"\\s*:\\s*"progress"(?P<body>[^}]*)}',
+        response,
+        re.DOTALL,
+    )
+    if manual_match:
+        body = manual_match.group("body")
+        summary_match = re.search(r'"summary"\\s*:\\s*"(?P<summary>.*?)"', body, re.DOTALL)
+        location_match_manual = re.search(r'"location"\\s*:\\s*"(?P<loc>[^"]+)"', body)
+        next_step_match = re.search(r'"next_step"\\s*:\\s*"(?P<ns>[^"]+)"', body)
+        if summary_match:
+            summary = " ".join(summary_match.group("summary").splitlines()).strip()
+            next_step = next_step_match.group("ns") if next_step_match else None
+            if not _is_placeholder_text(summary):
+                if next_step and _is_placeholder_text(next_step):
                     return None
-                return ProgressUpdate(
-                    summary=summary,
-                    location=data.get("location", ""),
-                    before_screenshot=data.get("before_screenshot"),
-                    before_description=data.get("before_description"),
-                )
-        except json.JSONDecodeError:
-            pass
+                location = location_match_manual.group("loc") if location_match_manual else ""
+                return ProgressUpdate(summary=summary, location=location, next_step=next_step)
 
     return None
 
@@ -526,6 +849,44 @@ def check_verification_mentioned(response: str) -> bool:
             return True
 
     return False
+
+
+# =============================================================================
+# CODING CONTINUATION PROMPT
+# =============================================================================
+# Used when agent exits without completing (only progress update, no completion JSON)
+
+CONTINUATION_PROMPT = """\
+Your previous response ended with a progress update but you did not complete the task. \
+Continue from where you left off:
+
+1. Write test(s) that should fail until the fix/feature is implemented
+2. Make the changes, adjusting tests as needed
+3. Run verification commands (lint and tests)
+4. Fix ALL failures and retest if required
+5. End with a JSON summary block:
+```json
+{{
+  "change_summary": "One sentence describing what was changed",
+  "files_changed": ["src/file.py", "tests/test_file.py"],
+  "completion_status": "success"
+}}
+```
+
+Do NOT output another progress update - continue directly with implementation.
+"""
+
+
+def get_continuation_prompt(previous_output: str) -> str:
+    """Build a continuation prompt when agent exits early (progress but no completion).
+
+    Args:
+        previous_output: The output from the previous run (included for context)
+
+    Returns:
+        Continuation prompt to re-invoke the agent
+    """
+    return CONTINUATION_PROMPT
 
 
 # =============================================================================

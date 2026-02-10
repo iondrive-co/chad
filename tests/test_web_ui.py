@@ -89,10 +89,11 @@ class TestChadWebUI:
         return client
 
     @pytest.fixture
-    def web_ui(self, mock_api_client):
+    def web_ui(self, mock_api_client, monkeypatch, tmp_path):
         """Create a ChadWebUI instance with mocked dependencies."""
         from chad.ui.gradio.web_ui import ChadWebUI
 
+        monkeypatch.setenv("CHAD_CONFIG", str(tmp_path / "test_chad.conf"))
         ui = ChadWebUI(mock_api_client)
         ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/codex"))
         return ui
@@ -402,6 +403,8 @@ class TestChadWebUI:
         monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
         config = ModelConfig(provider="mock", model_name="default", account_name="claude")
         provider = MockProvider(config)
+        provider._get_remaining_usage = lambda: 0.5
+        provider._decrement_usage = lambda amount=None: None
         provider.start_session(str(worktree_path))
         session.provider = provider
         session.coding_account = "claude"
@@ -434,6 +437,58 @@ class TestChadWebUI:
             "Error" in msg.get("content", "") for msg in session.chat_history if msg.get("role") == "assistant"
         ), "Follow-up response should not include errors"
 
+    def test_followup_reconnects_when_provider_released(self, web_ui, git_repo, monkeypatch):
+        """Follow-up should reconnect to provider after API-based execution releases it."""
+        session_id = "reconnect-test"
+        git_mgr = GitWorktreeManager(git_repo)
+        worktree_path, base_commit = git_mgr.create_worktree(session_id)
+
+        session = web_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = worktree_path
+        session.worktree_branch = git_mgr._branch_name(session_id)
+        session.worktree_base_commit = base_commit
+
+        # Simulate state after API-based execution:
+        # - session.active = True (task succeeded)
+        # - session.provider = None (released after API execution)
+        # - session.coding_account set to the account name
+        session.active = True
+        session.provider = None  # This is the key condition we're testing
+        session.coding_account = "mock-claude"
+        session.config = ModelConfig(provider="mock", model_name="default", account_name="mock-claude")
+        session.chat_history = [{"role": "user", "content": "**Task**\n\nInitial task"}]
+
+        # Set up mock account with "mock" provider so create_provider uses MockProvider
+        mock_account = MockAccount(name="mock-claude", provider="mock", role="CODING")
+        web_ui.api_client.list_accounts.return_value = [mock_account]
+        web_ui.api_client.get_account.return_value = mock_account
+
+        # Speed up the mock provider
+        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
+
+        # Send a follow-up; this should reconnect and succeed, not show "Session expired"
+        list(
+            web_ui.send_followup(
+                session_id,
+                "Follow-up after API execution",
+                session.chat_history,
+                coding_agent="mock-claude",
+                verification_agent=web_ui.VERIFICATION_NONE,
+            )
+        )
+
+        # Check that no "Session expired" message was added
+        all_messages = [msg.get("content", "") for msg in session.chat_history]
+        assert not any("Session expired" in msg for msg in all_messages), (
+            "Follow-up should reconnect, not show 'Session expired'"
+        )
+
+        # Check that the follow-up was processed (BUGS.md should exist from mock provider)
+        assert session.worktree_path is not None
+        bugs_file = session.worktree_path / "BUGS.md"
+        assert bugs_file.exists(), "BUGS.md should be created by follow-up"
+
     def test_set_reasoning_success(self, web_ui, mock_api_client):
         """Test setting reasoning level for an account."""
         result = web_ui.set_reasoning("claude", "high")[0]
@@ -453,6 +508,80 @@ class TestChadWebUI:
         assert "Node missing" in result
         mock_api_client.create_account.assert_not_called()
 
+    def test_add_provider_mistral_requires_login_before_account_creation(self, web_ui, mock_api_client):
+        """Mistral accounts should only be created after successful vibe auth."""
+        mock_api_client.list_accounts.return_value = []
+        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/vibe"))
+
+        with patch.object(web_ui.provider_ui, "_check_provider_login", return_value=(False, "Not logged in")):
+            result = web_ui.add_provider("mistral-1", "mistral")[0]
+
+        assert "❌" in result
+        assert "vibe --setup" in result
+        mock_api_client.create_account.assert_not_called()
+
+    def test_add_provider_kimi_login_flow_failure(self, web_ui, mock_api_client):
+        """Kimi login flow shows error on failure (no creds written)."""
+        mock_api_client.list_accounts.return_value = []
+        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/kimi"))
+        web_ui.provider_ui.installer.find_tool_path = Mock(return_value="/tmp/kimi")
+
+        # Mock subprocess.Popen to simulate a failed login (no success event)
+        mock_proc = Mock()
+        mock_proc.stdout.readline.return_value = b""
+        mock_proc.poll.return_value = 0  # Process exited immediately
+        mock_proc.terminate = Mock()
+        mock_proc.wait = Mock()
+
+        import subprocess as _subprocess
+        with patch.object(_subprocess, "Popen", return_value=mock_proc):
+            with patch("chad.ui.gradio.provider_ui.shutil.which", return_value="/tmp/kimi"):
+                result = web_ui.add_provider("kimi-1", "kimi")[0]
+
+        assert "❌" in result
+        mock_api_client.create_account.assert_not_called()
+
+    def test_add_provider_kimi_creds_saved_but_error_event(self, web_ui, mock_api_client, tmp_path):
+        """Kimi login should succeed when CLI saves creds but emits error (model listing fails)."""
+        mock_api_client.list_accounts.return_value = []
+        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/kimi"))
+        web_ui.provider_ui.installer.find_tool_path = Mock(return_value="/tmp/kimi")
+
+        # The CLI emits: verification_url → waiting → error (model listing 401)
+        # BUT it saves credentials before trying to list models.
+        events = [
+            b'{"type": "verification_url", "data": {"verification_url": "https://example.com"}}\n',
+            b'{"type": "error", "message": "Failed to get models: 401"}\n',
+        ]
+        event_iter = iter(events)
+
+        mock_proc = Mock()
+        mock_proc.stdout.readline.side_effect = lambda: next(event_iter, b"")
+        mock_proc.poll.side_effect = [None, None, 0]
+        mock_proc.terminate = Mock()
+        mock_proc.wait = Mock()
+
+        def fake_popen(cmd, **kwargs):
+            # Simulate the CLI writing creds (it saves before model listing)
+            kimi_home = Path(kwargs["env"]["HOME"])
+            creds_dir = kimi_home / ".kimi" / "credentials"
+            creds_dir.mkdir(parents=True, exist_ok=True)
+            (creds_dir / "kimi-code.json").write_text('{"token": "test"}')
+            return mock_proc
+
+        import subprocess as _subprocess
+        with patch.object(_subprocess, "Popen", side_effect=fake_popen):
+            with patch("chad.ui.gradio.provider_ui.shutil.which", return_value="/tmp/kimi"):
+                with patch("chad.ui.gradio.provider_ui.safe_home", return_value=str(tmp_path)):
+                    result = web_ui.add_provider("kimi-1", "kimi")[0]
+
+        assert "✅" in result
+        mock_api_client.create_account.assert_called_once()
+        # Config should be written by Chad since CLI didn't write it
+        config_file = tmp_path / ".chad" / "kimi-homes" / "kimi-1" / ".kimi" / "config.toml"
+        assert config_file.exists()
+        assert "[models." in config_file.read_text()
+
     def test_get_models_includes_stored_model(self, web_ui, mock_api_client, tmp_path):
         """Stored models should always be present in dropdown choices."""
         mock_api_client.list_accounts.return_value = [MockAccount(name="gpt", provider="openai")]
@@ -464,6 +593,25 @@ class TestChadWebUI:
 
         assert "gpt-5.1-codex-max" in models
         assert "default" in models
+
+    def test_get_models_for_mock_excludes_foreign_stored_model(self, web_ui, mock_api_client, tmp_path):
+        """Mock coding agent should not expose models from other providers."""
+        mock_account = MockAccount(
+            name="testy",
+            provider="mock",
+            role="CODING",
+            model="claude-sonnet-4-20250514",
+        )
+        mock_api_client.list_accounts.return_value = [mock_account]
+        mock_api_client.get_account.side_effect = lambda _: mock_account
+        mock_api_client.get_account_model.return_value = "claude-sonnet-4-20250514"
+
+        from chad.util.model_catalog import ModelCatalog
+
+        web_ui.model_catalog = ModelCatalog(api_client=mock_api_client, home_dir=tmp_path, cache_ttl=0)
+        models = web_ui.get_models_for_account("testy")
+
+        assert models == ["default"]
 
     def test_get_account_choices(self, web_ui, mock_api_client):
         """Test getting account choices for dropdowns."""
@@ -506,6 +654,150 @@ class TestChadWebUI:
         assert "🛑" in live_stream_update.get("value", "")
         assert session.cancel_requested is True
 
+    def test_start_task_rejects_when_server_session_is_still_active(self, web_ui, git_repo):
+        """Starting a new task with an active server task should return one full Gradio update tuple."""
+        session = web_ui.create_session("test")
+        session.server_session_id = "server-session-1"
+        web_ui.api_client.get_session.return_value = Mock(active=True)
+
+        updates = list(web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+
+        assert len(updates) == 1
+        update = updates[0]
+        # 24 elements: 18 base (role_status removed) + 6 prompt outputs
+        assert len(update) == 24
+        assert "already running" in update[2].get("value", "").lower()
+        assert update[5].get("interactive") is True
+        assert update[6].get("interactive") is False
+
+    def test_start_task_after_cancel_requests_server_cancel_and_continues(self, web_ui, git_repo, monkeypatch):
+        """Restart right after cancel should request server cancel and continue once inactive."""
+        session = web_ui.create_session("test")
+        session.server_session_id = "server-session-1"
+        session.cancel_requested = True
+
+        calls = {"count": 0}
+
+        def get_session_side_effect(_session_id):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return Mock(active=True)
+            return Mock(active=False)
+
+        web_ui.api_client.get_session.side_effect = get_session_side_effect
+
+        started = {"value": False}
+
+        def fake_run_task_via_api(
+            session_id,
+            project_path,
+            task_description,
+            coding_account,
+            message_queue,
+            **kwargs,
+        ):
+            started["value"] = True
+            message_queue.put(("message_complete", "CODING AI", "done"))
+            return True, "done", "server-session-2", {
+                "files_modified": [],
+                "files_created": [],
+                "commands_run": [],
+                "total_tool_calls": 0,
+            }
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        updates = list(
+            web_ui.start_chad_task(
+                session.id,
+                str(git_repo),
+                "do something",
+                "claude",
+                verification_agent=web_ui.VERIFICATION_NONE,
+            )
+        )
+
+        assert started["value"] is True
+        web_ui.api_client.cancel_session.assert_called_once_with("server-session-1")
+        assert all("already running" not in (u[2].get("value", "").lower()) for u in updates)
+
+    def test_start_task_after_cancel_detaches_stale_server_session_when_cancel_wait_fails(
+        self,
+        web_ui,
+        git_repo,
+        monkeypatch,
+    ):
+        """Restart after cancel should continue even if stale session still reports active."""
+        session = web_ui.create_session("test")
+        session.server_session_id = "server-session-1"
+        session.cancel_requested = True
+        web_ui.api_client.get_session.return_value = Mock(active=True)
+
+        cancel_attempts = {"count": 0}
+
+        def fake_request_server_cancel(_server_session_id, timeout_seconds=3.0):  # noqa: ARG001
+            cancel_attempts["count"] += 1
+            return False
+
+        monkeypatch.setattr(web_ui, "_request_server_cancel", fake_request_server_cancel)
+
+        started = {"value": False}
+
+        def fake_run_task_via_api(
+            session_id,
+            project_path,
+            task_description,
+            coding_account,
+            message_queue,
+            **kwargs,
+        ):
+            started["value"] = True
+            message_queue.put(("message_complete", "CODING AI", "done"))
+            return True, "done", "server-session-2", {
+                "files_modified": [],
+                "files_created": [],
+                "commands_run": [],
+                "total_tool_calls": 0,
+            }
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        updates = list(
+            web_ui.start_chad_task(
+                session.id,
+                str(git_repo),
+                "do something",
+                "claude",
+                verification_agent=web_ui.VERIFICATION_NONE,
+            )
+        )
+
+        assert cancel_attempts["count"] == 1
+        assert started["value"] is True
+        assert session.server_session_id == "server-session-2"
+        assert all("already running" not in (u[2].get("value", "").lower()) for u in updates)
+
+    def test_workspace_label_prefers_worktree_over_project(self, web_ui):
+        """Workspace label should show active worktree path when available."""
+        session = web_ui.create_session("workspace")
+        session.project_path = "/repo"
+        session.worktree_path = Path("/repo/.chad-worktrees/abcd1234")
+
+        label = web_ui._workspace_label(session)
+
+        assert "Workspace:" in label
+        assert "/repo/.chad-worktrees/abcd1234" in label
+
+    def test_workspace_html_escapes_label_and_sets_tooltip(self, web_ui):
+        """Workspace HTML should escape path text and include it in tooltip."""
+        session = web_ui.create_session("workspace-html")
+        session.project_path = '/tmp/repo/<unsafe>"path'
+
+        html_output = web_ui._workspace_html(session)
+
+        assert 'title="/tmp/repo/&lt;unsafe&gt;&quot;path"' in html_output
+        assert "Workspace: /tmp/repo/&lt;unsafe&gt;&quot;path" in html_output
+
     def test_cancel_preserves_live_stream(self, monkeypatch, web_ui, git_repo):
         """Cancelling should not clear the live output panel."""
 
@@ -519,7 +811,7 @@ class TestChadWebUI:
             message_queue.put(("stream", "working", live_html))
             stream_ready.set()
             cancel_gate.wait(timeout=1.0)
-            return False, "stopped", "server-session"
+            return False, "stopped", "server-session", None
 
         monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
 
@@ -555,7 +847,7 @@ class TestChadWebUI:
             message_queue.put(("stream", live_text))
             stream_ready.set()
             cancel_gate.wait(timeout=1.0)
-            return False, "stopped", "server-session"
+            return False, "stopped", "server-session", None
 
         monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
 
@@ -645,7 +937,7 @@ class TestChadWebUI:
             message_queue.put(("stream", "continuing work\n"))
             message_queue.put(("message_complete", "CODING AI", "Task done"))
             stream_complete.set()
-            return True, "completed", "server-session"
+            return True, "completed", "server-session", None
 
         monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
 
@@ -675,6 +967,129 @@ class TestChadWebUI:
             "CODING AI" in u
         )]
         assert len(content_updates) > 0, f"Live stream should have content during streaming. Got updates: {progress_updates[:5]}"
+
+    def test_coding_milestone_inserted_on_phase2_status(self, monkeypatch, web_ui, git_repo):
+        """Coding milestone appears when Phase 2 status is received, even without progress JSON."""
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", "exploring...\n"))
+            # Phase 2 status triggers the Coding milestone
+            message_queue.put(("status", "Phase 2: Implementing changes..."))
+            time.sleep(0.02)
+            message_queue.put(("stream", "implementing...\n"))
+            message_queue.put(("message_complete", "CODING AI", "Task done"))
+            return True, "completed", "server-session", None
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("test")
+        updates = list(web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+
+        # Collect all chat history snapshots
+        all_histories = [u[1] for u in updates if isinstance(u[1], list)]
+        # The final chat history should contain a Coding milestone
+        final_history = all_histories[-1] if all_histories else []
+        coding_milestones = [
+            msg for msg in final_history
+            if isinstance(msg, dict) and "**Coding:**" in msg.get("content", "")
+        ]
+        assert len(coding_milestones) == 1, (
+            f"Expected exactly 1 Coding milestone, found {len(coding_milestones)}. "
+            f"History contents: {[m.get('content', '')[:60] for m in final_history if isinstance(m, dict)]}"
+        )
+
+    def test_coding_milestone_not_duplicated_with_progress_json(self, monkeypatch, web_ui, git_repo):
+        """Coding milestone is not duplicated when both Phase 2 status and progress JSON appear."""
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", "exploring...\n"))
+            # Phase 2 status first
+            message_queue.put(("status", "Phase 2: Implementing changes..."))
+            time.sleep(0.02)
+            # Then progress JSON
+            progress_json = '{"type": "progress", "summary": "Found bug", "location": "x.py:1", "next_step": "Fix"}'
+            message_queue.put(("stream", progress_json))
+            time.sleep(0.02)
+            message_queue.put(("stream", "fixing...\n"))
+            message_queue.put(("message_complete", "CODING AI", "Task done"))
+            return True, "completed", "server-session", None
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("test")
+        updates = list(web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+
+        all_histories = [u[1] for u in updates if isinstance(u[1], list)]
+        final_history = all_histories[-1] if all_histories else []
+        coding_milestones = [
+            msg for msg in final_history
+            if isinstance(msg, dict) and "**Coding:**" in msg.get("content", "")
+        ]
+        assert len(coding_milestones) == 1, (
+            f"Expected exactly 1 Coding milestone even with progress JSON, found {len(coding_milestones)}"
+        )
+
+    def test_structured_progress_renders_before_coding_milestone(self, monkeypatch, web_ui, git_repo):
+        """Structured progress events should appear before the coding phase milestone."""
+        from chad.util.prompts import ProgressUpdate
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", "exploring...\n"))
+            time.sleep(0.02)
+            # TaskExecutor emits structured progress before Phase 2 status.
+            message_queue.put(("progress", ProgressUpdate(
+                summary="Found bug",
+                location="x.py:1",
+                next_step="Fix",
+            )))
+            time.sleep(0.02)
+            message_queue.put(("status", "Phase 2: Implementing changes..."))
+            time.sleep(0.02)
+            # Delayed echoed JSON should not create a second progress bubble.
+            message_queue.put((
+                "stream",
+                '{"type": "progress", "summary": "Found bug", "location": "x.py:1", "next_step": "Fix"}',
+            ))
+            message_queue.put(("stream", "implementing...\n"))
+            time.sleep(0.02)
+            message_queue.put(("message_complete", "CODING AI", "Task done"))
+            return True, "completed", "server-session", None
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("test")
+        updates = list(web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+
+        all_histories = [u[1] for u in updates if isinstance(u[1], list)]
+        final_history = all_histories[-1] if all_histories else []
+
+        progress_indices = [
+            idx for idx, msg in enumerate(final_history)
+            if isinstance(msg, dict) and "*(Progress)*" in msg.get("content", "")
+        ]
+        coding_indices = [
+            idx for idx, msg in enumerate(final_history)
+            if isinstance(msg, dict) and "**Coding:**" in msg.get("content", "")
+        ]
+
+        assert len(progress_indices) == 1, (
+            f"Expected exactly one progress bubble, got {len(progress_indices)} "
+            f"with history: {[m.get('content', '')[:80] for m in final_history if isinstance(m, dict)]}"
+        )
+        assert len(coding_indices) == 1, (
+            f"Expected exactly one coding milestone, got {len(coding_indices)} "
+            f"with history: {[m.get('content', '')[:80] for m in final_history if isinstance(m, dict)]}"
+        )
+        assert progress_indices[0] < coding_indices[0], (
+            "Progress bubble should be shown before the Coding milestone when structured progress "
+            "arrives first"
+        )
 
 
 class TestClaudeJsonParsingIntegration:
@@ -739,7 +1154,7 @@ class TestClaudeJsonParsingIntegration:
 
         # Run the task
         message_queue = queue.Queue()
-        success, output, _ = web_ui.run_task_via_api(
+        success, output, _, _ = web_ui.run_task_via_api(
             session_id="test",
             project_path=str(git_repo),
             task_description="test task",
@@ -762,6 +1177,121 @@ class TestClaudeJsonParsingIntegration:
         assert '{"type":"system"' not in combined, "Raw JSON should not appear"
         assert '{"type":"result"' not in combined, "Result events should be filtered"
 
+    def test_run_task_parses_gemini_json_for_gemini_provider(self, web_ui, mock_api_client, git_repo):
+        """run_task_via_api should parse Gemini stream-json output for gemini accounts."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="gem", provider="gemini", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-123"
+        mock_api_client.create_session.return_value = mock_session
+
+        gemini_json_lines = (
+            b'{"type":"init","model":"gemini-2.5-pro","session_id":"abc123"}' + b'\n'
+            b'{"type":"message","role":"assistant","content":"Hello from Gemini!"}' + b'\n'
+            b'{"type":"result","stats":{"input_tokens":10,"output_tokens":20}}' + b'\n'
+        )
+
+        mock_stream_event = Mock()
+        mock_stream_event.event_type = "terminal"
+        mock_stream_event.data = {"data": base64.b64encode(gemini_json_lines).decode()}
+
+        mock_complete_event = Mock()
+        mock_complete_event.event_type = "complete"
+        mock_complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="gem",
+            message_queue=message_queue,
+        )
+
+        stream_messages = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "stream":
+                stream_messages.append(msg[1])
+
+        combined = "\n".join(stream_messages)
+        assert success is True
+        assert "Hello from Gemini!" in combined
+        assert '{"type":"message"' not in combined
+        assert '{"type":"result"' not in combined
+
+    def test_run_task_emits_progress_messages_from_structured_events(self, web_ui, mock_api_client, git_repo):
+        """run_task_via_api should convert structured progress events into queue progress messages."""
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+        from chad.util.prompts import ProgressUpdate
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="claude", provider="anthropic", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-123"
+        mock_api_client.create_session.return_value = mock_session
+
+        progress_event = Mock()
+        progress_event.event_type = "event"
+        progress_event.data = {
+            "type": "progress",
+            "summary": "Found workspace CSS issue",
+            "location": "src/chad/ui/gradio/web_ui.py:1066",
+            "next_step": "Apply CSS fix",
+        }
+
+        status_event = Mock()
+        status_event.event_type = "event"
+        status_event.data = {"type": "status", "status": "Phase 2: Implementing changes..."}
+
+        complete_event = Mock()
+        complete_event.event_type = "complete"
+        complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([progress_event, status_event, complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="claude",
+            message_queue=message_queue,
+        )
+
+        assert success is True
+        assert output == ""
+
+        queued_messages = []
+        while not message_queue.empty():
+            queued_messages.append(message_queue.get())
+
+        progress_messages = [msg for msg in queued_messages if msg[0] == "progress"]
+        assert len(progress_messages) == 1, f"Expected one progress message, got: {queued_messages}"
+
+        progress_payload = progress_messages[0][1]
+        assert isinstance(progress_payload, ProgressUpdate)
+        assert progress_payload.summary == "Found workspace CSS issue"
+        assert progress_payload.location == "src/chad/ui/gradio/web_ui.py:1066"
+        assert progress_payload.next_step == "Apply CSS fix"
+
     def test_run_task_passes_through_raw_for_non_anthropic(self, web_ui, mock_api_client, git_repo):
         """run_task_via_api should pass through raw output for non-anthropic providers."""
         import base64
@@ -779,8 +1309,9 @@ class TestClaudeJsonParsingIntegration:
         mock_session.id = "server-sess-456"
         mock_api_client.create_session.return_value = mock_session
 
-        # Raw terminal output (not JSON)
-        raw_output = b"Working on task...\nDone!"
+        # Realistic Codex output with prompt echo
+        # Codex outputs: banner, --------, header, --------, user (colored), prompt, mcp startup:
+        raw_output = b"OpenAI Codex v0.92.0\n--------\nworkdir: /tmp\nmodel: gpt-5\n--------\n\x1b[36muser\x1b[0m\nTask prompt here\n\x1b[36mmcp startup:\x1b[0m 0 servers\nWorking on task...\nDone!"
 
         mock_stream_event = Mock()
         mock_stream_event.event_type = "terminal"
@@ -796,7 +1327,7 @@ class TestClaudeJsonParsingIntegration:
 
         # Run the task
         message_queue = queue.Queue()
-        success, output, _ = web_ui.run_task_via_api(
+        success, output, _, _ = web_ui.run_task_via_api(
             session_id="test",
             project_path=str(git_repo),
             task_description="test task",
@@ -816,6 +1347,379 @@ class TestClaudeJsonParsingIntegration:
         assert "Working on task" in combined
         assert "Done!" in combined
 
+    def test_codex_prompt_echo_keeps_content_before_user_marker(self, web_ui, mock_api_client, git_repo):
+        """Codex filter should keep content BEFORE '-------- user' marker."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        # Configure mock to return non-anthropic account
+        mock_api_client.list_accounts.return_value = [
+            Account(name="codex", provider="openai", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        # Mock create_session
+        mock_session = Mock()
+        mock_session.id = "server-sess-789"
+        mock_api_client.create_session.return_value = mock_session
+
+        # Realistic Codex output with header info preserved, prompt filtered
+        # Structure: banner, --------, header (keep), --------, user, prompt (filter), mcp startup, agent work (keep)
+        raw_output = b"OpenAI Codex v0.92.0\n--------\nworkdir: /home/user/project\nmodel: gpt-5.1-codex\n--------\n\x1b[36muser\x1b[0m\nTask prompt here\n\x1b[36mmcp startup:\x1b[0m 0 servers\nActual agent output\nDone!"
+
+        mock_stream_event = Mock()
+        mock_stream_event.event_type = "terminal"
+        mock_stream_event.data = {"data": base64.b64encode(raw_output).decode()}
+
+        mock_complete_event = Mock()
+        mock_complete_event.event_type = "complete"
+        mock_complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        # Run the task
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="codex",
+            message_queue=message_queue,
+        )
+
+        # Collect stream messages
+        stream_messages = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "stream":
+                stream_messages.append(msg[1])
+
+        combined = "".join(stream_messages)
+        # Header info (before "user" marker) should be kept
+        assert "OpenAI Codex" in combined
+        assert "workdir:" in combined
+        # Content between "user" and "mcp startup:" should be filtered
+        assert "Task prompt here" not in combined
+        # Content after "mcp startup:" should be shown
+        assert "Actual agent output" in combined
+        assert "Done!" in combined
+
+    def test_codex_prompt_echo_filtered_after_phase_restart(self, web_ui, mock_api_client, git_repo):
+        """Codex prompt echo filtering should restart for implementation phase output."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="codex", provider="openai", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-phase"
+        mock_api_client.create_session.return_value = mock_session
+
+        phase_one = (
+            b"OpenAI Codex v0.92.0\n--------\nworkdir: /tmp\nmodel: gpt-5\n--------\n"
+            b"\x1b[36muser\x1b[0m\nExploration prompt should be hidden\n"
+            b"\x1b[36mmcp startup:\x1b[0m 0 servers\nExploration output kept\n"
+        )
+        phase_two = (
+            b"OpenAI Codex v0.92.0\n--------\nworkdir: /tmp\nmodel: gpt-5\n--------\n"
+            b"\x1b[36muser\x1b[0m\nImplementation prompt should be hidden\n"
+            b"\x1b[36mmcp startup:\x1b[0m 0 servers\nImplementation output kept\nDone!\n"
+        )
+
+        phase_one_event = Mock()
+        phase_one_event.event_type = "terminal"
+        phase_one_event.data = {"data": base64.b64encode(phase_one).decode()}
+
+        phase_two_event = Mock()
+        phase_two_event.event_type = "terminal"
+        phase_two_event.data = {"data": base64.b64encode(phase_two).decode()}
+
+        complete_event = Mock()
+        complete_event.event_type = "complete"
+        complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([phase_one_event, phase_two_event, complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="codex",
+            message_queue=message_queue,
+        )
+
+        assert success
+        assert "Exploration prompt should be hidden" not in output
+        assert "Implementation prompt should be hidden" not in output
+        assert "Exploration output kept" in output
+        assert "Implementation output kept" in output
+        assert "Done!" in output
+
+    def test_long_codex_output_fully_captured(self, web_ui, mock_api_client, git_repo):
+        """Long Codex output should be fully captured in final_output, not just last screenful."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="codex", provider="openai", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-long"
+        mock_api_client.create_session.return_value = mock_session
+
+        # Header + prompt echo + mcp startup
+        header = b"OpenAI Codex v0.92.0\n--------\nworkdir: /tmp\nmodel: gpt-5\n--------\n\x1b[36muser\x1b[0m\nTask prompt\n\x1b[36mmcp startup:\x1b[0m 0 servers\n"
+        # Simulate long agent output (many lines that would overflow terminal screen buffer)
+        long_lines = "\n".join(f"Agent output line {i}" for i in range(200))
+        raw_output = header + long_lines.encode("utf-8")
+
+        mock_stream_event = Mock()
+        mock_stream_event.event_type = "terminal"
+        mock_stream_event.data = {"data": base64.b64encode(raw_output).decode()}
+
+        mock_complete_event = Mock()
+        mock_complete_event.event_type = "complete"
+        mock_complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="codex",
+            message_queue=message_queue,
+        )
+
+        assert success
+        # Final output must contain ALL lines, not just the last screenful
+        assert "Agent output line 0" in output
+        assert "Agent output line 100" in output
+        assert "Agent output line 199" in output
+
+    def test_codex_output_buffer_flushed_on_completion(self, web_ui, mock_api_client, git_repo):
+        """Codex output buffer should be flushed when stream completes, even without mcp marker."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="codex", provider="openai", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-flush"
+        mock_api_client.create_session.return_value = mock_session
+
+        # Output without mcp startup marker - buffer won't be drained by normal filtering
+        # This simulates incomplete Codex output (e.g., early termination)
+        raw_output = b"Some initial output without markers\nImportant content here"
+
+        mock_stream_event = Mock()
+        mock_stream_event.event_type = "terminal"
+        mock_stream_event.data = {"data": base64.b64encode(raw_output).decode()}
+
+        mock_complete_event = Mock()
+        mock_complete_event.event_type = "complete"
+        mock_complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="codex",
+            message_queue=message_queue,
+        )
+
+        assert success
+        # The buffered content should be flushed and included in final output
+        assert "Important content here" in output
+
+    def test_run_task_forwards_phase_status_and_strips_ansi(self, web_ui, mock_api_client, git_repo):
+        """Structured status events should reach UI and final output should be ANSI-clean."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="mock-coding", provider="mock", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-status"
+        mock_api_client.create_session.return_value = mock_session
+
+        raw_output = b"\x1b[1;34mMock Agent v1.0\x1b[0m\n\x1b[33m> Analyzing task...\x1b[0m\n"
+
+        terminal_event = Mock()
+        terminal_event.event_type = "terminal"
+        terminal_event.data = {"data": base64.b64encode(raw_output).decode()}
+
+        phase_event = Mock()
+        phase_event.event_type = "event"
+        phase_event.data = {"type": "status", "status": "Phase 2: Implementing changes..."}
+
+        complete_event = Mock()
+        complete_event.event_type = "complete"
+        complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([terminal_event, phase_event, complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="mock-coding",
+            message_queue=message_queue,
+        )
+
+        statuses = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "status":
+                statuses.append(msg[1])
+
+        assert success
+        assert any("Phase 2: Implementing changes..." in s for s in statuses), statuses
+        assert "Mock Agent v1.0" in output
+        assert "\x1b" not in output
+
+    def test_run_task_emits_separate_exploration_and_coding_messages(self, web_ui, mock_api_client, git_repo):
+        """Phase 2 transition should close exploration bubble and start a coding bubble."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="mock-coding", provider="mock", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-phase-split"
+        mock_api_client.create_session.return_value = mock_session
+
+        exploration = b"Prompt: Exploration\nExploring files...\n"
+        implementation = b"Prompt: Implementation\nApplying fix...\n"
+
+        exploration_event = Mock()
+        exploration_event.event_type = "terminal"
+        exploration_event.data = {"data": base64.b64encode(exploration).decode()}
+
+        phase_event = Mock()
+        phase_event.event_type = "event"
+        phase_event.data = {"type": "status", "status": "Phase 2: Implementing changes..."}
+
+        implementation_event = Mock()
+        implementation_event.event_type = "terminal"
+        implementation_event.data = {"data": base64.b64encode(implementation).decode()}
+
+        complete_event = Mock()
+        complete_event.event_type = "complete"
+        complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter(
+            [exploration_event, phase_event, implementation_event, complete_event]
+        )
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="mock-coding",
+            message_queue=message_queue,
+        )
+
+        assert success
+        assert "Prompt: Exploration" in output
+        assert "Prompt: Implementation" in output
+
+        completes = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "message_complete":
+                completes.append(msg[2])
+
+        assert len(completes) == 2
+        assert "Prompt: Exploration" in completes[0]
+        assert "Prompt: Implementation" in completes[1]
+
+    def test_run_task_reused_session_streams_only_new_events(self, web_ui, mock_api_client, git_repo):
+        """Reused server sessions should stream from latest sequence, not from the beginning."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="mock-coding", provider="mock", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+        mock_api_client.get_session_latest_seq.return_value = 9
+
+        stale_complete = Mock()
+        stale_complete.event_type = "complete"
+        stale_complete.data = {"exit_code": None}
+
+        terminal_event = Mock()
+        terminal_event.event_type = "terminal"
+        terminal_event.data = {"data": base64.b64encode(b"new run output\n").decode()}
+
+        fresh_complete = Mock()
+        fresh_complete.event_type = "complete"
+        fresh_complete.data = {"exit_code": 0}
+
+        def stream_events(session_id, since_seq=0, include_terminal=True):
+            if since_seq == 0:
+                return iter([stale_complete])
+            return iter([terminal_event, fresh_complete])
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.side_effect = stream_events
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="mock-coding",
+            message_queue=message_queue,
+            server_session_id="server-sess-reuse",
+        )
+
+        assert success
+        assert "new run output" in output
+        mock_api_client.get_session_latest_seq.assert_called_once_with("server-sess-reuse")
+
 
 class TestLiveStreamPresentation:
     """Formatting and styling tests for the live activity stream."""
@@ -832,6 +1736,41 @@ class TestLiveStreamPresentation:
 
         assert "first line\nsecond block\nthird" in rendered
         assert "\n\n" not in rendered
+
+
+class TestLiveStreamSearch:
+    """Verify that live stream HTML includes the search bar."""
+
+    def test_live_stream_html_contains_search_bar(self):
+        """build_live_stream_html should include search input in header."""
+        from chad.ui.gradio import web_ui
+
+        rendered = web_ui.build_live_stream_html("some content", "AI")
+        assert 'class="live-search-input"' in rendered
+        assert 'class="live-search-bar"' in rendered
+        assert 'class="live-search-count"' in rendered
+        assert 'class="live-search-nav"' in rendered
+        assert 'placeholder="Search..."' in rendered
+
+    def test_live_stream_pyte_contains_search_bar(self):
+        """build_live_stream_html_from_pyte should include search input in header."""
+        from chad.ui.gradio import web_ui
+
+        rendered = web_ui.build_live_stream_html_from_pyte("<p>content</p>", "AI")
+        assert 'class="live-search-input"' in rendered
+        assert 'class="live-search-bar"' in rendered
+        assert 'class="live-search-count"' in rendered
+        assert 'class="live-search-nav"' in rendered
+
+    def test_search_bar_inside_header(self):
+        """Search bar should be inside the live-output-header div."""
+        from chad.ui.gradio import web_ui
+
+        rendered = web_ui.build_live_stream_html("test", "AI")
+        # Header should contain the title and search bar
+        assert 'class="live-header-title"' in rendered
+        # Ensure the header still shows the AI name
+        assert "AI (Live Stream)" in rendered
 
 
 class TestPortResolution:
@@ -915,16 +1854,17 @@ class TestPortResolution:
         assert "visibility:" not in box_block
 
 
-def test_live_stream_display_buffer_trims_to_tail():
-    """Live stream display buffer should keep only the most recent content."""
+def test_live_stream_display_buffer_keeps_all_content():
+    """Live stream display buffer should keep all content for infinite history."""
     from chad.ui.gradio.web_ui import LiveStreamDisplayBuffer
 
-    buffer = LiveStreamDisplayBuffer(max_chars=100)
+    buffer = LiveStreamDisplayBuffer()
     buffer.append("a" * 60)
     buffer.append("b" * 60)
 
-    assert len(buffer.content) == 100
-    assert buffer.content == ("a" * 40) + ("b" * 60)
+    # Should keep all content without truncation
+    assert len(buffer.content) == 120
+    assert buffer.content == ("a" * 60) + ("b" * 60)
 
 
 def test_live_stream_render_state_resets_for_rerender():
@@ -940,6 +1880,81 @@ def test_live_stream_render_state_resets_for_rerender():
 
     state.reset()
     assert state.should_render(rendered) is True
+
+
+def test_workspace_display_allows_full_path():
+    """Workspace display should allow full path without ellipsis truncation."""
+    from chad.ui.gradio import web_ui
+
+    # Check that workspace display CSS doesn't cause text truncation
+    css = web_ui.PROVIDER_PANEL_CSS
+
+    # Look for workspace-inline style block that controls text display
+    workspace_inline_pattern = r"\.workspace-inline[^}]*\{([^}]*)\}"
+    matches = re.findall(workspace_inline_pattern, css, re.MULTILINE | re.DOTALL)
+
+    assert matches, "Expected workspace-inline CSS style block"
+
+    workspace_inline_css = matches[0]
+
+    # The workspace should not truncate text with ellipsis - it should allow full paths to be shown
+    # This test will fail if ellipsis truncation is present, requiring the fix
+    assert not ("text-overflow: ellipsis" in workspace_inline_css and "overflow: hidden" in workspace_inline_css), \
+        f"Workspace inline should not use ellipsis truncation to allow full path display: {workspace_inline_css}"
+
+
+def test_workspace_font_color_is_black():
+    """Workspace font should be black (#000000) for better readability."""
+    from chad.ui.gradio import web_ui
+
+    # Check that workspace display CSS uses black font color
+    css = web_ui.PROVIDER_PANEL_CSS
+
+    # Look for workspace-inline style block that controls text color
+    workspace_inline_pattern = r"\.workspace-inline[^}]*\{([^}]*)\}"
+    matches = re.findall(workspace_inline_pattern, css, re.MULTILINE | re.DOTALL)
+
+    assert matches, "Expected workspace-inline CSS style block"
+
+    workspace_inline_css = matches[0]
+
+    # The workspace font should be black for better readability
+    # This test ensures the color is #000000 (black) instead of light gray
+    assert "color: #000000" in workspace_inline_css, \
+        f"Workspace font should be black (#000000), found: {workspace_inline_css}"
+
+
+def test_cancel_and_save_buttons_same_size():
+    """Cancel and Save buttons should have consistent size properties."""
+    from chad.ui.gradio import web_ui
+
+    # Read the web UI source to check button properties
+    import inspect
+    source = inspect.getsource(web_ui.ChadWebUI)
+
+    # Find both button definitions
+    cancel_btn_pattern = r'cancel_btn = gr\.Button\(\s*"Cancel"[^)]+\)'
+    save_btn_pattern = r'project_save_btn = gr\.Button\(\s*"Save"[^)]+\)'
+
+    cancel_match = re.search(cancel_btn_pattern, source, re.MULTILINE | re.DOTALL)
+    save_match = re.search(save_btn_pattern, source, re.MULTILINE | re.DOTALL)
+
+    assert cancel_match, "Could not find Cancel button definition"
+    assert save_match, "Could not find Save button definition"
+
+    cancel_def = cancel_match.group(0)
+    save_def = save_match.group(0)
+
+    # Both buttons should have size="sm" for consistency
+    assert 'size="sm"' in cancel_def, f"Cancel button should have size='sm': {cancel_def}"
+    assert 'size="sm"' in save_def, f"Save button should have size='sm': {save_def}"
+
+    # Both buttons should have same min_width and scale for consistent sizing
+    assert 'min_width=80' in cancel_def, f"Cancel button should have min_width=80: {cancel_def}"
+    assert 'min_width=80' in save_def, f"Save button should have min_width=80: {save_def}"
+
+    assert 'scale=0' in cancel_def, f"Cancel button should have scale=0: {cancel_def}"
+    assert 'scale=0' in save_def, f"Save button should have scale=0: {save_def}"
 
 
 class TestChadWebUIInterface:
@@ -972,6 +1987,72 @@ class TestChadWebUIInterface:
 
         # Verify Blocks was called
         mock_gr.Blocks.assert_called_once()
+
+    @patch("chad.ui.gradio.web_ui.gr")
+    def test_create_interface_uses_multimodal_textbox_for_task_input(self, mock_gr, mock_api_client):
+        """Task input should use MultimodalTextbox for combined text and image drag-drop."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        mock_blocks = MagicMock()
+        mock_gr.Blocks.return_value.__enter__ = Mock(return_value=mock_blocks)
+        mock_gr.Blocks.return_value.__exit__ = Mock(return_value=None)
+
+        web_ui = ChadWebUI(mock_api_client)
+        web_ui.create_interface()
+
+        # Check that MultimodalTextbox is used for task description
+        multimodal_calls = [
+            call.kwargs
+            for call in mock_gr.MultimodalTextbox.call_args_list
+            if "elem_classes" in call.kwargs and "task-desc-input" in call.kwargs["elem_classes"]
+        ]
+
+        assert multimodal_calls, "Task input should use MultimodalTextbox"
+        # Should support image uploads
+        assert all(kwargs.get("file_types") == ["image"] for kwargs in multimodal_calls)
+        assert all(kwargs.get("file_count") == "multiple" for kwargs in multimodal_calls)
+
+    @patch("chad.ui.gradio.web_ui.gr")
+    def test_create_interface_does_not_pass_scale_to_html(self, mock_gr, mock_api_client):
+        """gr.HTML does not support scale; passing it causes startup failure."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        mock_blocks = MagicMock()
+        mock_gr.Blocks.return_value.__enter__ = Mock(return_value=mock_blocks)
+        mock_gr.Blocks.return_value.__exit__ = Mock(return_value=None)
+
+        web_ui = ChadWebUI(mock_api_client)
+        web_ui.create_interface()
+
+        assert mock_gr.HTML.call_count > 0
+        for call in mock_gr.HTML.call_args_list:
+            assert "scale" not in call.kwargs
+
+    @patch("chad.ui.gradio.web_ui.gr")
+    def test_create_interface_disables_chat_message_grouping(self, mock_gr, mock_api_client):
+        """Milestones chatbot should not merge consecutive same-role messages."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        mock_blocks = MagicMock()
+        mock_gr.Blocks.return_value.__enter__ = Mock(return_value=mock_blocks)
+        mock_gr.Blocks.return_value.__exit__ = Mock(return_value=None)
+
+        web_ui = ChadWebUI(mock_api_client)
+        web_ui.create_interface()
+
+        chatbot_calls = [c.kwargs for c in mock_gr.Chatbot.call_args_list if c.kwargs.get("label") == "Milestones"]
+        assert chatbot_calls, "Expected Milestones chatbot to be created"
+        assert all(c.get("group_consecutive_messages") is False for c in chatbot_calls)
+
+    def test_provider_fallback_order_saves_on_submit_not_change(self):
+        """Fallback order should save on Enter/submit to avoid per-keystroke API calls."""
+        import inspect
+
+        import chad.ui.gradio.web_ui as web_ui
+
+        source = inspect.getsource(web_ui)
+        assert "fallback_order_input.submit(" in source
+        assert "fallback_order_input.change(" not in source
 
 
 class TestLaunchWebUI:
@@ -1080,46 +2161,39 @@ class TestGeminiUsage:
         assert "Not logged in" in result
 
     @patch("pathlib.Path.home")
-    def test_gemini_logged_in_no_sessions(self, mock_home, web_ui, tmp_path):
-        """Test Gemini usage when logged in but no session data."""
+    def test_gemini_logged_in_no_usage(self, mock_home, web_ui, tmp_path):
+        """Test Gemini usage when logged in but no usage data."""
         mock_home.return_value = tmp_path
         gemini_dir = tmp_path / ".gemini"
         gemini_dir.mkdir()
         (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
-        # No tmp directory
 
-        result = web_ui._get_gemini_usage()
+        with patch("chad.util.providers._read_gemini_usage", return_value=[]):
+            result = web_ui._get_gemini_usage()
 
         assert "✅" in result
         assert "Logged in" in result
-        assert "Usage data unavailable" in result
+        assert "No usage data yet" in result
 
     @patch("pathlib.Path.home")
     def test_gemini_usage_aggregates_models(self, mock_home, web_ui, tmp_path):
-        """Test Gemini usage aggregates token counts by model."""
-        import json
-
+        """Test Gemini usage aggregates token counts by model from JSONL."""
         mock_home.return_value = tmp_path
         gemini_dir = tmp_path / ".gemini"
         gemini_dir.mkdir()
         (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
 
-        # Create session file with model usage data
-        session_dir = gemini_dir / "tmp" / "project123" / "chats"
-        session_dir.mkdir(parents=True)
+        records = [
+            {"timestamp": "2026-01-01T12:00:00+00:00", "model": "gemini-2.5-pro",
+             "input_tokens": 1000, "output_tokens": 100, "cached_tokens": 500},
+            {"timestamp": "2026-01-01T13:00:00+00:00", "model": "gemini-2.5-pro",
+             "input_tokens": 2000, "output_tokens": 200, "cached_tokens": 1000},
+            {"timestamp": "2026-01-01T14:00:00+00:00", "model": "gemini-2.5-flash",
+             "input_tokens": 500, "output_tokens": 50, "cached_tokens": 200},
+        ]
 
-        session_data = {
-            "sessionId": "test-session",
-            "messages": [
-                {"type": "gemini", "model": "gemini-2.5-pro", "tokens": {"input": 1000, "output": 100, "cached": 500}},
-                {"type": "gemini", "model": "gemini-2.5-pro", "tokens": {"input": 2000, "output": 200, "cached": 1000}},
-                {"type": "gemini", "model": "gemini-2.5-flash", "tokens": {"input": 500, "output": 50, "cached": 200}},
-                {"type": "user", "content": "test"},  # Should be ignored
-            ],
-        }
-        (session_dir / "session-test.json").write_text(json.dumps(session_data))
-
-        result = web_ui._get_gemini_usage()
+        with patch("chad.util.providers._read_gemini_usage", return_value=records):
+            result = web_ui._get_gemini_usage()
 
         assert "✅" in result
         assert "Model Usage" in result
@@ -1283,14 +2357,15 @@ class TestRemainingUsage:
 
     @patch("pathlib.Path.home")
     def test_gemini_remaining_usage_logged_in(self, mock_home, web_ui, tmp_path):
-        """Gemini logged in returns low estimate (0.3)."""
+        """Gemini logged in with no usage returns 1.0 (full capacity)."""
         mock_home.return_value = tmp_path
         gemini_dir = tmp_path / ".gemini"
         gemini_dir.mkdir()
         (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
 
-        result = web_ui._get_gemini_remaining_usage()
-        assert result == 0.3
+        with patch("chad.util.providers._read_gemini_usage", return_value=[]):
+            result = web_ui._get_gemini_remaining_usage()
+        assert result == 1.0  # Logged in, no usage = full capacity
 
     @patch("pathlib.Path.home")
     def test_mistral_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
@@ -1303,14 +2378,14 @@ class TestRemainingUsage:
 
     @patch("pathlib.Path.home")
     def test_mistral_remaining_usage_logged_in(self, mock_home, web_ui, tmp_path):
-        """Mistral logged in returns low estimate (0.3)."""
+        """Mistral logged in with no usage returns 1.0 (full capacity)."""
         mock_home.return_value = tmp_path
         vibe_dir = tmp_path / ".vibe"
         vibe_dir.mkdir()
         (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"')
 
         result = web_ui._get_mistral_remaining_usage()
-        assert result == 0.3
+        assert result == 1.0  # Logged in, no sessions = full capacity
 
     @patch("pathlib.Path.home")
     def test_claude_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
@@ -1348,6 +2423,249 @@ class TestRemainingUsage:
 
         result = web_ui._get_codex_remaining_usage("codex")
         assert result == 0.0
+
+    @patch("pathlib.Path.home")
+    def test_gemini_remaining_usage_with_records(self, mock_home, web_ui, tmp_path):
+        """Gemini calculates remaining usage from today's JSONL records."""
+        from datetime import datetime, timezone
+
+        mock_home.return_value = tmp_path
+        gemini_dir = tmp_path / ".gemini"
+        gemini_dir.mkdir()
+        (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        today = datetime.now(timezone.utc).isoformat()
+        # 10 requests = 10% of 100 limit
+        records = [{"timestamp": today, "model": "gemini-pro"} for _ in range(10)]
+
+        with patch("chad.util.providers._read_gemini_usage", return_value=records):
+            result = web_ui._get_gemini_remaining_usage()
+        assert result == pytest.approx(0.9, abs=0.01)  # 90% remaining
+
+    @patch("pathlib.Path.home")
+    def test_qwen_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
+        """Qwen not logged in returns 0.0."""
+        mock_home.return_value = tmp_path
+
+        result = web_ui._get_qwen_remaining_usage()
+        assert result == 0.0
+
+    @patch("pathlib.Path.home")
+    def test_qwen_remaining_usage_logged_in_no_sessions(self, mock_home, web_ui, tmp_path):
+        """Qwen logged in with no sessions returns 1.0 (full capacity)."""
+        mock_home.return_value = tmp_path
+        qwen_dir = tmp_path / ".qwen"
+        qwen_dir.mkdir()
+        (qwen_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        result = web_ui._get_qwen_remaining_usage()
+        assert result == 1.0
+
+    @patch("pathlib.Path.home")
+    def test_qwen_remaining_usage_with_sessions(self, mock_home, web_ui, tmp_path):
+        """Qwen calculates remaining usage from today's requests."""
+        import json
+        from datetime import datetime, timezone
+
+        mock_home.return_value = tmp_path
+        qwen_dir = tmp_path / ".qwen"
+        qwen_dir.mkdir()
+        (qwen_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        session_dir = qwen_dir / "projects" / "project1" / "chats"
+        session_dir.mkdir(parents=True)
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        # 400 requests = 20% of 2000 limit
+        lines = [json.dumps({"type": "assistant", "timestamp": today}) for _ in range(400)]
+        (session_dir / "session.jsonl").write_text("\n".join(lines))
+
+        result = web_ui._get_qwen_remaining_usage()
+        assert result == pytest.approx(0.8, abs=0.01)  # 80% remaining
+
+    @patch("pathlib.Path.home")
+    def test_mistral_remaining_usage_with_sessions(self, mock_home, web_ui, tmp_path):
+        """Mistral calculates remaining usage from today's sessions."""
+        import json
+
+        mock_home.return_value = tmp_path
+        vibe_dir = tmp_path / ".vibe"
+        vibe_dir.mkdir()
+        (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"')
+
+        session_dir = vibe_dir / "logs" / "session"
+        session_dir.mkdir(parents=True)
+
+        # 100 requests = 10% of 1000 limit
+        session_data = {"metadata": {"stats": {"prompt_count": 100}}}
+        (session_dir / "session_today.json").write_text(json.dumps(session_data))
+
+        result = web_ui._get_mistral_remaining_usage()
+        assert result == pytest.approx(0.9, abs=0.01)  # 90% remaining
+
+
+class TestUsageBasedProviderSwitch:
+    """Test cases for proactive usage-based provider switching."""
+
+    @pytest.fixture
+    def mock_api_client(self):
+        """Create a mock API client with mock provider support."""
+        mgr = Mock()
+        accounts = {
+            "primary-mock": MockAccount(name="primary-mock", provider="mock", role="CODING"),
+            "fallback-mock": MockAccount(name="fallback-mock", provider="mock"),
+        }
+        mgr.list_accounts.return_value = list(accounts.values())
+        mgr.list_role_assignments.return_value = {}
+        mgr.get_account_model.return_value = "default"
+
+        def get_account(name):
+            if name in accounts:
+                return accounts[name]
+            raise ValueError(f"Account {name} not found")
+
+        mgr.get_account.side_effect = get_account
+        return mgr
+
+    @pytest.fixture
+    def web_ui(self, mock_api_client):
+        """Create a ChadWebUI instance."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        return ChadWebUI(mock_api_client)
+
+    def test_check_usage_and_switch_no_switch_under_threshold(self, web_ui, mock_api_client):
+        """No switch should occur when usage is below threshold."""
+        # Set threshold to 80%
+        mock_api_client.get_usage_switch_threshold.return_value = 80
+
+        # Set mock remaining usage to 0.5 (50% remaining = 50% used, under 80% threshold)
+        mock_api_client.get_mock_remaining_usage.return_value = 0.5
+
+        account, switched_from = web_ui._check_usage_and_switch("primary-mock")
+
+        assert account == "primary-mock"
+        assert switched_from is None
+
+    def test_check_usage_and_switch_triggers_switch(self, web_ui, mock_api_client):
+        """Switch should occur when usage exceeds threshold."""
+        # Set threshold to 50%
+        mock_api_client.get_usage_switch_threshold.return_value = 50
+
+        # Primary mock has 20% remaining (80% used, exceeds 50% threshold)
+        # Fallback mock has 80% remaining (20% used, under 50% threshold)
+        def mock_remaining(name):
+            if name == "primary-mock":
+                return 0.2  # 80% used
+            return 0.8  # 20% used
+
+        mock_api_client.get_mock_remaining_usage.side_effect = mock_remaining
+
+        # Set up fallback order
+        mock_api_client.get_next_fallback_provider.return_value = "fallback-mock"
+
+        account, switched_from = web_ui._check_usage_and_switch("primary-mock")
+
+        assert account == "fallback-mock"
+        assert switched_from == "primary-mock"
+
+    def test_check_usage_and_switch_disabled_at_100_percent(self, web_ui, mock_api_client):
+        """No switch should occur when threshold is 100% (disabled)."""
+        # Set threshold to 100% (disabled)
+        mock_api_client.get_usage_switch_threshold.return_value = 100
+
+        # Even with high usage, no switch should occur
+        mock_api_client.get_mock_remaining_usage.return_value = 0.05  # 95% used
+
+        account, switched_from = web_ui._check_usage_and_switch("primary-mock")
+
+        assert account == "primary-mock"
+        assert switched_from is None
+
+    def test_check_usage_and_switch_no_fallback_available(self, web_ui, mock_api_client):
+        """No switch should occur when no fallback is configured."""
+        # Set threshold to 50%
+        mock_api_client.get_usage_switch_threshold.return_value = 50
+
+        # High usage
+        mock_api_client.get_mock_remaining_usage.return_value = 0.2  # 80% used
+
+        # No fallback available
+        mock_api_client.get_next_fallback_provider.return_value = None
+
+        account, switched_from = web_ui._check_usage_and_switch("primary-mock")
+
+        assert account == "primary-mock"
+        assert switched_from is None
+
+    def test_check_usage_and_switch_fallback_also_exhausted(self, web_ui, mock_api_client):
+        """No switch when fallback is also over threshold."""
+        # Set threshold to 50%
+        mock_api_client.get_usage_switch_threshold.return_value = 50
+
+        # Both providers are over threshold
+        def mock_remaining(name):
+            return 0.1  # 90% used for both
+
+        mock_api_client.get_mock_remaining_usage.side_effect = mock_remaining
+        mock_api_client.get_next_fallback_provider.return_value = "fallback-mock"
+
+        account, switched_from = web_ui._check_usage_and_switch("primary-mock")
+
+        # Should not switch since fallback is also exhausted
+        assert account == "primary-mock"
+        assert switched_from is None
+
+    def test_start_task_uses_selected_coding_agent_for_initial_run(
+        self, web_ui, mock_api_client, git_repo, monkeypatch
+    ):
+        """Initial coding run should honor the selected coding agent."""
+        mock_api_client.get_usage_switch_threshold.return_value = 50
+        mock_api_client.get_next_fallback_provider.return_value = "fallback-mock"
+        mock_api_client.get_worktree_status.return_value = Mock(exists=False)
+
+        def mock_remaining(name):
+            if name == "primary-mock":
+                return 0.01  # 99% used (over threshold)
+            return 0.90
+
+        mock_api_client.get_mock_remaining_usage.side_effect = mock_remaining
+
+        captured = {"coding_account": None}
+
+        def fake_run_task_via_api(
+            session_id,
+            project_path,
+            task_description,
+            coding_account,
+            message_queue,
+            **kwargs,
+        ):
+            captured["coding_account"] = coding_account
+            message_queue.put(("status", "Phase 1: Exploring codebase..."))
+            message_queue.put(("status", "Phase 2: Implementing changes..."))
+            message_queue.put(("message_complete", "CODING AI", "done"))
+            return True, "done", "server-session", {
+                "files_modified": ["src/example.py"],
+                "files_created": [],
+                "commands_run": [],
+                "total_tool_calls": 1,
+            }
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("selected-agent")
+        list(
+            web_ui.start_chad_task(
+                session.id,
+                str(git_repo),
+                "test",
+                coding_agent="primary-mock",
+                verification_agent=web_ui.VERIFICATION_NONE,
+            )
+        )
+
+        assert captured["coding_account"] == "primary-mock"
 
 
 class TestClaudeMultiAccount:
@@ -1438,6 +2756,35 @@ class TestClaudeMultiAccount:
         assert "PRO" in result
 
     @patch("pathlib.Path.home")
+    @patch("requests.get")
+    def test_claude_usage_extra_credits_are_displayed_as_dollars(self, mock_get, mock_home, web_ui, tmp_path):
+        """Claude extra credit values are cents and should render as dollars."""
+        import json
+
+        mock_home.return_value = tmp_path
+
+        config_dir = tmp_path / ".chad" / "claude-configs" / "claude-1"
+        config_dir.mkdir(parents=True)
+        creds = {"claudeAiOauth": {"accessToken": "test-token", "subscriptionType": "PRO"}}
+        (config_dir / ".credentials.json").write_text(json.dumps(creds))
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "extra_usage": {
+                "is_enabled": True,
+                "used_credits": 1499,
+                "monthly_limit": 4000,
+                "utilization": 37.5,
+            }
+        }
+        mock_get.return_value = mock_response
+
+        result = web_ui.provider_ui._get_claude_usage("claude-1")
+
+        assert "$14.99 / $40.00 (37.5%)" in result
+
+    @patch("pathlib.Path.home")
     def test_check_provider_login_uses_isolated_config(self, mock_home, web_ui, tmp_path):
         """Provider login check uses account-specific config directory."""
         import json
@@ -1459,6 +2806,44 @@ class TestClaudeMultiAccount:
 
         assert logged_in_1 is True
         assert logged_in_2 is False
+
+    def test_opencode_login_check_detects_auth_file(self, web_ui, monkeypatch, tmp_path):
+        """OpenCode login check succeeds when OAuth auth.json exists."""
+        import json
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        auth_dir = tmp_path / ".local" / "share" / "opencode"
+        auth_dir.mkdir(parents=True)
+        (auth_dir / "auth.json").write_text(json.dumps({"token": "test-token"}))
+        logged_in, msg = web_ui.provider_ui._check_provider_login("opencode", "oc-test")
+        assert logged_in is True
+        assert "Logged in" in msg
+
+    def test_opencode_login_check_fails_without_auth(self, web_ui, monkeypatch, tmp_path):
+        """OpenCode login check fails when no OAuth credentials exist."""
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        logged_in, msg = web_ui.provider_ui._check_provider_login("opencode", "oc-test")
+        assert logged_in is False
+        assert "Not logged in" in msg
+
+    def test_kimi_add_provider_no_shutil_error(self, web_ui, mock_api_client):
+        """Kimi add_provider should not raise UnboundLocalError for shutil."""
+        mock_api_client.list_accounts.return_value = []
+        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/kimi"))
+        web_ui.provider_ui.installer.find_tool_path = Mock(return_value="/tmp/kimi")
+
+        # Mock subprocess.Popen to simulate a failed login (no creds written)
+        mock_proc = Mock()
+        mock_proc.stdout.readline.return_value = b""
+        mock_proc.poll.return_value = 0
+        mock_proc.terminate = Mock()
+        mock_proc.wait = Mock()
+
+        import subprocess as _subprocess
+        with patch.object(_subprocess, "Popen", return_value=mock_proc):
+            with patch("chad.ui.gradio.provider_ui.shutil.which", return_value="/tmp/kimi"):
+                # This should NOT raise UnboundLocalError: local variable 'shutil'
+                result = web_ui.add_provider("kimi-test", "kimi")[0]
+        assert "❌" in result
 
     def test_delete_provider_cleans_up_claude_config(self, mock_api_client, tmp_path):
         """Deleting Claude provider removes its config directory."""
@@ -1574,6 +2959,196 @@ class TestClaudeMultiAccount:
         mock_api_client.create_account.assert_called_once()
 
 
+class TestPexpectLoginDrain:
+    """Test that pexpect-based login flows drain PTY output to prevent buffer deadlocks."""
+
+    @pytest.fixture
+    def mock_api_client(self):
+        mgr = Mock()
+        mgr.list_accounts.return_value = []
+        mgr.list_role_assignments.return_value = {}
+        mgr.get_account_model.return_value = "default"
+        mgr.get_account_reasoning.return_value = "default"
+        return mgr
+
+    @pytest.fixture
+    def web_ui(self, mock_api_client):
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        ui = ChadWebUI(mock_api_client)
+        ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "gemini"))
+        return ui
+
+    @patch("pathlib.Path.home")
+    def test_gemini_login_creates_settings_json(self, mock_home, web_ui, mock_api_client, tmp_path):
+        """Gemini login pre-creates settings.json so the CLI skips the auth dialog."""
+        import json
+        import pexpect
+
+        mock_home.return_value = tmp_path
+
+        mock_child = Mock()
+        mock_child.isalive.return_value = True
+        mock_child.close = Mock()
+
+        def fake_drain(size=10000, timeout=0.1):
+            raise pexpect.TIMEOUT("no data")
+
+        mock_child.read_nonblocking = fake_drain
+
+        poll_count = [0]
+        original_exists = Path.exists
+
+        def mock_exists(path):
+            if "oauth_creds.json" in str(path) and ".gemini" in str(path):
+                poll_count[0] += 1
+                # _check_provider_login calls once, then loop polls
+                return poll_count[0] >= 3
+            return original_exists(path)
+
+        with patch("pexpect.spawn", return_value=mock_child):
+            with patch("time.sleep"):
+                with patch.object(Path, "exists", mock_exists):
+                    result = web_ui.add_provider("my-gemini", "gemini")[0]
+
+        # settings.json must be created before the CLI is spawned
+        settings_path = tmp_path / ".gemini" / "settings.json"
+        assert settings_path.exists(), "settings.json not pre-created"
+        settings = json.loads(settings_path.read_text())
+        assert settings["security"]["auth"]["selectedType"] == "oauth-personal"
+        assert "✅" in result
+
+    @patch("pathlib.Path.home")
+    def test_gemini_login_drains_pty_output(self, mock_home, web_ui, mock_api_client, tmp_path):
+        """Gemini login flow must drain PTY output to prevent buffer deadlock.
+
+        Without draining, the Gemini CLI blocks when its PTY output buffer fills,
+        causing the polling loop to hang indefinitely since child.isalive() stays True.
+        """
+        import pexpect
+
+        mock_home.return_value = tmp_path
+
+        # Track read_nonblocking calls to verify draining happens
+        drain_calls = []
+
+        mock_child = Mock()
+        mock_child.isalive.return_value = True
+        mock_child.close = Mock()
+
+        def track_drain(size=10000, timeout=0.1):
+            drain_calls.append((size, timeout))
+            raise pexpect.TIMEOUT("no data")
+
+        mock_child.read_nonblocking = track_drain
+
+        poll_count = [0]
+        original_exists = Path.exists
+
+        def mock_exists(path):
+            if "oauth_creds.json" in str(path) and ".gemini" in str(path):
+                poll_count[0] += 1
+                # _check_provider_login calls exists() once (poll 1),
+                # then the loop polls: poll 2, 3, 4 return False, poll 5 succeeds.
+                # This gives 3 drain calls in the loop.
+                return poll_count[0] >= 5
+            return original_exists(path)
+
+        with patch("pexpect.spawn", return_value=mock_child):
+            with patch("time.sleep"):
+                with patch.object(Path, "exists", mock_exists):
+                    result = web_ui.add_provider("my-gemini", "gemini")[0]
+
+        # Verify draining happened during polling
+        assert len(drain_calls) >= 2, (
+            f"Expected read_nonblocking to be called during polling, got {len(drain_calls)} calls. "
+            "Without draining, the PTY buffer fills and the CLI deadlocks."
+        )
+        assert "✅" in result
+        mock_api_client.create_account.assert_called_once_with("my-gemini", "gemini")
+
+    @patch("pathlib.Path.home")
+    def test_gemini_login_does_not_overwrite_existing_settings(self, mock_home, web_ui, mock_api_client, tmp_path):
+        """If settings.json already exists, don't overwrite the user's config."""
+        import json
+        import pexpect
+
+        mock_home.return_value = tmp_path
+
+        # Pre-create settings with custom content
+        gemini_dir = tmp_path / ".gemini"
+        gemini_dir.mkdir(parents=True)
+        custom = {"security": {"auth": {"selectedType": "gemini-api-key"}}, "custom": True}
+        (gemini_dir / "settings.json").write_text(json.dumps(custom))
+
+        mock_child = Mock()
+        mock_child.isalive.return_value = True
+        mock_child.close = Mock()
+        mock_child.read_nonblocking = Mock(side_effect=pexpect.TIMEOUT("no data"))
+
+        poll_count = [0]
+        original_exists = Path.exists
+
+        def mock_exists(path):
+            if "oauth_creds.json" in str(path) and ".gemini" in str(path):
+                poll_count[0] += 1
+                return poll_count[0] >= 3
+            return original_exists(path)
+
+        with patch("pexpect.spawn", return_value=mock_child):
+            with patch("time.sleep"):
+                with patch.object(Path, "exists", mock_exists):
+                    web_ui.add_provider("my-gemini", "gemini")
+
+        # Original settings must be preserved
+        settings = json.loads((gemini_dir / "settings.json").read_text())
+        assert settings["custom"] is True
+        assert settings["security"]["auth"]["selectedType"] == "gemini-api-key"
+
+    @patch("pathlib.Path.home")
+    def test_qwen_login_drains_pty_output(self, mock_home, web_ui, mock_api_client, tmp_path):
+        """Qwen login flow drains PTY output (regression guard)."""
+        import pexpect
+
+        mock_home.return_value = tmp_path
+        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "qwen"))
+
+        drain_calls = []
+
+        mock_child = Mock()
+        mock_child.isalive.return_value = True
+        mock_child.send = Mock()
+        mock_child.close = Mock()
+
+        def track_drain(size=10000, timeout=0.1):
+            drain_calls.append((size, timeout))
+            raise pexpect.TIMEOUT("no data")
+
+        mock_child.read_nonblocking = track_drain
+
+        poll_count = [0]
+        original_exists = Path.exists
+
+        def mock_exists(path):
+            if "oauth_creds.json" in str(path) and ".qwen" in str(path):
+                poll_count[0] += 1
+                # _check_provider_login calls exists() once (poll 1),
+                # then the loop polls: poll 2, 3, 4 return False, poll 5 succeeds.
+                return poll_count[0] >= 5
+            return original_exists(path)
+
+        with patch("pexpect.spawn", return_value=mock_child):
+            with patch("time.sleep"):
+                with patch.object(Path, "exists", mock_exists):
+                    result = web_ui.add_provider("my-qwen", "qwen")[0]
+
+        assert len(drain_calls) >= 2, (
+            f"Expected read_nonblocking to be called during polling, got {len(drain_calls)} calls."
+        )
+        assert "✅" in result
+        mock_api_client.create_account.assert_called_once_with("my-qwen", "qwen")
+
+
 class TestCodingSummaryExtraction:
     """Test extraction of structured summaries from coding agent output."""
 
@@ -1684,6 +3259,40 @@ More details here...
         message = make_chat_message("CODING AI", content)
         # Should use heuristic extraction (starts with "I've updated...")
         assert "I've updated the authentication module" in message["content"]
+
+    def test_make_chat_message_prefers_prompt_line_for_terminal_output(self):
+        """Collapsed terminal summaries should prioritize prompt/phase markers over file paths."""
+        from chad.ui.gradio.web_ui import make_chat_message
+
+        content = (
+            "Mock Agent v1.0\n"
+            "Working in: /tmp/work\n"
+            "Prompt: Exploration\n\n"
+            "> Analyzing task...\n"
+            "Tool: Read BUGS.md\n"
+            "✓ Read 15 lines\n"
+            "Tool: Glob src/**/*.py\n"
+            "✓ Found 8 files\n"
+            + ("[tick] provider context stream\n" * 30)
+        )
+
+        message = make_chat_message("CODING AI", content)
+        summary_part = message["content"].split("<details>")[0]
+
+        assert "Prompt: Exploration" in summary_part
+        assert "Tool: Read BUGS.md" not in summary_part
+
+    def test_make_chat_message_strips_visible_escape_symbol_sequences(self):
+        """Visible Unicode escape symbol sequences should be sanitized from chat output."""
+        from chad.ui.gradio.web_ui import make_chat_message
+
+        content = "␛[1;34mMock Agent v1.0␛[0m\n␛[36mPrompt: Exploration␛[0m"
+        message = make_chat_message("CODING AI", content, collapsible=False)
+        rendered = message["content"]
+
+        assert "␛[" not in rendered
+        assert "Mock Agent v1.0" in rendered
+        assert "Prompt: Exploration" in rendered
 
     def test_make_chat_message_displays_hypothesis_and_screenshots(self, tmp_path):
         """make_chat_message should show hypothesis and inline screenshot images."""
@@ -1831,10 +3440,97 @@ More details here...
 
 
 class TestProgressUpdateExtraction:
-    """Test progress update extraction with placeholder filtering."""
+    """Test progress update extraction with placeholder filtering.
+
+    Supports two formats:
+    1. Markdown (preferred) - avoids Codex CLI early exit with JSON
+    2. JSON (legacy fallback)
+    """
+
+    # =========================================================================
+    # Markdown format tests (preferred format)
+    # =========================================================================
+
+    def test_extract_progress_update_from_markdown_block(self):
+        """Extract progress from markdown code block format."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+Some thinking text...
+
+```
+**Progress:** Fixing authentication bug in login flow
+**Location:** src/auth.py:45
+**Next:** Writing tests
+```
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert result.summary == "Fixing authentication bug in login flow"
+        assert result.location == "src/auth.py:45"
+        assert result.next_step == "Writing tests"
+
+    def test_extract_progress_update_markdown_without_code_block(self):
+        """Extract progress from markdown without code block wrapper."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+**Progress:** Found the config manager in settings module
+**Location:** src/config.py:42
+**Next:** Adding validation logic
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert result.summary == "Found the config manager in settings module"
+        assert result.location == "src/config.py:42"
+        assert result.next_step == "Adding validation logic"
+
+    def test_extract_progress_update_markdown_next_step_optional(self):
+        """Markdown progress should work without Next field."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+**Progress:** Investigating the issue
+**Location:** src/app.py:10
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert result.summary == "Investigating the issue"
+        assert result.location == "src/app.py:10"
+        assert result.next_step is None
+
+    def test_extract_progress_update_markdown_filters_placeholder(self):
+        """Markdown progress with placeholder text should be filtered."""
+        from chad.util.prompts import extract_progress_update
+
+        # The exact example from the prompt should be filtered
+        content = '''
+**Progress:** Adding retry logic to handle API rate limits
+**Location:** src/api/client.py:45
+**Next:** Writing tests to verify the retry behavior
+'''
+        result = extract_progress_update(content)
+        assert result is None
+
+    def test_extract_progress_update_markdown_case_insensitive(self):
+        """Markdown field names should be case-insensitive."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+**progress:** Found authentication handler
+**LOCATION:** src/auth.py:45
+**next:** Adding tests
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert result.summary == "Found authentication handler"
+
+    # =========================================================================
+    # JSON format tests (legacy fallback)
+    # =========================================================================
 
     def test_extract_progress_update_from_json_block(self):
-        """Extract progress from code-fenced JSON."""
+        """Extract progress from code-fenced JSON (legacy format)."""
         from chad.util.prompts import extract_progress_update
 
         content = '''
@@ -1892,12 +3588,25 @@ Some thinking text...
 
         content = '''
 ```json
-{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45"}
+{"type": "progress", "summary": "Found authentication handler in login module", "location": "src/auth/login.py:45"}
 ```
 '''
         result = extract_progress_update(content)
         assert result is not None
-        assert result.summary == "Adding retry logic to handle API rate limits"
+        assert result.summary == "Found authentication handler in login module"
+
+    def test_extract_progress_update_filters_prompt_example(self):
+        """The exact example from the prompt should be filtered."""
+        from chad.util.prompts import extract_progress_update
+
+        # This is the exact example in the coding agent prompt - should be filtered
+        content = '''
+```json
+{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is None
 
     def test_extract_progress_update_filters_empty_summary(self):
         """Empty summary should be filtered."""
@@ -1911,12 +3620,222 @@ Some thinking text...
         result = extract_progress_update(content)
         assert result is None
 
+    def test_extract_progress_update_handles_newlines_in_summary(self):
+        """Progress JSON with accidental newlines should still parse."""
+        from chad.util.prompts import extract_progress_update
 
-class TestDynamicStatusLine:
-    """Test dynamic status line with task state and worktree path."""
+        content = '''
+{"type":"progress","summary":"Line 1 of summary
+ Line 2 continuing","location":"src/app.py:10"}
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert "Line 1 of summary" in result.summary
+        assert "Line 2 continuing" in result.summary
+        assert result.location == "src/app.py:10"
+
+    def test_extract_progress_update_includes_next_step(self):
+        """Progress update should include next_step field."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+```json
+{"type": "progress", "summary": "Found the config manager", "location": "src/config.py:42", "next_step": "Adding the new option to the config schema"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert result.summary == "Found the config manager"
+        assert result.location == "src/config.py:42"
+        assert result.next_step == "Adding the new option to the config schema"
+
+    def test_extract_progress_update_next_step_optional(self):
+        """Progress update should work without next_step field."""
+        from chad.util.prompts import extract_progress_update
+
+        content = '''
+```json
+{"type": "progress", "summary": "Investigating issue", "location": "src/app.py:10"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is not None
+        assert result.next_step is None
+
+    def test_extract_progress_update_filters_placeholder_next_step(self):
+        """Progress with placeholder next_step should be filtered."""
+        from chad.util.prompts import extract_progress_update
+
+        # The example from the prompt should be filtered
+        content = '''
+```json
+{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45", "next_step": "Writing tests to verify the retry behavior"}
+```
+'''
+        result = extract_progress_update(content)
+        assert result is None
+
+
+class TestMakeProgressMessage:
+    """Test progress message formatting."""
+
+    def test_make_progress_message_with_next_step(self):
+        """Progress message should display next step."""
+        from chad.ui.gradio.web_ui import make_progress_message
+        from chad.util.prompts import ProgressUpdate
+
+        progress = ProgressUpdate(
+            summary="Found the config module",
+            location="src/config.py:42",
+            next_step="Adding the new option",
+        )
+        result = make_progress_message(progress)
+
+        assert result["role"] == "assistant"
+        content = result["content"]
+        assert "Found the config module" in content
+        assert "`src/config.py:42`" in content
+        assert "**Next:** Adding the new option" in content
+
+    def test_make_progress_message_without_next_step(self):
+        """Progress message should work without next step."""
+        from chad.ui.gradio.web_ui import make_progress_message
+        from chad.util.prompts import ProgressUpdate
+
+        progress = ProgressUpdate(
+            summary="Investigating issue",
+            location="src/app.py:10",
+        )
+        result = make_progress_message(progress)
+
+        content = result["content"]
+        assert "Investigating issue" in content
+        assert "**Next:**" not in content
+
+
+class TestLivePatchScrollPreservation:
+    """Ensure live patching does not reset scroll by avoiding value updates."""
+
+    @pytest.fixture
+    def mock_api_client(self):
+        from unittest.mock import Mock
+
+        client = Mock()
+        client.list_accounts.return_value = []
+        client.list_role_assignments.return_value = {}
+        client.list_providers.return_value = ["anthropic", "openai"]
+        return client
+
+    @pytest.fixture
+    def web_ui(self, mock_api_client):
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        return ChadWebUI(mock_api_client)
+
+    def test_live_patch_returns_update_without_value(self, web_ui):
+        """When live_patch is used, live_stream update should not include a value (prevents scroll reset)."""
+        session = web_ui.create_session("scroll-test")
+        session.has_initial_live_render = True  # Simulate after first render
+        live_html = '<div data-live-id="live-stream-box"><div class="live-output-content">line 1</div></div>'
+
+        display_stream, live_patch, flag = web_ui._compute_live_stream_updates(
+            live_html, None, session, live_stream_id="live-stream-box", task_ended=False
+        )
+        assert display_stream is None  # use live_patch path
+        assert live_patch is not None
+        assert flag is True  # remains set
+
+    def test_initial_render_sets_value(self, web_ui):
+        """On first render (no initial live render yet), value should be populated so content appears."""
+        session = web_ui.create_session("scroll-first")
+        session.has_initial_live_render = False
+        live_html = '<div data-live-id="live-stream-box"><div class="live-output-content">init</div></div>'
+
+        display_stream, live_patch, flag = web_ui._compute_live_stream_updates(
+            live_html, None, session, live_stream_id="live-stream-box", task_ended=False
+        )
+        assert display_stream == live_html
+        assert live_patch is None
+        assert flag is True  # should flip on first render
+
+    def test_empty_content_resets_initial_flag(self, web_ui):
+        """Clearing live_stream must reset has_initial so next content does a full render.
+
+        Reproduces the race condition where:
+        1. First render sets has_initial = True
+        2. Empty content clears the DOM but has_initial stays True
+        3. Next content tries JS patching on a cleared DOM and fails silently
+        """
+        session = web_ui.create_session("clear-reset")
+        live_stream_id = "live-stream-box"
+        live_html = (
+            f'<div data-live-id="{live_stream_id}">'
+            '<div class="live-output-content">content</div></div>'
+        )
+
+        # Step 1: initial render — sets has_initial = True
+        _, _, flag = web_ui._compute_live_stream_updates(
+            live_html, None, session, live_stream_id=live_stream_id,
+            task_ended=False,
+        )
+        assert flag is True
+
+        # Step 2: empty content arrives (e.g. status event clears live stream)
+        session.has_initial_live_render = flag
+        _, _, flag = web_ui._compute_live_stream_updates(
+            "", None, session, live_stream_id=live_stream_id,
+            task_ended=False,
+        )
+        assert flag is False, "has_initial must reset when content is cleared"
+
+        # Step 3: new content arrives — must do a full Gradio render (not JS patch)
+        session.has_initial_live_render = flag
+        display_stream, live_patch, flag = web_ui._compute_live_stream_updates(
+            live_html, None, session, live_stream_id=live_stream_id,
+            task_ended=False,
+        )
+        assert display_stream == live_html, (
+            "After clearing, next content must use full Gradio render"
+        )
+        assert live_patch is None
+        assert flag is True
+
+
+class TestPhaseMilestones:
+    """Test phase milestone messages inserted into chat history."""
+
+    def test_make_phase_milestone_with_metrics(self):
+        """make_phase_milestone should format phase name, account, model, and metrics."""
+        from chad.ui.gradio.web_ui import make_phase_milestone
+
+        msg = make_phase_milestone("Exploration", "claude-1", "claude-sonnet-4-20250514", 85)
+        assert msg["role"] == "user"
+        assert "**Exploration:**" in msg["content"]
+        assert "claude-1" in msg["content"]
+        assert "claude-sonnet-4-20250514" in msg["content"]
+        assert "Usage: 85%" in msg["content"]
+
+    def test_make_phase_milestone_without_metrics(self):
+        """make_phase_milestone should omit metrics when not provided."""
+        from chad.ui.gradio.web_ui import make_phase_milestone
+
+        msg = make_phase_milestone("Verification", "verifier", "gpt-4o")
+        assert msg["role"] == "user"
+        assert "**Verification:**" in msg["content"]
+        assert "verifier" in msg["content"]
+        assert "gpt-4o" in msg["content"]
+        assert "Usage:" not in msg["content"]
+
+    def test_make_phase_milestone_different_phases(self):
+        """make_phase_milestone should work with various phase names."""
+        from chad.ui.gradio.web_ui import make_phase_milestone
+
+        for phase in ("Coding", "Re-coding", "Re-verification"):
+            msg = make_phase_milestone(phase, "acct", "model-x", 50)
+            assert f"**{phase}:**" in msg["content"]
 
     def test_idle_status_shows_ready_with_model(self):
-        """Idle status should show Ready with coding model info."""
+        """Idle status should show Ready with coding model info (get_role_config_status still works)."""
         from chad.ui.gradio.provider_ui import ProviderUIManager
 
         class MockAPIClient:
@@ -1930,98 +3849,78 @@ class TestDynamicStatusLine:
         assert "Coding" in status
         assert "claude-main" in status
 
-    def test_ready_status_shows_worktree_path(self):
-        """Ready status should show worktree path when provided."""
+    def test_format_usage_metrics_returns_percentages(self):
+        """_format_usage_metrics should return formatted usage percentage."""
         from chad.ui.gradio.provider_ui import ProviderUIManager
 
         class MockAPIClient:
+            def __init__(self):
+                self._mock_usage = {"test-account": 0.75}
+
             def list_accounts(self):
-                return [MockAccount(name="claude-main", provider="anthropic", model="sonnet-4", role="CODING")]
+                return [MockAccount(name="test-account", provider="mock", role="CODING")]
+
+            def get_account(self, name):
+                return MockAccount(name=name, provider="mock", role="CODING")
+
+            def get_mock_remaining_usage(self, name):
+                return self._mock_usage.get(name, 0.5)
 
         ui = ProviderUIManager(MockAPIClient())
-        ready, status = ui.get_role_config_status(worktree_path="/home/user/.chad-worktrees/abc123")
+        metrics = ui._format_usage_metrics("test-account")
+        assert "Usage: 75%" in metrics
+
+    def test_ready_status_includes_usage_metrics(self):
+        """Ready status should include usage metrics when available."""
+        from chad.ui.gradio.provider_ui import ProviderUIManager
+
+        class MockAPIClient:
+            def __init__(self):
+                self._mock_usage = {"test-account": 0.8}
+
+            def list_accounts(self):
+                return [MockAccount(name="test-account", provider="mock", role="CODING")]
+
+            def get_account(self, name):
+                return MockAccount(name=name, provider="mock", role="CODING")
+
+            def get_mock_remaining_usage(self, name):
+                return self._mock_usage.get(name, 0.5)
+
+        ui = ProviderUIManager(MockAPIClient())
+        ready, status = ui.get_role_config_status()
         assert ready is True
         assert "Ready" in status
-        assert "Coding" in status
-        assert "claude-main" in status
-        assert "Worktree" in status
-        assert "abc123" in status  # Last component of worktree path
+        assert "Usage: 80%" in status
 
-    def test_running_status_shows_worktree_path(self):
-        """Running state should show worktree path instead of model."""
+
+class TestMockProviderCardControls:
+    """Tests for mock-specific provider card controls."""
+
+    def test_provider_state_includes_duration_sliders_for_mock(self):
+        """Mock provider cards expose usage and duration controls."""
         from chad.ui.gradio.provider_ui import ProviderUIManager
 
         class MockAPIClient:
             def list_accounts(self):
-                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
+                return [MockAccount(name="mock-coding", provider="mock", role="CODING")]
 
-        ui = ProviderUIManager(MockAPIClient())
-        ready, status = ui.get_role_config_status(task_state="running", worktree_path="/tmp/worktree-abc123")
-        assert ready is True
-        assert "Running" in status
-        assert "Worktree" in status
-        assert "/tmp/worktree-abc123" in status
-        assert "Ready" not in status
+            def get_mock_remaining_usage(self, name):
+                return 0.4
 
-    def test_verifying_status_shows_worktree_path(self):
-        """Verifying state should show worktree path."""
-        from chad.ui.gradio.provider_ui import ProviderUIManager
+            def get_mock_run_duration_seconds(self, name):
+                return 60
 
-        class MockAPIClient:
-            def list_accounts(self):
-                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
+        ui = ProviderUIManager(MockAPIClient(), dev_mode=True)
+        state = ui.provider_state(card_slots=1)
 
-        ui = ProviderUIManager(MockAPIClient())
-        ready, status = ui.get_role_config_status(task_state="verifying", worktree_path="/tmp/worktree-abc123")
-        assert ready is True
-        assert "Verifying" in status
-        assert "Worktree" in status
-        assert "/tmp/worktree-abc123" in status
-
-    def test_completed_status_shows_agent_name(self):
-        """Completed state should show agent name (not worktree)."""
-        from chad.ui.gradio.provider_ui import ProviderUIManager
-
-        class MockAPIClient:
-            def list_accounts(self):
-                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
-
-        ui = ProviderUIManager(MockAPIClient())
-        ready, status = ui.get_role_config_status(task_state="completed", worktree_path="/tmp/worktree-abc123")
-        assert ready is True
-        assert "Completed" in status
-        assert "Agent" in status
-        assert "claude-main" in status
-        # Worktree path not shown for completed/failed states
-        assert "Worktree" not in status
-
-    def test_failed_status_shows_agent_name(self):
-        """Failed state should show agent name (not worktree)."""
-        from chad.ui.gradio.provider_ui import ProviderUIManager
-
-        class MockAPIClient:
-            def list_accounts(self):
-                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
-
-        ui = ProviderUIManager(MockAPIClient())
-        ready, status = ui.get_role_config_status(task_state="failed", worktree_path="/tmp/worktree-abc123")
-        assert ready is True
-        assert "Failed" in status
-        assert "Agent" in status
-        assert "claude-main" in status
-
-    def test_format_role_status_passes_parameters(self):
-        """format_role_status should pass task state and worktree path through."""
-        from chad.ui.gradio.provider_ui import ProviderUIManager
-
-        class MockAPIClient:
-            def list_accounts(self):
-                return [MockAccount(name="claude-main", provider="anthropic", role="CODING")]
-
-        ui = ProviderUIManager(MockAPIClient())
-        status = ui.format_role_status(task_state="running", worktree_path="/tmp/wt")
-        assert "Running" in status
-        assert "Worktree" in status
+        # Per-card tuple shape:
+        # column, group, header, account_name, usage_box, usage_slider, duration_slider, delete_btn
+        assert len(state) == 8
+        assert state[3] == "mock-coding"
+        assert state[4]["visible"] is False
+        assert state[5]["visible"] is True and state[5]["value"] == 60
+        assert state[6]["visible"] is True and state[6]["value"] == 60
 
 
 class TestVerificationPrompt:
@@ -2183,6 +4082,252 @@ class TestVerificationPrompt:
         assert passed is True
         assert summary == "All good!"
         assert issues == []
+
+    def test_parse_verification_response_prefers_json_with_passed(self):
+        """When multiple JSON blocks exist, parser should choose one with `passed`."""
+        from chad.util.prompts import parse_verification_response
+
+        response = """
+        ```json
+        {"change_summary": "Coding-style summary", "completion_status": "success"}
+        ```
+
+        ```json
+        {"passed": false, "summary": "Needs fixes", "issues": ["Missing test"]}
+        ```
+        """
+        passed, summary, issues = parse_verification_response(response)
+        assert passed is False
+        assert summary == "Needs fixes"
+        assert issues == ["Missing test"]
+
+    def test_run_verification_emits_parse_failure_status(self, monkeypatch, tmp_path):
+        """Verification should surface parse failures while retrying."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+        import chad.ui.gradio.web_ui as web_ui
+
+        class DummyAPIClient:
+            def get_account(self, name):
+                return MockAccount(name=name, provider="anthropic")
+
+        class DummyVerifier:
+            def __init__(self):
+                self._responses = iter([
+                    '```json\n{"change_summary": "wrong schema"}\n```',
+                    '```json\n{"change_summary": "still wrong"}\n```',
+                ])
+
+            def set_activity_callback(self, _callback):
+                return None
+
+            def start_session(self, _project_path, _system_prompt):
+                return True
+
+            def send_message(self, _message):
+                return None
+
+            def get_response(self, timeout=None):
+                return next(self._responses, None)
+
+            def stop_session(self):
+                return None
+
+        monkeypatch.setattr(web_ui, "create_provider", lambda *_args, **_kwargs: DummyVerifier())
+
+        activities = []
+
+        def on_activity(kind, detail):
+            activities.append((kind, detail))
+
+        ui = ChadWebUI(DummyAPIClient())
+        verified, feedback = ui._run_verification(
+            str(tmp_path), "coding output", "Task", "verifier", on_activity=on_activity
+        )
+
+        assert verified is False
+        assert feedback.startswith("Verification failed:")
+        assert "Missing required field 'passed'" in feedback
+        parse_status = [d for k, d in activities if k == "system" and "Verification parse failed" in d]
+        assert parse_status, "Expected parse-failure status updates during retries"
+
+    def test_run_verification_mock_provider_two_phase_fail_then_pass(self, monkeypatch, tmp_path):
+        """Mock provider should fail first verification attempt, then pass after revision."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.util.config_manager import ConfigManager
+        from chad.util.providers import MockProvider
+
+        class DummyAPIClient:
+            def get_account(self, name):
+                return MockAccount(name=name, provider="mock")
+
+        # Keep this test fast and isolated.
+        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
+        monkeypatch.setenv("CHAD_CONFIG", str(tmp_path / "test_chad.conf"))
+        config_mgr = ConfigManager()
+        config_mgr.save_config({"mock_remaining_usage": {"mock-verifier": 1.0}})
+        MockProvider._verification_counts.clear()
+
+        ui = ChadWebUI(DummyAPIClient())
+        first_verified, first_feedback = ui._run_verification(
+            str(tmp_path), "coding output", "Task", "mock-verifier"
+        )
+        second_verified, second_feedback = ui._run_verification(
+            str(tmp_path), "coding output", "Task", "mock-verifier"
+        )
+
+        assert first_verified is False
+        assert "timestamp" in first_feedback.lower()
+        assert second_verified is True
+        assert "verified that bugs.md was updated correctly" in second_feedback.lower()
+
+    def test_run_verification_recovers_after_one_parse_failure(self, monkeypatch, tmp_path):
+        """Verifier should retry once and succeed when second response is valid."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+        import chad.ui.gradio.web_ui as web_ui
+
+        class DummyAPIClient:
+            def get_account(self, name):
+                return MockAccount(name=name, provider="anthropic")
+
+        class DummyVerifier:
+            def __init__(self, response):
+                self._response = response
+
+            def set_activity_callback(self, _callback):
+                return None
+
+            def start_session(self, _project_path, _system_prompt):
+                return True
+
+            def send_message(self, _message):
+                return None
+
+            def get_response(self, timeout=None):
+                return self._response
+
+            def stop_session(self):
+                return None
+
+        responses = [
+            '```json\n{"change_summary": "wrong schema"}\n```',
+            '```json\n{"passed": true, "summary": "Looks good"}\n```',
+        ]
+        create_calls = {"count": 0}
+
+        def create_provider_stub(*_args, **_kwargs):
+            idx = create_calls["count"]
+            create_calls["count"] += 1
+            return DummyVerifier(responses[min(idx, len(responses) - 1)])
+
+        monkeypatch.setattr(web_ui, "create_provider", create_provider_stub)
+        monkeypatch.setattr(web_ui, "check_verification_mentioned", lambda *_args, **_kwargs: True)
+
+        ui = ChadWebUI(DummyAPIClient())
+        verified, feedback = ui._run_verification(
+            str(tmp_path), "coding output", "Task", "verifier"
+        )
+
+        assert verified is True
+        assert feedback == "Looks good"
+        assert create_calls["count"] == 2
+
+    def test_run_verification_retry_uses_fresh_provider_session(self, monkeypatch, tmp_path):
+        """Retry should create a new verifier instance instead of reusing prior session state."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+        import chad.ui.gradio.web_ui as web_ui
+
+        class DummyAPIClient:
+            def get_account(self, name):
+                return MockAccount(name=name, provider="openai")
+
+        class DummyVerifier:
+            def __init__(self, response):
+                self._response = response
+
+            def set_activity_callback(self, _callback):
+                return None
+
+            def start_session(self, _project_path, _system_prompt):
+                return True
+
+            def send_message(self, _message):
+                return None
+
+            def get_response(self, timeout=None):
+                return self._response
+
+            def stop_session(self):
+                return None
+
+        responses = [
+            '```json\n{"change_summary": "wrong schema"}\n```',
+            '```json\n{"passed": true, "summary": "Looks good"}\n```',
+        ]
+        create_calls = {"count": 0}
+
+        def create_provider_stub(*_args, **_kwargs):
+            idx = create_calls["count"]
+            create_calls["count"] += 1
+            return DummyVerifier(responses[min(idx, len(responses) - 1)])
+
+        monkeypatch.setattr(web_ui, "create_provider", create_provider_stub)
+        monkeypatch.setattr(web_ui, "check_verification_mentioned", lambda *_args, **_kwargs: True)
+
+        ui = ChadWebUI(DummyAPIClient())
+        verified, feedback = ui._run_verification(
+            str(tmp_path), "coding output", "Task", "verifier"
+        )
+
+        assert verified is True
+        assert feedback == "Looks good"
+        assert create_calls["count"] == 2
+
+    def test_run_verification_uses_two_phase_prompts(self, monkeypatch, tmp_path):
+        """Verification should run exploration first, then a strict conclusion JSON prompt."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+        import chad.ui.gradio.web_ui as web_ui
+
+        class DummyAPIClient:
+            def get_account(self, name):
+                return MockAccount(name=name, provider="openai")
+
+        sent_messages = []
+
+        class DummyVerifier:
+            def __init__(self):
+                self._responses = iter(
+                    [
+                        "Exploration complete. I reviewed the changes.",
+                        '```json\n{"passed": true, "summary": "Looks good"}\n```',
+                    ]
+                )
+
+            def set_activity_callback(self, _callback):
+                return None
+
+            def start_session(self, _project_path, _system_prompt):
+                return True
+
+            def send_message(self, message):
+                sent_messages.append(message)
+
+            def get_response(self, timeout=None):
+                return next(self._responses, None)
+
+            def stop_session(self):
+                return None
+
+        monkeypatch.setattr(web_ui, "create_provider", lambda *_args, **_kwargs: DummyVerifier())
+        monkeypatch.setattr(web_ui, "check_verification_mentioned", lambda *_args, **_kwargs: True)
+
+        ui = ChadWebUI(DummyAPIClient())
+        verified, feedback = ui._run_verification(
+            str(tmp_path), "coding output", "Task", "verifier"
+        )
+
+        assert verified is True
+        assert feedback == "Looks good"
+        assert len(sent_messages) == 2
 
 
 class TestAnsiToHtml:
@@ -2373,6 +4518,28 @@ class TestPreferredVerificationModel:
         # Should fall back to the account's stored model
         assert state.model_value == "claude-sonnet-4-20250514"
 
+    def test_build_verification_dropdown_same_as_mock_filters_foreign_model(self, web_ui, mock_api_client):
+        """SAME_AS_CODING should not retain a model that belongs to a different provider."""
+        mock_account = MockAccount(
+            name="testy",
+            provider="mock",
+            role="CODING",
+            model="claude-sonnet-4-20250514",
+            reasoning="default",
+        )
+        mock_api_client.list_accounts.return_value = [mock_account]
+        mock_api_client.get_account.side_effect = lambda _: mock_account
+
+        state = web_ui._build_verification_dropdown_state(
+            coding_agent="testy",
+            verification_agent=web_ui.SAME_AS_CODING,
+            coding_model_value="claude-sonnet-4-20250514",
+            coding_reasoning_value="default",
+        )
+
+        assert state.model_choices == ["default"]
+        assert state.model_value == "default"
+
     def test_resolve_verification_preferences_persists_model(self, web_ui, mock_api_client):
         """Test that _resolve_verification_preferences persists the verification model to config."""
         # Call with an explicit verification model
@@ -2406,12 +4573,57 @@ class TestPreferredVerificationModel:
         mock_api_client.set_preferred_verification_model.assert_not_called()
 
 
+class TestPromptPreviews:
+    """Tests for build_prompt_previews which pre-fills prompts with project docs."""
+
+    def test_previews_without_project_path(self):
+        """Previews with no project path should have {task} placeholder and no docs."""
+        from chad.util.prompts import build_prompt_previews
+
+        previews = build_prompt_previews(None)
+        assert "{task}" in previews.exploration
+        assert "{task}" in previews.implementation
+        assert "{task}" in previews.verification
+        assert "{exploration_output}" in previews.implementation
+        assert "Project Documentation" not in previews.exploration
+
+    def test_previews_with_project_path(self, tmp_path):
+        """Previews with a project path should include docs and verification instructions."""
+        from chad.util.prompts import build_prompt_previews
+
+        # Create a project with an AGENTS.md doc
+        agents_md = tmp_path / "AGENTS.md"
+        agents_md.write_text("# My Project\nDo things.")
+
+        previews = build_prompt_previews(tmp_path)
+        # Should still have {task} placeholder
+        assert "{task}" in previews.exploration
+        assert "{task}" in previews.implementation
+        # Should have project docs filled in (reference to AGENTS.md)
+        assert "AGENTS.md" in previews.exploration
+        assert "AGENTS.md" in previews.implementation
+
+    def test_previews_keep_exploration_output_placeholder(self):
+        """Implementation preview should keep {exploration_output} as placeholder."""
+        from chad.util.prompts import build_prompt_previews
+
+        previews = build_prompt_previews(None)
+        assert "{exploration_output}" in previews.implementation
+
+    def test_previews_verification_has_coding_output_placeholder(self):
+        """Verification preview should keep {coding_output} as placeholder."""
+        from chad.util.prompts import build_prompt_previews
+
+        previews = build_prompt_previews(None)
+        assert "{coding_output}" in previews.verification
+
+
 class TestScreenshotUpload:
     """Tests for screenshot upload functionality."""
 
-    def test_build_coding_prompt_includes_screenshot_paths(self, tmp_path):
-        """build_coding_prompt should include screenshot file paths when provided."""
-        from chad.util.prompts import build_coding_prompt
+    def test_exploration_prompt_includes_screenshot_paths(self, tmp_path):
+        """build_exploration_prompt should include screenshot file paths when provided."""
+        from chad.util.prompts import build_exploration_prompt
 
         # Create test screenshot files
         screenshot1 = tmp_path / "screenshot1.png"
@@ -2419,7 +4631,7 @@ class TestScreenshotUpload:
         screenshot1.write_bytes(b"PNG mock data 1")
         screenshot2.write_bytes(b"PNG mock data 2")
 
-        prompt = build_coding_prompt(
+        prompt = build_exploration_prompt(
             task="Fix the UI layout",
             screenshots=[str(screenshot1), str(screenshot2)],
         )
@@ -2430,15 +4642,49 @@ class TestScreenshotUpload:
         # Should have a screenshots section
         assert "Screenshot" in prompt or "screenshot" in prompt
 
-    def test_build_coding_prompt_works_without_screenshots(self):
-        """build_coding_prompt should work without screenshots (backwards compatible)."""
-        from chad.util.prompts import build_coding_prompt
+    def test_exploration_prompt_works_without_screenshots(self):
+        """build_exploration_prompt should work without screenshots (backwards compatible)."""
+        from chad.util.prompts import build_exploration_prompt
 
-        prompt = build_coding_prompt(task="Simple task")
+        prompt = build_exploration_prompt(task="Simple task")
 
         assert "Simple task" in prompt
         # No screenshot references should be present
         assert "Screenshot" not in prompt
+
+    def test_exploration_prompt_includes_phase_info(self):
+        """Exploration prompt should include phase info, class-map guidance, and progress JSON requirement."""
+        from chad.util.prompts import build_exploration_prompt
+
+        prompt = build_exploration_prompt(task="Do thing")
+        # Should have Phase 1 marker
+        assert "Phase 1" in prompt
+        # Exploration should steer agents toward using the class map when present
+        assert "Class Map" in prompt
+        # Progress update requirement should be present
+        assert "progress" in prompt.lower()
+        # Time constraint should be present (60 seconds for exploration)
+        assert "60 seconds" in prompt or "within" in prompt.lower()
+
+    def test_progress_is_extracted_correctly(self):
+        """Progress JSON should be correctly extracted from agent output.
+
+        The progress update allows users to see what the agent found during
+        initial exploration before it continues with the remaining steps.
+        """
+        from chad.util.prompts import extract_progress_update
+
+        # Verify progress is correctly extracted from agent output
+        agent_output = """
+        I've explored the codebase and found the relevant files.
+        ```json
+        {"type": "progress", "summary": "Found main entry point", "location": "src/main.py:42"}
+        ```
+        """
+        progress = extract_progress_update(agent_output)
+        assert progress is not None
+        assert progress.summary == "Found main entry point"
+        assert progress.location == "src/main.py:42"
 
     def test_task_create_schema_accepts_screenshots(self):
         """TaskCreate schema should accept an optional screenshots field."""
@@ -2460,6 +4706,30 @@ class TestScreenshotUpload:
             screenshots=["/tmp/screenshot1.png", "/tmp/screenshot2.png"],
         )
         assert task_with_screenshots.screenshots == ["/tmp/screenshot1.png", "/tmp/screenshot2.png"]
+
+    def test_task_create_schema_accepts_override_prompts(self):
+        """TaskCreate schema should accept optional override prompt fields."""
+        from chad.server.api.schemas.task import TaskCreate
+
+        # Without overrides
+        task = TaskCreate(
+            project_path="/tmp/project",
+            task_description="Fix bug",
+            coding_agent="claude",
+        )
+        assert task.override_exploration_prompt is None
+        assert task.override_implementation_prompt is None
+
+        # With overrides
+        task_with_overrides = TaskCreate(
+            project_path="/tmp/project",
+            task_description="Fix bug",
+            coding_agent="claude",
+            override_exploration_prompt="Custom exploration",
+            override_implementation_prompt="Custom implementation",
+        )
+        assert task_with_overrides.override_exploration_prompt == "Custom exploration"
+        assert task_with_overrides.override_implementation_prompt == "Custom implementation"
 
     def test_api_client_start_task_accepts_screenshots(self):
         """APIClient.start_task should accept screenshots parameter."""
@@ -2490,3 +4760,207 @@ class TestScreenshotUpload:
             request_data = call_args.kwargs.get("json", {})
             assert "screenshots" in request_data
             assert request_data["screenshots"] == ["/tmp/screenshot1.png"]
+
+
+class TestFollowupEventLogging:
+    """Test that send_followup() logs events to the session event log."""
+
+    @pytest.fixture
+    def web_ui(self):
+        from chad.ui.gradio.web_ui import ChadWebUI
+        client = Mock()
+        claude_account = MockAccount(name="claude", provider="mock", role="CODING")
+        client.list_accounts.return_value = [claude_account]
+        client.get_account.return_value = claude_account
+        client.get_verification_agent.return_value = None
+        client.get_preferences.return_value = Mock(last_project_path=None, dark_mode=True, ui_mode="gradio")
+        client.get_cleanup_settings.return_value = Mock(retention_days=7, auto_cleanup=True)
+        client.get_max_verification_attempts.return_value = 3
+        ui = ChadWebUI(client)
+        ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/codex"))
+        return ui
+
+    def _setup_session(self, web_ui, session_id, git_repo, monkeypatch):
+        """Set up a session with a MockProvider and EventLog."""
+        from chad.util.event_log import EventLog
+        git_mgr = GitWorktreeManager(git_repo)
+        worktree_path, base_commit = git_mgr.create_worktree(session_id)
+
+        session = web_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = worktree_path
+        session.worktree_branch = git_mgr._branch_name(session_id)
+        session.worktree_base_commit = base_commit
+        session.active = True
+        session.chat_history = [{"role": "user", "content": "**Task**\n\nInitial task"}]
+        session.task_description = "Initial task"
+
+        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
+        config = ModelConfig(provider="mock", model_name="default", account_name="claude")
+        provider = MockProvider(config)
+        provider._get_remaining_usage = lambda: 0.5
+        provider._decrement_usage = lambda amount=None: None
+        provider.start_session(str(worktree_path))
+        session.provider = provider
+        session.coding_account = "claude"
+        session.config = config
+
+        # Set up event log (remove any stale log from previous runs)
+        session.event_log = EventLog(session_id)
+        if session.event_log.log_path.exists():
+            session.event_log.log_path.unlink()
+            session.event_log = EventLog(session_id)
+        session.event_log.start_turn()
+        return session
+
+    def _get_events(self, session):
+        """Read all events from the session's event log."""
+        import json
+        events = []
+        log_path = session.event_log.log_path
+        if log_path.exists():
+            for line in log_path.read_text().splitlines():
+                if line.strip():
+                    events.append(json.loads(line))
+        return events
+
+    def test_followup_logs_user_and_assistant_events(self, web_ui, git_repo, monkeypatch):
+        """Follow-up should log UserMessageEvent and AssistantMessageEvent."""
+        session = self._setup_session(web_ui, "event-log-basic", git_repo, monkeypatch)
+
+        list(web_ui.send_followup(
+            "event-log-basic",
+            "Fix the button color",
+            session.chat_history,
+            coding_agent="claude",
+            verification_agent=web_ui.VERIFICATION_NONE,
+        ))
+
+        events = self._get_events(session)
+        event_types = [e["type"] for e in events]
+        assert "user_message" in event_types, f"Expected user_message event, got: {event_types}"
+        assert "assistant_message" in event_types, f"Expected assistant_message event, got: {event_types}"
+
+        # Check sequence numbers are monotonically increasing
+        sequences = [e["seq"] for e in events if e["type"] in ("user_message", "assistant_message")]
+        assert sequences == sorted(sequences), f"Sequences not monotonic: {sequences}"
+
+    def test_followup_logs_raw_message_not_resume_prompt(self, web_ui, git_repo, monkeypatch):
+        """Logged UserMessageEvent should contain the raw user message, not modified versions."""
+        session = self._setup_session(web_ui, "event-log-raw", git_repo, monkeypatch)
+
+        raw_message = "Please change the font size"
+        list(web_ui.send_followup(
+            "event-log-raw",
+            raw_message,
+            session.chat_history,
+            coding_agent="claude",
+            verification_agent=web_ui.VERIFICATION_NONE,
+            screenshots=["/tmp/fake_screenshot.png"],
+        ))
+
+        events = self._get_events(session)
+        user_events = [e for e in events if e["type"] == "user_message"]
+        assert len(user_events) >= 1
+        # The logged content should be the raw message, not the screenshot-appended version
+        assert user_events[0]["content"] == raw_message
+
+    def test_followup_with_verification_logs_verification_events(self, web_ui, git_repo, monkeypatch):
+        """Follow-up with verification should log VerificationAttemptEvent."""
+        session = self._setup_session(web_ui, "event-log-verify", git_repo, monkeypatch)
+
+        # Mock _run_verification to return success
+        monkeypatch.setattr(
+            web_ui, "_run_verification",
+            lambda *args, **kwargs: (True, "All checks passed"),
+        )
+
+        list(web_ui.send_followup(
+            "event-log-verify",
+            "Add a test",
+            session.chat_history,
+            coding_agent="claude",
+            verification_agent="claude",
+        ))
+
+        events = self._get_events(session)
+        event_types = [e["type"] for e in events]
+        assert "user_message" in event_types
+        assert "assistant_message" in event_types
+        assert "verification_attempt" in event_types
+
+        verify_events = [e for e in events if e["type"] == "verification_attempt"]
+        assert verify_events[0]["passed"] is True
+
+    def test_followup_verification_revision_logs_all_events(self, web_ui, git_repo, monkeypatch):
+        """Verification fail + revision should log the full event sequence."""
+        session = self._setup_session(web_ui, "event-log-revision", git_repo, monkeypatch)
+
+        # First call fails verification, second passes
+        verification_calls = {"count": 0}
+
+        def mock_verification(*args, **kwargs):
+            verification_calls["count"] += 1
+            if verification_calls["count"] == 1:
+                return (False, "Tests are failing")
+            return (True, "All good now")
+
+        monkeypatch.setattr(web_ui, "_run_verification", mock_verification)
+
+        list(web_ui.send_followup(
+            "event-log-revision",
+            "Fix the layout",
+            session.chat_history,
+            coding_agent="claude",
+            verification_agent="claude",
+        ))
+
+        events = self._get_events(session)
+        event_types = [e["type"] for e in events]
+
+        # Should have: user_message (followup), assistant_message (coding),
+        # verification_attempt (fail), user_message (revision), assistant_message (revision),
+        # verification_attempt (pass)
+        assert event_types.count("user_message") >= 2, f"Expected >=2 user_message events, got: {event_types}"
+        assert event_types.count("assistant_message") >= 2, f"Expected >=2 assistant_message events, got: {event_types}"
+        assert event_types.count("verification_attempt") == 2, f"Expected 2 verification_attempt events, got: {event_types}"
+
+        # First verification should be failed, second should pass
+        verify_events = [e for e in events if e["type"] == "verification_attempt"]
+        assert verify_events[0]["passed"] is False
+        assert verify_events[1]["passed"] is True
+
+    def test_followup_verification_uses_followup_message_as_task_description(
+        self, web_ui, git_repo, monkeypatch
+    ):
+        """Follow-up after merge (empty task_description) should use the follow-up message for verification."""
+        session = self._setup_session(web_ui, "event-log-empty-desc", git_repo, monkeypatch)
+
+        # Simulate post-merge state: task_description cleared
+        session.task_description = ""
+
+        # Track what task_description is passed to _run_verification
+        captured_args = {}
+
+        def mock_verification(*args, **kwargs):
+            # _run_verification(path, coding_output, task_description, ...)
+            captured_args["task_description"] = args[2] if len(args) > 2 else kwargs.get("task_description")
+            return (True, "All checks passed")
+
+        monkeypatch.setattr(web_ui, "_run_verification", mock_verification)
+
+        followup_msg = "Refactor the database layer"
+        list(web_ui.send_followup(
+            "event-log-empty-desc",
+            followup_msg,
+            session.chat_history,
+            coding_agent="claude",
+            verification_agent="claude",
+        ))
+
+        # Verification must receive the follow-up message, not an empty string
+        assert captured_args.get("task_description") == followup_msg, (
+            f"Expected task_description='{followup_msg}', got '{captured_args.get('task_description')}'"
+        )
+        # session.task_description should also be updated
+        assert session.task_description == followup_msg

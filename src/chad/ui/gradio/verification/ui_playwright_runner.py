@@ -245,6 +245,17 @@ def create_temp_env(screenshot_mode: bool = True) -> TempChadEnv:
     )
 
 
+def _extract_announced_port(line: str) -> int | None:
+    """Extract API/UI port announcements from Chad startup logs."""
+    match = re.search(r"CHAD_PORT=(\d+)", line)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"Running on local URL:\s*https?://[^:]+:(\d+)", line)
+    if match:
+        return int(match.group(1))
+    return None
+
+
 def _wait_for_port(process: subprocess.Popen[str], timeout: int = 30) -> int:
     """Wait for the Chad process to announce its port."""
     start = time.time()
@@ -252,10 +263,10 @@ def _wait_for_port(process: subprocess.Popen[str], timeout: int = 30) -> int:
         line = process.stdout.readline()
         if not line and process.poll() is not None:
             raise ChadLaunchError("Chad server exited unexpectedly while waiting for port")
-        match = re.search(r"CHAD_PORT=(\d+)", line)
-        if match:
-            return int(match.group(1))
-    raise ChadLaunchError("Timed out waiting for CHAD_PORT announcement")
+        port = _extract_announced_port(line)
+        if port is not None:
+            return port
+    raise ChadLaunchError("Timed out waiting for server port announcement")
 
 
 def _wait_for_ready(port: int, timeout: int = 60) -> None:
@@ -395,9 +406,14 @@ def open_playwright_page(
             time.sleep(render_delay)
             if tab:
                 _select_tab(page, tab)
-            # Ensure core run tab elements are present before yielding
-            page.wait_for_selector("#agent-chatbot", timeout=20000)
-            page.wait_for_selector(".merge-section", state="attached", timeout=20000)
+            # Ensure core elements are present before yielding (tab-specific)
+            normalized_tab = (tab or "run").strip().lower()
+            if normalized_tab in {"run", "task", "default", None}:
+                page.wait_for_selector("#agent-chatbot", timeout=20000)
+                page.wait_for_selector(".merge-section", state="attached", timeout=20000)
+            else:
+                # Setup/Providers tab - wait for config panel
+                page.wait_for_selector("#config-panel", state="attached", timeout=20000)
             yield page
         finally:
             browser.close()

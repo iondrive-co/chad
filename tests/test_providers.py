@@ -6,6 +6,7 @@ import platform
 import sys
 import textwrap
 import time
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -16,6 +17,11 @@ from chad.util.providers import (
     GeminiCodeAssistProvider,
     OpenAICodexProvider,
     MistralVibeProvider,
+    QwenCodeProvider,
+    OpenCodeProvider,
+    KimiCodeProvider,
+    MockProvider,
+    MockProviderQuotaError,
     parse_codex_output,
 )
 
@@ -42,6 +48,16 @@ class TestCreateProvider:
         config = ModelConfig(provider="mistral", model_name="default")
         provider = create_provider(config)
         assert isinstance(provider, MistralVibeProvider)
+
+    def test_create_opencode_provider(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = create_provider(config)
+        assert isinstance(provider, OpenCodeProvider)
+
+    def test_create_kimi_provider(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = create_provider(config)
+        assert isinstance(provider, KimiCodeProvider)
 
     def test_unsupported_provider(self):
         config = ModelConfig(provider="unsupported", model_name="model")
@@ -207,6 +223,92 @@ def test_strip_ansi_codes_helper():
 
     colored = "\x1b[31mError\x1b[0m message"
     assert _strip_ansi_codes(colored) == "Error message"
+
+
+class TestCodexNeedsContinuation:
+    """Test cases for _codex_needs_continuation helper."""
+
+    def test_empty_message_returns_false(self):
+        from chad.util.providers import _codex_needs_continuation
+
+        assert _codex_needs_continuation("") is False
+        assert _codex_needs_continuation(None) is False
+
+    def test_progress_without_completion_needs_continuation(self):
+        """Progress markers without completion markers should trigger continuation."""
+        from chad.util.providers import _codex_needs_continuation
+
+        # Progress update only (incomplete checkpoint)
+        message = """**Progress:** Found the relevant files in src/api/
+**Location:** src/api/client.py:45
+**Next:** Will implement the retry logic now"""
+        assert _codex_needs_continuation(message) is True
+
+    def test_progress_with_completion_does_not_need_continuation(self):
+        """Progress markers with completion markers should NOT trigger continuation."""
+        from chad.util.providers import _codex_needs_continuation
+
+        # Full response with both progress and completion
+        message = """**Progress:** Implemented retry logic
+**Location:** src/api/client.py:45
+**Next:** Done
+
+```json
+{
+  "change_summary": "Added retry logic to API client",
+  "files_changed": ["src/api/client.py"],
+  "completion_status": "success"
+}
+```"""
+        assert _codex_needs_continuation(message) is False
+
+    def test_completion_only_does_not_need_continuation(self):
+        """Completion markers without progress should NOT trigger continuation."""
+        from chad.util.providers import _codex_needs_continuation
+
+        message = """Task complete.
+
+```json
+{
+  "change_summary": "Fixed the bug",
+  "files_changed": ["src/bug.py"],
+  "completion_status": "success"
+}
+```"""
+        assert _codex_needs_continuation(message) is False
+
+    def test_plain_message_does_not_need_continuation(self):
+        """Plain messages without any markers should NOT trigger continuation."""
+        from chad.util.providers import _codex_needs_continuation
+
+        message = "I've completed the task. The changes look good."
+        assert _codex_needs_continuation(message) is False
+
+    def test_partial_progress_markers(self):
+        """Messages with only some progress markers should still trigger continuation."""
+        from chad.util.providers import _codex_needs_continuation
+
+        # Only **Next:** marker
+        message = "**Next:** Will write the tests now"
+        assert _codex_needs_continuation(message) is True
+
+        # Only **Progress:** marker
+        message = "**Progress:** Found 3 relevant files to modify"
+        assert _codex_needs_continuation(message) is True
+
+    def test_partial_completion_markers_block_continuation(self):
+        """Any completion marker should block continuation."""
+        from chad.util.providers import _codex_needs_continuation
+
+        # Progress with just change_summary
+        message = '''**Progress:** Done
+{"change_summary": "Fixed it"}'''
+        assert _codex_needs_continuation(message) is False
+
+        # Progress with just completion_status
+        message = '''**Progress:** Done
+{"completion_status": "success"}'''
+        assert _codex_needs_continuation(message) is False
 
 
 def test_parse_codex_output_preserves_multiline_content():
@@ -988,8 +1090,23 @@ class TestImportOnWindows:
 
         import chad.util.providers as providers
 
-        importlib.reload(providers)
-        assert providers.__name__ == "chad.util.providers"
+        # Save class references before reload - importlib.reload() modifies
+        # the module in-place, creating new class definitions. We need to
+        # restore the original classes to prevent class identity issues in
+        # subsequent tests (e.g., pytest.raises(MockProviderQuotaError) won't
+        # match if the class was redefined by reload).
+        original_classes = {
+            "MockProviderQuotaError": providers.MockProviderQuotaError,
+            "MockProvider": providers.MockProvider,
+        }
+
+        try:
+            importlib.reload(providers)
+            assert providers.__name__ == "chad.util.providers"
+        finally:
+            # Restore original class definitions
+            for name, cls in original_classes.items():
+                setattr(providers, name, cls)
 
     @patch("chad.util.providers._stream_pty_output", return_value=("", False, True))
     @patch("chad.util.providers._start_pty_process")
@@ -1357,6 +1474,154 @@ class TestCodexJsonEventParsing:
         assert provider.thread_id is not None
 
 
+class TestCodexProgressCheckpointResume:
+    """Test cases for auto-resume on progress checkpoint detection."""
+
+    def test_progress_checkpoint_triggers_resume(self):
+        """Progress checkpoint without completion markers should trigger auto-resume."""
+        import json
+        import os
+        import tempfile
+
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            provider.project_path = tmpdir
+            provider.cli_path = "/bin/echo"  # Use echo as a placeholder
+
+            # Simulate first call returning progress checkpoint
+            progress_events = [
+                {"type": "thread.started", "thread_id": "test-thread-123"},
+                {"type": "turn.started"},
+                {"type": "item.completed", "item": {
+                    "type": "agent_message",
+                    "text": "**Progress:** Found relevant files\n**Location:** src/api/\n**Next:** Will implement now"
+                }},
+                {"type": "turn.completed"},
+            ]
+
+            # Simulate second call (resume) returning completion
+            completion_events = [
+                {"type": "thread.started", "thread_id": "test-thread-456"},
+                {"type": "turn.started"},
+                {"type": "item.completed", "item": {
+                    "type": "agent_message",
+                    "text": '```json\n{"change_summary": "Implemented feature", "files_changed": ["src/api/client.py"], "completion_status": "success"}\n```'
+                }},
+                {"type": "turn.completed"},
+            ]
+
+            # Create pipes for both calls
+            read_fd1, write_fd1 = os.pipe()
+            read_fd2, write_fd2 = os.pipe()
+
+            # Write events to first pipe
+            for event in progress_events:
+                os.write(write_fd1, (json.dumps(event) + "\n").encode())
+            os.close(write_fd1)
+
+            # Write events to second pipe
+            for event in completion_events:
+                os.write(write_fd2, (json.dumps(event) + "\n").encode())
+            os.close(write_fd2)
+
+            # Track which pipe to use
+            pipes_used = [read_fd1, read_fd2]
+            pipe_index = [0]
+
+            def mock_start_pty(cmd, cwd=None, env=None):
+                mock_process = Mock()
+                mock_process.poll.return_value = 0
+                mock_process.stdin = Mock()
+                mock_process.pid = 12345 + pipe_index[0]
+                mock_process.returncode = 0
+                mock_process.wait.return_value = 0
+                fd = pipes_used[pipe_index[0]]
+                pipe_index[0] += 1
+                return mock_process, fd
+
+            activity_notifications = []
+
+            def mock_notify(activity_type, data=""):
+                activity_notifications.append((activity_type, data))
+
+            provider._notify_activity = mock_notify
+
+            with patch("chad.util.providers._start_pty_process", side_effect=mock_start_pty):
+                provider.send_message("Do the task")
+                response = provider.get_response(timeout=10.0)
+
+            # Should have detected checkpoint and resumed
+            assert provider.thread_id == "test-thread-456"  # Updated after resume
+            assert "**Progress:**" in response  # Original progress is included
+            assert '"change_summary"' in response  # Completion is included
+            assert "---" in response  # Separator between progress and completion
+
+            # Check that checkpoint notification was sent
+            stream_notifications = [n for n in activity_notifications if n[0] == "stream"]
+            checkpoint_found = any("checkpoint detected" in n[1].lower() for n in stream_notifications)
+            assert checkpoint_found, "Should notify about checkpoint detection"
+
+    def test_completion_does_not_trigger_resume(self):
+        """Messages with completion markers should NOT trigger auto-resume."""
+        import json
+        import os
+        import tempfile
+
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            provider.project_path = tmpdir
+            provider.cli_path = "/bin/echo"
+
+            # Events with both progress AND completion (should not trigger resume)
+            events = [
+                {"type": "thread.started", "thread_id": "test-thread-123"},
+                {"type": "turn.started"},
+                {"type": "item.completed", "item": {
+                    "type": "agent_message",
+                    "text": '**Progress:** Done\n\n```json\n{"change_summary": "Fixed it", "files_changed": ["a.py"], "completion_status": "success"}\n```'
+                }},
+                {"type": "turn.completed"},
+            ]
+
+            read_fd, write_fd = os.pipe()
+            for event in events:
+                os.write(write_fd, (json.dumps(event) + "\n").encode())
+            os.close(write_fd)
+
+            def mock_start_pty(cmd, cwd=None, env=None):
+                mock_process = Mock()
+                mock_process.poll.return_value = 0
+                mock_process.stdin = Mock()
+                mock_process.pid = 12345
+                mock_process.returncode = 0
+                mock_process.wait.return_value = 0
+                return mock_process, read_fd
+
+            activity_notifications = []
+
+            def mock_notify(activity_type, data=""):
+                activity_notifications.append((activity_type, data))
+
+            provider._notify_activity = mock_notify
+
+            with patch("chad.util.providers._start_pty_process", side_effect=mock_start_pty):
+                provider.send_message("Do the task")
+                response = provider.get_response(timeout=10.0)
+
+            # Should NOT have tried to resume (completion markers present)
+            assert '"change_summary"' in response
+            assert "---" not in response  # No separator means no resume happened
+
+            # Check that no checkpoint notification was sent
+            stream_notifications = [n for n in activity_notifications if n[0] == "stream"]
+            checkpoint_found = any("checkpoint detected" in n[1].lower() for n in stream_notifications)
+            assert not checkpoint_found, "Should NOT notify about checkpoint when completion present"
+
+
 class TestCodexLiveViewFormatting:
     """Regression tests for Codex live view text formatting."""
 
@@ -1553,6 +1818,216 @@ class TestMistralVibeProvider:
         assert provider.current_message == "Hello"
 
 
+class TestOpenCodeProvider:
+    """Test cases for OpenCodeProvider."""
+
+    @patch("chad.util.providers._ensure_cli_tool", return_value=(True, "/bin/opencode"))
+    def test_start_session_success(self, mock_ensure):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+
+        result = provider.start_session("/tmp/test_project")
+        assert result is True
+        assert provider.project_path == "/tmp/test_project"
+        mock_ensure.assert_called_once_with("opencode", provider._notify_activity)
+
+    @patch("chad.util.providers._ensure_cli_tool", return_value=(False, "CLI not found"))
+    def test_start_session_failure(self, mock_ensure):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+
+        result = provider.start_session("/tmp/test_project")
+        assert result is False
+        mock_ensure.assert_called_once_with("opencode", provider._notify_activity)
+
+    @patch("chad.util.providers._ensure_cli_tool", return_value=(True, "/bin/opencode"))
+    def test_start_session_with_system_prompt(self, mock_ensure):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+
+        result = provider.start_session("/tmp/test_project", system_prompt="Initial prompt")
+        assert result is True
+        assert provider.system_prompt == "Initial prompt"
+        # System prompt is prepended to messages when no session_id
+        provider.send_message("Test message")
+        assert "Initial prompt" in provider.current_message
+        assert "Test message" in provider.current_message
+
+    def test_send_message(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+
+        provider.send_message("Hello")
+        assert provider.current_message == "Hello"
+
+    def test_send_message_without_system_prompt_on_continuation(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+        provider.system_prompt = "System prompt"
+        provider.session_id = "ses_abc123"  # Session already established
+
+        provider.send_message("Follow-up message")
+        # Should not include system prompt since session_id is set
+        assert provider.current_message == "Follow-up message"
+
+    def test_is_alive_with_session_id(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+
+        # Initially not alive
+        assert provider.is_alive() is False
+
+        # With session_id, should be alive
+        provider.session_id = "ses_abc123"
+        assert provider.is_alive() is True
+
+    def test_stop_session_clears_session_id(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+        provider.session_id = "ses_abc123"
+
+        provider.stop_session()
+        assert provider.session_id is None
+
+    def test_supports_multi_turn(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+        assert provider.supports_multi_turn() is True
+
+    def test_get_session_id(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+
+        # Initially None
+        assert provider.get_session_id() is None
+
+        # After setting session_id
+        provider.session_id = "ses_xyz789"
+        assert provider.get_session_id() == "ses_xyz789"
+
+    def test_supports_usage_reporting(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+        assert provider.supports_usage_reporting() is True
+
+    def test_get_response_no_message(self):
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+        assert provider.get_response(timeout=1) == ""
+
+
+class TestKimiCodeProvider:
+    """Test cases for KimiCodeProvider."""
+
+    @patch("chad.util.providers._ensure_cli_tool", return_value=(True, "/bin/kimi"))
+    def test_start_session_success(self, mock_ensure):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+
+        result = provider.start_session("/tmp/test_project")
+        assert result is True
+        assert provider.project_path == "/tmp/test_project"
+        mock_ensure.assert_called_once_with("kimi", provider._notify_activity)
+
+    @patch("chad.util.providers._ensure_cli_tool", return_value=(False, "CLI not found"))
+    def test_start_session_failure(self, mock_ensure):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+
+        result = provider.start_session("/tmp/test_project")
+        assert result is False
+        mock_ensure.assert_called_once_with("kimi", provider._notify_activity)
+
+    @patch("chad.util.providers._ensure_cli_tool", return_value=(True, "/bin/kimi"))
+    def test_start_session_with_system_prompt(self, mock_ensure):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+
+        result = provider.start_session("/tmp/test_project", system_prompt="Initial prompt")
+        assert result is True
+        assert provider.system_prompt == "Initial prompt"
+        # System prompt is prepended to messages when no session_id
+        provider.send_message("Test message")
+        assert "Initial prompt" in provider.current_message
+        assert "Test message" in provider.current_message
+
+    def test_send_message(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+
+        provider.send_message("Hello")
+        assert provider.current_message == "Hello"
+
+    def test_send_message_without_system_prompt_on_continuation(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+        provider.system_prompt = "System prompt"
+        provider.session_id = "ses_abc123"  # Session already established
+
+        provider.send_message("Follow-up message")
+        # Should not include system prompt since session_id is set
+        assert provider.current_message == "Follow-up message"
+
+    def test_is_alive_with_session_id(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+
+        # Initially not alive
+        assert provider.is_alive() is False
+
+        # With session_id, should be alive
+        provider.session_id = "ses_abc123"
+        assert provider.is_alive() is True
+
+    def test_stop_session_clears_session_id(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+        provider.session_id = "ses_abc123"
+
+        provider.stop_session()
+        assert provider.session_id is None
+
+    def test_supports_multi_turn(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+        assert provider.supports_multi_turn() is True
+
+    def test_get_session_id(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+
+        # Initially None
+        assert provider.get_session_id() is None
+
+        # After setting session_id
+        provider.session_id = "ses_xyz789"
+        assert provider.get_session_id() == "ses_xyz789"
+
+    def test_supports_usage_reporting(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+        assert provider.supports_usage_reporting() is True
+
+    def test_get_response_no_message(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+        assert provider.get_response(timeout=1) == ""
+
+    def test_get_isolated_config_dir_with_account(self):
+        config = ModelConfig(provider="kimi", model_name="default", account_name="myaccount")
+        provider = KimiCodeProvider(config)
+        config_dir = provider._get_isolated_config_dir()
+        assert "kimi-homes" in str(config_dir)
+        assert "myaccount" in str(config_dir)
+
+    def test_get_isolated_config_dir_without_account(self):
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+        config_dir = provider._get_isolated_config_dir()
+        # Should return user home directory
+        assert str(config_dir).startswith(str(Path.home()))
+
+
 class TestGeminiCodeAssistProvider:
     """Tests for GeminiCodeAssistProvider."""
 
@@ -1588,6 +2063,43 @@ class TestGeminiCodeAssistProvider:
         response = provider.get_response(timeout=5.0)
         assert "result" in response
         mock_popen.assert_called_once()
+        cmd = mock_popen.call_args[0][0]
+        assert "-p" in cmd
+        assert "hello" in cmd[cmd.index("-p") + 1]
+        assert provider.current_message is None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
+    @patch("chad.util.providers.select.select")
+    @patch("chad.util.providers.os.read")
+    @patch("chad.util.providers.os.close")
+    @patch("chad.util.providers.pty.openpty")
+    @patch("subprocess.Popen")
+    def test_get_response_resume_uses_non_interactive_prompt(
+        self, mock_popen, mock_openpty, mock_close, mock_read, mock_select
+    ):
+        mock_openpty.return_value = (10, 11)
+
+        mock_stdin = Mock()
+        mock_process = Mock()
+        mock_process.stdin = mock_stdin
+        mock_process.poll.side_effect = [None, 0, 0, 0]
+        mock_popen.return_value = mock_process
+
+        mock_select.side_effect = [([10], [], []), ([], [], [])]
+        mock_read.side_effect = [b"result\n", b""]
+
+        provider = GeminiCodeAssistProvider(ModelConfig(provider="gemini", model_name="default"))
+        provider.project_path = "/tmp/test"
+        provider.session_id = "existing-session"
+        provider.send_message("continue")
+
+        response = provider.get_response(timeout=5.0)
+        assert "result" in response
+        cmd = mock_popen.call_args[0][0]
+        assert "--resume" in cmd
+        assert "existing-session" in cmd
+        assert "-p" in cmd
+        assert "continue" in cmd[cmd.index("-p") + 1]
         assert provider.current_message is None
 
     @pytest.mark.skipif(sys.platform == "win32", reason="PTY not available on Windows")
@@ -1895,3 +2407,696 @@ print("Done", flush=True)
         # The special characters should be present (or replaced if errors='replace')
         assert "Hello" in all_output
         assert "Quotes" in all_output
+
+
+class TestProviderGetSessionId:
+    """Tests for provider get_session_id method for handoff support."""
+
+    def test_claude_provider_returns_none(self):
+        """Claude provider has no native session ID."""
+        config = ModelConfig(provider="anthropic", model_name="claude-sonnet-4")
+        provider = ClaudeCodeProvider(config)
+        assert provider.get_session_id() is None
+
+    def test_codex_provider_returns_thread_id(self):
+        """Codex provider returns thread_id when set."""
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+
+        # Initially None
+        assert provider.get_session_id() is None
+
+        # After setting thread_id
+        provider.thread_id = "thread_abc123"
+        assert provider.get_session_id() == "thread_abc123"
+
+    def test_gemini_provider_returns_session_id(self):
+        """Gemini provider returns session_id when set."""
+        config = ModelConfig(provider="gemini", model_name="default")
+        provider = GeminiCodeAssistProvider(config)
+
+        # Initially None
+        assert provider.get_session_id() is None
+
+        # After setting session_id
+        provider.session_id = "gemini_session_xyz"
+        assert provider.get_session_id() == "gemini_session_xyz"
+
+    def test_qwen_provider_returns_session_id(self):
+        """Qwen provider returns session_id when set."""
+        config = ModelConfig(provider="qwen", model_name="default")
+        provider = QwenCodeProvider(config)
+
+        # Initially None
+        assert provider.get_session_id() is None
+
+        # After setting session_id
+        provider.session_id = "qwen_session_789"
+        assert provider.get_session_id() == "qwen_session_789"
+
+    def test_mistral_provider_returns_none(self):
+        """Mistral provider has no session ID (uses continue flag)."""
+        config = ModelConfig(provider="mistral", model_name="default")
+        provider = MistralVibeProvider(config)
+        assert provider.get_session_id() is None
+
+    def test_opencode_provider_returns_session_id(self):
+        """OpenCode provider returns session_id when set."""
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+
+        # Initially None
+        assert provider.get_session_id() is None
+
+        # After setting session_id
+        provider.session_id = "ses_opencode_abc"
+        assert provider.get_session_id() == "ses_opencode_abc"
+
+    def test_kimi_provider_returns_session_id(self):
+        """Kimi provider returns session_id when set."""
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+
+        # Initially None
+        assert provider.get_session_id() is None
+
+        # After setting session_id
+        provider.session_id = "ses_kimi_xyz"
+        assert provider.get_session_id() == "ses_kimi_xyz"
+
+
+class TestProviderUsageReporting:
+    """Tests for provider usage reporting capabilities."""
+
+    def test_claude_provider_supports_usage_reporting(self):
+        """Claude provider supports usage percentage reporting via Anthropic API."""
+        config = ModelConfig(provider="anthropic", model_name="claude-sonnet-4")
+        provider = ClaudeCodeProvider(config)
+        assert provider.supports_usage_reporting() is True
+        # get_usage_percentage returns None when credentials not available
+        # (we can't test actual API calls in unit tests)
+
+    def test_codex_provider_supports_usage_reporting(self):
+        """Codex provider supports usage percentage reporting via session files."""
+        config = ModelConfig(provider="openai", model_name="gpt-4")
+        provider = OpenAICodexProvider(config)
+        assert provider.supports_usage_reporting() is True
+        # get_usage_percentage returns None when session files not available
+
+    def test_gemini_provider_supports_usage_reporting(self):
+        """Gemini provider supports usage percentage reporting via local session files."""
+        config = ModelConfig(provider="gemini", model_name="default")
+        provider = GeminiCodeAssistProvider(config)
+        assert provider.supports_usage_reporting() is True
+
+    def test_qwen_provider_supports_usage_reporting(self):
+        """Qwen provider supports usage percentage reporting via local session files."""
+        config = ModelConfig(provider="qwen", model_name="default")
+        provider = QwenCodeProvider(config)
+        assert provider.supports_usage_reporting() is True
+
+    def test_mistral_provider_supports_usage_reporting(self):
+        """Mistral provider supports usage percentage reporting via local session files."""
+        config = ModelConfig(provider="mistral", model_name="default")
+        provider = MistralVibeProvider(config)
+        assert provider.supports_usage_reporting() is True
+
+    def test_opencode_provider_supports_usage_reporting(self):
+        """OpenCode provider supports usage percentage reporting via local session files."""
+        config = ModelConfig(provider="opencode", model_name="default")
+        provider = OpenCodeProvider(config)
+        assert provider.supports_usage_reporting() is True
+
+    def test_kimi_provider_supports_usage_reporting(self):
+        """Kimi provider supports usage percentage reporting via local session files."""
+        config = ModelConfig(provider="kimi", model_name="default")
+        provider = KimiCodeProvider(config)
+        assert provider.supports_usage_reporting() is True
+
+
+class TestUsagePercentageCalculation:
+    """Tests for usage percentage calculation from local session files."""
+
+    def test_gemini_usage_not_logged_in(self, tmp_path):
+        """Gemini returns None when oauth credentials don't exist."""
+        from chad.util.providers import _get_gemini_usage_percentage
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_gemini_usage_percentage("")
+            assert result is None
+
+    def test_gemini_usage_logged_in_no_usage(self, tmp_path):
+        """Gemini returns 0% when logged in but no usage JSONL exists."""
+        from chad.util.providers import _get_gemini_usage_percentage
+
+        gemini_dir = tmp_path / ".gemini"
+        gemini_dir.mkdir()
+        (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_gemini_usage_percentage("")
+            assert result == 0.0
+
+    def test_gemini_usage_counts_today_requests(self, tmp_path):
+        """Gemini correctly counts today's requests from usage JSONL."""
+        import json
+        from datetime import datetime, timezone
+        from chad.util.providers import _get_gemini_usage_percentage
+
+        gemini_dir = tmp_path / ".gemini"
+        gemini_dir.mkdir()
+        (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        # Create usage JSONL file
+        chad_dir = tmp_path / ".chad"
+        chad_dir.mkdir(parents=True, exist_ok=True)
+
+        today = datetime.now(timezone.utc).isoformat()
+        yesterday = "2020-01-01T12:00:00+00:00"
+
+        lines = [
+            json.dumps({"timestamp": today, "model": "gemini-pro", "input_tokens": 100, "output_tokens": 50}),
+            json.dumps({"timestamp": today, "model": "gemini-pro", "input_tokens": 200, "output_tokens": 80}),
+            json.dumps({"timestamp": yesterday, "model": "gemini-pro", "input_tokens": 50}),  # Not today
+        ]
+        (chad_dir / "gemini-usage.jsonl").write_text("\n".join(lines) + "\n")
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_gemini_usage_percentage("")
+            # 2 requests today out of 100 limit = 2.0%
+            assert result == pytest.approx(2.0, abs=0.1)
+
+    def test_append_gemini_usage_writes_jsonl(self, tmp_path):
+        """_append_gemini_usage writes a JSONL record."""
+        from chad.util.providers import _append_gemini_usage, _read_gemini_usage
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            _append_gemini_usage("gem-1", "gemini-2.5-pro", {
+                "input_tokens": 1000,
+                "output_tokens": 200,
+                "cached": 500,
+                "total_tokens": 1700,
+                "tool_calls": 3,
+                "duration_ms": 4500,
+            })
+            records = _read_gemini_usage()
+            assert len(records) == 1
+            rec = records[0]
+            assert rec["account"] == "gem-1"
+            assert rec["model"] == "gemini-2.5-pro"
+            assert rec["input_tokens"] == 1000
+            assert rec["output_tokens"] == 200
+            assert rec["cached_tokens"] == 500
+            assert rec["total_tokens"] == 1700
+            assert rec["tool_calls"] == 3
+            assert "timestamp" in rec
+
+    def test_qwen_usage_not_logged_in(self, tmp_path):
+        """Qwen returns None when oauth credentials don't exist."""
+        from chad.util.providers import _get_qwen_usage_percentage
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_qwen_usage_percentage("")
+            assert result is None
+
+    def test_qwen_usage_logged_in_no_sessions(self, tmp_path):
+        """Qwen returns 0% when logged in but no session files exist."""
+        from chad.util.providers import _get_qwen_usage_percentage
+
+        qwen_dir = tmp_path / ".qwen"
+        qwen_dir.mkdir()
+        (qwen_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_qwen_usage_percentage("")
+            assert result == 0.0
+
+    def test_qwen_usage_counts_today_requests(self, tmp_path):
+        """Qwen correctly counts today's requests from jsonl session files."""
+        import json
+        from datetime import datetime, timezone
+        from chad.util.providers import _get_qwen_usage_percentage
+
+        qwen_dir = tmp_path / ".qwen"
+        qwen_dir.mkdir()
+        (qwen_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        # Create session directory structure
+        session_dir = qwen_dir / "projects" / "project1" / "chats"
+        session_dir.mkdir(parents=True)
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        yesterday = "2020-01-01T12:00:00.000Z"
+
+        # Write jsonl format (one JSON object per line)
+        lines = [
+            json.dumps({"type": "assistant", "timestamp": today}),
+            json.dumps({"type": "assistant", "timestamp": today}),
+            json.dumps({"type": "assistant", "timestamp": today}),
+            json.dumps({"type": "assistant", "timestamp": yesterday}),  # Not today
+            json.dumps({"type": "user", "timestamp": today}),  # Not assistant
+        ]
+        (session_dir / "session.jsonl").write_text("\n".join(lines))
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_qwen_usage_percentage("")
+            # 3 requests today out of 2000 limit = 0.15%
+            assert result == pytest.approx(0.15, abs=0.01)
+
+    def test_mistral_usage_not_logged_in(self, tmp_path):
+        """Mistral returns None when config doesn't exist."""
+        from chad.util.providers import _get_mistral_usage_percentage
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_mistral_usage_percentage("")
+            assert result is None
+
+    def test_mistral_usage_logged_in_no_sessions(self, tmp_path):
+        """Mistral returns 0% when logged in but no session files exist."""
+        from chad.util.providers import _get_mistral_usage_percentage
+
+        vibe_dir = tmp_path / ".vibe"
+        vibe_dir.mkdir()
+        (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"')
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_mistral_usage_percentage("")
+            assert result == 0.0
+
+    def test_mistral_usage_counts_today_sessions(self, tmp_path):
+        """Mistral correctly counts today's sessions from session files."""
+        import json
+        from chad.util.providers import _get_mistral_usage_percentage
+
+        vibe_dir = tmp_path / ".vibe"
+        vibe_dir.mkdir()
+        (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"')
+
+        # Create session directory
+        session_dir = vibe_dir / "logs" / "session"
+        session_dir.mkdir(parents=True)
+
+        # Create today's session file with prompt_count
+        session_data = {"metadata": {"stats": {"prompt_count": 5}}}
+        session_file = session_dir / "session_today.json"
+        session_file.write_text(json.dumps(session_data))
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_mistral_usage_percentage("")
+            # 5 requests today out of 1000 limit = 0.5%
+            assert result == pytest.approx(0.5, abs=0.01)
+
+    def test_gemini_usage_handles_malformed_jsonl(self, tmp_path):
+        """Gemini gracefully handles malformed JSONL lines."""
+        import json
+        from datetime import datetime, timezone
+        from chad.util.providers import _get_gemini_usage_percentage
+
+        gemini_dir = tmp_path / ".gemini"
+        gemini_dir.mkdir()
+        (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        chad_dir = tmp_path / ".chad"
+        chad_dir.mkdir(parents=True, exist_ok=True)
+        today = datetime.now(timezone.utc).isoformat()
+        lines = [
+            "not valid json",
+            json.dumps({"timestamp": today, "model": "gemini-pro", "input_tokens": 100}),
+        ]
+        (chad_dir / "gemini-usage.jsonl").write_text("\n".join(lines) + "\n")
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_gemini_usage_percentage("")
+            # 1 valid request out of 100 limit = 1.0%
+            assert result == pytest.approx(1.0, abs=0.1)
+
+    def test_qwen_usage_handles_malformed_jsonl(self, tmp_path):
+        """Qwen gracefully handles malformed jsonl lines."""
+        import json
+        from datetime import datetime, timezone
+        from chad.util.providers import _get_qwen_usage_percentage
+
+        qwen_dir = tmp_path / ".qwen"
+        qwen_dir.mkdir()
+        (qwen_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        session_dir = qwen_dir / "projects" / "project1" / "chats"
+        session_dir.mkdir(parents=True)
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        lines = [
+            "not valid json",
+            json.dumps({"type": "assistant", "timestamp": today}),
+            "{malformed",
+        ]
+        (session_dir / "session.jsonl").write_text("\n".join(lines))
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_qwen_usage_percentage("")
+            # Only 1 valid request counted
+            assert result == pytest.approx(0.05, abs=0.01)
+
+    def test_usage_capped_at_100_percent(self, tmp_path):
+        """Usage percentage is capped at 100% even if over limit."""
+        import json
+        from datetime import datetime, timezone
+        from chad.util.providers import _get_gemini_usage_percentage
+
+        gemini_dir = tmp_path / ".gemini"
+        gemini_dir.mkdir()
+        (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
+
+        chad_dir = tmp_path / ".chad"
+        chad_dir.mkdir(parents=True, exist_ok=True)
+
+        today = datetime.now(timezone.utc).isoformat()
+        # Create more requests than the daily limit (2000)
+        lines = [json.dumps({"timestamp": today, "model": "gemini-pro"}) for _ in range(2500)]
+        (chad_dir / "gemini-usage.jsonl").write_text("\n".join(lines) + "\n")
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_gemini_usage_percentage("")
+            assert result == 100.0  # Capped at 100%
+
+    def test_opencode_usage_no_sessions(self, tmp_path):
+        """OpenCode returns 0% when no session files exist."""
+        from chad.util.providers import _get_opencode_usage_percentage
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_opencode_usage_percentage("")
+            assert result == 0.0
+
+    def test_opencode_usage_with_account_isolation(self, tmp_path):
+        """OpenCode returns 0% when using account-isolated data dir with no sessions."""
+        from chad.util.providers import _get_opencode_usage_percentage
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_opencode_usage_percentage("myaccount")
+            assert result == 0.0
+
+    def test_opencode_usage_counts_today_requests(self, tmp_path):
+        """OpenCode correctly counts today's requests from jsonl session files."""
+        import json
+        from datetime import datetime, timezone
+        from chad.util.providers import _get_opencode_usage_percentage
+
+        # Create session directory at ~/.local/share/opencode/sessions
+        data_dir = tmp_path / ".local" / "share" / "opencode" / "sessions"
+        data_dir.mkdir(parents=True)
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        yesterday = "2020-01-01T12:00:00.000Z"
+
+        # Write jsonl format (one JSON object per line)
+        lines = [
+            json.dumps({"type": "assistant", "timestamp": today}),
+            json.dumps({"type": "assistant", "timestamp": today}),
+            json.dumps({"type": "assistant", "timestamp": yesterday}),  # Not today
+            json.dumps({"type": "user", "timestamp": today}),  # Not assistant
+        ]
+        (data_dir / "session.jsonl").write_text("\n".join(lines))
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_opencode_usage_percentage("testaccount")
+            # 2 requests today out of 2000 limit = 0.1%
+            assert result == pytest.approx(0.1, abs=0.01)
+
+    def test_opencode_usage_handles_malformed_jsonl(self, tmp_path):
+        """OpenCode gracefully handles malformed jsonl lines."""
+        import json
+        from datetime import datetime, timezone
+        from chad.util.providers import _get_opencode_usage_percentage
+
+        data_dir = tmp_path / ".local" / "share" / "opencode" / "sessions"
+        data_dir.mkdir(parents=True)
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        lines = [
+            "not valid json",
+            json.dumps({"type": "assistant", "timestamp": today}),
+            "{malformed",
+        ]
+        (data_dir / "session.jsonl").write_text("\n".join(lines))
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_opencode_usage_percentage("testaccount")
+            # Only 1 valid request counted
+            assert result == pytest.approx(0.05, abs=0.01)
+
+    def test_kimi_usage_not_configured(self, tmp_path):
+        """Kimi returns None when config doesn't exist."""
+        from chad.util.providers import _get_kimi_usage_percentage
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_kimi_usage_percentage("")
+            assert result is None
+
+    def test_kimi_usage_logged_in_no_sessions(self, tmp_path):
+        """Kimi returns 0% when logged in but no session files exist."""
+        from chad.util.providers import _get_kimi_usage_percentage
+
+        creds_dir = tmp_path / ".kimi" / "credentials"
+        creds_dir.mkdir(parents=True)
+        (creds_dir / "kimi-code.json").write_text('{"token": "test"}')
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_kimi_usage_percentage("")
+            assert result == 0.0
+
+    def test_kimi_usage_counts_today_requests(self, tmp_path):
+        """Kimi correctly counts today's requests from jsonl session files."""
+        import json
+        from datetime import datetime, timezone
+        from chad.util.providers import _get_kimi_usage_percentage
+
+        # Create credentials and session directory structure for account
+        kimi_dir = tmp_path / ".chad" / "kimi-homes" / "testaccount" / ".kimi"
+        kimi_dir.mkdir(parents=True)
+        creds_dir = kimi_dir / "credentials"
+        creds_dir.mkdir(parents=True)
+        (creds_dir / "kimi-code.json").write_text('{"token": "test"}')
+
+        sessions_dir = kimi_dir / "sessions"
+        sessions_dir.mkdir()
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        yesterday = "2020-01-01T12:00:00.000Z"
+
+        # Write jsonl format (one JSON object per line)
+        lines = [
+            json.dumps({"type": "assistant", "timestamp": today}),
+            json.dumps({"type": "assistant", "timestamp": today}),
+            json.dumps({"type": "assistant", "timestamp": today}),
+            json.dumps({"type": "assistant", "timestamp": yesterday}),  # Not today
+            json.dumps({"type": "user", "timestamp": today}),  # Not assistant
+        ]
+        (sessions_dir / "session.jsonl").write_text("\n".join(lines))
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_kimi_usage_percentage("testaccount")
+            # 3 requests today out of 2000 limit = 0.15%
+            assert result == pytest.approx(0.15, abs=0.01)
+
+    def test_kimi_usage_handles_malformed_jsonl(self, tmp_path):
+        """Kimi gracefully handles malformed jsonl lines."""
+        import json
+        from datetime import datetime, timezone
+        from chad.util.providers import _get_kimi_usage_percentage
+
+        kimi_dir = tmp_path / ".chad" / "kimi-homes" / "testaccount" / ".kimi"
+        kimi_dir.mkdir(parents=True)
+        creds_dir = kimi_dir / "credentials"
+        creds_dir.mkdir(parents=True)
+        (creds_dir / "kimi-code.json").write_text('{"token": "test"}')
+
+        sessions_dir = kimi_dir / "sessions"
+        sessions_dir.mkdir()
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        lines = [
+            "not valid json",
+            json.dumps({"type": "assistant", "timestamp": today}),
+            "{malformed",
+        ]
+        (sessions_dir / "session.jsonl").write_text("\n".join(lines))
+
+        with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
+            result = _get_kimi_usage_percentage("testaccount")
+            # Only 1 valid request counted
+            assert result == pytest.approx(0.05, abs=0.01)
+
+
+class TestMockProviderQuotaSimulation:
+    """Tests for MockProvider quota exhaustion simulation.
+
+    These tests verify that MockProvider can simulate quota errors,
+    enabling testing of provider handover without real API costs.
+
+    Note: These tests use direct method patching instead of the config system
+    to avoid test pollution issues when run in sequence with other tests.
+    """
+
+    @pytest.fixture(autouse=True)
+    def reset_mock_provider_state(self):
+        """Reset MockProvider class-level state before each test."""
+        MockProvider._verification_counts.clear()
+        MockProvider._coding_turn_counts.clear()
+        yield
+        MockProvider._verification_counts.clear()
+        MockProvider._coding_turn_counts.clear()
+
+    def test_quota_error_when_usage_is_zero(self, tmp_path):
+        """MockProvider raises quota error when mock_remaining_usage is 0."""
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-account",
+        )
+        provider = MockProvider(model_config)
+        # Mock the internal method to return 0 usage
+        provider._get_remaining_usage = lambda: 0.0
+        provider.start_session(str(tmp_path))
+        provider.send_message("test task")
+
+        with pytest.raises(MockProviderQuotaError) as exc_info:
+            provider.get_response()
+
+        error_msg = str(exc_info.value)
+        assert "quota exceeded" in error_msg.lower()
+        assert "insufficient credits" in error_msg.lower()
+
+    def test_no_quota_error_when_usage_available(self, tmp_path):
+        """MockProvider works normally when mock_remaining_usage > 0."""
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-account",
+        )
+        provider = MockProvider(model_config)
+        provider._get_remaining_usage = lambda: 0.5
+        provider._decrement_usage = lambda amount=None: None  # No-op
+        provider.start_session(str(tmp_path))
+        provider.send_message("test task")
+
+        response = provider.get_response()
+        assert response
+        assert "change_summary" in response or "BUGS.md" in response
+
+    def test_usage_decrements_after_response(self, tmp_path):
+        """MockProvider decrements usage after each response."""
+        usage = [0.5]  # Use list to allow mutation in closure
+
+        def get_usage():
+            return usage[0]
+
+        def decrement_usage(amount=None):
+            decrement = amount if amount is not None else MockProvider.USAGE_DECREMENT_PER_RESPONSE
+            usage[0] = max(0.0, usage[0] - decrement)
+
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-account",
+        )
+        provider = MockProvider(model_config)
+        provider._get_remaining_usage = get_usage
+        provider._decrement_usage = decrement_usage
+        provider.start_session(str(tmp_path))
+        provider.send_message("test task")
+
+        initial_usage = usage[0]
+        provider.get_response()
+        final_usage = usage[0]
+
+        assert final_usage < initial_usage
+        expected = initial_usage - MockProvider.USAGE_DECREMENT_PER_RESPONSE
+        assert final_usage == pytest.approx(expected, abs=0.001)
+
+    def test_queued_responses_bypass_quota_check(self, tmp_path):
+        """Queued responses (for unit tests) bypass quota simulation."""
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-account",
+        )
+        provider = MockProvider(model_config)
+        provider._get_remaining_usage = lambda: 0.0  # Would fail if checked
+        provider.start_session(str(tmp_path))
+
+        provider.queue_response('{"test": "response"}')
+        response = provider.get_response()
+        assert response == '{"test": "response"}'
+
+    def test_quota_error_matches_handoff_detection(self, tmp_path):
+        """Quota error message matches is_quota_exhaustion_error() patterns."""
+        from chad.util.handoff import is_quota_exhaustion_error
+
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-account",
+        )
+        provider = MockProvider(model_config)
+        provider._get_remaining_usage = lambda: 0.0
+        provider.start_session(str(tmp_path))
+        provider.send_message("test task")
+
+        try:
+            provider.get_response()
+            pytest.fail("Expected MockProviderQuotaError")
+        except MockProviderQuotaError as e:
+            assert is_quota_exhaustion_error(str(e)), (
+                f"Error message '{e}' not detected as quota exhaustion. "
+                "This will break provider handover testing."
+            )
+
+    def test_gradual_quota_depletion(self, tmp_path):
+        """MockProvider can simulate gradual quota depletion over multiple responses."""
+        usage = [0.015]  # Start with just enough for 2 responses (0.01 each)
+
+        def get_usage():
+            return usage[0]
+
+        def decrement_usage(amount=None):
+            decrement = amount if amount is not None else MockProvider.USAGE_DECREMENT_PER_RESPONSE
+            usage[0] = max(0.0, usage[0] - decrement)
+
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-account",
+        )
+        provider = MockProvider(model_config)
+        provider._get_remaining_usage = get_usage
+        provider._decrement_usage = decrement_usage
+        provider.start_session(str(tmp_path))
+
+        # First response should succeed
+        provider.send_message("task 1")
+        response1 = provider.get_response()
+        assert response1
+
+        # Second response should also succeed (0.015 - 0.01 = 0.005 > 0)
+        provider.send_message("task 2")
+        response2 = provider.get_response()
+        assert response2
+
+        # Third response should fail (0.005 - 0.01 = -0.005 -> clamped to 0)
+        provider.send_message("task 3")
+        with pytest.raises(MockProviderQuotaError):
+            provider.get_response()
+
+    def test_default_usage_when_no_account(self, tmp_path):
+        """MockProvider uses default usage when no account configured."""
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            # No account_name
+        )
+        provider = MockProvider(model_config)
+        provider.start_session(str(tmp_path))
+        provider.send_message("test task")
+
+        # Should use default 0.5 usage and work normally
+        response = provider.get_response()
+        assert response

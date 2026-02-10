@@ -156,6 +156,8 @@ async def start_task(session_id: str, request: TaskCreate) -> TaskStatusResponse
             terminal_rows=request.terminal_rows,
             terminal_cols=request.terminal_cols,
             screenshots=request.screenshots,
+            override_exploration_prompt=request.override_exploration_prompt,
+            override_implementation_prompt=request.override_implementation_prompt,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

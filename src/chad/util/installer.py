@@ -16,7 +16,7 @@ class CLIToolSpec:
 
     name: str
     binary: str
-    installer: str  # 'npm' or 'pip'
+    installer: str  # 'npm', 'pip', or 'shell'
     package: str
     version: str | None = None
 
@@ -69,6 +69,20 @@ class AIToolInstaller:
                 package="mistral-vibe",
                 version=None,
             ),
+            "opencode": CLIToolSpec(
+                name="OpenCode",
+                binary="opencode",
+                installer="shell",
+                package="https://opencode.ai/install",
+                version=None,
+            ),
+            "kimi": CLIToolSpec(
+                name="Kimi Code",
+                binary="kimi",
+                installer="pip",
+                package="kimi-cli",
+                version=None,
+            ),
         }
 
     def resolve_tool_path(self, binary: str) -> Path | None:
@@ -116,6 +130,8 @@ class AIToolInstaller:
             return self._install_with_npm(spec)
         if spec.installer == "pip":
             return self._install_with_pip(spec)
+        if spec.installer == "shell":
+            return self._install_with_shell(spec)
         return False, f"No installer configured for {spec.name}"
 
     def _install_with_npm(self, spec: CLIToolSpec) -> tuple[bool, str]:
@@ -202,3 +218,78 @@ class AIToolInstaller:
 
     def _check_node_npm(self) -> bool:
         return is_tool_installed("node") and is_tool_installed("npm")
+
+    def _install_with_shell(self, spec: CLIToolSpec) -> tuple[bool, str]:
+        """Install a tool by running a shell script from a URL."""
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        ensure_directory(self.tools_dir)
+        ensure_directory(self.bin_dir)
+
+        # Download the install script
+        try:
+            import urllib.request
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
+                script_path = f.name
+            urllib.request.urlretrieve(spec.package, script_path)
+        except Exception as e:
+            return False, (
+                f"Failed to download {spec.name} installer: {e}\n\n"
+                f"You can install it manually:\n"
+                f"```\ncurl -fsSL {spec.package} | bash\n```"
+            )
+
+        # Run the install script with BIN_DIR set to our bin directory
+        try:
+            env = os.environ.copy()
+            env["BIN_DIR"] = str(self.bin_dir)
+            result = subprocess.run(
+                ["bash", script_path],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            os.unlink(script_path)
+
+            if result.returncode != 0:
+                err = result.stderr.strip() or result.stdout.strip() or f"Install script exited with code {result.returncode}"
+                return False, (
+                    f"Failed to install {spec.name}: {err}\n\n"
+                    f"You can install it manually:\n"
+                    f"```\ncurl -fsSL {spec.package} | bash\n```"
+                )
+        except subprocess.TimeoutExpired:
+            try:
+                os.unlink(script_path)
+            except OSError:
+                pass
+            return False, f"Installation of {spec.name} timed out"
+        except Exception as e:
+            try:
+                os.unlink(script_path)
+            except OSError:
+                pass
+            return False, f"Failed to run {spec.name} installer: {e}"
+
+        # Some installers (e.g. OpenCode) ignore BIN_DIR and install to ~/.<tool>/bin.
+        # Bridge that location into Chad's managed bin directory when present.
+        conventional_bin = Path.home() / f".{spec.binary}" / "bin" / spec.binary
+        managed_bin = self.bin_dir / spec.binary
+        if conventional_bin.exists() and not managed_bin.exists():
+            try:
+                managed_bin.symlink_to(conventional_bin)
+            except (FileExistsError, OSError):
+                try:
+                    shutil.copy2(conventional_bin, managed_bin)
+                except OSError:
+                    pass
+
+        resolved = self.resolve_tool_path(spec.binary)
+        if not resolved:
+            return False, f"{spec.name} installation succeeded but '{spec.binary}' was not found."
+
+        return True, str(resolved)

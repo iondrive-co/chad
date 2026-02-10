@@ -24,6 +24,11 @@ CONFIG_BASE_KEYS: set[str] = {
     "cleanup_days",
     "ui_mode",
     "projects",  # Per-project settings keyed by absolute project path
+    "provider_fallback_order",  # List of account names for auto-switching on quota exhaustion
+    "usage_switch_threshold",  # Percentage (0-100) of usage before auto-switching providers
+    "mock_remaining_usage",  # Dict of account_name -> 0.0-1.0 for mock provider testing
+    "mock_run_duration_seconds",  # Dict of account_name -> 0-3600 mock run duration for handover testing
+    "max_verification_attempts",  # Maximum verification attempts before giving up (default 5)
 }
 
 
@@ -675,6 +680,194 @@ class ConfigManager:
         """
         config = self.load_config()
         return config.get("projects", {})
+
+    def get_provider_fallback_order(self) -> list[str]:
+        """Get the ordered list of account names for auto-switching on quota exhaustion.
+
+        When a provider runs out of credits/quota, the system will automatically
+        switch to the next provider in this list.
+
+        Returns:
+            List of account names in fallback priority order
+        """
+        config = self.load_config()
+        order = config.get("provider_fallback_order", [])
+        # Filter out accounts that no longer exist
+        valid_accounts = set(self.list_accounts().keys())
+        return [acc for acc in order if acc in valid_accounts]
+
+    def set_provider_fallback_order(self, account_names: list[str]) -> None:
+        """Set the ordered list of account names for auto-switching.
+
+        Args:
+            account_names: List of account names in fallback priority order.
+                          Accounts not in this list will not be used for auto-switching.
+
+        Raises:
+            ValueError: If any account name doesn't exist
+        """
+        valid_accounts = set(self.list_accounts().keys())
+        invalid = [name for name in account_names if name not in valid_accounts]
+        if invalid:
+            raise ValueError(f"Unknown account(s): {', '.join(invalid)}")
+
+        config = self.load_config()
+        config["provider_fallback_order"] = account_names
+        self.save_config(config)
+
+    def get_next_fallback_provider(self, current_account: str) -> str | None:
+        """Get the next provider in the fallback order after the current one.
+
+        Args:
+            current_account: The currently active account name
+
+        Returns:
+            Next account name in fallback order, or None if no more fallbacks
+        """
+        order = self.get_provider_fallback_order()
+        if not order:
+            return None
+
+        try:
+            current_idx = order.index(current_account)
+            if current_idx + 1 < len(order):
+                return order[current_idx + 1]
+        except ValueError:
+            # Current account not in fallback order, return first in order
+            if order:
+                return order[0]
+
+        return None
+
+    def get_usage_switch_threshold(self) -> int:
+        """Get the usage percentage threshold for auto-switching providers.
+
+        When a provider reports usage above this percentage of its limit,
+        the system will automatically switch to the next fallback provider.
+
+        Returns:
+            Percentage threshold (0-100), defaults to 90
+        """
+        config = self.load_config()
+        return config.get("usage_switch_threshold", 90)
+
+    def set_usage_switch_threshold(self, percentage: int) -> None:
+        """Set the usage percentage threshold for auto-switching providers.
+
+        Args:
+            percentage: Threshold percentage (0-100). Use 100 to disable
+                       usage-based switching (only error-based switching).
+
+        Raises:
+            ValueError: If percentage is not between 0 and 100
+        """
+        if not 0 <= percentage <= 100:
+            raise ValueError("usage_switch_threshold must be between 0 and 100")
+        config = self.load_config()
+        config["usage_switch_threshold"] = percentage
+        self.save_config(config)
+
+    def get_mock_remaining_usage(self, account_name: str) -> float:
+        """Get mock remaining usage for a mock provider account.
+
+        Used for testing usage-based provider switching without real providers.
+
+        Args:
+            account_name: The mock account name
+
+        Returns:
+            Remaining usage as 0.0-1.0 (1.0 = full capacity remaining)
+        """
+        config = self.load_config()
+        usage_dict = config.get("mock_remaining_usage", {})
+        return usage_dict.get(account_name, 0.5)  # Default to 50%
+
+    def set_mock_remaining_usage(self, account_name: str, remaining: float) -> None:
+        """Set mock remaining usage for a mock provider account.
+
+        Args:
+            account_name: The mock account name
+            remaining: Remaining usage as 0.0-1.0 (1.0 = full capacity remaining)
+
+        Raises:
+            ValueError: If remaining is not between 0 and 1
+        """
+        if not 0.0 <= remaining <= 1.0:
+            raise ValueError("mock_remaining_usage must be between 0.0 and 1.0")
+        config = self.load_config()
+        if "mock_remaining_usage" not in config:
+            config["mock_remaining_usage"] = {}
+        config["mock_remaining_usage"][account_name] = remaining
+        self.save_config(config)
+
+    def get_mock_run_duration_seconds(self, account_name: str) -> int:
+        """Get mock run duration for a mock provider account.
+
+        Used for testing handover by forcing mock provider runs to stream output
+        for a configurable duration.
+
+        Args:
+            account_name: The mock account name
+
+        Returns:
+            Run duration in seconds (0-3600), defaults to 0
+        """
+        config = self.load_config()
+        duration_dict = config.get("mock_run_duration_seconds", {})
+        raw_value = duration_dict.get(account_name, 0)
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, min(3600, value))
+
+    def set_mock_run_duration_seconds(self, account_name: str, seconds: int) -> None:
+        """Set mock run duration for a mock provider account.
+
+        Args:
+            account_name: The mock account name
+            seconds: Run duration in seconds (0-3600)
+
+        Raises:
+            ValueError: If seconds is not between 0 and 3600
+        """
+        try:
+            seconds_int = int(seconds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("mock_run_duration_seconds must be between 0 and 3600") from exc
+
+        if not 0 <= seconds_int <= 3600:
+            raise ValueError("mock_run_duration_seconds must be between 0 and 3600")
+
+        config = self.load_config()
+        if "mock_run_duration_seconds" not in config:
+            config["mock_run_duration_seconds"] = {}
+        config["mock_run_duration_seconds"][account_name] = seconds_int
+        self.save_config(config)
+
+    def get_max_verification_attempts(self) -> int:
+        """Get the maximum number of verification attempts.
+
+        Returns:
+            Maximum attempts (default 5)
+        """
+        config = self.load_config()
+        return config.get("max_verification_attempts", 5)
+
+    def set_max_verification_attempts(self, attempts: int) -> None:
+        """Set the maximum number of verification attempts.
+
+        Args:
+            attempts: Maximum attempts (1-20)
+
+        Raises:
+            ValueError: If attempts is not between 1 and 20
+        """
+        if not 1 <= attempts <= 20:
+            raise ValueError("max_verification_attempts must be between 1 and 20")
+        config = self.load_config()
+        config["max_verification_attempts"] = attempts
+        self.save_config(config)
 
 
 def validate_config_keys(config: dict[str, Any], *, allow: Iterable[str] | None = None) -> None:

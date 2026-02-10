@@ -55,16 +55,24 @@ class ModelCatalog:
     )
     QWEN_FALLBACK: tuple[str, ...] = (
         "qwen3-coder",
-        "qwen3-coder-plus",
         "default",
     )
     MISTRAL_FALLBACK: tuple[str, ...] = ("default",)
+    OPENCODE_FALLBACK: tuple[str, ...] = (
+        "anthropic/claude-sonnet-4-5",
+        "openai/gpt-4o",
+        "default",
+    )
+    KIMI_FALLBACK: tuple[str, ...] = (
+        "kimi-k2.5",
+        "default",
+    )
     MOCK_FALLBACK: tuple[str, ...] = ("default",)
 
     _cache: dict[str, tuple[float, list[str]]] = field(default_factory=dict, init=False)
 
     def supported_providers(self) -> set[str]:
-        return {"anthropic", "openai", "gemini", "qwen", "mistral", "mock"}
+        return {"anthropic", "openai", "gemini", "qwen", "mistral", "opencode", "kimi", "mock"}
 
     def get_models(self, provider: str, account_name: str | None = None) -> list[str]:
         """Return discovered models for a provider, cached with TTL."""
@@ -100,8 +108,55 @@ class ModelCatalog:
             "gemini": self.GEMINI_FALLBACK,
             "qwen": self.QWEN_FALLBACK,
             "mistral": self.MISTRAL_FALLBACK,
+            "opencode": self.OPENCODE_FALLBACK,
+            "kimi": self.KIMI_FALLBACK,
             "mock": self.MOCK_FALLBACK,
         }.get(provider, ("default",))
+
+    @staticmethod
+    def _normalize_stored_model(model: object) -> str | None:
+        if not isinstance(model, str):
+            return None
+        normalized = model.strip()
+        return normalized or None
+
+    def _model_matches_provider(self, provider: str, model: str) -> bool:
+        normalized = model.strip().lower()
+        if not normalized:
+            return False
+        if normalized == "default":
+            return True
+
+        if provider == "mock":
+            return False
+        if provider == "anthropic":
+            return normalized.startswith("claude-")
+        if provider == "gemini":
+            return normalized.startswith("gemini-")
+        if provider == "qwen":
+            return normalized.startswith("qwen")
+        if provider == "kimi":
+            return normalized.startswith("kimi")
+        if provider == "mistral":
+            return normalized.startswith(("mistral", "codestral", "ministral", "open-mistral", "pixtral"))
+        if provider == "opencode":
+            return "/" in normalized
+        if provider == "openai":
+            foreign_prefixes = (
+                "claude-",
+                "anthropic/",
+                "gemini-",
+                "google/",
+                "qwen",
+                "kimi",
+                "mistral",
+                "codestral",
+                "ministral",
+                "open-mistral",
+                "pixtral",
+            )
+            return not normalized.startswith(foreign_prefixes)
+        return True
 
     def _stored_model(self, provider: str, account_name: str | None) -> set[str]:
         if not account_name or not self.api_client:
@@ -112,17 +167,20 @@ class ModelCatalog:
         # Primary: model stored on the account object (used throughout the UI)
         try:
             account = self.api_client.get_account(account_name)
-            model = getattr(account, "model", None)
-            if model:
-                models.add(str(model))
+            account_provider = getattr(account, "provider", None)
+            if account_provider and str(account_provider).strip() != provider:
+                return set()
+            model = self._normalize_stored_model(getattr(account, "model", None))
+            if model and self._model_matches_provider(provider, model):
+                models.add(model)
         except Exception:
             pass
 
         # Legacy/compat: some API clients expose get_account_model instead
         try:
-            model = self.api_client.get_account_model(account_name)
-            if model:
-                models.add(str(model))
+            model = self._normalize_stored_model(self.api_client.get_account_model(account_name))
+            if model and self._model_matches_provider(provider, model):
+                models.add(model)
         except Exception:
             pass
 

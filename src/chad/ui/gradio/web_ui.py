@@ -1,11 +1,13 @@
 """Gradio web interface for Chad."""
 
 import base64
+import math
 import os
 import json
 import re
 import socket
 import threading
+import time
 import queue
 import uuid
 import html
@@ -31,15 +33,25 @@ from chad.util.event_log import (
     UserMessageEvent,
     AssistantMessageEvent,
     VerificationAttemptEvent,
+    ProviderSwitchedEvent,
+)
+from chad.util.handoff import (
+    log_handoff_checkpoint,
+    build_resume_prompt,
+    is_quota_exhaustion_error,
+    get_quota_error_reason,
 )
 from chad.util.providers import ModelConfig, parse_codex_output, create_provider
 from chad.util.model_catalog import ModelCatalog
 from chad.util.prompts import (
-    build_coding_prompt,
+    build_exploration_prompt,
+    build_implementation_prompt,
+    build_prompt_previews,
     extract_coding_summary,
     extract_progress_update,
     check_verification_mentioned,
-    get_verification_prompt,
+    get_verification_exploration_prompt,
+    get_verification_conclusion_prompt,
     parse_verification_response,
     ProgressUpdate,
     VerificationParseError,
@@ -72,6 +84,8 @@ class Session:
     task_description: str | None = None
     project_path: str | None = None
     coding_account: str | None = None
+    # Track provider switches for UI indication
+    switched_from: str | None = None  # Previous provider after a handoff
     # Git worktree support
     worktree_path: Path | None = None
     worktree_branch: str | None = None
@@ -79,10 +93,15 @@ class Session:
     has_worktree_changes: bool = False
     merge_conflicts: list[MergeConflict] | None = None
     # Prompt tracking for display
-    last_coding_prompt: str | None = None
+    last_exploration_prompt: str | None = None
+    last_implementation_prompt: str | None = None
     last_verification_prompt: str | None = None
     # Live stream DOM patching support - track if initial render is done
     has_initial_live_render: bool = False
+    # Persistent live stream content for tab switch restoration
+    last_live_stream: str = ""
+    # Track file modifications from last coding run (for revision context)
+    last_work_done: dict | None = None
 
     @property
     def log_path(self) -> Path | None:
@@ -122,10 +141,23 @@ class VerificationDropdownState:
 
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\][^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
 
 DEFAULT_CODING_TIMEOUT = 900.0
-DEFAULT_VERIFICATION_TIMEOUT = 600.0
+DEFAULT_VERIFICATION_TIMEOUT = 1800.0  # 30 minutes to match provider defaults
 MAX_VERIFICATION_PROMPT_CHARS = 6000
+
+
+def _sanitize_terminal_text(text: str) -> str:
+    """Strip ANSI/control sequences from terminal text for chat rendering."""
+    if not text:
+        return ""
+    # Some providers emit a visible Unicode escape symbol (␛) instead of
+    # the raw ESC byte. Normalize it so ANSI stripping still works.
+    normalized = text.replace("\u241b", "\x1b")
+    cleaned = ANSI_ESCAPE_RE.sub("", normalized)
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+    return CONTROL_CHAR_RE.sub("", cleaned)
 
 
 def _find_free_port() -> int:
@@ -198,14 +230,30 @@ body, .gradio-container, .gradio-container * {
 }
 
 .run-top-row {
-  gap: 12px !important;
+  gap: 4px !important;
   align-items: flex-start !important;
 }
 
+.run-top-row > .column > .row {
+  align-items: flex-start !important;
+}
 
+.run-top-row .row,
+.run-top-row .column {
+  gap: 4px !important;
+}
+
+.run-top-row .block {
+  margin-bottom: 2px !important;
+}
+
+.prompt-display textarea {                                                                                    
+   max-height: 300px !important;                                                                               
+   overflow-y: auto !important;                                                                                
+} 
 .project-setup-column {
   display: grid;
-  gap: 10px;
+  gap: 4px;
 }
 
 .project-path-input label {
@@ -219,13 +267,18 @@ body, .gradio-container, .gradio-container * {
 .project-commands-row {
   display: grid !important;
   grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
-  gap: 12px !important;
+  gap: 10px !important;
   align-items: start !important;
+  margin-bottom: 0 !important;
 }
 
 .command-column {
   display: grid;
-  gap: 6px;
+  gap: 4px;
+}
+
+.command-column .block {
+  margin-bottom: 0 !important;
 }
 
 .command-header {
@@ -255,15 +308,39 @@ body, .gradio-container, .gradio-container * {
 }
 
 .command-status {
-  margin: 0;
-  min-height: 18px;
+  margin: 0 !important;
   font-size: 0.9rem;
+}
+
+/* Only show min-height when there's actual status content */
+.command-status:has(p:not(:empty)) {
+  min-height: 18px;
+}
+
+.doc-paths-row {
+  gap: 8px !important;
+  margin-top: 0 !important;
+  padding-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+
+
+.agent-config {
+  display: grid !important;
+  gap: 8px !important;
+  align-content: start;
+}
+
+.agent-config .block,
+.agent-config .form,
+.agent-config .wrap {
+  margin-bottom: 0 !important;
 }
 
 .project-save-btn button,
 .project-save-btn {
   min-height: 34px !important;
-  width: auto !important;
+  width: 80px !important;
   padding: 8px 14px !important;
 }
 
@@ -288,6 +365,7 @@ body, .gradio-container, .gradio-container * {
   -webkit-text-fill-color: var(--cancel-btn-text) !important;
   font-size: 0.85rem !important;
   min-height: 34px !important;
+  width: 80px !important;
   padding: 8px 14px !important;
   opacity: 1 !important;
 }
@@ -549,6 +627,57 @@ body, .gradio-container, .gradio-container * {
   font-size: 12px;
   letter-spacing: 0.05em;
   margin: 0;
+  display: flex;
+  align-items: center;
+}
+.live-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.live-search-input {
+  background: #1a1a2e;
+  color: #e2e8f0;
+  border: 1px solid #555;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 11px;
+  width: 140px;
+  outline: none;
+  font-family: inherit;
+}
+.live-search-input:focus {
+  border-color: #a8d4ff;
+}
+.live-search-count {
+  color: #888;
+  font-size: 11px;
+  min-width: 28px;
+  text-align: center;
+  font-weight: 400;
+}
+.live-search-nav {
+  background: transparent;
+  color: #a8d4ff;
+  border: 1px solid #555;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 10px;
+  cursor: pointer;
+  line-height: 1;
+}
+.live-search-nav:hover {
+  background: #333;
+}
+mark.live-search-match {
+  background: rgba(255, 230, 0, 0.35);
+  color: inherit;
+  padding: 0;
+  border-radius: 2px;
+}
+mark.live-search-match.current {
+  background: rgba(255, 180, 0, 0.7);
 }
 
 #live-stream-box .live-output-content,
@@ -573,6 +702,13 @@ body, .gradio-container, .gradio-container * {
   font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
   font-size: 13px;
   line-height: 1.4;
+}
+
+/* Prevent nested elements from creating their own scrollbars (causes double scrollbar issue) */
+#live-stream-box .live-output-content *,
+.live-stream-box .live-output-content * {
+  overflow: visible !important;
+  max-height: none !important;
 }
 
 /* Syntax highlighting colors for live stream */
@@ -880,22 +1016,27 @@ body, .gradio-container, .gradio-container * {
   border-radius: 0;
 }
 
-/* Role status row: keep status and session log button on one line, aligned with button row below */
-#role-status-row {
+/* Container that anchors action controls to the right under agent selectors */
+#role-status-row-container,
+.role-status-row-container {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  justify-content: flex-end;
   width: 100%;
-  max-width: 100%;
-  overflow: hidden;
+  margin-top: -4px !important;
+  margin-bottom: 0 !important;
 }
 
-#role-config-status {
-  flex: 1 1 0;  /* Grow, shrink, start from 0 width */
-  margin: 0;
-  min-width: 0;  /* Allow text to shrink so session log can have space */
-  overflow: hidden;
-  text-overflow: ellipsis;
+/* Action row: compact inline controls */
+#role-status-row,
+.role-status-row {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+  width: auto !important;
+  flex: 0 0 auto;
+  max-width: 100%;
+  background: transparent !important;
 }
 
 .role-status-row button,
@@ -917,6 +1058,27 @@ body, .gradio-container, .gradio-container * {
   display: inline-flex !important;
   align-items: center !important;
   gap: 6px !important;
+}
+
+#workspace-display,
+.workspace-display {
+  margin: 0 !important;
+  min-width: 0 !important;
+  width: auto !important;
+  flex-grow: 1 !important;
+  max-width: 100% !important;
+  overflow: visible !important;
+}
+
+#workspace-display .workspace-inline,
+.workspace-display .workspace-inline {
+  margin: 0 !important;
+  font-size: 12px;
+  color: #000000;
+  white-space: normal;
+  word-break: break-all;
+  overflow-wrap: break-word;
+  line-height: 1.2;
 }
 
 /* Agent communication chatbot - preserve scroll position */
@@ -980,6 +1142,20 @@ body, .gradio-container, .gradio-container * {
   border-radius: 0;
   padding: 0;
   box-shadow: none;
+}
+
+.task-input-row {
+  gap: 12px !important;
+  align-items: flex-start !important;
+}
+
+.task-input-row .task-desc-input textarea {
+  min-height: 120px !important;
+}
+
+/* Start button alignment */
+.start-task-btn {
+  align-self: stretch;
 }
 
 /* Follow-up input - styled as a compact chat continuation */
@@ -1063,25 +1239,16 @@ body, .gradio-container, .gradio-container * {
   border-style: solid !important;
 }
 
-/* Fix status text wrapping to prevent cancel button width changes */
-.role-status-row {
-  flex-wrap: nowrap !important;
-  overflow: hidden !important;
-}
-
+/* Status line can wrap to multiple lines and span full width */
 .role-config-status {
-  flex: 1 1 auto !important;
-  min-width: 0 !important;
-  overflow: hidden !important;
-  text-overflow: ellipsis !important;
-  white-space: nowrap !important;
+  width: 100% !important;
+  margin: 0 !important;
 }
 
 .role-config-status p {
-  overflow: hidden !important;
-  text-overflow: ellipsis !important;
-  white-space: nowrap !important;
   margin: 0 !important;
+  word-wrap: break-word !important;
+  white-space: normal !important;
 }
 
 /* Ensure cancel button has fixed width */
@@ -1589,18 +1756,15 @@ def normalize_live_stream_spacing(content: str) -> str:
 
 
 class LiveStreamDisplayBuffer:
-    """Rolling buffer for live stream display content."""
+    """Buffer for live stream display content with infinite history."""
 
-    def __init__(self, max_chars: int = 50000) -> None:
-        self.max_chars = max_chars
+    def __init__(self) -> None:
         self.content = ""
 
     def append(self, chunk: str) -> None:
         if not chunk:
             return
         self.content += chunk
-        if len(self.content) > self.max_chars:
-            self.content = self.content[-self.max_chars :]
 
 
 class LiveStreamRenderState:
@@ -1757,7 +1921,17 @@ def build_live_stream_html(content: str, ai_name: str = "CODING AI", live_id: st
     html_content = highlight_diffs(html_content)
     # Apply syntax highlighting to code blocks
     html_content = highlight_code_syntax(html_content)
-    header = f'<div class="live-output-header">▶ {ai_name} (Live Stream)</div>'
+    header = (
+        f'<div class="live-output-header">'
+        f'<span class="live-header-title">▶ {ai_name} (Live Stream)</span>'
+        f'<span class="live-search-bar">'
+        f'<input type="text" class="live-search-input" placeholder="Search..." />'
+        f'<span class="live-search-count"></span>'
+        f'<button class="live-search-nav" title="Previous">&#9650;</button>'
+        f'<button class="live-search-nav" title="Next">&#9660;</button>'
+        f'</span>'
+        f'</div>'
+    )
     body = f'<div class="live-output-content">{html_content}</div>'
     wrapper_attr = f' data-live-id="{live_id}"' if live_id else ''
     return f'<div class="live-output-wrapper"{wrapper_attr}>{header}\n{body}</div>'
@@ -1780,7 +1954,17 @@ def build_live_stream_html_from_pyte(content_html: str, ai_name: str = "CODING A
     content_html = '\n'.join(normalized_lines)
     if not content_html.strip():
         return ""
-    header = f'<div class="live-output-header">▶ {ai_name} (Live Stream)</div>'
+    header = (
+        f'<div class="live-output-header">'
+        f'<span class="live-header-title">▶ {ai_name} (Live Stream)</span>'
+        f'<span class="live-search-bar">'
+        f'<input type="text" class="live-search-input" placeholder="Search..." />'
+        f'<span class="live-search-count"></span>'
+        f'<button class="live-search-nav" title="Previous">&#9650;</button>'
+        f'<button class="live-search-nav" title="Next">&#9660;</button>'
+        f'</span>'
+        f'</div>'
+    )
     body = f'<div class="live-output-content">{content_html}</div>'
     wrapper_attr = f' data-live-id="{live_id}"' if live_id else ''
     return f'<div class="live-output-wrapper"{wrapper_attr}>{header}\n{body}</div>'
@@ -1818,8 +2002,26 @@ def summarize_content(content: str, max_length: int = 200) -> str:
     """
     import re
 
+    def _truncate(text: str) -> str:
+        text = text.strip()
+        if len(text) <= max_length:
+            return text
+        return text[:max_length].rsplit(" ", 1)[0] + "..."
+
     # Remove markdown formatting for cleaner summary
     clean = content.replace("**", "").replace("`", "").replace("# ", "")
+
+    # Prefer phase/prompt markers for terminal-like output. This avoids
+    # summaries collapsing to a random file path line like "Tool: Read ...".
+    lines = [line.strip() for line in clean.splitlines() if line.strip()]
+    terminal_markers = ("Prompt:", "Phase ", "Tool:", "Working in:", "Task Complete", "> ")
+    if lines and any(marker in clean for marker in terminal_markers):
+        for prefix in ("Prompt:", "Phase ", "> ", "Task Complete", "Tool:"):
+            for line in lines:
+                if line.startswith(prefix):
+                    return _truncate(line)
+        # Fallback for terminal output without known prefixes.
+        return _truncate(lines[0])
 
     # Split into sentences
     sentences = re.split(r"(?<=[.!?])\s+", clean)
@@ -1840,17 +2042,13 @@ def summarize_content(content: str, max_length: int = 200) -> str:
         for pattern in action_patterns:
             if re.match(pattern, sentence, re.IGNORECASE):
                 # Found a good summary sentence
-                if len(sentence) <= max_length:
-                    return sentence
-                return sentence[:max_length].rsplit(" ", 1)[0] + "..."
+                return _truncate(sentence)
 
     # Look for sentences mentioning file paths
     for sentence in sentences:
         sentence = sentence.strip()
         if re.search(r"[a-zA-Z_]+\.(py|js|ts|tsx|css|html|md|json|yaml|yml)", sentence):
-            if len(sentence) <= max_length:
-                return sentence
-            return sentence[:max_length].rsplit(" ", 1)[0] + "..."
+            return _truncate(sentence)
 
     # Fallback: get first meaningful paragraph
     first_para = clean.split("\n\n")[0].strip()
@@ -1861,9 +2059,7 @@ def summarize_content(content: str, max_length: int = 200) -> str:
                 first_para = para.strip()
                 break
 
-    if len(first_para) <= max_length:
-        return first_para
-    return first_para[:max_length].rsplit(" ", 1)[0] + "..."
+    return _truncate(first_para)
 
 
 def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> dict:
@@ -1874,6 +2070,8 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
         content: The message content
         collapsible: Whether to make long messages collapsible with a summary
     """
+    content = _sanitize_terminal_text(content)
+
     if collapsible and len(content) > 300:
         coding_summary = extract_coding_summary(content)
         if coding_summary:
@@ -1932,7 +2130,7 @@ def make_chat_message(speaker: str, content: str, collapsible: bool = True) -> d
 def make_progress_message(progress: ProgressUpdate) -> dict:
     """Create a chat message for an intermediate progress update.
 
-    Shows the before screenshot full-width with a summary and location.
+    Shows the before screenshot full-width with a summary, location, and next step.
     """
     screenshot_url = image_to_data_url(progress.before_screenshot)
     parts = ["**CODING AI** *(Progress)*"]
@@ -1940,6 +2138,8 @@ def make_progress_message(progress: ProgressUpdate) -> dict:
         parts.append(f"\n\n{progress.summary}")
     if progress.location:
         parts.append(f"\n\n**Location:** `{progress.location}`")
+    if progress.next_step:
+        parts.append(f"\n\n**Next:** {progress.next_step}")
     if screenshot_url:
         desc_html = f'<div class="screenshot-description">{progress.before_description}</div>' if progress.before_description else ''
         parts.append(
@@ -1948,6 +2148,26 @@ def make_progress_message(progress: ProgressUpdate) -> dict:
             f'<img src="{screenshot_url}" alt="Before screenshot">{desc_html}</div>'
         )
     return {"role": "assistant", "content": "".join(parts)}
+
+
+def make_phase_milestone(phase_name: str, account_name: str, model_name: str,
+                         usage_pct: int | None = None) -> dict:
+    """Create a chatbot message marking a phase transition with provider info.
+
+    Args:
+        phase_name: Phase name (e.g., "Exploration", "Coding", "Verification").
+        account_name: Provider account name.
+        model_name: Model identifier.
+        usage_pct: Usage used percentage (0-100), or None if unavailable.
+
+    Returns:
+        Chat message dict with role="user" for display in the milestones panel.
+    """
+    metrics = ""
+    if usage_pct is not None:
+        metrics = f" Usage: {usage_pct}%"
+    content = f"**{phase_name}:** {account_name} ({model_name}{metrics})"
+    return {"role": "user", "content": content}
 
 
 def _truncate_verification_output(text: str, limit: int = MAX_VERIFICATION_PROMPT_CHARS) -> str:
@@ -1985,6 +2205,10 @@ class ChadWebUI:
         self.provider_ui = ProviderUIManager(api_client, self.model_catalog, dev_mode=dev_mode)
         # Store dropdown references for cross-tab updates
         self._session_dropdowns: dict[str, dict] = {}
+        # Store live patch triggers for tab rehydration
+        self._session_live_patches: dict[str, gr.HTML] = {}
+        # Store live stream components for direct tab-switch restoration
+        self._session_live_streams: dict[str, gr.HTML] = {}
         # Store provider card delete events for chaining dropdown updates
         self._provider_delete_events: list = []
         # Stream client for API-based task execution (same method as CLI)
@@ -2065,7 +2289,9 @@ class ChadWebUI:
         server_session_id: str | None = None,
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
-    ) -> tuple[bool, str, str | None]:
+        override_exploration_prompt: str | None = None,
+        override_implementation_prompt: str | None = None,
+    ) -> tuple[bool, str, str | None, dict | None]:
         """Run a task via the API and post events to the message queue.
 
         This method enables unified streaming - both CLI and Gradio UI use
@@ -2083,8 +2309,17 @@ class ChadWebUI:
             screenshots: Optional list of screenshot file paths for agent reference
 
         Returns:
-            Tuple of (success, final_output_text, server_session_id)
+            Tuple of (success, final_output_text, server_session_id, work_done)
+            where work_done is a dict with files_modified, files_created, commands_run
         """
+        # Track file modifications to detect exploration-only vs actual work
+        work_done: dict = {
+            "files_modified": [],
+            "files_created": [],
+            "commands_run": [],
+            "total_tool_calls": 0,
+        }
+
         # Create server-side session first when not provided
         if server_session_id is None:
             try:
@@ -2095,7 +2330,16 @@ class ChadWebUI:
                 server_session_id = server_session.id
             except Exception as e:
                 message_queue.put(("status", f"❌ Failed to create session: {e}"))
-                return False, str(e), None
+                return False, str(e), None, None
+
+        resume_since_seq = 0
+        if server_session_id:
+            try:
+                # When reusing a server session for revision runs, skip prior events
+                # so stale complete events don't terminate the new stream.
+                resume_since_seq = int(self.api_client.get_session_latest_seq(server_session_id))
+            except Exception:
+                resume_since_seq = 0
 
         if server_session_id:
             message_queue.put(("session_id", server_session_id))
@@ -2115,10 +2359,12 @@ class ChadWebUI:
                 terminal_rows=TERMINAL_ROWS,
                 terminal_cols=effective_cols,
                 screenshots=screenshots,
+                override_exploration_prompt=override_exploration_prompt,
+                override_implementation_prompt=override_implementation_prompt,
             )
         except Exception as e:
             message_queue.put(("status", f"❌ Failed to start task: {e}"))
-            return False, str(e), server_session_id
+            return False, str(e), server_session_id, None
 
         # Emit message start
         message_queue.put(("ai_switch", "CODING AI"))
@@ -2130,24 +2376,79 @@ class ChadWebUI:
         got_complete_event = False
 
         # Detect if this is a provider that outputs stream-json (needs parsing)
-        # Both anthropic (Claude) and qwen use similar JSON formats
+        # Claude/Qwen/Gemini/Kimi share line-delimited JSON output modes.
         json_parser = None
         try:
             accounts = self.api_client.list_accounts()
             for acc in accounts:
-                if acc.name == coding_account and acc.provider in ("anthropic", "qwen"):
+                if acc.name == coding_account and acc.provider in ("anthropic", "qwen", "gemini", "kimi"):
                     json_parser = ClaudeStreamJsonParser()
                     break
         except Exception:
             pass  # Fall back to raw output if we can't determine provider
 
-        # For stream-json providers: accumulate parsed text directly (no terminal width constraints)
-        # For others: use pyte terminal emulation for proper ANSI/cursor handling
-        accumulated_text: list[str] = []
+        # Track output across the entire run (for verification input) and for the
+        # currently active chat phase (exploration vs implementation message bubbles).
+        full_output_chunks: list[str] = []
+        phase_output_chunks: list[str] = []
+        phase_message_split_done = False
+
+        def _record_output_chunk(chunk: str) -> None:
+            if not chunk:
+                return
+            full_output_chunks.append(chunk)
+            phase_output_chunks.append(chunk)
+
+        # For stream-json providers: parse text directly (no terminal width constraints).
+        # For others: use pyte terminal emulation for proper ANSI/cursor handling.
         terminal = None if json_parser else TerminalEmulator(cols=effective_cols, rows=TERMINAL_ROWS)
 
+        # Detect provider for Codex prompt echo filtering
+        is_codex = False
         try:
-            for event in stream_client.stream_events(server_session_id, include_terminal=True):
+            for acc in accounts:
+                if acc.name == coding_account and acc.provider == "openai":
+                    is_codex = True
+                    break
+        except Exception:
+            pass
+
+        # Codex prompt echo filtering state
+        # Codex echoes stdin after the header. The structure is:
+        #   [banner] OpenAI Codex v0.92.0...
+        #   --------
+        #   [header] workdir, model, etc
+        #   --------
+        #   [36muser[0m  (or just "user" - ANSI colored)
+        #   [prompt text - this is what we want to filter]
+        #   [36mmcp startup:[0m no servers
+        #   [agent work starts here]
+        #
+        # We keep everything up to the colored "user" line, filter the prompt,
+        # and show everything after "mcp startup:"
+        codex_in_prompt_echo = False  # True when we're in the echoed prompt section
+        codex_past_prompt_echo = False  # True when we've seen "mcp startup:" and are done
+        codex_output_buffer = ""
+        codex_ansi_pattern = re.compile(r'\x1b\[[0-9;]*m')
+        codex_user_line_pattern = re.compile(r'\n--------\nuser\n')
+        codex_user_pattern = re.compile(r'\n--------\n(?:\x1b\[[0-9;]*m)*user(?:\x1b\[[0-9;]*m)*\n')
+        codex_mcp_pattern = re.compile(
+            r'(?:\x1b\[[0-9;]*m)*mcp startup:(?:\x1b\[[0-9;]*m)*[^\n]*\n',
+            re.IGNORECASE,
+        )
+
+        try:
+            try:
+                stream_iter = stream_client.stream_events(
+                    server_session_id,
+                    since_seq=resume_since_seq,
+                    include_terminal=True,
+                )
+            except TypeError:
+                # Backward-compatible fallback for simple stream client stubs in tests
+                stream_iter = stream_client.stream_events(server_session_id, include_terminal=True)
+
+            for event in stream_iter:
                 if event.event_type == "terminal":
                     # Feed terminal data (base64 for live PTY, plain text for logs)
                     raw_data = event.data.get("data", "")
@@ -2164,35 +2465,155 @@ class ChadWebUI:
                         text_chunks = json_parser.feed(raw_bytes)
                         if text_chunks:
                             # Accumulate parsed text and render as HTML directly
-                            accumulated_text.extend(text_chunks)
+                            for text_chunk in text_chunks:
+                                _record_output_chunk(text_chunk)
                             readable_text = "\n".join(text_chunks) + "\n"
                             # Escape HTML and preserve newlines
-                            all_text = "\n".join(accumulated_text)
+                            all_text = "\n".join(full_output_chunks)
                             html_output = html.escape(all_text)
                             message_queue.put(("stream", readable_text, html_output))
                         # If no complete lines yet, don't emit anything
                     else:
-                        # Non-anthropic: pass through raw PTY output with terminal emulation
+                        decoded = raw_bytes.decode("utf-8", errors="replace")
+
+                        # Each task phase starts a new Codex process. If we see a fresh
+                        # Codex banner while in passthrough mode, restart prompt filtering
+                        # so the implementation prompt gets stripped too.
+                        if is_codex and codex_past_prompt_echo:
+                            banner_probe = codex_ansi_pattern.sub('', decoded).lower()
+                            if "openai codex" in banner_probe and "--------" in banner_probe:
+                                codex_past_prompt_echo = False
+                                codex_in_prompt_echo = False
+                                codex_output_buffer = ""
+
+                        # Filter Codex prompt echo
+                        # Codex output structure:
+                        #   [banner]
+                        #   --------
+                        #   [header info]
+                        #   --------
+                        #   user  (or [36muser[0m with ANSI)
+                        #   [prompt - FILTER THIS]
+                        #   mcp startup: ...
+                        #   [agent work - KEEP THIS]
+                        if is_codex and not codex_past_prompt_echo:
+                            codex_output_buffer += decoded
+                            normalized = codex_output_buffer.replace("\r\n", "\n").replace("\r", "\n")
+
+                            # Strip ANSI codes for pattern matching
+                            stripped = codex_ansi_pattern.sub('', normalized)
+
+                            # Look for "user" on its own line (after second --------)
+                            # This marks the start of the echoed prompt
+                            user_line_match = codex_user_line_pattern.search(stripped)
+
+                            # Check if we're entering the prompt echo section
+                            if not codex_in_prompt_echo and user_line_match:
+                                # Found start of prompt echo - emit content before it
+                                # Find the position in the original (non-stripped) string
+                                # by finding the pattern with ANSI codes
+                                match = codex_user_pattern.search(normalized)
+                                if match:
+                                    pre_echo = normalized[:match.start()]
+                                    if pre_echo.strip():
+                                        terminal.feed(pre_echo.encode("utf-8"))
+                                        _record_output_chunk(pre_echo)
+                                        html_output = terminal.render_html()
+                                        message_queue.put(("stream", pre_echo, html_output))
+                                    # Now in prompt echo section - update buffer
+                                    codex_in_prompt_echo = True
+                                    codex_output_buffer = normalized[match.end():]
+                                    normalized = codex_output_buffer
+                                    stripped = codex_ansi_pattern.sub('', normalized)
+
+                            # Check if we've passed the prompt echo section
+                            if codex_in_prompt_echo and "mcp startup:" in stripped.lower():
+                                # Found end of prompt echo - extract agent output after marker
+                                match = codex_mcp_pattern.search(normalized)
+                                if match:
+                                    agent_output = normalized[match.end():]
+                                else:
+                                    # Fallback: find in stripped and estimate position
+                                    marker_pos = stripped.lower().find("mcp startup:")
+                                    newline_after = stripped.find("\n", marker_pos)
+                                    if newline_after != -1:
+                                        agent_output = normalized[newline_after + 1:]
+                                    else:
+                                        agent_output = ""
+                                codex_past_prompt_echo = True
+                                codex_output_buffer = ""
+                                if agent_output.strip():
+                                    terminal.feed(agent_output.encode("utf-8"))
+                                    _record_output_chunk(agent_output)
+                                    html_output = terminal.render_html()
+                                    message_queue.put(("stream", agent_output, html_output))
+                                continue
+
+                            # If not in prompt echo yet, emit normally but keep buffer small
+                            if not codex_in_prompt_echo:
+                                if len(codex_output_buffer) > 2000:
+                                    # No marker found - emit older content and keep looking
+                                    to_emit = codex_output_buffer[:-500]
+                                    codex_output_buffer = codex_output_buffer[-500:]
+                                    if to_emit.strip():
+                                        terminal.feed(to_emit.encode("utf-8"))
+                                        _record_output_chunk(to_emit)
+                                        html_output = terminal.render_html()
+                                        message_queue.put(("stream", to_emit, html_output))
+                            continue
+
+                        # Past prompt echo - pass through raw PTY output with terminal emulation
                         terminal.feed(raw_bytes)
-                        text_chunk = raw_bytes.decode("utf-8", errors="replace")
+                        _record_output_chunk(decoded)
                         html_output = terminal.render_html()
-                        message_queue.put(("stream", text_chunk, html_output))
+                        message_queue.put(("stream", decoded, html_output))
 
                 elif event.event_type == "complete":
                     exit_code = event.data.get("exit_code", 0)
                     got_complete_event = True
+                    # Flush any remaining Codex output buffer
+                    if is_codex and codex_output_buffer.strip():
+                        if terminal:
+                            terminal.feed(codex_output_buffer.encode("utf-8"))
+                        _record_output_chunk(codex_output_buffer)
+                        codex_output_buffer = ""
                     break
 
                 elif event.event_type == "error":
                     error_msg = event.data.get("error", "Unknown error")
                     message_queue.put(("status", f"❌ Error: {error_msg}"))
-                    return False, error_msg, server_session_id
+                    return False, error_msg, server_session_id, work_done
 
                 elif event.event_type == "event":
                     # Structured events from EventLog
                     event_type = event.data.get("type", "")
                     if event_type == "session_started":
                         pass  # Already handled by task start
+                    elif event_type == "status":
+                        status_text = event.data.get("status", "")
+                        if status_text:
+                            if (
+                                status_text == "Phase 2: Implementing changes..."
+                                and not phase_message_split_done
+                            ):
+                                exploration_output = _sanitize_terminal_text("\n".join(phase_output_chunks)).strip()
+                                if exploration_output:
+                                    message_queue.put(("message_complete", "CODING AI", exploration_output))
+                                    message_queue.put(("message_start", "CODING AI"))
+                                    phase_message_split_done = True
+                                phase_output_chunks = []
+                            message_queue.put(("status", status_text))
+                    elif event_type == "progress":
+                        summary = str(event.data.get("summary", "")).strip()
+                        if summary:
+                            progress = ProgressUpdate(
+                                summary=summary,
+                                location=str(event.data.get("location", "") or ""),
+                                next_step=event.data.get("next_step"),
+                                before_screenshot=event.data.get("before_screenshot"),
+                                before_description=event.data.get("before_description"),
+                            )
+                            message_queue.put(("progress", progress))
                     elif event_type == "terminal_output":
                         # Fallback for parsed terminal output from EventLog
                         # This ensures content is shown even if raw PTY parsing fails
@@ -2200,44 +2621,66 @@ class ChadWebUI:
                         if data and data.strip():
                             # For JSON providers, use the already-parsed EventLog text
                             if json_parser:
-                                accumulated_text = [data]  # Replace with EventLog content
+                                full_output_chunks = [data]  # Replace with EventLog content
+                                phase_output_chunks = [data]
                                 html_output = html.escape(data)
                                 message_queue.put(("stream", data, html_output))
                     elif event_type == "tool_call_started":
                         tool = event.data.get("tool", "")
+                        work_done["total_tool_calls"] += 1
                         if tool == "bash":
-                            cmd = event.data.get("command", "")[:50]
-                            message_queue.put(("activity", f"● bash: {cmd}"))
+                            cmd = event.data.get("command", "")
+                            message_queue.put(("activity", f"● bash: {cmd[:50]}"))
+                            # Track significant commands
+                            cmd_lower = cmd.lower()
+                            keywords = ["pytest", "npm", "make", "cargo", "go ", "yarn", "pnpm", "gradle", "mvn"]
+                            if any(kw in cmd_lower for kw in keywords):
+                                work_done["commands_run"].append(cmd[:100])
                         elif tool in ("read", "write", "edit"):
                             path = event.data.get("path", "")
                             message_queue.put(("activity", f"● {tool}: {path}"))
+                            # Track file modifications
+                            if tool == "write" and path and path not in work_done["files_created"]:
+                                work_done["files_created"].append(path)
+                            elif tool == "edit" and path and path not in work_done["files_modified"]:
+                                work_done["files_modified"].append(path)
 
         except Exception as e:
             message_queue.put(("status", f"❌ Stream error: {e}"))
-            return False, str(e), server_session_id
+            return False, str(e), server_session_id, work_done
 
         # Check if stream ended without completion event - this indicates a bug
         # where the SSE stream dropped unexpectedly (e.g., PTY session marked inactive
         # prematurely). Don't treat this as success or verification will start early.
         if not got_complete_event:
             message_queue.put(("status", "❌ Stream ended unexpectedly without completion"))
-            return False, "Stream ended unexpectedly", server_session_id
+            return False, "Stream ended unexpectedly", server_session_id, work_done
 
         # Get plain text for final output
-        if terminal:
+        # Always prefer full_output_chunks (captures full session) over terminal.get_text()
+        # (which only returns the visible screen buffer, losing scrollback history)
+        if full_output_chunks:
+            final_output = "\n".join(full_output_chunks)
+        elif terminal:
             final_output = terminal.get_text()
         else:
-            # For anthropic JSON parsing, use accumulated text
-            final_output = "\n".join(accumulated_text)
+            final_output = ""
+        final_output = _sanitize_terminal_text(final_output)
+        phase_output = _sanitize_terminal_text("\n".join(phase_output_chunks))
+        final_message_output = phase_output if phase_output.strip() else final_output
 
         # Emit completion
         if exit_code == 0:
-            message_queue.put(("message_complete", "CODING AI", final_output))
-            return True, final_output, server_session_id
+            message_queue.put(("message_complete", "CODING AI", final_message_output))
+            # Check if agent only explored without making changes
+            made_changes = bool(work_done["files_modified"] or work_done["files_created"])
+            if not made_changes:
+                message_queue.put(("warning", "Agent completed without modifying any files"))
+            return True, final_output, server_session_id, work_done
         else:
             message_queue.put(("status", f"❌ Agent exited with code {exit_code}"))
-            message_queue.put(("message_complete", "CODING AI", final_output))
-            return False, f"Agent exited with code {exit_code}", server_session_id
+            message_queue.put(("message_complete", "CODING AI", final_message_output))
+            return False, f"Agent exited with code {exit_code}", server_session_id, work_done
 
     def get_session(self, session_id: str) -> Session:
         """Get or create a session by ID."""
@@ -2249,6 +2692,115 @@ class ChadWebUI:
         """Return the session ID used for worktree operations (server-aware)."""
         session = self.get_session(session_id)
         return session.server_session_id or session_id
+
+    def _wait_for_server_session_inactive(
+        self,
+        server_session_id: str,
+        timeout_seconds: float = 3.0,
+        poll_interval: float = 0.1,
+    ) -> bool:
+        """Wait until a server-side session is inactive or gone."""
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            try:
+                server_session = self.api_client.get_session(server_session_id)
+            except Exception:
+                # Missing session is equivalent to inactive for restart purposes
+                return True
+            if not server_session or not getattr(server_session, "active", False):
+                return True
+            time.sleep(poll_interval)
+        return False
+
+    def _request_server_cancel(self, server_session_id: str, timeout_seconds: float = 3.0) -> bool:
+        """Request cancellation of a server-side session and wait for shutdown."""
+        try:
+            self.api_client.cancel_session(server_session_id)
+        except Exception:
+            return False
+        return self._wait_for_server_session_inactive(server_session_id, timeout_seconds=timeout_seconds)
+
+    def _await_cancel_cleanup(
+        self,
+        session_id: str,
+        server_session_id: str,
+        timeout_seconds: float = 15.0,
+    ) -> None:
+        """Wait for server cancellation to settle, then clean up local worktree state."""
+        if not self._wait_for_server_session_inactive(server_session_id, timeout_seconds=timeout_seconds):
+            return
+
+        session = self.get_session(session_id)
+        if session.server_session_id != server_session_id:
+            return
+        if not session.worktree_path or not session.project_path:
+            return
+
+        try:
+            git_mgr = GitWorktreeManager(Path(session.project_path))
+            git_mgr.delete_worktree(self._worktree_id(session_id))
+        except Exception:
+            pass  # Best effort cleanup
+        session.worktree_path = None
+        session.worktree_base_commit = None
+
+    def _workspace_label(self, session: Session) -> str:
+        """Format the workspace path label shown next to the session log button."""
+        workspace_path = ""
+        if session.worktree_path:
+            workspace_path = str(session.worktree_path)
+        elif session.project_path:
+            workspace_path = str(session.project_path)
+        if workspace_path:
+            return f"Workspace: {workspace_path}"
+        return "Workspace: Not set"
+
+    def _workspace_html(self, session: Session) -> str:
+        """Render workspace label as compact inline HTML."""
+        workspace_path = ""
+        if session.worktree_path:
+            workspace_path = str(session.worktree_path)
+        elif session.project_path:
+            workspace_path = str(session.project_path)
+        tooltip = workspace_path if workspace_path else "Not set"
+        return (
+            f'<div class="workspace-inline" title="{html.escape(tooltip)}">'
+            f"{html.escape(self._workspace_label(session))}"
+            "</div>"
+        )
+
+    @staticmethod
+    def _compute_live_stream_updates(
+        live_stream: str,
+        live_patch: tuple[str, str] | None,
+        session: "Session",
+        live_stream_id: str,
+        task_ended: bool,
+    ) -> tuple[str | None, tuple[str, str] | None, bool]:
+        """Decide whether to patch or replace live stream content.
+
+        Returns (display_stream, live_patch_out, has_initial_live_render_flag).
+        """
+        use_live_patch = live_patch
+        has_initial = session.has_initial_live_render
+
+        if not use_live_patch and live_stream and not task_ended:
+            has_live_id = f'data-live-id="{live_stream_id}"' in live_stream
+            if has_live_id:
+                if has_initial:
+                    use_live_patch = (live_stream_id, live_stream)
+                else:
+                    has_initial = True
+        elif not live_stream:
+            # DOM content is being cleared — reset so next content gets a full
+            # Gradio render instead of JS-patching a now-empty element.
+            has_initial = False
+
+        if task_ended:
+            has_initial = False
+
+        display_stream = None if use_live_patch else live_stream
+        return display_stream, use_live_patch, has_initial
 
     def create_session(self, name: str = "New Session") -> Session:
         """Create a new session with a unique ID."""
@@ -2282,6 +2834,56 @@ class ChadWebUI:
 
     def _get_mistral_remaining_usage(self) -> float:
         return self.provider_ui._get_mistral_remaining_usage()
+
+    def _get_qwen_remaining_usage(self) -> float:
+        return self.provider_ui._get_qwen_remaining_usage()
+
+    def _check_usage_and_switch(self, coding_account: str) -> tuple[str, str | None]:
+        """Check if current provider exceeds usage threshold and switch if needed.
+
+        Returns:
+            Tuple of (account_to_use, switched_from_account)
+            switched_from_account is None if no switch occurred
+        """
+        try:
+            threshold = self.api_client.get_usage_switch_threshold()
+            # Ensure threshold is a valid number
+            if not isinstance(threshold, (int, float)):
+                threshold = 90
+        except Exception:
+            threshold = 90
+
+        # Threshold of 100 disables usage-based switching
+        if threshold >= 100:
+            return coding_account, None
+
+        # Check current account usage
+        remaining = self.get_remaining_usage(coding_account)
+        used_pct = (1.0 - remaining) * 100
+
+        if used_pct < threshold:
+            # Usage is below threshold, no switch needed
+            return coding_account, None
+
+        # Usage exceeds threshold, try to find a fallback
+        try:
+            next_account = self.api_client.get_next_fallback_provider(coding_account)
+        except Exception:
+            return coding_account, None
+
+        if not next_account:
+            return coding_account, None
+
+        # Check that fallback has better usage
+        next_remaining = self.get_remaining_usage(next_account)
+        next_used_pct = (1.0 - next_remaining) * 100
+
+        if next_used_pct >= threshold:
+            # Fallback also exceeds threshold, don't switch
+            return coding_account, None
+
+        # Switch to fallback
+        return next_account, coding_account
 
     def _provider_state(self, pending_delete: str = None) -> tuple:
         return self.provider_ui.provider_state(self.provider_card_count, pending_delete=pending_delete)
@@ -2355,6 +2957,7 @@ class ChadWebUI:
             - verified=True means the work passed verification
             - verified=False means revisions are needed, feedback contains issues
             - verified=None means verification aborted due to missing inputs
+              or internal verifier execution errors
         """
         try:
             account = self.api_client.get_account(verification_account)
@@ -2448,60 +3051,78 @@ class ChadWebUI:
         coding_summary = extract_coding_summary(coding_output)
         change_summary = coding_summary.change_summary if coding_summary else None
         trimmed_output = _truncate_verification_output(coding_output)
-        verification_prompt = get_verification_prompt(trimmed_output, task_description, change_summary)
+        exploration_prompt = get_verification_exploration_prompt(trimmed_output, task_description, change_summary)
+        conclusion_prompt = get_verification_conclusion_prompt()
 
         try:
-            verifier = create_provider(verification_config)
-            if on_activity:
-                verifier.set_activity_callback(on_activity)
-
-            if not verifier.start_session(project_path, None):
-                return True, "Verification skipped: failed to start session"
-
             max_parse_attempts = 2
             last_error = None
+            retry_conclusion_prompt = conclusion_prompt
 
             for attempt in range(max_parse_attempts):
-                verifier.send_message(verification_prompt)
-                response = verifier.get_response(timeout=timeout)
+                verifier = create_provider(verification_config)
+                if on_activity:
+                    verifier.set_activity_callback(on_activity)
 
-                if not response:
-                    last_error = "No response from verification agent"
-                    continue
+                if not verifier.start_session(project_path, None):
+                    return True, "Verification skipped: failed to start session"
 
                 try:
-                    passed, summary, issues = parse_verification_response(response)
+                    verifier.send_message(exploration_prompt)
+                    _ = verifier.get_response(timeout=timeout)
 
+                    verifier.send_message(retry_conclusion_prompt)
+                    response = verifier.get_response(timeout=timeout)
+
+                    if not response:
+                        last_error = "No response from verification agent"
+                        if on_activity:
+                            on_activity(
+                                "system",
+                                f"Verification response missing (attempt {attempt + 1}/{max_parse_attempts})",
+                            )
+                        continue
+
+                    try:
+                        passed, summary, issues = parse_verification_response(response)
+
+                        if passed:
+                            # Skip automated verification for mock provider (testing mode)
+                            if verification_provider != "mock" and not check_verification_mentioned(coding_output):
+                                verified, feedback = _run_automated_verification()
+                                if not verified:
+                                    return False, feedback or "Verification failed"
+                            return True, summary
+
+                        feedback = summary
+                        if issues:
+                            feedback += "\n\nIssues:\n" + "\n".join(f"- {issue}" for issue in issues)
+                        return False, feedback
+
+                    except VerificationParseError as e:
+                        last_error = str(e)
+                        if on_activity:
+                            on_activity(
+                                "system",
+                                f"Verification parse failed (attempt {attempt + 1}/{max_parse_attempts}): {last_error}",
+                            )
+                        if attempt < max_parse_attempts - 1:
+                            # Retry with a stronger reminder to use strict JSON in the conclusion phase.
+                            retry_conclusion_prompt = (
+                                "Your previous response was not valid JSON. "
+                                "You MUST respond with ONLY a JSON object like:\n"
+                                '```json\n{"passed": true, "summary": "explanation"}\n```\n\n'
+                                "Try again.\n\n"
+                                f"{conclusion_prompt}"
+                            )
+                        continue
+                finally:
                     verifier.stop_session()
 
-                    if passed:
-                        # Skip automated verification for mock provider (testing mode)
-                        if verification_provider != "mock" and not check_verification_mentioned(coding_output):
-                            verified, feedback = _run_automated_verification()
-                            if not verified:
-                                return False, feedback or "Verification failed"
-                        return True, summary
-
-                    feedback = summary
-                    if issues:
-                        feedback += "\n\nIssues:\n" + "\n".join(f"- {issue}" for issue in issues)
-                    return False, feedback
-
-                except VerificationParseError as e:
-                    last_error = str(e)
-                    if attempt < max_parse_attempts - 1:
-                        # Retry with a reminder to use JSON format
-                        verification_prompt = (
-                            "Your previous response was not valid JSON. "
-                            "You MUST respond with ONLY a JSON object like:\n"
-                            '```json\n{"passed": true, "summary": "explanation"}\n```\n\n'
-                            "Try again."
-                        )
-                    continue
-
-            verifier.stop_session()
-            # All attempts failed - return error
-            return None, f"Verification failed: {last_error}"
+            # All attempts failed to produce parseable verdict JSON.
+            # Treat this as a failed verification (revision needed) rather than
+            # a terminal error so the coding loop can continue.
+            return False, f"Verification failed: {last_error or 'unknown verification parse error'}"
 
         except Exception as e:
             return None, f"Verification error: {str(e)}"
@@ -2555,8 +3176,8 @@ class ChadWebUI:
             error = result.stderr.strip() if result.stderr else "Unknown error"
             return f"⚠️ **Login may have failed**\n\n{error}\n\nTry refreshing Usage Statistics to check status."
 
-    def add_provider(self, provider_name: str, provider_type: str):  # noqa: C901
-        return self.provider_ui.add_provider(provider_name, provider_type, self.provider_card_count)
+    def add_provider(self, provider_name: str, provider_type: str, api_key: str = ""):  # noqa: C901
+        return self.provider_ui.add_provider(provider_name, provider_type, self.provider_card_count, api_key=api_key)
 
     def _unassign_account_roles(self, account_name: str) -> None:
         self.provider_ui._unassign_account_roles(account_name)
@@ -2565,15 +3186,23 @@ class ChadWebUI:
         self,
         task_state: str | None = None,
         worktree_path: str | None = None,
+        project_path: str | None = None,
+        verification_account: str | None = None,
+        accounts=None,
     ) -> tuple[bool, str]:
-        return self.provider_ui.get_role_config_status(task_state, worktree_path)
+        return self.provider_ui.get_role_config_status(
+            task_state, worktree_path, project_path=project_path, verification_account=verification_account,
+            accounts=accounts,
+        )
 
-    def format_role_status(
-        self,
-        task_state: str | None = None,
-        worktree_path: str | None = None,
-    ) -> str:
-        return self.provider_ui.format_role_status(task_state, worktree_path)
+    def _make_phase_milestone(self, phase_name: str, account_name: str, model_name: str) -> dict:
+        """Create a phase milestone chat message with live usage metrics."""
+        try:
+            usage_remaining = self.provider_ui.get_remaining_usage(account_name)
+            usage_pct = math.ceil((1.0 - usage_remaining) * 100)
+        except Exception:
+            usage_pct = None
+        return make_phase_milestone(phase_name, account_name, model_name, usage_pct)
 
     def assign_role(self, account_name: str, role: str):
         return self.provider_ui.assign_role(account_name, role, self.provider_card_count)
@@ -2598,12 +3227,27 @@ class ChadWebUI:
         """Cancel the running task for a specific session.
 
         Returns a tuple of UI component updates matching the cancel_btn.click outputs:
-        (chatbot, live_stream, task_status, project_path, task_description,
+        (live_stream, chatbot, task_status, project_path, task_description,
          start_btn, cancel_btn, followup_row, merge_section_group)
         """
         session = self.get_session(session_id)
         session.cancel_requested = True
         session.active = False  # Mark session as inactive to allow restart
+        server_session_id = session.server_session_id
+        cancel_requested = False
+        if session.server_session_id:
+            # Request server cancellation immediately; do not block the UI waiting for shutdown.
+            try:
+                self.api_client.cancel_session(session.server_session_id)
+                cancel_requested = True
+            except Exception:
+                cancel_requested = False
+            if cancel_requested and server_session_id:
+                threading.Thread(
+                    target=self._await_cancel_cleanup,
+                    args=(session_id, server_session_id),
+                    daemon=True,
+                ).start()
         if session.provider:
             session.provider.stop_session()
             session.provider = None
@@ -2615,8 +3259,8 @@ class ChadWebUI:
         except Exception:
             pass  # Best effort cleanup
 
-        # Clean up worktree if it exists
-        if session.worktree_path and session.project_path:
+        # No server-backed task: clean up worktree synchronously.
+        if session.worktree_path and session.project_path and not server_session_id:
             try:
                 git_mgr = GitWorktreeManager(Path(session.project_path))
                 git_mgr.delete_worktree(self._worktree_id(session_id))
@@ -2630,8 +3274,8 @@ class ChadWebUI:
             gr.update(value="🛑 Task cancelled"),  # live_stream
             no_change,  # chatbot - keep existing chat history
             no_change,  # task_status
-            no_change,  # project_path - keep so user can restart
-            no_change,  # task_description - keep so user can modify and restart
+            gr.update(interactive=True),  # project_path - keep editable so user can restart
+            gr.update(interactive=True),  # task_description - re-enable submit/start after cancel
             gr.update(interactive=True),  # start_btn - re-enable to allow new task
             gr.update(interactive=False),  # cancel_btn - disable since nothing to cancel
             gr.update(visible=False),  # followup_row - hide follow-up section
@@ -2697,6 +3341,7 @@ class ChadWebUI:
         coding_reasoning_value: str | None,
         current_verification_model: str | None = None,
         current_verification_reasoning: str | None = None,
+        accounts=None,
     ) -> VerificationDropdownState:
         """Resolve verification dropdown values based on current selections."""
         if verification_agent == self.VERIFICATION_NONE:
@@ -2707,7 +3352,8 @@ class ChadWebUI:
                 "default",
                 False,
             )
-        accounts = self.api_client.list_accounts()
+        if accounts is None:
+            accounts = self.api_client.list_accounts()
         accounts_map = {acc.name: acc.provider for acc in accounts}
         account_choices = list(accounts_map.keys())
         actual_account = coding_agent if verification_agent == self.SAME_AS_CODING else verification_agent
@@ -2772,6 +3418,8 @@ class ChadWebUI:
         verification_reasoning: str | None = None,
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
+        override_exploration_prompt: str | None = None,
+        override_implementation_prompt: str | None = None,
     ) -> Iterator[
         tuple[
             list,
@@ -2791,6 +3439,7 @@ class ChadWebUI:
         session = self.get_session(session_id)
         chat_history = []
         message_queue = queue.Queue()
+        prior_cancel_requested = session.cancel_requested
         session.cancel_requested = False
         session.config = None
 
@@ -2799,38 +3448,53 @@ class ChadWebUI:
         if session.server_session_id:
             try:
                 server_session = self.api_client.get_session(session.server_session_id)
-                if server_session and server_session.active:
-                    # Task is still running - cancel it first or warn user
-                    error_msg = (
-                        "⚠️ A task is already running on this session.\n\n"
-                        "Please wait for it to complete or cancel it before starting a new task."
-                    )
-                    # We need to define make_yield before using it, so just return early
-                    # with a simple error
-                    yield (
-                        [],  # chatbot
-                        error_msg,  # task_status
-                        gr.update(),  # live_stream
-                        gr.update(),  # project_path
-                        gr.update(),  # task_description
-                        gr.update(interactive=True),  # start_btn
-                        gr.update(interactive=False),  # cancel_btn
-                        gr.update(),  # role_status
-                        gr.update(),  # summary
-                        gr.update(),  # followup_row
-                        gr.update(),  # followup_btn
-                        gr.update(),  # merge_row
-                        gr.update(),  # merge_summary
-                        gr.update(),  # branch_dropdown
-                        gr.update(),  # diff_full_content
-                        gr.update(),  # merge_section_header
-                        gr.update(),  # live_patch_trigger
-                        gr.update(),  # coding_prompt_accordion
-                        gr.update(),  # coding_prompt_content
-                        gr.update(),  # verification_prompt_accordion
-                        gr.update(),  # verification_prompt_content
-                    )
-                    return
+                if server_session and getattr(server_session, "active", False):
+                    # User just cancelled and immediately restarted: complete server-side
+                    # cancellation first so restart can proceed on the happy path.
+                    if prior_cancel_requested:
+                        cancelled = self._request_server_cancel(session.server_session_id, timeout_seconds=15.0)
+                        if cancelled:
+                            server_session = self.api_client.get_session(session.server_session_id)
+                        else:
+                            # Cancel was already requested locally but server state did not
+                            # settle in time. Detach from this stale server session so the
+                            # restart can proceed on a new session.
+                            session.server_session_id = None
+                            server_session = None
+
+                    if server_session and getattr(server_session, "active", False):
+                        # Task is still running - cancel it first or warn user
+                        error_msg = (
+                            "⚠️ A task is already running on this session.\n\n"
+                            "Please wait for it to complete or cancel it before starting a new task."
+                        )
+                        yield (
+                            gr.update(),  # live_stream
+                            [],  # chatbot
+                            gr.update(value=error_msg),  # task_status
+                            gr.update(),  # project_path
+                            gr.update(),  # task_description
+                            gr.update(interactive=True),  # start_btn
+                            gr.update(interactive=False),  # cancel_btn
+                            gr.update(),  # session_log_btn
+                            gr.update(),  # workspace_display
+                            gr.update(),  # followup_input
+                            gr.update(),  # followup_row
+                            gr.update(),  # send_followup_btn
+                            gr.update(),  # merge_section_group
+                            gr.update(),  # changes_summary
+                            gr.update(),  # merge_target_branch
+                            gr.update(),  # diff_full_content
+                            "",  # merge_section_header
+                            "",  # live_patch_trigger
+                            gr.update(),  # exploration_prompt_accordion
+                            gr.update(),  # exploration_prompt_content
+                            gr.update(),  # implementation_prompt_accordion
+                            gr.update(),  # implementation_prompt_content
+                            gr.update(),  # verification_prompt_accordion
+                            gr.update(),  # verification_prompt_content
+                        )
+                        return
             except Exception:
                 # Session might not exist on server yet, which is fine
                 pass
@@ -2852,8 +3516,10 @@ class ChadWebUI:
             live_patch: tuple[str, str] | None = None,
             task_state: str | None = None,
             task_ended: bool = False,
-            coding_prompt: str | None = None,
+            exploration_prompt: str | None = None,
+            implementation_prompt: str | None = None,
             verification_prompt: str | None = None,
+            verification_account: str | None = None,
         ):
             """Format output tuple for Gradio with current UI state.
 
@@ -2868,42 +3534,17 @@ class ChadWebUI:
                 task_ended: When True, task has completed/failed/cancelled and buttons
                            should allow starting a new task (start enabled, cancel disabled).
             """
-            # Automatic live_patch handling for scroll/selection preservation
-            # - First render with content: normal Gradio update, set initial_render flag
-            # - Subsequent renders: use live_patch for JS DOM patching
-            use_live_patch = live_patch  # Explicit live_patch takes precedence
-
-            if not use_live_patch and live_stream:
-                # Check if this live_stream has our wrapper with data-live-id
-                has_live_id = f'data-live-id="{live_stream_id}"' in live_stream
-                if has_live_id:
-                    if session.has_initial_live_render:
-                        # After initial render, use live_patch for updates
-                        use_live_patch = (live_stream_id, live_stream)
-                    else:
-                        # First render with content - do normal Gradio update
-                        session.has_initial_live_render = True
-
-            # When task ends, reset initial render flag for next task
-            if task_ended:
-                session.has_initial_live_render = False
-
-            # When live_patch is provided, skip updating the live_stream component directly
-            # JS will handle patching the DOM in-place to preserve scroll/selection
-            if use_live_patch:
-                display_stream = None  # Signal to use gr.update() without value
-                live_patch = use_live_patch
-            else:
-                display_stream = live_stream
+            display_stream, live_patch, updated_flag = self._compute_live_stream_updates(
+                live_stream, live_patch, session, live_stream_id, task_ended
+            )
+            session.has_initial_live_render = updated_flag
             is_error = "❌" in status
-            # Get worktree path for status display
-            wt_path = str(session.worktree_path) if session.worktree_path else None
-            display_role_status = self.format_role_status(task_state, wt_path)
             log_btn_update = gr.update(
                 label=session.log_path.name if session.log_path else "Session Log",
                 value=str(session.log_path) if session.log_path else None,
                 visible=session.log_path is not None,
             )
+            workspace_update = gr.update(value=self._workspace_html(session))
             display_history = history
             if history and isinstance(history[0], dict):
                 content = history[0].get("content", "")
@@ -2931,6 +3572,43 @@ class ChadWebUI:
             # When display_stream is None (patching mode), don't update the live_stream value
             # This allows JS to patch the DOM in-place without Gradio replacing it
             live_stream_update = gr.update() if display_stream is None else gr.update(value=display_stream)
+            # Prompt textboxes - update content and interactivity based on phase
+            # During task: lock prompts for phases that have started
+            # After task ends: unlock all prompts for editing
+            _explore_interactive = True if task_ended else (
+                True if task_state is None else False
+            )
+            _impl_interactive = True if task_ended else (
+                True if task_state is None else (
+                    task_state == "running"  # Still editable during exploration
+                )
+            )
+            _verif_interactive = True if task_ended else (
+                True if task_state is None else (
+                    task_state in ("running",)  # Still editable during exploration/implementation
+                )
+            )
+            _explore_acc = gr.update(visible=True) if exploration_prompt else gr.update()
+            _explore_val = (
+                gr.update(value=exploration_prompt, interactive=_explore_interactive)
+                if exploration_prompt else (
+                    gr.update(interactive=_explore_interactive) if task_state is not None or task_ended else gr.update()
+                )
+            )
+            _impl_acc = gr.update(visible=True) if implementation_prompt else gr.update()
+            _impl_val = (
+                gr.update(value=implementation_prompt, interactive=_impl_interactive)
+                if implementation_prompt else (
+                    gr.update(interactive=_impl_interactive) if task_state is not None or task_ended else gr.update()
+                )
+            )
+            _verif_acc = gr.update(visible=True) if verification_prompt else gr.update()
+            _verif_val = (
+                gr.update(value=verification_prompt, interactive=_verif_interactive)
+                if verification_prompt else (
+                    gr.update(interactive=_verif_interactive) if task_state is not None or task_ended else gr.update()
+                )
+            )
             return (
                 live_stream_update,  # live_stream - Updated by JS patching when live_patch is provided
                 display_history,  # chatbot
@@ -2940,8 +3618,8 @@ class ChadWebUI:
                 gr.update(value=task_description, interactive=interactive),
                 gr.update(interactive=start_btn_interactive),
                 gr.update(interactive=cancel_btn_interactive),
-                gr.update(value=display_role_status),
                 log_btn_update,
+                workspace_update,
                 gr.update(value=""),  # Clear followup input
                 gr.update(visible=show_followup),  # Show/hide followup row
                 gr.update(interactive=show_followup),  # Enable/disable send button
@@ -2951,12 +3629,9 @@ class ChadWebUI:
                 gr.update(value=diff_full),  # Full diff content
                 header_text,  # merge_section_header - dynamic header
                 patch_html,  # live_patch_trigger - JS reads this to patch content
-                # Prompt accordions - show when prompts are provided
-                # Prompts are rendered as markdown directly since they contain markdown content
-                gr.update(visible=True) if coding_prompt else gr.update(),
-                gr.update(value=coding_prompt) if coding_prompt else gr.update(),
-                gr.update(visible=True) if verification_prompt else gr.update(),
-                gr.update(value=verification_prompt) if verification_prompt else gr.update(),
+                _explore_acc, _explore_val,
+                _impl_acc, _impl_val,
+                _verif_acc, _verif_val,
             )
 
         try:
@@ -2989,15 +3664,17 @@ class ChadWebUI:
                 error_msg = f"❌ Project must be a git repository: {project_path}"
                 yield make_yield([], error_msg, summary=error_msg, interactive=True)
                 return
-
             session.task_description = task_description
             session.project_path = str(path_obj)
+            session.last_live_stream = ""  # Clear for new task
 
             # Worktree will be created by the API when the task starts
             # For now, set the project path; worktree info will be fetched after task starts
 
             coding_account = coding_agent
             coding_provider = account.provider
+            session.switched_from = None
+
             self.api_client.set_account_role(coding_account, "CODING")
 
             selected_model = coding_model or account.model or "default"
@@ -3034,16 +3711,19 @@ class ChadWebUI:
             )
 
             # Create event log for structured logging
-            if not session.event_log:
-                session.event_log = EventLog(session.id)
-            session.event_log.log(SessionStartedEvent(
-                task_description=task_description,
-                project_path=str(path_obj),
-                coding_provider=coding_provider,
-                coding_account=coding_account,
-                coding_model=selected_model if selected_model != "default" else None,
-            ))
-            session.event_log.start_turn()
+            try:
+                if not session.event_log:
+                    session.event_log = EventLog(session.id)
+                session.event_log.log(SessionStartedEvent(
+                    task_description=task_description,
+                    project_path=str(path_obj),
+                    coding_provider=coding_provider,
+                    coding_account=coding_account,
+                    coding_model=selected_model if selected_model != "default" else None,
+                ))
+                session.event_log.start_turn()
+            except Exception:
+                pass  # Event logging is optional
 
             status_prefix = "**Starting Chad...**\n\n"
             status_prefix += f"• Project: {path_obj}\n"
@@ -3057,15 +3737,32 @@ class ChadWebUI:
             chat_history.append({"role": "user", "content": f"**Task**\n\n{task_description}"})
             session.event_log.log(UserMessageEvent(content=task_description))
 
-            # Build the coding prompt for display
+            # Build the exploration and implementation prompts for display
+            # Use override prompts if user edited them, otherwise auto-generate
             project_docs = self._read_project_docs(path_obj)
-            display_coding_prompt = build_coding_prompt(task_description, project_docs, str(path_obj))
-            session.last_coding_prompt = display_coding_prompt
+            display_exploration_prompt = override_exploration_prompt or build_exploration_prompt(
+                task_description, project_docs, str(path_obj)
+            )
+            display_implementation_prompt = override_implementation_prompt or build_implementation_prompt(
+                task_description,
+                "{exploration_output}",  # Placeholder until exploration completes
+                project_docs,
+                str(path_obj),
+            )
+            session.last_exploration_prompt = display_exploration_prompt
+            session.last_implementation_prompt = display_implementation_prompt
+
+            # Insert exploration phase milestone
+            chat_history.append(
+                self._make_phase_milestone("Exploration", coding_account, selected_model)
+            )
 
             initial_status = f"{status_prefix}⏳ Initializing session..."
             yield make_yield(
                 chat_history, initial_status, summary=initial_status, interactive=False,
-                task_state="running", coding_prompt=display_coding_prompt,
+                task_state="running",
+                exploration_prompt=display_exploration_prompt,
+                implementation_prompt=display_implementation_prompt,
             )
 
             # Use the streaming API to run the task
@@ -3078,7 +3775,7 @@ class ChadWebUI:
             def api_task_loop():
                 """Run the task via the API streaming endpoint."""
                 try:
-                    success, output, server_session_id = self.run_task_via_api(
+                    success, output, server_session_id, work_done = self.run_task_via_api(
                         session_id=session_id,
                         project_path=str(path_obj),
                         task_description=task_description,
@@ -3088,7 +3785,11 @@ class ChadWebUI:
                         coding_reasoning=selected_reasoning if selected_reasoning != "default" else None,
                         terminal_cols=terminal_cols,
                         screenshots=screenshots,
+                        override_exploration_prompt=override_exploration_prompt,
+                        override_implementation_prompt=override_implementation_prompt,
                     )
+                    # Store work_done for later use in revision context
+                    session.last_work_done = work_done
                     task_success[0] = success
                     coding_final_output[0] = output
                     if success:
@@ -3126,7 +3827,7 @@ class ChadWebUI:
             current_status = f"{status_prefix}⏳ Coding AI is working..."
             current_ai = "CODING AI"
             current_live_stream = ""
-            last_live_stream = ""
+            last_live_stream = session.last_live_stream  # Restore from session for tab switches
             yield make_yield(
                 chat_history,
                 current_status,
@@ -3150,7 +3851,7 @@ class ChadWebUI:
             pending_message_idx = None
             render_state = LiveStreamRenderState()
             progress_emitted = False  # Track if we've shown a progress update bubble
-
+            coding_milestone_emitted = False  # Track if we've shown the Coding milestone
             while not relay_complete.is_set() and not session.cancel_requested:
                 try:
                     msg = message_queue.get(timeout=0.02)
@@ -3208,6 +3909,17 @@ class ChadWebUI:
                         current_live_stream = ""
                         latest_pyte_html = ""
                         render_state.reset()
+                        # Insert Coding milestone when Phase 2 starts
+                        if "Phase 2" in msg[1] and not coding_milestone_emitted:
+                            coding_milestone_emitted = True
+                            coding_milestone = self._make_phase_milestone(
+                                "Coding", coding_account, selected_model
+                            )
+                            if pending_message_idx is not None:
+                                chat_history.insert(pending_message_idx, coding_milestone)
+                                pending_message_idx += 1
+                            else:
+                                chat_history.append(coding_milestone)
                         summary_text = current_status
                         yield make_yield(
                             chat_history,
@@ -3218,8 +3930,55 @@ class ChadWebUI:
                         )
                         last_yield_time = time_module.time()
 
+                    elif msg_type == "progress":
+                        if progress_emitted:
+                            continue
+
+                        progress_data = msg[1] if len(msg) > 1 else None
+                        progress_update = None
+                        if isinstance(progress_data, ProgressUpdate):
+                            progress_update = progress_data
+                        elif isinstance(progress_data, dict):
+                            summary = str(progress_data.get("summary", "")).strip()
+                            if summary:
+                                progress_update = ProgressUpdate(
+                                    summary=summary,
+                                    location=str(progress_data.get("location", "") or ""),
+                                    next_step=progress_data.get("next_step"),
+                                    before_screenshot=progress_data.get("before_screenshot"),
+                                    before_description=progress_data.get("before_description"),
+                                )
+
+                        if progress_update is None:
+                            continue
+
+                        progress_emitted = True
+                        progress_msg = make_progress_message(progress_update)
+                        if pending_message_idx is not None:
+                            chat_history.insert(pending_message_idx, progress_msg)
+                            pending_message_idx += 1
+                            # Start a fresh live buffer after the progress handoff.
+                            display_buffer = LiveStreamDisplayBuffer()
+                            latest_pyte_html = ""
+                            render_state.reset()
+                        else:
+                            chat_history.append(progress_msg)
+
+                        # Keep last rendered live content visible while new chunks arrive.
+                        yield make_yield(chat_history, current_status, last_live_stream, task_state="running")
+                        last_yield_time = time_module.time()
+
                     elif msg_type == "session_id":
                         session.server_session_id = msg[1]
+                        # Fetch worktree info now that task is starting
+                        try:
+                            wt_status = self.api_client.get_worktree_status(msg[1])
+                            if wt_status and wt_status.exists:
+                                session.worktree_path = Path(wt_status.path) if wt_status.path else None
+                                session.worktree_branch = wt_status.branch
+                                session.worktree_base_commit = wt_status.base_commit
+                        except Exception:
+                            pass
                         yield make_yield(
                             chat_history,
                             current_status,
@@ -3238,6 +3997,16 @@ class ChadWebUI:
                     elif msg_type == "stream":
                         chunk = msg[1]
                         html_chunk = msg[2] if len(msg) > 2 else None
+                        # Fetch worktree path on first stream if not yet known
+                        if not session.worktree_path and session.server_session_id:
+                            try:
+                                wt_status = self.api_client.get_worktree_status(session.server_session_id)
+                                if wt_status and wt_status.exists:
+                                    session.worktree_path = Path(wt_status.path) if wt_status.path else None
+                                    session.worktree_branch = wt_status.branch
+                                    session.worktree_base_commit = wt_status.base_commit
+                            except Exception:
+                                pass
                         if html_chunk:
                             latest_pyte_html = html_chunk  # Track for activity/empty handlers
                         if chunk.strip():
@@ -3248,12 +4017,24 @@ class ChadWebUI:
                                 current_live_stream = build_live_stream_html(display_buffer.content, current_ai, live_stream_id)
                                 if current_live_stream:
                                     last_live_stream = current_live_stream
+                                    session.last_live_stream = current_live_stream
 
                             # Check for progress update in streaming buffer
                             if not progress_emitted:
                                 progress = extract_progress_update(streaming_buffer)
                                 if progress:
                                     progress_emitted = True
+                                    # Insert coding phase milestone if not already inserted by status handler
+                                    if not coding_milestone_emitted:
+                                        coding_milestone_emitted = True
+                                        coding_milestone = self._make_phase_milestone(
+                                            "Coding", coding_account, selected_model
+                                        )
+                                        if pending_message_idx is not None:
+                                            chat_history.insert(pending_message_idx, coding_milestone)
+                                            pending_message_idx += 1
+                                        else:
+                                            chat_history.append(coding_milestone)
                                     # Insert progress bubble at the tracked position
                                     progress_msg = make_progress_message(progress)
                                     if pending_message_idx is not None:
@@ -3277,6 +4058,7 @@ class ChadWebUI:
                             current_live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai, live_stream_id)
                             if current_live_stream:
                                 last_live_stream = current_live_stream
+                                session.last_live_stream = current_live_stream
 
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
@@ -3301,6 +4083,7 @@ class ChadWebUI:
                                 activity_stream = build_live_stream_html(content, current_ai, live_stream_id)
                             if activity_stream:
                                 last_live_stream = activity_stream
+                                session.last_live_stream = activity_stream
                                 yield make_yield(chat_history, current_status, activity_stream, task_state="running")
                                 last_yield_time = now
 
@@ -3344,6 +4127,7 @@ class ChadWebUI:
                         html_chunk = pending_msg[2] if len(pending_msg) > 2 else None
                         if html_chunk:
                             last_live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai, live_stream_id)
+                            session.last_live_stream = last_live_stream
                         elif chunk.strip():
                             display_buffer.append(chunk)
                     elif pending_type == "activity":
@@ -3362,6 +4146,7 @@ class ChadWebUI:
                     "🛑 Task cancelled",
                     cancel_live_stream,
                     summary="🛑 Task cancelled",
+                    interactive=True,
                     show_followup=True,  # Always show follow-up after task starts
                     task_state="failed",
                     task_ended=True,
@@ -3396,6 +4181,8 @@ class ChadWebUI:
             verification_account_for_run = actual_verification_account if verification_enabled else None
             verification_log: list[dict[str, object]] = []
             verified: bool | None = None  # Track verification result
+
+            sanitized_reason = completion_reason[0] or ""
 
             if session.cancel_requested:
                 final_status = "🛑 Task cancelled by user"
@@ -3432,7 +4219,7 @@ class ChadWebUI:
                 # since we now run it automatically during verification phase
 
                 # Run verification loop
-                max_verification_attempts = 3
+                max_verification_attempts = self.api_client.get_max_verification_attempts()
                 verification_attempt = 0
                 verified = False
                 verification_feedback = ""
@@ -3444,6 +4231,11 @@ class ChadWebUI:
                     verification_attempt += 1
 
                     chat_history.append(
+                        self._make_phase_milestone(
+                            "Verification", verification_account_for_run, resolved_verification_model
+                        )
+                    )
+                    chat_history.append(
                         {
                             "role": "user",
                             "content": f"───────────── 🔍 VERIFICATION (Attempt {verification_attempt}) ─────────────",
@@ -3454,7 +4246,7 @@ class ChadWebUI:
                     coding_summary = extract_coding_summary(last_coding_output)
                     change_summary = coding_summary.change_summary if coding_summary else None
                     trimmed_output = _truncate_verification_output(last_coding_output)
-                    display_verification_prompt = get_verification_prompt(
+                    display_verification_prompt = get_verification_exploration_prompt(
                         trimmed_output, task_description, change_summary
                     )
                     session.last_verification_prompt = display_verification_prompt
@@ -3467,9 +4259,12 @@ class ChadWebUI:
                     verify_placeholder = build_live_stream_html(
                         "🔍 Starting verification...", "VERIFICATION AI", live_stream_id
                     )
+                    # Reset live render flag so verification gets a full render, not a patch
+                    session.has_initial_live_render = False
                     yield make_yield(
                         chat_history, verify_status, verify_placeholder, task_state="verifying",
                         verification_prompt=display_verification_prompt,
+                        verification_account=verification_account_for_run,
                     )
 
                     # Run verification in a thread so we can stream output to live view
@@ -3507,22 +4302,54 @@ class ChadWebUI:
                     verify_display_buffer = LiveStreamDisplayBuffer()
                     verify_display_buffer.append("🔍 Starting verification...\n")
                     verify_last_yield = 0.0
+                    verify_live_stream = ""
+                    keepalive_interval = 2.0  # Yield every 2 seconds even without new data
                     while not verification_complete.is_set() and not session.cancel_requested:
                         try:
                             msg = message_queue.get(timeout=0.05)
                             if msg[0] == "stream":
                                 chunk = msg[1]
+                                html_chunk = msg[2] if len(msg) > 2 else None
                                 if chunk.strip():
                                     verify_display_buffer.append(chunk)
+                                # Use HTML chunk from API if available, otherwise render from text
+                                if html_chunk:
+                                    verify_live_stream = build_live_stream_html_from_pyte(
+                                        html_chunk, "VERIFICATION AI", live_stream_id
+                                    )
+                                elif chunk.strip():
+                                    verify_live_stream = build_live_stream_html(
+                                        verify_display_buffer.content, "VERIFICATION AI", live_stream_id
+                                    )
+                                if verify_live_stream:
+                                    session.last_live_stream = verify_live_stream
                                     now = time_module.time()
                                     if now - verify_last_yield >= min_yield_interval:
-                                        rendered = build_live_stream_html(
-                                            verify_display_buffer.content, "VERIFICATION AI", live_stream_id
-                                        )
-                                        yield make_yield(chat_history, verify_status, rendered, task_state="verifying")
+                                        yield make_yield(chat_history, verify_status, verify_live_stream, task_state="verifying",
+                                                         verification_account=verification_account_for_run)
                                         verify_last_yield = now
                         except queue.Empty:
-                            pass
+                            # Yield periodic keepalive updates to show verification is still running
+                            now = time_module.time()
+                            if now - verify_last_yield >= keepalive_interval:
+                                # Build live stream if we have content but haven't shown it yet
+                                if not verify_live_stream and verify_display_buffer.content:
+                                    verify_live_stream = build_live_stream_html(
+                                        verify_display_buffer.content, "VERIFICATION AI", live_stream_id
+                                    )
+                                if verify_live_stream:
+                                    yield make_yield(chat_history, verify_status, verify_live_stream, task_state="verifying",
+                                                     verification_account=verification_account_for_run)
+                                else:
+                                    # Even without content, yield to keep connection alive
+                                    yield make_yield(chat_history, verify_status, "", task_state="verifying",
+                                                     verification_account=verification_account_for_run)
+                                verify_last_yield = now
+
+                    # Final yield to ensure content is shown even if loop exited quickly
+                    if verify_live_stream:
+                        yield make_yield(chat_history, verify_status, verify_live_stream, task_state="verifying",
+                                         verification_account=verification_account_for_run)
 
                     verification_thread.join(timeout=1.0)
                     verified, verification_feedback = verification_result[0], verification_result[1]
@@ -3594,15 +4421,18 @@ class ChadWebUI:
                             and verification_attempt < max_verification_attempts
                         )
                         if can_revise:
+                            chat_history.append(
+                                self._make_phase_milestone("Re-coding", coding_account, selected_model)
+                            )
                             revision_content = (
-                                "───────────── 🔄 REVISION REQUESTED ─────────────\n\n"
+                                "───────────── → REVISION REQUESTED ─────────────\n\n"
                                 "*Sending verification feedback to coding agent...*"
                             )
                             chat_history.append({"role": "user", "content": revision_content})
                             # Log revision request
                             if session.event_log:
                                 session.event_log.log(UserMessageEvent(content="Revision requested"))
-                            revision_status = f"{status_prefix}🔄 Sending revision request to coding agent..."
+                            revision_status = f"{status_prefix}→ Sending revision request to coding agent..."
                             yield make_yield(chat_history, revision_status, "", task_state="running")
 
                             # Send feedback to coding agent via session continuation
@@ -3619,6 +4449,8 @@ class ChadWebUI:
                             revision_status_msg = f"{status_prefix}⏳ Coding agent working on revisions..."
                             # Show live stream placeholder during revision setup
                             revision_placeholder = build_live_stream_html("⏳ Preparing revision...", "CODING AI", live_stream_id)
+                            # Reset live render flag so revision gets a full render, not a patch
+                            session.has_initial_live_render = False
                             yield make_yield(chat_history, revision_status_msg, revision_placeholder, task_state="running")
 
                             # Run revision in a thread so we can stream output to live view
@@ -3641,23 +4473,36 @@ class ChadWebUI:
                             # Poll message queue while revision runs (live stream updates)
                             rev_display_buffer = LiveStreamDisplayBuffer()
                             rev_last_yield = 0.0
+                            rev_live_stream = ""
                             while not revision_complete.is_set() and not session.cancel_requested:
                                 try:
                                     msg = message_queue.get(timeout=0.05)
                                     if msg[0] == "stream":
                                         chunk = msg[1]
+                                        html_chunk = msg[2] if len(msg) > 2 else None
                                         if chunk.strip():
                                             rev_display_buffer.append(chunk)
+                                        # Use HTML chunk from API if available, otherwise render from text
+                                        if html_chunk:
+                                            rev_live_stream = build_live_stream_html_from_pyte(
+                                                html_chunk, "CODING AI", live_stream_id
+                                            )
+                                        elif chunk.strip():
+                                            rev_live_stream = build_live_stream_html(
+                                                rev_display_buffer.content, "CODING AI", live_stream_id
+                                            )
+                                        if rev_live_stream:
+                                            session.last_live_stream = rev_live_stream
                                             now = time_module.time()
                                             if now - rev_last_yield >= min_yield_interval:
-                                                # Update only the dedicated live stream panel
-                                                rendered = build_live_stream_html(
-                                                    rev_display_buffer.content, "CODING AI", live_stream_id
-                                                )
-                                                yield make_yield(chat_history, revision_status_msg, rendered, task_state="running")
+                                                yield make_yield(chat_history, revision_status_msg, rev_live_stream, task_state="running")
                                                 rev_last_yield = now
                                 except queue.Empty:
                                     pass
+
+                            # Final yield to ensure content is shown even if loop exited quickly
+                            if rev_live_stream:
+                                yield make_yield(chat_history, revision_status_msg, rev_live_stream, task_state="running")
 
                             revision_thread.join(timeout=1.0)
                             revision_response = revision_result[0]
@@ -3689,6 +4534,11 @@ class ChadWebUI:
                                 }
                                 break
 
+                            chat_history.append(
+                                self._make_phase_milestone(
+                                    "Re-verification", verification_account_for_run, resolved_verification_model
+                                )
+                            )
                             reverify_placeholder = build_live_stream_html(
                                 "✓ Revision complete, re-verifying...", "VERIFICATION AI", live_stream_id
                             )
@@ -3697,6 +4547,7 @@ class ChadWebUI:
                                 f"{status_prefix}✓ Revision complete, re-verifying...",
                                 reverify_placeholder,
                                 task_state="verifying",
+                                verification_account=verification_account_for_run,
                             )
                         elif (
                             session.server_session_id
@@ -3704,37 +4555,57 @@ class ChadWebUI:
                             and not session.cancel_requested
                         ):
                             # API-based revision: re-run task via API with revision feedback
+                            chat_history.append(
+                                self._make_phase_milestone("Re-coding", coding_account, selected_model)
+                            )
                             revision_content = (
-                                "───────────── 🔄 REVISION REQUESTED ─────────────\n\n"
+                                "───────────── → REVISION REQUESTED ─────────────\n\n"
                                 "*Re-running coding agent with verification feedback...*"
                             )
                             chat_history.append({"role": "user", "content": revision_content})
                             if session.event_log:
                                 session.event_log.log(UserMessageEvent(content="Revision requested (API)"))
-                            revision_status = f"{status_prefix}🔄 Re-running coding agent with feedback..."
+                            revision_status = f"{status_prefix}→ Re-running coding agent with feedback..."
                             yield make_yield(chat_history, revision_status, "", task_state="running")
 
-                            # Build revision task description
+                            # Build revision task description with context about previous work
+                            work_context = ""
+                            if session.last_work_done:
+                                wd = session.last_work_done
+                                work_parts = []
+                                if wd.get("files_modified"):
+                                    work_parts.append("Files modified:\n" + "\n".join(f"  - {f}" for f in wd["files_modified"]))
+                                if wd.get("files_created"):
+                                    work_parts.append("Files created:\n" + "\n".join(f"  - {f}" for f in wd["files_created"]))
+                                if wd.get("commands_run"):
+                                    work_parts.append("Commands run:\n" + "\n".join(f"  - {c}" for c in wd["commands_run"][-5:]))
+                                if not work_parts:
+                                    work_parts.append("No file modifications were made in the previous attempt.")
+                                work_context = "\n\nPrevious attempt work:\n" + "\n".join(work_parts)
+
                             revision_task = (
                                 f"REVISION REQUEST: The previous attempt had verification issues.\n\n"
                                 f"Original task: {task_description}\n\n"
-                                f"Verification feedback:\n{verification_feedback}\n\n"
-                                f"Please fix these issues."
+                                f"Verification feedback:\n{verification_feedback}"
+                                f"{work_context}\n\n"
+                                f"Please fix these issues. Make sure to actually modify files, not just analyze them."
                             )
 
                             # Track where the revision message will be inserted
                             revision_pending_idx = len(chat_history)
                             revision_status_msg = f"{status_prefix}⏳ Coding agent working on revisions..."
                             revision_placeholder = build_live_stream_html("⏳ Preparing revision...", "CODING AI", live_stream_id)
+                            # Reset live render flag so revision gets a full render, not a patch
+                            session.has_initial_live_render = False
                             yield make_yield(chat_history, revision_status_msg, revision_placeholder, task_state="running")
 
                             # Run revision via API in a thread
-                            revision_result: list = [None, None, None]  # [success, output, error]
+                            revision_result: list = [None, None, None, None]  # [success, output, error, work_done]
                             revision_complete = threading.Event()
 
                             def run_api_revision_thread():
                                 try:
-                                    success, output, _ = self.run_task_via_api(
+                                    success, output, _, work_done = self.run_task_via_api(
                                         session_id=session.id,
                                         project_path=str(path_obj),
                                         task_description=revision_task,
@@ -3747,6 +4618,10 @@ class ChadWebUI:
                                     )
                                     revision_result[0] = success
                                     revision_result[1] = output
+                                    revision_result[3] = work_done
+                                    # Update session's work_done with revision changes
+                                    if work_done:
+                                        session.last_work_done = work_done
                                 except Exception as exc:
                                     revision_result[2] = exc
                                 finally:
@@ -3758,22 +4633,36 @@ class ChadWebUI:
                             # Poll message queue while revision runs
                             rev_display_buffer = LiveStreamDisplayBuffer()
                             rev_last_yield = 0.0
+                            rev_live_stream = ""
                             while not revision_complete.is_set() and not session.cancel_requested:
                                 try:
                                     msg = message_queue.get(timeout=0.05)
                                     if msg[0] == "stream":
                                         chunk = msg[1]
+                                        html_chunk = msg[2] if len(msg) > 2 else None
                                         if chunk.strip():
                                             rev_display_buffer.append(chunk)
+                                        # Use HTML chunk from API if available, otherwise render from text
+                                        if html_chunk:
+                                            rev_live_stream = build_live_stream_html_from_pyte(
+                                                html_chunk, "CODING AI", live_stream_id
+                                            )
+                                        elif chunk.strip():
+                                            rev_live_stream = build_live_stream_html(
+                                                rev_display_buffer.content, "CODING AI", live_stream_id
+                                            )
+                                        if rev_live_stream:
+                                            session.last_live_stream = rev_live_stream
                                             now = time_module.time()
                                             if now - rev_last_yield >= min_yield_interval:
-                                                rendered = build_live_stream_html(
-                                                    rev_display_buffer.content, "CODING AI", live_stream_id
-                                                )
-                                                yield make_yield(chat_history, revision_status_msg, rendered, task_state="running")
+                                                yield make_yield(chat_history, revision_status_msg, rev_live_stream, task_state="running")
                                                 rev_last_yield = now
                                 except queue.Empty:
                                     pass
+
+                            # Final yield to ensure content is shown even if loop exited quickly
+                            if rev_live_stream:
+                                yield make_yield(chat_history, revision_status_msg, rev_live_stream, task_state="running")
 
                             revision_thread.join(timeout=1.0)
                             revision_success = revision_result[0]
@@ -3801,6 +4690,11 @@ class ChadWebUI:
                                 })
                                 break
 
+                            chat_history.append(
+                                self._make_phase_milestone(
+                                    "Re-verification", verification_account_for_run, resolved_verification_model
+                                )
+                            )
                             reverify_placeholder = build_live_stream_html(
                                 "✓ Revision complete, re-verifying...", "VERIFICATION AI", live_stream_id
                             )
@@ -3809,6 +4703,7 @@ class ChadWebUI:
                                 f"{status_prefix}✓ Revision complete, re-verifying...",
                                 reverify_placeholder,
                                 task_state="verifying",
+                                verification_account=verification_account_for_run,
                             )
                         else:
                             # Can't continue - max attempts reached or cancelled
@@ -3833,14 +4728,17 @@ class ChadWebUI:
                             completion_msg += f"\n\n*{verification_feedback}*"
                     chat_history.append({"role": "user", "content": completion_msg})
             else:
+                sanitized_reason = completion_reason[0] or ""
+                if "End your response with a JSON summary block" in sanitized_reason or '"change_summary": "One sentence describing what was changed"' in sanitized_reason:
+                    sanitized_reason = "Task ended before producing any agent output."
                 final_status = (
-                    f"❌ Task did not complete successfully\n\n*{completion_reason[0]}*"
-                    if completion_reason[0]
+                    f"❌ Task did not complete successfully\n\n*{sanitized_reason}*"
+                    if sanitized_reason
                     else "❌ Task did not complete successfully"
                 )
                 failure_msg = "───────────── ❌ TASK FAILED ─────────────"
-                if completion_reason[0]:
-                    failure_msg += f"\n\n*{completion_reason[0]}*"
+                if sanitized_reason:
+                    failure_msg += f"\n\n*{sanitized_reason}*"
                 chat_history.append({"role": "user", "content": failure_msg})
 
             if final_status:
@@ -3863,11 +4761,15 @@ class ChadWebUI:
                 session_status = "failed"
                 overall_success = False
 
-            # Log session end event
+            # Log session end event with tool call count from tracked work
+            total_tool_calls = 0
+            if session.last_work_done:
+                total_tool_calls = session.last_work_done.get("total_tool_calls", 0)
             if session.event_log:
                 session.event_log.log(SessionEndedEvent(
                     success=overall_success,
-                    reason=completion_reason[0] or session_status,
+                    reason=sanitized_reason if not overall_success else (completion_reason[0] or session_status),
+                    total_tool_calls=total_tool_calls,
                 ))
             if session.log_path:
                 final_status += f"\n\n*Session log: {session.log_path}*"
@@ -3909,7 +4811,7 @@ class ChadWebUI:
                 final_summary,
                 final_live_stream,
                 summary=final_summary,
-                interactive=False,  # Task description locked after work begins
+                interactive=session.cancel_requested,  # Re-enable task input after cancellation
                 show_followup=can_continue,
                 show_merge=show_merge,
                 merge_summary=merge_summary_text if show_merge else "",
@@ -3949,6 +4851,7 @@ class ChadWebUI:
         coding_reasoning: str | None = None,
         verification_model: str | None = None,
         verification_reasoning: str | None = None,
+        screenshots: list[str] | None = None,
     ) -> Iterator[tuple[list, str, gr.update, gr.update, gr.update]]:
         """Send a follow-up message, with optional provider handoff and verification.
 
@@ -3960,6 +4863,7 @@ class ChadWebUI:
             verification_agent: Currently selected verification agent from dropdown
             coding_model: Preferred model selected in the Run tab
             coding_reasoning: Reasoning effort selected in the Run tab
+            screenshots: Optional list of screenshot file paths to include
 
         Yields:
             Tuples of (chat_history, live_stream, followup_input, followup_row, send_btn, live_patch_trigger,
@@ -3973,7 +4877,6 @@ class ChadWebUI:
         chat_history = (
             current_history if len(current_history) >= len(session.chat_history) else session.chat_history.copy()
         )
-        task_description = session.task_description or ""
         verification_log: list[dict[str, object]] = []
 
         # Stable live_id for DOM patching across the session
@@ -4012,9 +4915,25 @@ class ChadWebUI:
             yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
             return
 
-        accounts = self.api_client.list_accounts()
-        account_names = {acc.name for acc in accounts}
-        has_account = bool(coding_agent and coding_agent in account_names)
+        # Capture raw message before screenshot/resume-prompt modifications
+        raw_followup_message = followup_message
+
+        # The follow-up message IS the new task — use it as the task description
+        # for verification (session.task_description may be empty after merge/discard)
+        task_description = raw_followup_message
+        session.task_description = raw_followup_message
+
+        # Append screenshot paths to message if provided
+        if screenshots:
+            screenshot_section = "\n\nThe user has attached the following screenshots for reference. " \
+                "Use the Read tool to view them:\n"
+            for screenshot_path in screenshots:
+                screenshot_section += f"- {screenshot_path}\n"
+            followup_message = followup_message + screenshot_section
+
+        accounts_list = self.api_client.list_accounts()
+        accounts = {acc.name: acc.provider for acc in accounts_list}  # Map name -> provider
+        has_account = bool(coding_agent and coding_agent in accounts)
 
         def normalize_model_value(value: str | None) -> str:
             return value if value else "default"
@@ -4078,9 +4997,34 @@ class ChadWebUI:
             and (active_model != requested_model or active_reasoning != requested_reasoning)
         )
 
-        handoff_needed = provider_changed or pref_changed
+        # Also need handoff if session is active but provider was released (API-based execution)
+        provider_reconnect_needed = has_account and session.active and session.provider is None
+        handoff_needed = provider_changed or pref_changed or provider_reconnect_needed
 
         if handoff_needed:
+            # Get new provider type first (needed for formatting handoff context)
+            coding_provider_type = accounts[coding_agent]
+
+            # Log handoff checkpoint to event log before stopping old provider
+            old_provider_type = ""
+            old_model = ""
+            if session.event_log and session.provider:
+                provider_session_id = None
+                if hasattr(session.provider, "get_session_id"):
+                    provider_session_id = session.provider.get_session_id()
+
+                log_handoff_checkpoint(
+                    session.event_log,
+                    session.task_description or "",
+                    provider_session_id,
+                    target_provider=coding_provider_type,
+                )
+
+                # Track old provider info for ProviderSwitchedEvent
+                if session.config:
+                    old_provider_type = getattr(session.config, "provider", "")
+                    old_model = getattr(session.config, "model_name", "") or ""
+
             # Stop old session if active
             if session.provider:
                 try:
@@ -4091,7 +5035,6 @@ class ChadWebUI:
                 session.active = False
 
             # Start new provider
-            coding_provider_type = accounts[coding_agent]
             coding_config = ModelConfig(
                 provider=coding_provider_type,
                 model_name=requested_model,
@@ -4099,17 +5042,20 @@ class ChadWebUI:
                 reasoning_effort=None if requested_reasoning == "default" else requested_reasoning,
             )
 
-            handoff_detail = f"{coding_agent} ({coding_provider_type}"
-            if requested_model and requested_model != "default":
-                handoff_detail += f", {requested_model}"
-            if requested_reasoning and requested_reasoning != "default":
-                handoff_detail += f", {requested_reasoning} reasoning"
-            handoff_detail += ")"
+            # Only show handoff message if actually changing provider or preferences
+            # Skip message for silent reconnects (when provider was released after API-based execution)
+            if provider_changed or pref_changed:
+                handoff_detail = f"{coding_agent} ({coding_provider_type}"
+                if requested_model and requested_model != "default":
+                    handoff_detail += f", {requested_model}"
+                if requested_reasoning and requested_reasoning != "default":
+                    handoff_detail += f", {requested_reasoning} reasoning"
+                handoff_detail += ")"
 
-            handoff_title = "PROVIDER HANDOFF" if provider_changed else "PREFERENCE UPDATE"
-            handoff_msg = f"───────────── 🔄 {handoff_title} ─────────────\n\n" f"*Switching to {handoff_detail}*"
-            chat_history.append({"role": "user", "content": handoff_msg})
-            yield make_followup_yield(chat_history, "🔄 Switching providers...", working=True, merge_updates=merge_no_change)
+                handoff_title = "PROVIDER HANDOFF" if provider_changed else "PREFERENCE UPDATE"
+                handoff_msg = f"───────────── → {handoff_title} ─────────────\n\n" f"*Switching to {handoff_detail}*"
+                chat_history.append({"role": "user", "content": handoff_msg})
+            yield make_followup_yield(chat_history, "→ Reconnecting...", working=True, merge_updates=merge_no_change)
 
             new_provider = create_provider(coding_config)
             # Use worktree path if available, otherwise fall back to project path
@@ -4129,14 +5075,34 @@ class ChadWebUI:
                 yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
                 return
 
+            # Track the switch for UI indication
+            old_account = session.coding_account
+            session.switched_from = old_account if old_account else None
+
             session.provider = new_provider
             session.coding_account = coding_agent
             session.active = True
             session.config = coding_config
 
-            # Include conversation context for the new provider
-            context_summary = self._build_handoff_context(chat_history)
-            followup_message = f"{context_summary}\n\n# Follow-up Request\n\n{followup_message}"
+            # Log provider switched event
+            if session.event_log:
+                session.event_log.log(ProviderSwitchedEvent(
+                    from_provider=old_provider_type,
+                    to_provider=coding_provider_type,
+                    from_model=old_model,
+                    to_model=requested_model or "",
+                    reason="user_requested" if provider_changed else "preference_update",
+                ))
+
+            # Build resume prompt from event log if available
+            if session.event_log:
+                followup_message = build_resume_prompt(
+                    session.event_log, followup_message, target_provider=coding_provider_type
+                )
+            else:
+                # Fallback to old method
+                context_summary = self._build_handoff_context(chat_history)
+                followup_message = f"{context_summary}\n\n# Follow-up Request\n\n{followup_message}"
 
         if not session.active or not session.provider:
             chat_history.append({"role": "user", "content": f"**Follow-up**\n\n{followup_message}"})
@@ -4158,6 +5124,16 @@ class ChadWebUI:
         else:
             user_content = f"**Follow-up**\n\n{followup_message}"
         chat_history.append({"role": "user", "content": user_content})
+
+        # Log follow-up user message to event log
+        if session.event_log:
+            session.event_log.start_turn()
+            session.event_log.log(UserMessageEvent(content=raw_followup_message))
+
+        # Insert coding phase milestone for follow-up
+        chat_history.append(
+            self._make_phase_milestone("Coding", coding_agent, requested_model)
+        )
 
         # Track where the final message will be inserted
         # Don't add a placeholder - use only the dedicated live stream panel
@@ -4204,6 +5180,7 @@ class ChadWebUI:
         last_yield_time = 0.0
         min_yield_interval = 0.05
 
+        live_stream = ""
         while not relay_complete.is_set() and not session.cancel_requested:
             try:
                 msg = message_queue.get(timeout=0.02)
@@ -4211,13 +5188,19 @@ class ChadWebUI:
 
                 if msg_type == "stream":
                     chunk = msg[1]
+                    html_chunk = msg[2] if len(msg) > 2 else None
                     if chunk.strip():
                         full_history.append(_history_entry(current_ai, chunk))
                         display_buffer.append(chunk)
+                    # Use HTML chunk from API if available, otherwise render from text
+                    if html_chunk:
+                        live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai, live_stream_id)
+                    elif chunk.strip():
+                        live_stream = build_live_stream_html(display_buffer.content, current_ai, live_stream_id)
+                    if live_stream:
+                        session.last_live_stream = live_stream
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
-                            # Update only the dedicated live stream panel
-                            live_stream = build_live_stream_html(display_buffer.content, current_ai, live_stream_id)
                             yield make_followup_yield(
                                 chat_history,
                                 live_stream,
@@ -4263,16 +5246,101 @@ class ChadWebUI:
 
         # Insert final response into chat history
         if error_holder[0]:
-            chat_history.insert(pending_idx, {
-                "role": "assistant",
-                "content": f"**CODING AI**\n\n❌ *Error: {error_holder[0]}*",
-            })
-            session.active = False
-            session.provider = None
-            session.config = None
-            self._update_session_log(session, chat_history, full_history)
-            yield make_followup_yield(chat_history, "", show_followup=False, merge_updates=merge_no_change)
-            return
+            # Try auto-switch on quota exhaustion
+            switched, new_account = self._try_auto_switch_provider(session, error_holder[0])
+            if switched and new_account:
+                # Show switch notification in chat
+                switch_msg = (
+                    f"───────────── → AUTO-SWITCH ─────────────\n\n"
+                    f"*Quota/rate limit reached on {session.switched_from}. "
+                    f"Switching to {new_account}...*"
+                )
+                chat_history.append({"role": "user", "content": switch_msg})
+                yield make_followup_yield(chat_history, "→ Retrying with fallback provider...", working=True, merge_updates=merge_no_change)
+
+                # Build resume prompt and retry
+                new_provider_type = session.config.provider if session.config else "generic"
+                if session.event_log:
+                    retry_message = build_resume_prompt(
+                        session.event_log, followup_message, target_provider=new_provider_type
+                    )
+                else:
+                    retry_message = followup_message
+
+                # Retry with new provider
+                retry_response_holder = [None]
+                retry_error_holder = [None]
+                retry_complete = threading.Event()
+
+                def retry_relay():
+                    try:
+                        session.provider.send_message(retry_message)
+                        response = session.provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
+                        retry_response_holder[0] = response
+                    except Exception as e:
+                        retry_error_holder[0] = str(e)
+                    finally:
+                        retry_complete.set()
+
+                retry_thread = threading.Thread(target=retry_relay, daemon=True)
+                retry_thread.start()
+
+                # Wait for retry with streaming
+                retry_live_stream = ""
+                while not retry_complete.is_set() and not session.cancel_requested:
+                    try:
+                        msg = message_queue.get(timeout=0.1)
+                        if msg[0] == "stream":
+                            chunk = msg[1]
+                            html_chunk = msg[2] if len(msg) > 2 else None
+                            if chunk.strip():
+                                full_history.append(_history_entry(current_ai, chunk))
+                                display_buffer.append(chunk)
+                            if html_chunk:
+                                retry_live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai, live_stream_id)
+                            elif chunk.strip():
+                                retry_live_stream = build_live_stream_html(display_buffer.content, current_ai, live_stream_id)
+                            if retry_live_stream:
+                                session.last_live_stream = retry_live_stream
+                                yield make_followup_yield(chat_history, retry_live_stream, working=True, merge_updates=merge_no_change)
+                    except queue.Empty:
+                        pass
+
+                # Final yield to ensure content is shown
+                if retry_live_stream:
+                    yield make_followup_yield(chat_history, retry_live_stream, working=True, merge_updates=merge_no_change)
+
+                retry_thread.join(timeout=1)
+
+                if retry_error_holder[0]:
+                    # Retry also failed
+                    chat_history.insert(pending_idx, {
+                        "role": "assistant",
+                        "content": f"**CODING AI**\n\n❌ *Error after auto-switch: {retry_error_holder[0]}*",
+                    })
+                    session.active = False
+                    session.provider = None
+                    session.config = None
+                    self._update_session_log(session, chat_history, full_history)
+                    yield make_followup_yield(chat_history, "", show_followup=False, merge_updates=merge_no_change)
+                    return
+
+                if retry_response_holder[0]:
+                    # Update response holder with retry result
+                    response_holder[0] = retry_response_holder[0]
+                    error_holder[0] = None
+            else:
+                # No auto-switch available, show original error
+                chat_history.insert(pending_idx, {
+                    "role": "assistant",
+                    "content": f"**CODING AI**\n\n❌ *Error: {error_holder[0]}*",
+                })
+                session.active = False
+                session.provider = None
+                session.config = None
+                self._update_session_log(session, chat_history, full_history)
+                yield make_followup_yield(chat_history, "", show_followup=False, merge_updates=merge_no_change)
+                return
 
         if not response_holder[0]:
             chat_history.insert(pending_idx, {
@@ -4287,6 +5355,12 @@ class ChadWebUI:
         chat_history.insert(pending_idx, make_chat_message("CODING AI", parsed))
         last_coding_output = parsed
 
+        # Log assistant response to event log
+        if session.event_log and parsed:
+            session.event_log.log(AssistantMessageEvent(
+                blocks=[{"kind": "text", "content": parsed[:1000]}]
+            ))
+
         # Update stored history
         session.chat_history = chat_history
         self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
@@ -4299,12 +5373,17 @@ class ChadWebUI:
 
         if verification_account_for_run and verification_account_for_run in accounts:
             # Verification loop (like start_chad_task)
-            max_verification_attempts = 3
+            max_verification_attempts = self.api_client.get_max_verification_attempts()
             verification_attempt = 0
             verified = False
 
             while not verified and verification_attempt < max_verification_attempts and not session.cancel_requested:
                 verification_attempt += 1
+                chat_history.append(
+                    self._make_phase_milestone(
+                        "Verification", verification_account_for_run, resolved_verification_model
+                    )
+                )
                 chat_history.append(
                     {
                         "role": "user",
@@ -4316,6 +5395,8 @@ class ChadWebUI:
                 verify_placeholder = build_live_stream_html(
                     "🔍 Starting verification...", "VERIFICATION AI", live_stream_id
                 )
+                # Reset live render flag so verification gets a full render, not a patch
+                session.has_initial_live_render = False
                 yield make_followup_yield(chat_history, verify_placeholder, working=True, merge_updates=merge_no_change)
 
                 def verification_activity(activity_type: str, detail: str):
@@ -4353,6 +5434,7 @@ class ChadWebUI:
                 verify_display_buffer = LiveStreamDisplayBuffer()
                 verify_display_buffer.append("🔍 Starting verification...\n")
                 verify_last_yield = 0.0
+                verify_live_stream = ""
                 while not verification_complete.is_set() and not session.cancel_requested:
                     try:
                         msg = message_queue.get(timeout=0.05)
@@ -4360,15 +5442,21 @@ class ChadWebUI:
                             chunk = msg[1]
                             if chunk.strip():
                                 verify_display_buffer.append(chunk)
+                                verify_live_stream = build_live_stream_html(
+                                    verify_display_buffer.content, "VERIFICATION AI", live_stream_id
+                                )
+                                if verify_live_stream:
+                                    session.last_live_stream = verify_live_stream
                                 now = time_module.time()
                                 if now - verify_last_yield >= min_yield_interval:
-                                    rendered = build_live_stream_html(
-                                        verify_display_buffer.content, "VERIFICATION AI", live_stream_id
-                                    )
-                                    yield make_followup_yield(chat_history, rendered, working=True, merge_updates=merge_no_change)
+                                    yield make_followup_yield(chat_history, verify_live_stream, working=True, merge_updates=merge_no_change)
                                     verify_last_yield = now
                     except queue.Empty:
                         pass
+
+                # Final yield to ensure content is shown even if loop exited quickly
+                if verify_live_stream:
+                    yield make_followup_yield(chat_history, verify_live_stream, working=True, merge_updates=merge_no_change)
 
                 verification_thread.join(timeout=1.0)
                 verified, verification_feedback = verification_result[0], verification_result[1]
@@ -4397,6 +5485,12 @@ class ChadWebUI:
                             "content": "───────────── ❌ VERIFICATION ERROR ─────────────",
                         }
                     )
+                    if session.event_log:
+                        session.event_log.log(VerificationAttemptEvent(
+                            attempt_number=verification_attempt,
+                            passed=False,
+                            summary="Verification error",
+                        ))
                     self._update_session_log(
                         session, chat_history, full_history, verification_attempts=verification_log
                     )
@@ -4409,11 +5503,23 @@ class ChadWebUI:
                             "content": "───────────── ✅ VERIFICATION PASSED ─────────────",
                         }
                     )
+                    if session.event_log:
+                        session.event_log.log(VerificationAttemptEvent(
+                            attempt_number=verification_attempt,
+                            passed=True,
+                            summary=verification_feedback[:500] if verification_feedback else "",
+                        ))
                     self._update_session_log(
                         session, chat_history, full_history, verification_attempts=verification_log
                     )
                 else:
                     chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
+                    if session.event_log:
+                        session.event_log.log(VerificationAttemptEvent(
+                            attempt_number=verification_attempt,
+                            passed=False,
+                            summary=verification_feedback[:500] if verification_feedback else "",
+                        ))
                     self._update_session_log(
                         session, chat_history, full_history, verification_attempts=verification_log
                     )
@@ -4426,9 +5532,12 @@ class ChadWebUI:
                     )
                     if can_revise:
                         chat_history.append(
+                            self._make_phase_milestone("Re-coding", coding_agent, requested_model)
+                        )
+                        chat_history.append(
                             {
                                 "role": "user",
-                                "content": "───────────── 🔄 REVISION REQUESTED ─────────────",
+                                "content": "───────────── → REVISION REQUESTED ─────────────",
                             }
                         )
                         chat_history.append(
@@ -4442,7 +5551,9 @@ class ChadWebUI:
                             session, chat_history, full_history, verification_attempts=verification_log
                         )
                         # Show live stream placeholder during revision
-                        revision_placeholder = build_live_stream_html("🔄 Revision in progress...", "CODING AI", live_stream_id)
+                        revision_placeholder = build_live_stream_html("→ Revision in progress...", "CODING AI", live_stream_id)
+                        # Reset live render flag so revision gets a full render, not a patch
+                        session.has_initial_live_render = False
                         yield make_followup_yield(chat_history, revision_placeholder, working=True, merge_updates=merge_no_change)
 
                         revision_request = (
@@ -4451,6 +5562,8 @@ class ChadWebUI:
                             f"{verification_feedback}\n\n"
                             "Please fix these issues and confirm when done."
                         )
+                        if session.event_log:
+                            session.event_log.log(UserMessageEvent(content="Revision requested"))
                         try:
                             coding_provider.send_message(revision_request)
                             revision_response = coding_provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
@@ -4471,6 +5584,10 @@ class ChadWebUI:
                             parsed_revision = parse_codex_output(revision_response)
                             chat_history[revision_idx] = make_chat_message("CODING AI", parsed_revision)
                             last_coding_output = parsed_revision
+                            if session.event_log and parsed_revision:
+                                session.event_log.log(AssistantMessageEvent(
+                                    blocks=[{"kind": "text", "content": parsed_revision[:1000]}]
+                                ))
                             self._update_session_log(
                                 session, chat_history, full_history, verification_attempts=verification_log
                             )
@@ -4484,6 +5601,11 @@ class ChadWebUI:
                             )
                             break
 
+                        chat_history.append(
+                            self._make_phase_milestone(
+                                "Re-verification", verification_account_for_run, resolved_verification_model
+                            )
+                        )
                         reverify_placeholder = build_live_stream_html(
                             "✓ Revision complete, re-verifying...", "VERIFICATION AI", live_stream_id
                         )
@@ -5028,6 +6150,125 @@ class ChadWebUI:
 
         return "\n".join(context_parts)
 
+    def _try_auto_switch_provider(
+        self,
+        session: Session,
+        error_message: str,
+    ) -> tuple[bool, str | None]:
+        """Attempt to auto-switch to a fallback provider on quota exhaustion.
+
+        Args:
+            session: The current session
+            error_message: The error message from the failed provider
+
+        Returns:
+            Tuple of (switched: bool, new_account: str | None)
+            switched is True if we successfully switched to a new provider
+            new_account is the name of the new account, or None if no switch occurred
+        """
+        if not is_quota_exhaustion_error(error_message):
+            return False, None
+
+        current_account = session.coding_account
+        if not current_account:
+            return False, None
+
+        # Get the next fallback provider
+        try:
+            next_account = self.api_client.get_next_fallback_provider(current_account)
+        except Exception:
+            # API error getting fallback order - skip auto-switch
+            return False, None
+
+        if not next_account:
+            return False, None
+
+        # Get the new account's provider type
+        try:
+            accounts = {acc.name: acc.provider for acc in self.api_client.list_accounts()}
+            if next_account not in accounts:
+                return False, None
+            next_provider_type = accounts[next_account]
+        except Exception:
+            return False, None
+
+        # Log handoff checkpoint before stopping old provider
+        if session.event_log and session.provider:
+            provider_session_id = None
+            if hasattr(session.provider, "get_session_id"):
+                provider_session_id = session.provider.get_session_id()
+
+            log_handoff_checkpoint(
+                session.event_log,
+                session.task_description or "",
+                provider_session_id,
+                target_provider=next_provider_type,
+            )
+
+        # Track old provider info
+        old_provider_type = ""
+        old_model = ""
+        if session.config:
+            old_provider_type = getattr(session.config, "provider", "")
+            old_model = getattr(session.config, "model_name", "") or ""
+
+        # Stop old provider
+        if session.provider:
+            try:
+                session.provider.stop_session()
+            except Exception:
+                pass
+            session.provider = None
+            session.active = False
+
+        # Get new account info for model/reasoning
+        try:
+            next_acc = self.api_client.get_account(next_account)
+            next_model = next_acc.model or "default"
+            next_reasoning = next_acc.reasoning or "default"
+        except Exception:
+            next_model = "default"
+            next_reasoning = "default"
+
+        # Create new provider
+        new_config = ModelConfig(
+            provider=next_provider_type,
+            model_name=next_model,
+            account_name=next_account,
+            reasoning_effort=None if next_reasoning == "default" else next_reasoning,
+        )
+
+        new_provider = create_provider(new_config)
+
+        # Use worktree path if available
+        if session.worktree_path:
+            working_dir = str(session.worktree_path)
+        else:
+            working_dir = session.project_path or "."
+
+        if not new_provider.start_session(working_dir, None):
+            return False, None
+
+        # Track the switch
+        session.switched_from = current_account
+        session.provider = new_provider
+        session.coding_account = next_account
+        session.active = True
+        session.config = new_config
+
+        # Log provider switched event
+        reason = get_quota_error_reason(error_message) or "quota_exhaustion"
+        if session.event_log:
+            session.event_log.log(ProviderSwitchedEvent(
+                from_provider=old_provider_type,
+                to_provider=next_provider_type,
+                from_model=old_model,
+                to_model=next_model,
+                reason=f"auto_switch_{reason}",
+            ))
+
+        return True, next_account
+
     def _last_event_info(self, session: Session) -> dict | None:
         """Return the last event snapshot from the provider if available."""
         provider = getattr(session, "provider", None)
@@ -5061,7 +6302,13 @@ class ChadWebUI:
         session = self.get_session(session_id)
         default_path = os.environ.get("CHAD_PROJECT_PATH", str(Path.cwd()))
 
-        accounts = self.api_client.list_accounts()
+        # Initialize session project_path if not set
+        if not session.project_path:
+            session.project_path = default_path
+
+        # Use prefetched data during init, fall back to API calls at runtime
+        init = getattr(self, "_init_data", None)
+        accounts = init["accounts"] if init else self.api_client.list_accounts()
         accounts_map = {acc.name: acc for acc in accounts}
         account_choices = list(accounts_map.keys())
 
@@ -5081,8 +6328,11 @@ class ChadWebUI:
             except Exception:
                 pass
 
-        # Get ready status after any auto-assignment
-        is_ready, _ = self.get_role_config_status()
+        # During init we can derive is_ready from cached accounts
+        if init:
+            is_ready = bool(initial_coding)
+        else:
+            is_ready, _ = self.get_role_config_status(project_path=session.project_path)
 
         none_label = (
             "None (disable verification)"
@@ -5094,7 +6344,7 @@ class ChadWebUI:
             (none_label, self.VERIFICATION_NONE),
             *[(account, account) for account in account_choices],
         ]
-        stored_verification = self.api_client.get_verification_agent()
+        stored_verification = init["verification_agent"] if init else self.api_client.get_verification_agent()
         if stored_verification == self.VERIFICATION_NONE:
             initial_verification = self.VERIFICATION_NONE
         elif stored_verification in account_choices:
@@ -5126,7 +6376,9 @@ class ChadWebUI:
         )
 
         # Load preferred verification model from config
-        stored_verification_model = self.api_client.get_preferred_verification_model()
+        stored_verification_model = (
+            init["preferred_verification_model"] if init else self.api_client.get_preferred_verification_model()
+        )
 
         verif_state = self._build_verification_dropdown_state(
             initial_coding,
@@ -5134,6 +6386,7 @@ class ChadWebUI:
             coding_model_value,
             coding_reasoning_value,
             current_verification_model=stored_verification_model,
+            accounts=accounts,
         )
 
         with gr.Row(
@@ -5142,108 +6395,169 @@ class ChadWebUI:
             equal_height=True,
         ):
             with gr.Column(scale=1):
-                with gr.Row(equal_height=True):
+                with gr.Row(equal_height=False):
                     with gr.Column(scale=3, min_width=260):
-                        # Auto-detect initial verification commands for default path
-                        initial_detected = detect_verification_commands(Path(default_path).expanduser().resolve())
+                        # Auto-detect initial verification commands for default path (cached)
+                        _project_resolved = Path(default_path).expanduser().resolve()
+                        if not hasattr(self, "_detected_commands_cache"):
+                            self._detected_commands_cache = {}
+                        _cache_key = str(_project_resolved)
+                        if _cache_key not in self._detected_commands_cache:
+                            self._detected_commands_cache[_cache_key] = (
+                                detect_verification_commands(_project_resolved),
+                                detect_doc_paths(_project_resolved),
+                            )
+                        initial_detected, initial_docs = self._detected_commands_cache[_cache_key]
                         initial_lint = initial_detected.get("lint_command") or ""
                         initial_test = initial_detected.get("test_command") or ""
                         initial_type = initial_detected.get("project_type", "unknown")
-                        initial_docs = detect_doc_paths(Path(default_path).expanduser().resolve())
                         initial_instructions = initial_docs.instructions_path or ""
                         initial_architecture = initial_docs.architecture_path or ""
 
-                        project_path = gr.Textbox(
-                            label=self._format_project_label(initial_type),
-                            placeholder="/path/to/project",
-                            value=default_path,
-                            scale=3,
-                            key=f"project-path-{session_id}",
-                            elem_id="project-path-input" if is_first else None,
-                            elem_classes=["project-path-input"],
-                        )
-                        with gr.Row(elem_classes=["project-commands-row"], equal_height=True):
-                            with gr.Column(scale=1, elem_classes=["command-column"]):
-                                with gr.Row(elem_classes=["command-header", "lint-command-label"], equal_height=True):
-                                    gr.Markdown(
-                                        "**Lint Command**",
-                                        elem_classes=["command-label"],
-                                    )
-                                    lint_test_btn = gr.Button(
-                                        "Test",
-                                        variant="secondary",
-                                        size="sm",
-                                        key=f"lint-test-{session_id}",
-                                        elem_classes=["command-test-btn", "lint-test-btn"],
-                                    )
-                                lint_cmd_input = gr.Textbox(
-                                    label="Lint Command",
-                                    value=initial_lint,
-                                    placeholder=".venv/bin/python -m flake8 .",
-                                    key=f"lint-cmd-{session_id}",
-                                    show_label=False,
-                                    elem_classes=["command-input", "lint-command-input"],
-                                )
-                                lint_status = gr.Markdown(
-                                    "",
-                                    key=f"lint-status-{session_id}",
-                                    elem_classes=["command-status", "lint-command-status"],
-                                )
-                            with gr.Column(scale=1, elem_classes=["command-column"]):
-                                with gr.Row(elem_classes=["command-header", "test-command-label"], equal_height=True):
-                                    gr.Markdown(
-                                        "**Test Command**",
-                                        elem_classes=["command-label"],
-                                    )
-                                    test_test_btn = gr.Button(
-                                        "Test",
-                                        variant="secondary",
-                                        size="sm",
-                                        key=f"test-test-{session_id}",
-                                        elem_classes=["command-test-btn", "test-command-btn"],
-                                    )
-                                test_cmd_input = gr.Textbox(
-                                    label="Test Command",
-                                    value=initial_test,
-                                    placeholder=".venv/bin/python -m pytest tests/ -v",
-                                    key=f"test-cmd-{session_id}",
-                                    show_label=False,
-                                    elem_classes=["command-input", "test-command-input"],
-                                )
-                                test_status = gr.Markdown(
-                                    "",
-                                    key=f"test-status-{session_id}",
-                                    elem_classes=["command-status", "test-command-status"],
-                                )
-                        with gr.Row(elem_classes=["doc-paths-row"], equal_height=True):
-                            instructions_input = gr.Textbox(
-                                label="Agent Instructions Path",
-                                value=initial_instructions,
-                                placeholder="AGENTS.md",
-                                key=f"instructions-path-{session_id}",
-                                elem_classes=["doc-path-input", "instructions-path-input"],
+                        # Pre-fill prompt previews for initial project path
+                        _initial_previews = build_prompt_previews(default_path)
+
+                        with gr.Accordion("Project Information", open=False, elem_classes=["project-info-accordion"]):
+                            project_path = gr.Textbox(
+                                label=self._format_project_label(initial_type),
+                                placeholder="/path/to/project",
+                                value=default_path,
+                                scale=3,
+                                key=f"project-path-{session_id}",
+                                elem_id="project-path-input" if is_first else None,
+                                elem_classes=["project-path-input"],
                             )
-                            architecture_input = gr.Textbox(
-                                label="Architecture Doc Path",
-                                value=initial_architecture,
-                                placeholder="docs/ARCHITECTURE.md",
-                                key=f"architecture-path-{session_id}",
-                                elem_classes=["doc-path-input", "architecture-path-input"],
-                            )
+                            with gr.Row(elem_classes=["project-commands-row"], equal_height=True):
+                                with gr.Column(scale=1, elem_classes=["command-column"]):
+                                    with gr.Row(elem_classes=["command-header", "lint-command-label"], equal_height=True):
+                                        gr.Markdown(
+                                            "**Lint Command**",
+                                            elem_classes=["command-label"],
+                                        )
+                                        lint_test_btn = gr.Button(
+                                            "Test",
+                                            variant="secondary",
+                                            size="sm",
+                                            key=f"lint-test-{session_id}",
+                                            elem_classes=["command-test-btn", "lint-test-btn"],
+                                        )
+                                    lint_cmd_input = gr.Textbox(
+                                        label="Lint Command",
+                                        value=initial_lint,
+                                        placeholder=".venv/bin/python -m flake8 .",
+                                        key=f"lint-cmd-{session_id}",
+                                        show_label=False,
+                                        elem_classes=["command-input", "lint-command-input"],
+                                    )
+                                    lint_status = gr.Markdown(
+                                        "",
+                                        key=f"lint-status-{session_id}",
+                                        elem_classes=["command-status", "lint-command-status"],
+                                    )
+                                with gr.Column(scale=1, elem_classes=["command-column"]):
+                                    with gr.Row(elem_classes=["command-header", "test-command-label"], equal_height=True):
+                                        gr.Markdown(
+                                            "**Test Command**",
+                                            elem_classes=["command-label"],
+                                        )
+                                        test_test_btn = gr.Button(
+                                            "Test",
+                                            variant="secondary",
+                                            size="sm",
+                                            key=f"test-test-{session_id}",
+                                            elem_classes=["command-test-btn", "test-command-btn"],
+                                        )
+                                    test_cmd_input = gr.Textbox(
+                                        label="Test Command",
+                                        value=initial_test,
+                                        placeholder=".venv/bin/python -m pytest tests/ -v",
+                                        key=f"test-cmd-{session_id}",
+                                        show_label=False,
+                                        elem_classes=["command-input", "test-command-input"],
+                                    )
+                                    test_status = gr.Markdown(
+                                        "",
+                                        key=f"test-status-{session_id}",
+                                        elem_classes=["command-status", "test-command-status"],
+                                    )
+                            with gr.Row(elem_classes=["doc-paths-row"], equal_height=True):
+                                instructions_input = gr.Textbox(
+                                    label="Agent Instructions Path",
+                                    value=initial_instructions,
+                                    placeholder="AGENTS.md",
+                                    key=f"instructions-path-{session_id}",
+                                    elem_classes=["doc-path-input", "instructions-path-input"],
+                                )
+                                architecture_input = gr.Textbox(
+                                    label="Architecture Doc Path",
+                                    value=initial_architecture,
+                                    placeholder="docs/ARCHITECTURE.md",
+                                    key=f"architecture-path-{session_id}",
+                                    elem_classes=["doc-path-input", "architecture-path-input"],
+                                )
+
+                            # Prompt display accordions - editable textboxes
+                            with gr.Accordion(
+                                "Exploration Prompt",
+                                open=False,
+                                visible=True,
+                                key=f"exploration-prompt-accordion-{session_id}",
+                                elem_classes=["prompt-accordion"],
+                            ) as exploration_prompt_accordion:
+                                exploration_prompt_display = gr.Textbox(
+                                    value=_initial_previews.exploration,
+                                    key=f"exploration-prompt-display-{session_id}",
+                                    elem_classes=["prompt-display"],
+                                    lines=10,
+                                    max_lines=30,
+                                    interactive=True,
+                                    show_label=False,
+                                )
+
+                            with gr.Accordion(
+                                "Implementation Prompt",
+                                open=False,
+                                visible=True,
+                                key=f"implementation-prompt-accordion-{session_id}",
+                                elem_classes=["prompt-accordion"],
+                            ) as implementation_prompt_accordion:
+                                implementation_prompt_display = gr.Textbox(
+                                    value=_initial_previews.implementation,
+                                    key=f"implementation-prompt-display-{session_id}",
+                                    elem_classes=["prompt-display"],
+                                    lines=10,
+                                    max_lines=30,
+                                    interactive=True,
+                                    show_label=False,
+                                )
+
+                            with gr.Accordion(
+                                "Verification Prompt",
+                                open=False,
+                                visible=True,
+                                key=f"verification-prompt-accordion-{session_id}",
+                                elem_classes=["prompt-accordion"],
+                            ) as verification_prompt_accordion:
+                                verification_prompt_display = gr.Textbox(
+                                    value=_initial_previews.verification,
+                                    key=f"verification-prompt-display-{session_id}",
+                                    elem_classes=["prompt-display"],
+                                    lines=10,
+                                    max_lines=30,
+                                    interactive=True,
+                                    show_label=False,
+                                )
+                        # Action row stays outside the project accordion so it remains
+                        # available when project details are collapsed.
                         with gr.Row(
+                            equal_height=True,
                             elem_id="role-status-row" if is_first else None,
                             elem_classes=["role-status-row"],
                         ):
-                            wt_path = str(session.worktree_path) if session.worktree_path else None
-                            role_status = gr.Markdown(
-                                self.format_role_status(worktree_path=wt_path),
-                                key=f"role-status-{session_id}",
-                                elem_id="role-config-status" if is_first else None,
-                                elem_classes=["role-config-status"],
-                            )
                             cancel_btn = gr.Button(
                                 "Cancel",
                                 variant="stop",
+                                size="sm",
                                 interactive=False,
                                 key=f"cancel-btn-{session_id}",
                                 elem_id="cancel-task-btn" if is_first else None,
@@ -5273,7 +6587,13 @@ class ChadWebUI:
                                 elem_id="session-log-btn" if is_first else None,
                                 elem_classes=["session-log-btn"],
                             )
-                    with gr.Column(scale=1, min_width=200):
+                            workspace_display = gr.HTML(
+                                self._workspace_html(session),
+                                key=f"workspace-display-{session_id}",
+                                elem_id="workspace-display" if is_first else None,
+                                elem_classes=["workspace-display"],
+                            )
+                    with gr.Column(scale=1, min_width=200, elem_classes=["agent-config"]):
                         coding_agent = gr.Dropdown(
                             choices=account_choices,
                             value=initial_coding if initial_coding else None,
@@ -5302,7 +6622,7 @@ class ChadWebUI:
                             key=f"coding-reasoning-{session_id}",
                             interactive=bool(initial_coding and initial_coding in account_choices),
                         )
-                    with gr.Column(scale=1, min_width=200, elem_classes=["verification-column"]):
+                    with gr.Column(scale=1, min_width=200, elem_classes=["verification-column", "agent-config"]):
                         verification_agent = gr.Dropdown(
                             choices=verification_choices,
                             value=initial_verification,
@@ -5331,7 +6651,6 @@ class ChadWebUI:
                             key=f"verification-reasoning-{session_id}",
                             interactive=verif_state.interactive,
                         )
-
         # Task status header - always in DOM but CSS hides when empty
         # This ensures JavaScript can find it for merge section visibility logic
         task_status = gr.Markdown(
@@ -5346,27 +6665,29 @@ class ChadWebUI:
         with gr.Column(elem_classes=["agent-panel"]):
             gr.Markdown("### Agent Communication")
             with gr.Column(elem_classes=["task-entry-bubble"] if is_first else []):
-                task_description = gr.TextArea(
-                    label="Task Description",
-                    placeholder="Describe what you want done...",
-                    lines=4,
-                    key=f"task-desc-{session_id}",
-                )
-                screenshot_upload = gr.File(
-                    label="Screenshots (optional)",
-                    file_count="multiple",
-                    file_types=["image"],
-                    key=f"screenshot-upload-{session_id}",
-                    elem_classes=["screenshot-upload"],
-                )
-                start_btn = gr.Button(
-                    "▶ Start Task",
-                    variant="primary",
-                    interactive=is_ready,
-                    key=f"start-btn-{session_id}",
-                    elem_id="start-task-btn" if is_first else None,
-                    elem_classes=["start-task-btn"],
-                )
+                with gr.Row(elem_classes=["task-input-row"], equal_height=False):
+                    task_description = gr.MultimodalTextbox(
+                        label="Task Description",
+                        placeholder="Describe what you want done... (drag screenshots here)",
+                        lines=3,
+                        scale=4,
+                        file_types=["image"],
+                        file_count="multiple",
+                        sources=["upload"],
+                        key=f"task-desc-{session_id}",
+                        elem_classes=["task-desc-input"],
+                    )
+                    # Hidden start button - retains state for output tuples
+                    # Task is started via the MultimodalTextbox submit (play) button
+                    start_btn = gr.Button(
+                        "▶ Start Task",
+                        variant="primary",
+                        interactive=is_ready,
+                        key=f"start-btn-{session_id}",
+                        elem_id="start-task-btn" if is_first else None,
+                        elem_classes=["start-task-btn"],
+                        visible=False,
+                    )
 
             # Live stream kept in DOM (visible=True) but hidden via CSS for visual tests
             # Using gr.HTML instead of gr.Markdown for DOM patching support
@@ -5379,40 +6700,15 @@ class ChadWebUI:
             )
 
             chatbot = gr.Chatbot(
+                label="Milestones",
                 height=400,
                 key=f"chatbot-{session_id}",
                 elem_id="agent-chatbot" if is_first else None,
                 elem_classes=["agent-chatbot"],  # CSS targets this class
                 sanitize_html=False,  # Required for inline screenshots - content is internally generated
                 type="messages",  # Use OpenAI-style dicts with 'role' and 'content' keys
+                group_consecutive_messages=False,  # Keep phase milestones as distinct entries
             )
-
-            # Prompt display accordions (collapsed by default, visible after task starts)
-            with gr.Accordion(
-                "Coding Agent Prompt",
-                open=False,
-                visible=True,
-                key=f"coding-prompt-accordion-{session_id}",
-                elem_classes=["prompt-accordion"],
-            ) as coding_prompt_accordion:
-                coding_prompt_display = gr.Markdown(
-                    "*Run a task to see the coding prompt*",
-                    key=f"coding-prompt-display-{session_id}",
-                    elem_classes=["prompt-display"],
-                )
-
-            with gr.Accordion(
-                "Verification Agent Prompt",
-                open=False,
-                visible=True,
-                key=f"verification-prompt-accordion-{session_id}",
-                elem_classes=["prompt-accordion"],
-            ) as verification_prompt_accordion:
-                verification_prompt_display = gr.Markdown(
-                    "*Run a task to see the verification prompt*",
-                    key=f"verification-prompt-display-{session_id}",
-                    elem_classes=["prompt-display"],
-                )
 
         # Hidden state for dynamic terminal dimensions (calculated from container width)
         # JavaScript updates this when the live-stream-box is resized
@@ -5432,13 +6728,20 @@ class ChadWebUI:
             key=f"live-patch-{session_id}",
             elem_classes=["live-patch-trigger"],
         )
+        # Track trigger for cross-tab rehydration
+        self._session_live_patches[session_id] = live_patch_trigger
+        # Track live stream component for direct tab-switch restoration
+        self._session_live_streams[session_id] = live_stream
 
         with gr.Row(visible=False, key=f"followup-row-{session_id}") as followup_row:
-            followup_input = gr.TextArea(
+            followup_input = gr.MultimodalTextbox(
                 label="Continue conversation...",
-                placeholder="Ask for changes or additional work...",
+                placeholder="Ask for changes or additional work... (drag screenshots here)",
                 lines=2,
                 scale=5,
+                file_types=["image"],
+                file_count="multiple",
+                sources=["upload"],
                 key=f"followup-input-{session_id}",
             )
             send_followup_btn = gr.Button(
@@ -5527,6 +6830,7 @@ class ChadWebUI:
         # Project setup handlers
         def on_project_path_change(path_val):
             """Auto-detect project type and commands when path changes."""
+            empty_previews = build_prompt_previews(None)
             if not path_val:
                 return (
                     gr.update(label=self._format_project_label("enter path")),
@@ -5536,6 +6840,9 @@ class ChadWebUI:
                     gr.update(value=""),
                     "",
                     "",
+                    gr.update(value=empty_previews.exploration),
+                    gr.update(value=empty_previews.implementation),
+                    gr.update(value=empty_previews.verification),
                 )
             path_obj = Path(path_val).expanduser().resolve()
             if not path_obj.exists():
@@ -5547,7 +6854,12 @@ class ChadWebUI:
                     gr.update(value=""),
                     "",
                     "",
+                    gr.update(value=empty_previews.exploration),
+                    gr.update(value=empty_previews.implementation),
+                    gr.update(value=empty_previews.verification),
                 )
+
+            previews = build_prompt_previews(path_obj)
 
             # Try loading existing config first
             config = load_project_config(path_obj)
@@ -5561,6 +6873,9 @@ class ChadWebUI:
                     gr.update(value=(docs.architecture_path or "")),
                     "",
                     "",
+                    gr.update(value=previews.exploration),
+                    gr.update(value=previews.implementation),
+                    gr.update(value=previews.verification),
                 )
 
             # Auto-detect
@@ -5574,6 +6889,9 @@ class ChadWebUI:
                 gr.update(value=detected_docs.architecture_path or ""),
                 "",
                 "",
+                gr.update(value=previews.exploration),
+                gr.update(value=previews.implementation),
+                gr.update(value=previews.verification),
             )
 
         project_path.change(
@@ -5587,6 +6905,9 @@ class ChadWebUI:
                 architecture_input,
                 lint_status,
                 test_status,
+                exploration_prompt_display,
+                implementation_prompt_display,
+                verification_prompt_display,
             ],
         )
 
@@ -5639,13 +6960,12 @@ class ChadWebUI:
         project_save_btn.click(
             on_project_save,
             inputs=[project_path, lint_cmd_input, test_cmd_input, instructions_input, architecture_input],
-            outputs=[role_status],
+            outputs=[task_status],
         )
 
         def start_task_wrapper(
             proj_path,
-            task_desc,
-            screenshots_data,
+            task_input,
             coding,
             verification,
             c_model,
@@ -5653,11 +6973,34 @@ class ChadWebUI:
             v_model,
             v_reason,
             term_cols,
+            explore_prompt_val,
+            impl_prompt_val,
         ):
-            # Extract file paths from uploaded screenshots
+            # Extract text and file paths from MultimodalTextbox
+            task_desc = ""
             screenshot_paths = None
-            if screenshots_data:
-                screenshot_paths = [f.name for f in screenshots_data]
+            if task_input:
+                if isinstance(task_input, dict):
+                    task_desc = task_input.get("text", "")
+                    files = task_input.get("files", [])
+                    if files:
+                        screenshot_paths = [f if isinstance(f, str) else f.get("path", "") for f in files]
+                else:
+                    task_desc = str(task_input)
+
+            # Detect if user edited prompts by comparing with auto-generated defaults
+            override_explore = None
+            override_impl = None
+            if task_desc and proj_path:
+                from chad.util.prompts import build_prompt_previews as _bpp
+                defaults = _bpp(proj_path)
+                if explore_prompt_val and explore_prompt_val.strip() != defaults.exploration.strip():
+                    # Replace {task} placeholder with actual task description
+                    override_explore = explore_prompt_val.replace("{task}", task_desc)
+                if impl_prompt_val and impl_prompt_val.strip() != defaults.implementation.strip():
+                    # Replace {task} placeholder; {exploration_output} is replaced server-side
+                    override_impl = impl_prompt_val.replace("{task}", task_desc)
+
             yield from self.start_chad_task(
                 session_id,
                 proj_path,
@@ -5670,15 +7013,28 @@ class ChadWebUI:
                 v_reason,
                 terminal_cols=int(term_cols) if term_cols else None,
                 screenshots=screenshot_paths,
+                override_exploration_prompt=override_explore,
+                override_implementation_prompt=override_impl,
             )
 
         def cancel_wrapper():
             return self.cancel_task(session_id)
 
-        def followup_wrapper(msg, history, coding, verification, c_model, c_reason, v_model, v_reason):
+        def followup_wrapper(followup_input, history, coding, verification, c_model, c_reason, v_model, v_reason):
+            # Extract text and file paths from MultimodalTextbox
+            followup_msg = ""
+            screenshot_paths = None
+            if followup_input:
+                if isinstance(followup_input, dict):
+                    followup_msg = followup_input.get("text", "")
+                    files = followup_input.get("files", [])
+                    if files:
+                        screenshot_paths = [f if isinstance(f, str) else f.get("path", "") for f in files]
+                else:
+                    followup_msg = str(followup_input)
             yield from self.send_followup(
                 session_id,
-                msg,
+                followup_msg,
                 history,
                 coding,
                 verification,
@@ -5686,6 +7042,7 @@ class ChadWebUI:
                 c_reason,
                 v_model,
                 v_reason,
+                screenshots=screenshot_paths,
             )
 
         def verification_dropdown_updates(
@@ -5717,44 +7074,57 @@ class ChadWebUI:
                 ),
             )
 
+        _task_start_inputs = [
+            project_path,
+            task_description,
+            coding_agent,
+            verification_agent,
+            coding_model,
+            coding_reasoning,
+            verification_model,
+            verification_reasoning,
+            terminal_cols_state,
+            exploration_prompt_display,
+            implementation_prompt_display,
+        ]
+        _task_start_outputs = [
+            live_stream,
+            chatbot,
+            task_status,
+            project_path,
+            task_description,
+            start_btn,
+            cancel_btn,
+            session_log_btn,
+            workspace_display,
+            followup_input,
+            followup_row,
+            send_followup_btn,
+            merge_section_group,
+            changes_summary,
+            merge_target_branch,
+            diff_content,
+            merge_section_header,
+            live_patch_trigger,
+            exploration_prompt_accordion,
+            exploration_prompt_display,
+            implementation_prompt_accordion,
+            implementation_prompt_display,
+            verification_prompt_accordion,
+            verification_prompt_display,
+        ]
+
         start_btn.click(
             start_task_wrapper,
-            inputs=[
-                project_path,
-                task_description,
-                screenshot_upload,
-                coding_agent,
-                verification_agent,
-                coding_model,
-                coding_reasoning,
-                verification_model,
-                verification_reasoning,
-                terminal_cols_state,
-            ],
-            outputs=[
-                live_stream,
-                chatbot,
-                task_status,
-                project_path,
-                task_description,
-                start_btn,
-                cancel_btn,
-                role_status,
-                session_log_btn,
-                followup_input,
-                followup_row,
-                send_followup_btn,
-                merge_section_group,
-                changes_summary,
-                merge_target_branch,
-                diff_content,
-                merge_section_header,
-                live_patch_trigger,
-                coding_prompt_accordion,
-                coding_prompt_display,
-                verification_prompt_accordion,
-                verification_prompt_display,
-            ],
+            inputs=_task_start_inputs,
+            outputs=_task_start_outputs,
+        )
+
+        # MultimodalTextbox submit (play button) also starts the task
+        task_description.submit(
+            start_task_wrapper,
+            inputs=_task_start_inputs,
+            outputs=_task_start_outputs,
         )
 
         cancel_btn.click(
@@ -5861,8 +7231,7 @@ class ChadWebUI:
 
         # Handler for coding agent selection change
         def on_coding_agent_change(selected_account, verification_value, current_verif_model, current_verif_reasoning):
-            """Update role assignment, status, and dropdowns when coding agent changes."""
-            wt_path = str(session.worktree_path) if session.worktree_path else None
+            """Update role assignment and dropdowns when coding agent changes."""
             if not selected_account:
                 verif_model_update, verif_reasoning_update = verification_dropdown_updates(
                     None,
@@ -5873,7 +7242,6 @@ class ChadWebUI:
                     current_verif_reasoning,
                 )
                 return (
-                    gr.update(value=self.format_role_status(worktree_path=wt_path)),
                     gr.update(interactive=False),
                     gr.update(choices=["default"], value="default", interactive=False),
                     gr.update(choices=["default"], value="default", interactive=False),
@@ -5887,9 +7255,10 @@ class ChadWebUI:
             except Exception:
                 pass
 
-            # Get updated status
-            is_ready, _ = self.get_role_config_status(worktree_path=wt_path)
-            status_text = self.format_role_status(worktree_path=wt_path)
+            # Check if ready
+            wt_path = str(session.worktree_path) if session.worktree_path else None
+            proj_path = session.project_path
+            is_ready, _ = self.get_role_config_status(worktree_path=wt_path, project_path=proj_path)
 
             # Get model choices for the selected account
             model_choices = self.get_models_for_account(selected_account)
@@ -5920,7 +7289,6 @@ class ChadWebUI:
             )
 
             return (
-                gr.update(value=status_text),
                 gr.update(interactive=is_ready),
                 gr.update(choices=model_choices, value=model_value, interactive=True),
                 gr.update(choices=reasoning_choices, value=reasoning_value, interactive=True),
@@ -5932,7 +7300,6 @@ class ChadWebUI:
             on_coding_agent_change,
             inputs=[coding_agent, verification_agent, verification_model, verification_reasoning],
             outputs=[
-                role_status,
                 start_btn,
                 coding_model,
                 coding_reasoning,
@@ -6039,13 +7406,16 @@ class ChadWebUI:
 
     def _create_providers_ui(self):
         """Create the Setup tab UI within @gr.render."""
-        account_items = self.provider_ui.get_provider_card_items()
+        init = getattr(self, "_init_data", None)
+        account_items = self.provider_ui.get_provider_card_items(
+            accounts=init["accounts"] if init else None
+        )
         self.provider_card_count = max(12, len(account_items) + 8)
 
         provider_feedback = gr.Markdown("")
         gr.Markdown("### Setup", elem_classes=["provider-section-title"])
 
-        refresh_btn = gr.Button("🔄 Refresh", variant="secondary")
+        refresh_btn = gr.Button("→ Refresh", variant="secondary")
         pending_delete_state = gr.State(None)
 
         provider_cards = []
@@ -6056,11 +7426,18 @@ class ChadWebUI:
                     visible = True
                     header_text = self.provider_ui.format_provider_header(account_name, provider_type, idx)
                     usage_text = self.get_provider_usage(account_name)
+                    is_mock = provider_type == "mock"
+                    mock_usage_value = self.provider_ui.get_mock_remaining_usage(account_name) if is_mock else 0.5
+                    mock_duration_seconds = self.provider_ui.get_mock_run_duration_seconds(account_name) if is_mock else 0
                 else:
                     account_name = ""
+                    provider_type = ""
                     visible = False
                     header_text = ""
                     usage_text = ""
+                    is_mock = False
+                    mock_usage_value = 0.5
+                    mock_duration_seconds = 0
 
                 card_group_classes = ["provider-card"] if visible else ["provider-card", "provider-card-empty"]
                 with gr.Column(visible=visible, scale=1) as card_column:
@@ -6078,7 +7455,25 @@ class ChadWebUI:
                             )
                         account_state = gr.State(account_name)
                         gr.Markdown("Usage", elem_classes=["provider-usage-title"])
-                        usage_box = gr.Markdown(usage_text, elem_classes=["provider-usage"])
+                        usage_box = gr.Markdown(usage_text, elem_classes=["provider-usage"], visible=not is_mock)
+                        mock_usage_slider = gr.Slider(
+                            minimum=0,
+                            maximum=100,
+                            value=int((1.0 - mock_usage_value) * 100),
+                            step=5,
+                            label="Usage %",
+                            visible=is_mock,
+                            elem_classes=["mock-usage-slider"],
+                        )
+                        mock_duration_slider = gr.Slider(
+                            minimum=0,
+                            maximum=3600,
+                            value=int(mock_duration_seconds),
+                            step=5,
+                            label="Run Duration (sec)",
+                            visible=is_mock,
+                            elem_classes=["mock-duration-slider"],
+                        )
 
                 provider_cards.append(
                     {
@@ -6088,6 +7483,8 @@ class ChadWebUI:
                         "account_state": account_state,
                         "account_name": account_name,
                         "usage_box": usage_box,
+                        "mock_usage_slider": mock_usage_slider,
+                        "mock_duration_slider": mock_duration_slider,
                         "delete_btn": delete_btn,
                     }
                 )
@@ -6105,6 +7502,12 @@ class ChadWebUI:
                 label="Provider Type",
                 value="anthropic",
             )
+            new_provider_api_key = gr.Textbox(
+                label="API Key",
+                type="password",
+                placeholder="Paste your OpenCode API key here",
+                visible=False,
+            )
             add_btn = gr.Button("Add Provider", variant="primary", interactive=False)
 
         with gr.Accordion(
@@ -6114,9 +7517,9 @@ class ChadWebUI:
             elem_classes=["config-accordion"],
         ):
             config_status = gr.Markdown("", elem_classes=["config-panel__status"])
-            # Load settings from API
+            # Load settings from prefetched data or API
             try:
-                preferences = self.api_client.get_preferences()
+                preferences = init["preferences"] if init else self.api_client.get_preferences()
                 prefs_dict = {"project_path": preferences.last_project_path} if preferences else {}
                 ui_mode = preferences.ui_mode if preferences else "gradio"
             except Exception:
@@ -6124,12 +7527,12 @@ class ChadWebUI:
                 ui_mode = "gradio"
 
             try:
-                cleanup_settings = self.api_client.get_cleanup_settings()
+                cleanup_settings = init["cleanup_settings"] if init else self.api_client.get_cleanup_settings()
                 retention_days = cleanup_settings.retention_days
             except Exception:
                 retention_days = 7
 
-            accounts = self.api_client.list_accounts()
+            accounts = init["accounts"] if init else self.api_client.list_accounts()
             account_choices = [acc.name for acc in accounts]
             coding_assignment = ""
             for acc in accounts:
@@ -6138,7 +7541,7 @@ class ChadWebUI:
                     break
             coding_value = coding_assignment if coding_assignment in account_choices else None
 
-            stored_verification = self.api_client.get_verification_agent()
+            stored_verification = init["verification_agent"] if init else self.api_client.get_verification_agent()
             if stored_verification == self.VERIFICATION_NONE:
                 verification_value = self.VERIFICATION_NONE
             elif stored_verification and stored_verification in account_choices:
@@ -6247,6 +7650,52 @@ class ChadWebUI:
                     info="Gradio (web) or CLI (terminal) - applies on next launch",
                 )
 
+            # Auto-switch settings
+            gr.Markdown("### Auto-Switch Settings")
+            gr.Markdown(
+                "Configure automatic provider switching when quota is exhausted. "
+                "Order determines fallback priority."
+            )
+
+            # Load current fallback order and threshold
+            try:
+                fallback_order = init["fallback_order"] if init else self.api_client.get_provider_fallback_order()
+                fallback_order_str = ", ".join(fallback_order)
+            except Exception:
+                fallback_order_str = ""
+
+            usage_threshold = init["usage_threshold"] if init else self.api_client.get_usage_switch_threshold()
+            with gr.Row():
+                fallback_order_input = gr.Textbox(
+                    label="Provider Fallback Order",
+                    placeholder="e.g., work-claude, backup-gpt, gemini-free",
+                    value=fallback_order_str,
+                    info="Comma-separated account names in priority order (press Enter to save)",
+                )
+            with gr.Row():
+                usage_threshold_input = gr.Slider(
+                    label="Usage Switch Threshold (%)",
+                    minimum=0,
+                    maximum=100,
+                    step=5,
+                    value=usage_threshold,
+                    info="Switch provider when usage exceeds this percentage (100 = disable)",
+                )
+            # Verification settings
+            gr.Markdown("### Verification Settings")
+            max_attempts = init["max_verification_attempts"] if init else self.api_client.get_max_verification_attempts()
+
+            with gr.Row():
+                max_verification_attempts_input = gr.Number(
+                    label="Max Verification Attempts",
+                    minimum=1,
+                    maximum=20,
+                    step=1,
+                    value=max_attempts,
+                    info="Maximum verification attempts before giving up (1-20)",
+                    precision=0,
+                )
+
         provider_outputs = [provider_feedback]
         for card in provider_cards:
             provider_outputs.extend(
@@ -6256,6 +7705,8 @@ class ChadWebUI:
                     card["header"],
                     card["account_state"],
                     card["usage_box"],
+                    card["mock_usage_slider"],
+                    card["mock_duration_slider"],
                     card["delete_btn"],
                 ]
             )
@@ -6271,19 +7722,27 @@ class ChadWebUI:
             outputs=[add_btn],
         )
 
-        def add_provider_handler(provider_name, provider_type):
-            base = self.add_provider(provider_name, provider_type)
+        # Show API key field only for OpenCode
+        new_provider_type.change(
+            lambda ptype: gr.update(visible=(ptype == "opencode")),
+            inputs=[new_provider_type],
+            outputs=[new_provider_api_key],
+        )
+
+        def add_provider_handler(provider_name, provider_type, api_key):
+            base = self.add_provider(provider_name, provider_type, api_key=api_key)
             return (
                 *base[: len(provider_outputs)],
                 "",
                 gr.update(interactive=False),
                 gr.update(open=False),
+                gr.update(value="", visible=False),
             )
 
         add_btn.click(
             add_provider_handler,
-            inputs=[new_provider_name, new_provider_type],
-            outputs=provider_outputs + [new_provider_name, add_btn, add_provider_accordion],
+            inputs=[new_provider_name, new_provider_type, new_provider_api_key],
+            outputs=provider_outputs + [new_provider_name, add_btn, add_provider_accordion, new_provider_api_key],
         )
 
         def on_retention_change(days):
@@ -6405,6 +7864,51 @@ class ChadWebUI:
 
         ui_mode_pref.change(on_ui_mode_change, inputs=[ui_mode_pref], outputs=[config_status])
 
+        def on_fallback_order_change(order_str):
+            try:
+                # Parse comma-separated names
+                names = [n.strip() for n in order_str.split(",") if n.strip()]
+                self.api_client.set_provider_fallback_order(names)
+                if names:
+                    return f"✅ Fallback order set: {' → '.join(names)}"
+                return "✅ Fallback order cleared (auto-switch disabled)"
+            except Exception as exc:
+                return f"❌ {exc}"
+
+        fallback_order_input.submit(
+            on_fallback_order_change,
+            inputs=[fallback_order_input],
+            outputs=[config_status],
+        )
+
+        def on_usage_threshold_change(threshold):
+            try:
+                self.api_client.set_usage_switch_threshold(int(threshold))
+                if threshold >= 100:
+                    return "✅ Usage-based switching disabled"
+                return f"✅ Will switch providers when usage exceeds {int(threshold)}%"
+            except Exception as exc:
+                return f"❌ {exc}"
+
+        usage_threshold_input.change(
+            on_usage_threshold_change,
+            inputs=[usage_threshold_input],
+            outputs=[config_status],
+        )
+
+        def on_max_verification_attempts_change(attempts):
+            try:
+                self.api_client.set_max_verification_attempts(int(attempts))
+                return f"✅ Max verification attempts set to {int(attempts)}"
+            except Exception as exc:
+                return f"❌ {exc}"
+
+        max_verification_attempts_input.change(
+            on_max_verification_attempts_change,
+            inputs=[max_verification_attempts_input],
+            outputs=[config_status],
+        )
+
         for card in provider_cards:
 
             def make_delete_handler():
@@ -6435,13 +7939,93 @@ class ChadWebUI:
             )
             self._provider_delete_events.append(delete_event)
 
+            # Mock usage slider change handler
+            def make_mock_usage_handler():
+                def handler(value, account_name):
+                    if account_name:
+                        self.provider_ui.set_mock_remaining_usage(account_name, (100.0 - value) / 100.0)
+                return handler
+
+            card["mock_usage_slider"].change(
+                fn=make_mock_usage_handler(),
+                inputs=[card["mock_usage_slider"], card["account_state"]],
+            )
+
+            def make_mock_duration_handler():
+                def handler(value, account_name):
+                    if account_name:
+                        self.provider_ui.set_mock_run_duration_seconds(account_name, int(value))
+                return handler
+
+            card["mock_duration_slider"].change(
+                fn=make_mock_duration_handler(),
+                inputs=[card["mock_duration_slider"], card["account_state"]],
+            )
+
+    def _prefetch_init_data(self) -> dict:
+        """Fetch all data needed for UI construction in one batch.
+
+        This replaces ~49 individual API roundtrips with ~9, cutting
+        startup time significantly.
+        """
+        accounts = self.api_client.list_accounts()
+        try:
+            verification_agent = self.api_client.get_verification_agent()
+        except Exception:
+            verification_agent = ""
+        try:
+            preferred_verification_model = self.api_client.get_preferred_verification_model()
+        except Exception:
+            preferred_verification_model = ""
+        try:
+            preferences = self.api_client.get_preferences()
+        except Exception:
+            preferences = None
+        try:
+            cleanup_settings = self.api_client.get_cleanup_settings()
+        except Exception:
+            cleanup_settings = None
+        try:
+            fallback_order = self.api_client.get_provider_fallback_order()
+        except Exception:
+            fallback_order = []
+        try:
+            usage_threshold = self.api_client.get_usage_switch_threshold()
+        except Exception:
+            usage_threshold = 90
+        try:
+            max_verification_attempts = self.api_client.get_max_verification_attempts()
+        except Exception:
+            max_verification_attempts = 5
+        return {
+            "accounts": accounts,
+            "verification_agent": verification_agent,
+            "preferred_verification_model": preferred_verification_model,
+            "preferences": preferences,
+            "cleanup_settings": cleanup_settings,
+            "fallback_order": fallback_order,
+            "usage_threshold": usage_threshold,
+            "max_verification_attempts": max_verification_attempts,
+        }
+
+    def _startup_log(self, msg: str) -> None:
+        t0 = getattr(self, "_startup_t0", None)
+        if t0 is not None and self.dev_mode:
+            print(f"{_startup_elapsed(t0)} {msg}", flush=True)
+
     def create_interface(self) -> gr.Blocks:
         """Create the Gradio interface."""
         # Create initial session
         initial_session = self.create_session("Task 1")
         initial_session.event_log = EventLog(initial_session.id)
 
-        with gr.Blocks(title="Chad", js="""
+        # Prefetch all data needed during UI construction to avoid
+        # redundant API calls (was ~49 HTTP roundtrips, now ~9).
+        self._startup_log("Prefetching config...")
+        self._init_data = self._prefetch_init_data()
+        self._startup_log("Config ready")
+
+        with gr.Blocks(title="Chad", analytics_enabled=False, js="""
         () => {
             const getRoot = () => {
                 const app = document.querySelector('gradio-app');
@@ -6482,12 +8066,6 @@ class ChadWebUI:
                 };
                 return tryClick();
             };
-            const isPlusSelected = () => {
-                const root = getRoot();
-                return Array.from(root.querySelectorAll('[role="tab"]')).some(
-                    (tab) => isPlus(tab) && tab.getAttribute('aria-selected') === 'true'
-                );
-            };
             const wirePlusButtons = () => {
                 const root = getRoot();
                 const candidates = [
@@ -6499,19 +8077,9 @@ class ChadWebUI:
                     tab._plusClickSetup = true;
                     tab.addEventListener('click', () => setTimeout(clickAddTask, 60));
                 });
-                if (isPlusSelected()) setTimeout(clickAddTask, 60);
                 const addBtn = root.querySelector('#add-new-task-btn');
                 if (addBtn) hideButton(addBtn);
             };
-
-            const observer = new MutationObserver(() => {
-                if (isPlusSelected()) clickAddTask();
-            });
-            observer.observe(document, { childList: true, subtree: true });
-            const rootObserverTarget = getRoot();
-            if (rootObserverTarget && rootObserverTarget !== document) {
-                observer.observe(rootObserverTarget, { childList: true, subtree: true });
-            }
 
             setInterval(wirePlusButtons, 400);
             setTimeout(wirePlusButtons, 80);
@@ -6574,310 +8142,12 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
       tab._plusClickSetup = true;
       tab.addEventListener('click', () => setTimeout(triggerAdd, 60));
     });
-    const activePlus = tabs.find((tab) => tab && isPlus(tab) && tab.getAttribute('aria-selected') === 'true');
-    if (activePlus) triggerAdd();
     const btn = root.querySelector('#add-new-task-btn');
     if (btn) hideButton(btn);
   };
   setInterval(wirePlus, 400);
   setTimeout(wirePlus, 80);
 })();
-
-// Live view scroll tracking to prevent auto-scroll when user has scrolled up
-// State is stored by parent container ID since .live-output-content gets recreated on updates
-// NOTE: scroll events don't bubble, so we must attach listeners directly to the scrollable element
-window._liveStreamScrollState = window._liveStreamScrollState || {};
-window._liveStreamTrackedParents = window._liveStreamTrackedParents || new WeakSet();
-window._liveStreamTrackedContents = window._liveStreamTrackedContents || new WeakSet();
-
-function initializeLiveStreamScrollTracking() {
-    const getRoot = () => {
-        const app = document.querySelector('gradio-app');
-        return (app && app.shadowRoot) ? app.shadowRoot : document;
-    };
-
-    // Generate a stable ID for a parent container
-    function getParentId(parent) {
-        if (parent.id) return parent.id;
-        if (!parent.dataset.scrollTrackId) {
-            parent.dataset.scrollTrackId = 'scroll-' + Math.random().toString(36).substr(2, 9);
-        }
-        return parent.dataset.scrollTrackId;
-    }
-
-    // Get or create state for a parent container
-    function getState(parentId) {
-        if (!window._liveStreamScrollState[parentId]) {
-            window._liveStreamScrollState[parentId] = {
-                userScrolledUp: false,
-                savedScrollTop: 0,
-                lastScrollHeight: 0,
-                settingScroll: false
-            };
-        }
-        return window._liveStreamScrollState[parentId];
-    }
-
-    // Attach scroll listener directly to a content element
-    function attachScrollListener(content, state) {
-        if (window._liveStreamTrackedContents.has(content)) return;
-        window._liveStreamTrackedContents.add(content);
-
-        content.addEventListener('scroll', () => {
-            if (state.settingScroll) return;
-
-            const scrollTop = content.scrollTop;
-            const previousScrollTop = state.savedScrollTop;
-            const isAtBottom = scrollTop + content.clientHeight >= content.scrollHeight - 10;
-            const scrolledDown = scrollTop > previousScrollTop;
-
-            state.savedScrollTop = scrollTop;
-
-            if (isAtBottom && scrolledDown) {
-                state.userScrolledUp = false;
-            } else if (!isAtBottom) {
-                state.userScrolledUp = true;
-            }
-        });
-    }
-
-    // Setup scroll tracking on a parent container (stable element)
-    function setupParentTracking(parent) {
-        if (window._liveStreamTrackedParents.has(parent)) {
-            return;
-        }
-        window._liveStreamTrackedParents.add(parent);
-
-        const parentId = getParentId(parent);
-        const state = getState(parentId);
-
-        // Initial attachment if content exists
-        const initialContent = parent.querySelector('.live-output-content');
-        if (initialContent) {
-            attachScrollListener(initialContent, state);
-            state.lastScrollHeight = initialContent.scrollHeight;
-        }
-
-        // Watch for DOM changes (content replacement)
-        const observer = new MutationObserver(() => {
-            const content = parent.querySelector('.live-output-content');
-            if (!content) return;
-
-            // Attach scroll listener to new content element
-            attachScrollListener(content, state);
-
-            // Double requestAnimationFrame ensures Gradio DOM reconciliation is complete
-            requestAnimationFrame(() => {
-                requestAnimationFrame(() => {
-                    const newScrollHeight = content.scrollHeight;
-                    const contentGrew = newScrollHeight > state.lastScrollHeight;
-                    state.lastScrollHeight = newScrollHeight;
-
-                    state.settingScroll = true;
-
-                    if (state.userScrolledUp) {
-                        // Restore saved position when user has scrolled up
-                        content.scrollTop = state.savedScrollTop;
-                    } else if (contentGrew) {
-                        // Auto-scroll to bottom when at bottom and content grew
-                        content.scrollTop = newScrollHeight;
-                    }
-
-                    requestAnimationFrame(() => {
-                        state.settingScroll = false;
-                    });
-                });
-            });
-        });
-
-        observer.observe(parent, {
-            childList: true,
-            subtree: true
-        });
-    }
-
-    function findAndSetupParents() {
-        const root = getRoot();
-        const parents = [
-            root.querySelector('#live-stream-box'),
-            ...root.querySelectorAll('.live-stream-box')
-        ].filter(Boolean);
-
-        parents.forEach(parent => setupParentTracking(parent));
-    }
-
-    setInterval(findAndSetupParents, 500);
-    setTimeout(findAndSetupParents, 100);
-}
-
-initializeLiveStreamScrollTracking();
-
-// Dynamic terminal column calculation based on live-stream-box width
-function initializeTerminalColumnTracking() {
-    const CHAR_WIDTH = 8;  // Approximate width per character at 13px monospace font
-    const PADDING = 24;    // Total horizontal padding (12px * 2)
-    const SCROLLBAR = 20;  // Reserved for scrollbar
-    const MIN_COLS = 80;
-    const MAX_COLS = 300;
-
-    function getRoot() {
-        const app = document.querySelector('gradio-app');
-        return (app && app.shadowRoot) ? app.shadowRoot : document;
-    }
-
-    function calculateCols(width) {
-        const usableWidth = width - PADDING - SCROLLBAR;
-        const cols = Math.floor(usableWidth / CHAR_WIDTH);
-        return Math.min(MAX_COLS, Math.max(MIN_COLS, cols));
-    }
-
-    function updateTerminalCols(cols) {
-        const root = getRoot();
-        // Find the hidden number input for terminal columns
-        const inputs = [
-            root.querySelector('#terminal-cols-state input[type="number"]'),
-            ...root.querySelectorAll('.terminal-cols-state input[type="number"]')
-        ].filter(Boolean);
-
-        inputs.forEach(input => {
-            if (input && parseInt(input.value) !== cols) {
-                input.value = cols;
-                // Trigger input event so Gradio picks up the change
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-            }
-        });
-    }
-
-    function setupResizeObserver(element) {
-        if (element._terminalResizeSetup) return;
-        element._terminalResizeSetup = true;
-
-        const resizeObserver = new ResizeObserver(entries => {
-            for (const entry of entries) {
-                const width = entry.contentRect.width;
-                if (width > 0) {
-                    const cols = calculateCols(width);
-                    updateTerminalCols(cols);
-                }
-            }
-        });
-
-        resizeObserver.observe(element);
-
-        // Initial calculation
-        const width = element.getBoundingClientRect().width;
-        if (width > 0) {
-            updateTerminalCols(calculateCols(width));
-        }
-    }
-
-    function findAndSetupContainers() {
-        const root = getRoot();
-        const containers = [
-            root.querySelector('#live-stream-box'),
-            ...root.querySelectorAll('.live-stream-box')
-        ].filter(Boolean);
-
-        containers.forEach(setupResizeObserver);
-    }
-
-    setInterval(findAndSetupContainers, 500);
-    setTimeout(findAndSetupContainers, 100);
-}
-
-initializeTerminalColumnTracking();
-
-// Live DOM patching to preserve scroll position and text selection
-// Watches live_patch_trigger elements and patches live stream content in-place
-function initializeLiveDomPatching() {
-    const getRoot = () => {
-        const app = document.querySelector('gradio-app');
-        return (app && app.shadowRoot) ? app.shadowRoot : document;
-    };
-
-    // Simple HTML decoder
-    function decodeHtml(html) {
-        const txt = document.createElement('textarea');
-        txt.innerHTML = html;
-        return txt.value;
-    }
-
-    // Patch live stream content by updating innerHTML of existing container
-    function patchLiveContent(liveId, newHtml) {
-        const root = getRoot();
-        const wrapper = root.querySelector(`[data-live-id="${liveId}"]`);
-        if (!wrapper) return false;
-
-        const content = wrapper.querySelector('.live-output-content');
-        if (!content) return false;
-
-        // Save scroll position
-        const scrollTop = content.scrollTop;
-        const scrollHeight = content.scrollHeight;
-        const isAtBottom = scrollTop + content.clientHeight >= scrollHeight - 10;
-
-        // Parse new HTML to extract just the content portion
-        const temp = document.createElement('div');
-        temp.innerHTML = newHtml;
-        const newWrapper = temp.querySelector('.live-output-wrapper') || temp;
-        const newContent = newWrapper.querySelector('.live-output-content');
-
-        if (newContent) {
-            // Update only the inner content, preserving the container
-            content.innerHTML = newContent.innerHTML;
-        }
-
-        // Restore scroll position
-        requestAnimationFrame(() => {
-            const newScrollHeight = content.scrollHeight;
-            if (isAtBottom) {
-                // Was at bottom, stay at bottom
-                content.scrollTop = newScrollHeight;
-            } else {
-                // Restore previous position
-                content.scrollTop = scrollTop;
-            }
-        });
-
-        return true;
-    }
-
-    // Watch for changes to live_patch_trigger elements
-    function setupPatchTriggerWatcher() {
-        const root = getRoot();
-        const triggers = root.querySelectorAll('.live-patch-trigger');
-
-        triggers.forEach(trigger => {
-            if (trigger._patchObserverSetup) return;
-            trigger._patchObserverSetup = true;
-
-            const observer = new MutationObserver(() => {
-                // Find the data-live-patch element inside the trigger
-                const patchEl = trigger.querySelector('[data-live-patch]');
-                if (!patchEl) return;
-
-                const liveId = patchEl.dataset.livePatch;
-                const escapedHtml = patchEl.textContent || '';
-                if (!liveId || !escapedHtml) return;
-
-                // Decode the HTML and patch the live stream
-                const html = decodeHtml(escapedHtml);
-                patchLiveContent(liveId, html);
-            });
-
-            observer.observe(trigger, {
-                childList: true,
-                subtree: true,
-                characterData: true
-            });
-        });
-    }
-
-    setInterval(setupPatchTriggerWatcher, 500);
-    setTimeout(setupPatchTriggerWatcher, 100);
-}
-
-initializeLiveDomPatching();
 </script>
 """
             )
@@ -6892,6 +8162,27 @@ initializeLiveDomPatching();
                   const getRoot = () => {
                     const app = document.querySelector('gradio-app');
                     return (app && app.shadowRoot) ? app.shadowRoot : document;
+                  };
+                  window._liveStreamScrollState = window._liveStreamScrollState || {};
+                  window._liveStreamTrackedParents = window._liveStreamTrackedParents || new WeakSet();
+                  window._liveStreamTrackedContents = window._liveStreamTrackedContents || new WeakSet();
+                  const getParentId = (parent) => {
+                    if (parent.id) return parent.id;
+                    if (!parent.dataset.scrollTrackId) {
+                      parent.dataset.scrollTrackId = 'scroll-' + Math.random().toString(36).substr(2, 9);
+                    }
+                    return parent.dataset.scrollTrackId;
+                  };
+                  const getState = (parentId) => {
+                    if (!window._liveStreamScrollState[parentId]) {
+                      window._liveStreamScrollState[parentId] = {
+                        userScrolledUp: false,
+                        savedScrollTop: 0,
+                        lastScrollHeight: 0,
+                        settingScroll: false
+                      };
+                    }
+                    return window._liveStreamScrollState[parentId];
                   };
                   const isPlus = (el) => ((el.textContent || el.getAttribute('aria-label') || '').trim() === '➕');
                   const hideButton = (btn) => {
@@ -6930,9 +8221,18 @@ initializeLiveDomPatching();
                       const content = wrapper.querySelector('.live-output-content');
                       if (!content) return false;
 
+                      const parent = wrapper.closest('#live-stream-box, .live-stream-box');
+                      const parentId = parent ? getParentId(parent) : null;
+                      const state = parentId ? getState(parentId) : null;
+
                       const scrollTop = content.scrollTop;
                       const scrollHeight = content.scrollHeight;
                       const isAtBottom = scrollTop + content.clientHeight >= scrollHeight - 10;
+
+                      if (state) {
+                        state.settingScroll = true;
+                        state.savedScrollTop = scrollTop;
+                      }
 
                       const temp = document.createElement('div');
                       temp.innerHTML = newHtml;
@@ -6943,13 +8243,31 @@ initializeLiveDomPatching();
                         content.innerHTML = newContent.innerHTML;
                       }
 
+                      if (window._liveSearchReapply && parent) {
+                        window._liveSearchReapply(parent);
+                      }
+
                       requestAnimationFrame(() => {
-                        const newScrollHeight = content.scrollHeight;
-                        if (isAtBottom) {
-                          content.scrollTop = newScrollHeight;
-                        } else {
-                          content.scrollTop = scrollTop;
-                        }
+                        requestAnimationFrame(() => {
+                          const newScrollHeight = content.scrollHeight;
+                          if (state) {
+                            state.lastScrollHeight = newScrollHeight;
+                          }
+
+                          if (isAtBottom && (!state || !state.userScrolledUp)) {
+                            content.scrollTop = newScrollHeight;
+                            if (state) {
+                              state.savedScrollTop = newScrollHeight;
+                              state.userScrolledUp = false;
+                            }
+                          } else {
+                            content.scrollTop = scrollTop;
+                          }
+
+                          requestAnimationFrame(() => {
+                            if (state) state.settingScroll = false;
+                          });
+                        });
                       });
 
                       return true;
@@ -6988,30 +8306,6 @@ initializeLiveDomPatching();
                   };
 
                   const initializeLiveStreamScrollTracking = () => {
-                    window._liveStreamScrollState = window._liveStreamScrollState || {};
-                    window._liveStreamTrackedParents = window._liveStreamTrackedParents || new WeakSet();
-                    window._liveStreamTrackedContents = window._liveStreamTrackedContents || new WeakSet();
-
-                    const getParentId = (parent) => {
-                      if (parent.id) return parent.id;
-                      if (!parent.dataset.scrollTrackId) {
-                        parent.dataset.scrollTrackId = 'scroll-' + Math.random().toString(36).substr(2, 9);
-                      }
-                      return parent.dataset.scrollTrackId;
-                    };
-
-                    const getState = (parentId) => {
-                      if (!window._liveStreamScrollState[parentId]) {
-                        window._liveStreamScrollState[parentId] = {
-                          userScrolledUp: false,
-                          savedScrollTop: 0,
-                          lastScrollHeight: 0,
-                          settingScroll: false
-                        };
-                      }
-                      return window._liveStreamScrollState[parentId];
-                    };
-
                     const attachScrollListener = (content, state) => {
                       if (window._liveStreamTrackedContents.has(content)) return;
                       window._liveStreamTrackedContents.add(content);
@@ -7050,6 +8344,8 @@ initializeLiveDomPatching();
                       }
 
                       const observer = new MutationObserver(() => {
+                        if (state.settingScroll) return;
+
                         const content = parent.querySelector('.live-output-content');
                         if (!content) return;
 
@@ -7059,14 +8355,20 @@ initializeLiveDomPatching();
                           requestAnimationFrame(() => {
                             const newScrollHeight = content.scrollHeight;
                             const contentGrew = newScrollHeight > state.lastScrollHeight;
-                            state.lastScrollHeight = newScrollHeight;
 
+                            // Check if user was at bottom BEFORE content grew (using old height)
+                            const wasAtBottomBeforeGrowth = state.savedScrollTop + content.clientHeight >= state.lastScrollHeight - 10;
+
+                            state.lastScrollHeight = newScrollHeight;
                             state.settingScroll = true;
 
-                            if (state.userScrolledUp) {
-                              content.scrollTop = state.savedScrollTop;
-                            } else if (contentGrew) {
+                            if (contentGrew && wasAtBottomBeforeGrowth && !state.userScrolledUp) {
+                              // User was at bottom before content grew and hasn't scrolled up - auto-scroll
                               content.scrollTop = newScrollHeight;
+                              state.savedScrollTop = newScrollHeight;
+                              state.userScrolledUp = false;
+                            } else if (state.userScrolledUp) {
+                              content.scrollTop = state.savedScrollTop;
                             }
 
                             requestAnimationFrame(() => {
@@ -7268,6 +8570,15 @@ initializeLiveDomPatching();
                     });
                   };
                   const triggerAdd = () => {
+                    const focusLatestTask = () => {
+                      const taskTabs = collectAll('[role="tab"]').filter((tab) => {
+                        const text = (tab.textContent || tab.getAttribute('aria-label') || '').trim();
+                        return /^Task\\s+\\d+$/i.test(text);
+                      });
+                      if (!taskTabs.length) return;
+                      const last = taskTabs[taskTabs.length - 1];
+                      if (last) last.click();
+                    };
                     let attempts = 0;
                     const tick = () => {
                       const root = getRoot();
@@ -7275,6 +8586,7 @@ initializeLiveDomPatching();
                       if (btn) {
                         hideButton(btn);
                         btn.click();
+                        setTimeout(focusLatestTask, 140);
                         return;
                       }
                       if (attempts++ < 15) setTimeout(tick, 80);
@@ -7292,9 +8604,6 @@ initializeLiveDomPatching();
                       tab._plusClickSetup = true;
                       tab.addEventListener('click', () => setTimeout(triggerAdd, 60));
                     });
-                    const activePlus = tabs.find((tab) => tab && isPlus(tab) &&
-                        tab.getAttribute('aria-selected') === 'true');
-                    if (activePlus) triggerAdd();
                     const btn = root.querySelector('#add-new-task-btn');
                     if (btn) hideButton(btn);
                   };
@@ -7329,8 +8638,173 @@ initializeLiveDomPatching();
                       }
                     });
                   };
+                  const initializeLiveStreamSearch = () => {
+                    const searchStates = new WeakMap();
+
+                    const getSearchState = (box) => {
+                      if (!searchStates.has(box)) {
+                        searchStates.set(box, { query: '', currentIdx: 0, matchCount: 0, debounceTimer: null });
+                      }
+                      return searchStates.get(box);
+                    };
+
+                    const clearHighlights = (content) => {
+                      const marks = content.querySelectorAll('mark.live-search-match');
+                      marks.forEach(mark => {
+                        const parent = mark.parentNode;
+                        parent.replaceChild(document.createTextNode(mark.textContent), mark);
+                        parent.normalize();
+                      });
+                    };
+
+                    const applyHighlights = (content, query) => {
+                      if (!query) return 0;
+                      const lowerQuery = query.toLowerCase();
+                      let matchCount = 0;
+                      const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+                      const textNodes = [];
+                      while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+                      textNodes.forEach(node => {
+                        const text = node.textContent;
+                        const lowerText = text.toLowerCase();
+                        let idx = lowerText.indexOf(lowerQuery);
+                        if (idx === -1) return;
+                        const frag = document.createDocumentFragment();
+                        let lastIdx = 0;
+                        while (idx !== -1) {
+                          if (idx > lastIdx) frag.appendChild(document.createTextNode(text.slice(lastIdx, idx)));
+                          const mark = document.createElement('mark');
+                          mark.className = 'live-search-match';
+                          mark.textContent = text.slice(idx, idx + query.length);
+                          frag.appendChild(mark);
+                          matchCount++;
+                          lastIdx = idx + query.length;
+                          idx = lowerText.indexOf(lowerQuery, lastIdx);
+                        }
+                        if (lastIdx < text.length) frag.appendChild(document.createTextNode(text.slice(lastIdx)));
+                        node.parentNode.replaceChild(frag, node);
+                      });
+                      return matchCount;
+                    };
+
+                    const scrollInContainer = (container, el) => {
+                      const elTop = el.offsetTop;
+                      const elBottom = elTop + el.offsetHeight;
+                      const viewTop = container.scrollTop;
+                      const viewBottom = viewTop + container.clientHeight;
+                      if (elTop < viewTop) {
+                        container.scrollTop = elTop - 20;
+                      } else if (elBottom > viewBottom) {
+                        container.scrollTop = elBottom - container.clientHeight + 20;
+                      }
+                    };
+
+                    const updateCurrent = (content, state, countEl) => {
+                      const marks = content.querySelectorAll('mark.live-search-match');
+                      state.matchCount = marks.length;
+                      marks.forEach(m => m.classList.remove('current'));
+                      if (marks.length > 0) {
+                        if (state.currentIdx >= marks.length) state.currentIdx = 0;
+                        if (state.currentIdx < 0) state.currentIdx = marks.length - 1;
+                        marks[state.currentIdx].classList.add('current');
+                        scrollInContainer(content, marks[state.currentIdx]);
+                        countEl.textContent = (state.currentIdx + 1) + '/' + marks.length;
+                      } else {
+                        countEl.textContent = state.query ? '0/0' : '';
+                      }
+                    };
+
+                    const runSearch = (box) => {
+                      const input = box.querySelector('.live-search-input');
+                      const countEl = box.querySelector('.live-search-count');
+                      const content = box.querySelector('.live-output-content');
+                      if (!input || !countEl || !content) return;
+                      const state = getSearchState(box);
+                      state.query = input.value;
+                      state.currentIdx = 0;
+                      clearHighlights(content);
+                      applyHighlights(content, state.query);
+                      updateCurrent(content, state, countEl);
+                    };
+
+                    window._liveSearchReapply = (box) => {
+                      if (!box) return;
+                      const input = box.querySelector('.live-search-input');
+                      const countEl = box.querySelector('.live-search-count');
+                      const content = box.querySelector('.live-output-content');
+                      if (!input || !countEl || !content) return;
+                      const state = getSearchState(box);
+                      if (!state.query) return;
+                      const savedIdx = state.currentIdx;
+                      clearHighlights(content);
+                      applyHighlights(content, state.query);
+                      state.currentIdx = savedIdx;
+                      updateCurrent(content, state, countEl);
+                    };
+
+                    const bindInput = (input) => {
+                      if (input._searchBound) return;
+                      input._searchBound = true;
+                      const box = input.closest('#live-stream-box, .live-stream-box, .live-output-wrapper');
+                      if (!box) return;
+                      const state = getSearchState(box);
+
+                      input.addEventListener('input', () => {
+                        clearTimeout(state.debounceTimer);
+                        state.debounceTimer = setTimeout(() => runSearch(box), 200);
+                      });
+
+                      input.addEventListener('keydown', (e) => {
+                        e.stopPropagation();
+                        if (e.key === 'Escape') {
+                          input.value = '';
+                          runSearch(box);
+                          input.blur();
+                        } else if (e.key === 'Enter') {
+                          const countEl = box.querySelector('.live-search-count');
+                          const content = box.querySelector('.live-output-content');
+                          if (!countEl || !content) return;
+                          if (e.shiftKey) {
+                            state.currentIdx--;
+                          } else {
+                            state.currentIdx++;
+                          }
+                          updateCurrent(content, state, countEl);
+                        }
+                      });
+
+                      const navBtns = box.querySelectorAll('.live-search-nav');
+                      if (navBtns.length >= 2) {
+                        navBtns[0].addEventListener('click', () => {
+                          const countEl = box.querySelector('.live-search-count');
+                          const content = box.querySelector('.live-output-content');
+                          if (!countEl || !content) return;
+                          state.currentIdx--;
+                          updateCurrent(content, state, countEl);
+                        });
+                        navBtns[1].addEventListener('click', () => {
+                          const countEl = box.querySelector('.live-search-count');
+                          const content = box.querySelector('.live-output-content');
+                          if (!countEl || !content) return;
+                          state.currentIdx++;
+                          updateCurrent(content, state, countEl);
+                        });
+                      }
+                    };
+
+                    const discoverInputs = () => {
+                      const root = getRoot();
+                      root.querySelectorAll('.live-search-input').forEach(bindInput);
+                    };
+
+                    setInterval(discoverInputs, 500);
+                    setTimeout(discoverInputs, 100);
+                  };
+
                   initializeLiveDomPatching();
                   initializeLiveStreamScrollTracking();
+                  initializeLiveStreamSearch();
                   initializeTerminalColumnTracking();
                   const tickAll = () => {
                     wirePlus();
@@ -7353,7 +8827,7 @@ initializeLiveDomPatching();
             )
 
             # Maximum number of task tabs we can have
-            MAX_TASKS = 10
+            MAX_TASKS = 8
 
             # Pre-create sessions for all potential tabs
             all_sessions = [initial_session]
@@ -7368,10 +8842,12 @@ initializeLiveDomPatching();
             # Tab index 1 = Task 1 (since Setup is index 0)
             with gr.Tabs(selected=1, elem_id="main-tabs") as main_tabs:
                 # Setup tab (first, but not default selected)
+                self._startup_log("Creating setup tab...")
                 with gr.Tab("⚙️ Setup", id=0):
                     self._create_providers_ui()
 
                 # Pre-create ALL task tabs - only first visible initially
+                self._startup_log("Creating task tabs...")
                 task_tabs = []
                 for i in range(MAX_TASKS):
                     tab_id = i + 1  # Setup is 0, tasks start at 1
@@ -7379,6 +8855,7 @@ initializeLiveDomPatching();
                     with gr.Tab(f"Task {i + 1}", id=tab_id, visible=is_visible) as task_tab:
                         self._create_session_ui(all_sessions[i].id, is_first=(i == 0))
                     task_tabs.append(task_tab)
+                self._startup_log("Task tabs created")
 
                 # "+" tab to add new tasks - contains a button that triggers task creation
                 add_tab_id = MAX_TASKS + 1
@@ -7389,6 +8866,8 @@ initializeLiveDomPatching();
                         size="lg",
                         elem_id="add-new-task-btn",
                     )
+
+            self._startup_log("Wiring event handlers...")
 
             # Handle clicking the Add New Task button
             def on_add_task_click(current_count):
@@ -7402,6 +8881,7 @@ initializeLiveDomPatching();
 
                 # Build visibility updates - show tabs 1 through new_count
                 updates = [gr.Tabs(selected=new_tab_id), new_count]
+
                 for i in range(MAX_TASKS):
                     if i < new_count:
                         updates.append(gr.update(visible=True))
@@ -7417,10 +8897,19 @@ initializeLiveDomPatching();
 
             # Refresh dropdowns when switching to any task tab (after adding providers)
             def on_tab_select(evt: gr.SelectData):
-                """Refresh agent dropdowns when switching to a task tab."""
-                # Only refresh for task tabs (id >= 1, not providers tab id=0)
-                if evt.index == 0:
-                    return [gr.update() for _ in range(len(self._session_dropdowns) * 2)]
+                """Refresh agent dropdowns and restore live view when switching to a task tab."""
+                # Only refresh for task tabs (id 1-MAX_TASKS, not providers tab id=0 or add tab)
+                add_tab_id = MAX_TASKS + 1
+                n_dropdowns = len(self._session_dropdowns) * 2
+                n_patches = len(self._session_live_patches)
+                n_streams = len(self._session_live_streams)
+                total = n_dropdowns + n_patches + n_streams
+                if evt.index == 0 or evt.index == add_tab_id:
+                    return [gr.update() for _ in range(total)]
+                # Also guard against out-of-bounds indices
+                session_index = evt.index - 1
+                if session_index < 0 or session_index >= len(all_sessions):
+                    return [gr.update() for _ in range(total)]
 
                 # Get current account choices
                 accounts = self.api_client.list_accounts()
@@ -7441,17 +8930,55 @@ initializeLiveDomPatching();
                 for session_id in self._session_dropdowns:
                     updates.append(gr.update(choices=account_choices))  # coding_agent
                     updates.append(gr.update(choices=verification_choices))  # verification_agent
+                # Push a live patch for the selected tab to rehydrate live view
+                selected_session = all_sessions[session_index]
+                live_stream_id = f"live-{selected_session.id}"
+                patch_html = ""
+                if selected_session.last_live_stream:
+                    import html as html_module
+
+                    escaped = html_module.escape(selected_session.last_live_stream)
+                    patch_html = f'<div data-live-patch="{live_stream_id}" style="display:none">{escaped}</div>'
+
+                for sess in all_sessions:
+                    if sess.id == selected_session.id:
+                        if patch_html:
+                            updates.append(gr.update(value=patch_html))
+                        else:
+                            updates.append(gr.update())
+                    else:
+                        updates.append(gr.update())
+                # Directly restore live stream content for selected tab to avoid
+                # the brief "waiting for agent output" flash before JS patching
+                for sess in all_sessions:
+                    if sess.id == selected_session.id and selected_session.last_live_stream:
+                        updates.append(gr.update(value=selected_session.last_live_stream))
+                    else:
+                        updates.append(gr.update())
                 return updates
 
-            # Collect all dropdown outputs for the select handler
+            # Collect outputs for the select handler (dropdowns + live patch triggers + live streams)
             all_dropdown_outputs = []
-            for session_id in sorted(self._session_dropdowns.keys()):
-                dropdowns = self._session_dropdowns[session_id]
-                all_dropdown_outputs.append(dropdowns["coding_agent"])
-                all_dropdown_outputs.append(dropdowns["verification_agent"])
+            live_patch_outputs = []
+            live_stream_outputs = []
+            for sess in all_sessions:
+                session_id = sess.id
+                dropdowns = self._session_dropdowns.get(session_id)
+                if dropdowns:
+                    all_dropdown_outputs.append(dropdowns["coding_agent"])
+                    all_dropdown_outputs.append(dropdowns["verification_agent"])
+                trigger = self._session_live_patches.get(session_id)
+                if trigger:
+                    live_patch_outputs.append(trigger)
+                stream = self._session_live_streams.get(session_id)
+                if stream:
+                    live_stream_outputs.append(stream)
 
-            if all_dropdown_outputs:
-                main_tabs.select(on_tab_select, outputs=all_dropdown_outputs)
+            if all_dropdown_outputs or live_patch_outputs or live_stream_outputs:
+                main_tabs.select(
+                    on_tab_select,
+                    outputs=all_dropdown_outputs + live_patch_outputs + live_stream_outputs,
+                )
 
             # Chain dropdown refresh to provider delete events
             # This ensures dropdowns update when providers are deleted
@@ -7515,7 +9042,14 @@ initializeLiveDomPatching();
                     outputs=[self._config_verification_pref],
                 )
 
+            # Init data was only needed during construction
+            del self._init_data
             return interface
+
+
+def _startup_elapsed(t0: float) -> str:
+    """Format seconds elapsed since t0."""
+    return f"[{time.monotonic() - t0:.1f}s]"
 
 
 def launch_web_ui(
@@ -7533,6 +9067,8 @@ def launch_web_ui(
     Returns:
         Tuple of (None, actual_port) where actual_port is the port used
     """
+    t0 = time.monotonic()
+
     # Ensure downstream agents inherit a consistent project root
     try:
         from chad.util.config import ensure_project_root_env
@@ -7546,27 +9082,28 @@ def launch_web_ui(
     from chad.ui.client import APIClient
     api_client = APIClient(api_base_url)
 
+    def _log(msg: str) -> None:
+        if dev_mode:
+            print(f"{_startup_elapsed(t0)} {msg}", flush=True)
+
     # Create and launch UI
+    _log("Building interface...")
     ui = ChadWebUI(api_client, dev_mode=dev_mode)
+    ui._startup_t0 = t0
     app = ui.create_interface()
+    _log("Interface built")
 
     requested_port = port
     port, ephemeral, conflicted = _resolve_port(port)
     screenshot_mode = os.environ.get("CHAD_SCREENSHOT_MODE") == "1"
     open_browser = not screenshot_mode
+    if screenshot_mode:
+        # Playwright utilities wait for this explicit startup marker.
+        print(f"CHAD_PORT={port}", flush=True)
     if conflicted:
         print(f"Port {requested_port} already in use; launching on ephemeral port {port}")
 
-    print("\n" + "=" * 70)
-    print("CHAD WEB UI")
-    print("=" * 70)
-    if open_browser:
-        print("Opening web interface in your browser...")
-    print("Press Ctrl+C to stop the server")
-    print("=" * 70 + "\n")
-
-    # Print port marker for scripts to parse (before launch blocks)
-    print(f"CHAD_PORT={port}", flush=True)
+    _log("Launching Gradio server...")
 
     # Allow serving session log files from the logs directory
     log_dir = str(EventLog.get_log_dir())
@@ -7575,8 +9112,10 @@ def launch_web_ui(
         server_name="127.0.0.1",
         server_port=port,
         share=False,
-        inbrowser=open_browser,  # Don't open browser for screenshot mode
+        inbrowser=open_browser,
         quiet=False,
+        show_api=False,
+        enable_monitoring=False,
         allowed_paths=[log_dir],
     )
 

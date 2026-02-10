@@ -1,9 +1,10 @@
 """Test canceling and restarting tasks."""
 
 import threading
+import time
 import pytest
 from dataclasses import dataclass
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock, patch
 
 from chad.ui.gradio.web_ui import ChadWebUI, Session
 from chad.ui.client.api_client import Account
@@ -117,6 +118,13 @@ class TestCancelTask:
         assert isinstance(cancel_btn_update, dict), "cancel_btn update should be a dict"
         assert cancel_btn_update.get("interactive") is False, "cancel_btn should be disabled after cancel"
 
+        # Check task description input is re-enabled (index 4)
+        task_description_update = result[4]
+        assert isinstance(task_description_update, dict), "task_description update should be a dict"
+        assert task_description_update.get("interactive") is True, (
+            "task_description should be interactive=True after cancel so submit/start is available"
+        )
+
         # Check that followup_row is hidden (index 7)
         followup_row_update = result[7]
         assert isinstance(followup_row_update, dict), "followup_row update should be a dict"
@@ -126,6 +134,79 @@ class TestCancelTask:
         merge_section_update = result[8]
         assert isinstance(merge_section_update, dict), "merge_section_group update should be a dict"
         assert merge_section_update.get("visible") is False, "merge_section_group should be hidden after cancel"
+
+    def test_cancel_requests_server_session_cancellation(self, web_ui):
+        """Cancel should propagate to the server when an API session is active."""
+        session = Session(
+            id="test-session",
+            name="Test Session",
+            active=True,
+            cancel_requested=False,
+            provider=MagicMock(),
+            config={"test": "config"},
+            server_session_id="server-session-1",
+        )
+        web_ui.sessions["test-session"] = session
+        web_ui.api_client.get_session.return_value = Mock(active=False)
+
+        web_ui.cancel_task("test-session")
+
+        web_ui.api_client.cancel_session.assert_called_once_with("server-session-1")
+
+    @patch("chad.ui.gradio.web_ui.GitWorktreeManager")
+    def test_cancel_skips_worktree_delete_if_server_still_active(self, mock_git_mgr_class, web_ui, tmp_path):
+        """Don't delete worktree while server cancellation is still in-flight."""
+        session = Session(
+            id="test-session",
+            name="Test Session",
+            active=True,
+            cancel_requested=False,
+            provider=MagicMock(),
+            config={"test": "config"},
+            server_session_id="server-session-1",
+            project_path=str(tmp_path),
+            worktree_path=tmp_path / "worktree",
+        )
+        web_ui.sessions["test-session"] = session
+
+        web_ui._wait_for_server_session_inactive = MagicMock(return_value=False)
+
+        web_ui.cancel_task("test-session")
+        time.sleep(0.05)
+
+        mock_git_mgr_class.return_value.delete_worktree.assert_not_called()
+
+    def test_cancel_returns_quickly_even_if_server_shutdown_is_slow(self, web_ui):
+        """Cancel should return quickly and not block UI on server shutdown polling."""
+        session = Session(
+            id="test-session",
+            name="Test Session",
+            active=True,
+            cancel_requested=False,
+            provider=MagicMock(),
+            config={"test": "config"},
+            server_session_id="server-session-1",
+        )
+        web_ui.sessions["test-session"] = session
+
+        started_wait = threading.Event()
+
+        def slow_wait(_server_session_id, timeout_seconds=3.0, poll_interval=0.1):  # noqa: ARG001
+            started_wait.set()
+            time.sleep(0.25)
+            return False
+
+        web_ui.api_client.cancel_session = MagicMock()
+        web_ui._wait_for_server_session_inactive = slow_wait
+
+        start = time.perf_counter()
+        result = web_ui.cancel_task("test-session")
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 0.1, f"cancel_task blocked for {elapsed:.3f}s"
+        assert started_wait.wait(timeout=0.2), "Background shutdown wait should start asynchronously"
+        assert isinstance(result, tuple)
+        assert result[5].get("interactive") is True
 
     def test_final_yield_after_cancel_enables_start_button(self, web_ui, tmp_path, monkeypatch):
         """Final yield from start_chad_task should enable start button after cancel.
@@ -180,4 +261,45 @@ class TestCancelTask:
         assert isinstance(followup_row_update, dict), "followup_row update should be a dict"
         assert followup_row_update.get("visible") is False, (
             "followup_row should be visible=False in final yield after cancel"
+        )
+
+    def test_final_yield_after_cancel_reenables_task_input(self, web_ui, tmp_path, monkeypatch):
+        """Final yield after cancel should re-enable task input for immediate restart."""
+        git_dir = tmp_path / "repo"
+        git_dir.mkdir()
+        (git_dir / ".git").mkdir()
+
+        cancel_gate = threading.Event()
+        stream_ready = threading.Event()
+
+        def fake_run_task_via_api(
+            session_id, project_path, task_description, coding_account, message_queue, **kwargs
+        ):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", "working"))
+            stream_ready.set()
+            cancel_gate.wait(timeout=2.0)
+            return False, "cancelled", "server-session", None
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("test")
+        updates = []
+
+        def trigger_cancel():
+            stream_ready.wait(timeout=2.0)
+            session.cancel_requested = True
+            cancel_gate.set()
+
+        threading.Thread(target=trigger_cancel, daemon=True).start()
+
+        for update in web_ui.start_chad_task(session.id, str(git_dir), "test task", "test-account"):
+            updates.append(update)
+
+        final_update = updates[-1]
+        task_description_update = final_update[4]
+        assert isinstance(task_description_update, dict), "task_description update should be a dict"
+        assert task_description_update.get("interactive") is True, (
+            "task_description should be interactive=True after cancel so submit/start arrow is enabled"
         )

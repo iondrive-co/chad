@@ -25,11 +25,31 @@ def _get_claude_config_dir(account_name: str) -> Path:
     return Path.home() / ".chad" / "claude-configs" / account_name
 
 
+def _write_kimi_default_config(config_file: Path) -> None:
+    """Write default Kimi config when creds exist but config wasn't populated."""
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(
+        'default_model = "kimi-code/kimi-k2.5"\n\n'
+        '[models."kimi-code/kimi-k2.5"]\n'
+        'provider = "managed:kimi-code"\n'
+        'model = "kimi-k2.5"\n'
+        'max_context_size = 131072\n\n'
+        '[providers."managed:kimi-code"]\n'
+        'type = "kimi"\n'
+        'base_url = "https://api.kimi.com/coding/v1"\n'
+        'api_key = ""\n\n'
+        '[providers."managed:kimi-code".oauth]\n'
+        'storage = "file"\n'
+        'key = "kimi-code"\n',
+        encoding="utf-8",
+    )
+
+
 def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
     """Run the OAuth flow for a provider.
 
     Args:
-        provider: Provider type (anthropic, openai, gemini, qwen, mistral)
+        provider: Provider type (anthropic, openai, gemini, qwen, mistral, opencode, kimi)
         account_name: Name for the new account
 
     Returns:
@@ -148,18 +168,88 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
             return False, f"Login error: {e}"
 
     elif provider == "mistral":
-        print("Starting Vibe login... (browser will open)")
+        vibe_config = Path.home() / ".vibe" / "config.toml"
+        if vibe_config.exists():
+            return True, "Already logged in"
+
+        print("Starting Vibe setup...")
         print()
         try:
             result = subprocess.run(
-                ["vibe"],
+                ["vibe", "--setup"],
                 timeout=120,
             )
-            if result.returncode == 0:
+            if result.returncode == 0 and vibe_config.exists():
                 return True, "Login successful"
             return False, "Login failed or was cancelled"
         except FileNotFoundError:
             return False, "Vibe CLI not found"
+        except subprocess.TimeoutExpired:
+            return False, "Login timed out"
+        except Exception as e:
+            return False, f"Login error: {e}"
+
+    elif provider == "opencode":
+        # OpenCode stores credentials at ~/.local/share/opencode/auth.json
+        auth_file = Path.home() / ".local" / "share" / "opencode" / "auth.json"
+        if auth_file.exists():
+            try:
+                data = json.loads(auth_file.read_text(encoding="utf-8"))
+                if data:
+                    return True, "Already logged in"
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        print("OpenCode requires an API key.")
+        print("Get one at https://opencode.ai/auth")
+        print()
+        try:
+            api_key = input("Paste your API key (or press Enter to skip): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            api_key = ""
+        if api_key:
+            auth_file.parent.mkdir(parents=True, exist_ok=True)
+            auth_data = {"opencode": {"type": "api", "key": api_key}}
+            auth_file.write_text(json.dumps(auth_data), encoding="utf-8")
+            return True, "API key stored"
+        return False, "No API key provided"
+
+    elif provider == "kimi":
+        # Check isolated credentials for this account
+        kimi_home = Path.home() / ".chad" / "kimi-homes" / account_name
+        creds_file = kimi_home / ".kimi" / "credentials" / "kimi-code.json"
+        global_creds = Path.home() / ".kimi" / "credentials" / "kimi-code.json"
+        config_file = kimi_home / ".kimi" / "config.toml"
+        # Only consider fully logged in if creds exist AND config has models populated.
+        # A partial login leaves creds but empty config, causing "LLM not set".
+        if creds_file.exists() or global_creds.exists():
+            if config_file.exists() and "[models." in config_file.read_text(encoding="utf-8"):
+                return True, "Already logged in"
+            # Creds exist but config wasn't populated — write config directly
+            # rather than re-doing OAuth (which fails with "already approved").
+            _write_kimi_default_config(config_file)
+            return True, "Already logged in"
+
+        # Run interactive kimi login in the terminal
+        kimi_cli = shutil.which("kimi")
+        if not kimi_cli:
+            return False, "Kimi CLI not found. Install with: npm install -g @anthropic-ai/kimi-code"
+
+        kimi_home.mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env["HOME"] = str(kimi_home)
+
+        print("Starting Kimi login...")
+        print()
+        try:
+            result = subprocess.run(
+                [kimi_cli, "login"],
+                env=env,
+                timeout=120,
+            )
+            if result.returncode == 0 and creds_file.exists():
+                return True, "Logged in successfully"
+            return False, "Kimi login did not complete"
         except subprocess.TimeoutExpired:
             return False, "Login timed out"
         except Exception as e:
@@ -249,27 +339,40 @@ def run_settings_menu(client: APIClient) -> None:
         # Get current settings from API
         accounts = client.list_accounts()
         cleanup = client.get_cleanup_settings()
-
-        # Find coding and verification agents
+        preferences = client.get_preferences()
+        verification_agent_name = client.get_verification_agent()
+        verification_model = client.get_preferred_verification_model()
+        max_verification_attempts = client.get_max_verification_attempts()
+        fallback_order = client.get_provider_fallback_order()
+        usage_threshold = client.get_usage_switch_threshold()
+        # Find coding agent from roles
         coding_agent = None
-        verification_agent = None
         for acc in accounts:
             if acc.role == "CODING":
                 coding_agent = acc.name
-            if acc.role == "VERIFICATION":
-                verification_agent = acc.name
 
         print("Current Settings:")
-        print(f"  Accounts:     {len(accounts)} configured")
-        print(f"  Cleanup:      {cleanup.retention_days} days")
-        print(f"  Coding Agent: {coding_agent or '(not set)'}")
-        print(f"  Verification: {verification_agent or '(not set)'}")
+        print(f"  Accounts:           {len(accounts)} configured")
+        print(f"  Cleanup:            {cleanup.retention_days} days")
+        print(f"  UI Mode:            {preferences.ui_mode}")
+        print(f"  Coding Agent:       {coding_agent or '(not set)'}")
+        print(f"  Verification Agent: {verification_agent_name or '(not set)'}")
+        print(f"  Verification Model: {verification_model or '(auto)'}")
+        print(f"  Max Verif Attempts: {max_verification_attempts}")
+        fallback_str = " -> ".join(fallback_order) if fallback_order else "(none)"
+        print(f"  Fallback Order:     {fallback_str}")
+        print(f"  Usage Threshold:    {usage_threshold}%")
         print()
 
         print("Settings Menu:")
         print("  [1] Manage accounts")
         print("  [2] Set cleanup days")
         print("  [3] Set verification agent")
+        print("  [4] Set verification model")
+        print("  [5] Set max verification attempts")
+        print("  [6] Set provider fallback order")
+        print("  [7] Set usage threshold")
+        print("  [8] Set UI mode")
         print("  [b] Back to main menu")
         print()
 
@@ -306,28 +409,141 @@ def run_settings_menu(client: APIClient) -> None:
             if not accounts:
                 print("No accounts configured.")
             else:
-                options = [("None (disabled)", "")] + [
+                options = [("None (disabled)", None)] + [
                     (f"{acc.name} ({acc.provider})", acc.name)
                     for acc in accounts
                 ]
                 default_idx = 0
-                if verification_agent:
+                if verification_agent_name:
                     for i, (_, val) in enumerate(options):
-                        if val == verification_agent:
+                        if val == verification_agent_name:
                             default_idx = i
                             break
 
                 selected = select_from_list("Select verification agent:", options, default_idx)
-                if selected is not None:
-                    if selected == "":
-                        # Clear verification role - need to find who has it
-                        for acc in accounts:
-                            if acc.role == "VERIFICATION":
-                                client.set_account_role(acc.name, "")
-                        print("Verification agent disabled")
-                    else:
-                        client.set_account_role(selected, "VERIFICATION")
+                if selected is not None or (selected is None and default_idx == 0):
+                    client.set_verification_agent(selected)
+                    if selected:
                         print(f"Verification agent set to: {selected}")
+                    else:
+                        print("Verification agent disabled")
+            input("Press Enter to continue...")
+
+        elif choice == "4":
+            # Set verification model
+            print()
+            print(f"Current verification model: {verification_model or '(auto)'}")
+            print()
+            if not verification_agent_name:
+                print("No verification agent set. Set one first.")
+            else:
+                # Get available models for the verification agent
+                try:
+                    models = client.get_account_models(verification_agent_name)
+                    if models:
+                        options = [("Auto (default)", None)] + [
+                            (model, model) for model in models
+                        ]
+                        default_idx = 0
+                        if verification_model:
+                            for i, (_, val) in enumerate(options):
+                                if val == verification_model:
+                                    default_idx = i
+                                    break
+                        selected = select_from_list("Select verification model:", options, default_idx)
+                        if selected is not None or default_idx > 0:
+                            client.set_preferred_verification_model(selected)
+                            if selected:
+                                print(f"Verification model set to: {selected}")
+                            else:
+                                print("Verification model set to auto")
+                    else:
+                        print("No models available for verification agent.")
+                except Exception as e:
+                    print(f"Error getting models: {e}")
+            input("Press Enter to continue...")
+
+        elif choice == "5":
+            # Set max verification attempts
+            print()
+            print(f"Current max verification attempts: {max_verification_attempts}")
+            print("Number of times to retry verification before giving up.")
+            try:
+                new_attempts = input("New max attempts (1-20): ").strip()
+                if new_attempts:
+                    attempts = int(new_attempts)
+                    if 1 <= attempts <= 20:
+                        client.set_max_verification_attempts(attempts)
+                        print(f"Max verification attempts set to {attempts}")
+                    else:
+                        print("Please enter a number between 1 and 20")
+            except ValueError:
+                print("Invalid number")
+            input("Press Enter to continue...")
+
+        elif choice == "6":
+            # Set provider fallback order
+            print()
+            print("Provider Fallback Order")
+            print("-" * 30)
+            if fallback_order:
+                print("Current order:")
+                for i, name in enumerate(fallback_order, 1):
+                    print(f"  {i}. {name}")
+            else:
+                print("No fallback order set.")
+            print()
+            print("Enter account names separated by commas, in priority order.")
+            print("Available accounts:", ", ".join(acc.name for acc in accounts) if accounts else "(none)")
+            print()
+            try:
+                order_input = input("New order (or Enter to keep current): ").strip()
+                if order_input:
+                    new_order = [name.strip() for name in order_input.split(",") if name.strip()]
+                    # Validate account names
+                    valid_names = {acc.name for acc in accounts}
+                    invalid = [name for name in new_order if name not in valid_names]
+                    if invalid:
+                        print(f"Unknown accounts: {', '.join(invalid)}")
+                    else:
+                        client.set_provider_fallback_order(new_order)
+                        print(f"Fallback order set: {' -> '.join(new_order)}")
+            except Exception as e:
+                print(f"Error: {e}")
+            input("Press Enter to continue...")
+
+        elif choice == "7":
+            # Set usage threshold
+            print()
+            print(f"Current usage threshold: {usage_threshold}%")
+            print("When provider usage exceeds this %, auto-switch to next fallback.")
+            print("Set to 100 to disable usage-based switching.")
+            try:
+                new_threshold = input("New threshold (0-100): ").strip()
+                if new_threshold:
+                    threshold = int(new_threshold)
+                    if 0 <= threshold <= 100:
+                        client.set_usage_switch_threshold(threshold)
+                        print(f"Usage threshold set to {threshold}%")
+                    else:
+                        print("Please enter a number between 0 and 100")
+            except ValueError:
+                print("Invalid number")
+            input("Press Enter to continue...")
+
+        elif choice == "8":
+            # Set UI mode
+            print()
+            print(f"Current UI mode: {preferences.ui_mode}")
+            options = [
+                ("Gradio (web interface)", "gradio"),
+                ("CLI (terminal interface)", "cli"),
+            ]
+            default_idx = 0 if preferences.ui_mode == "gradio" else 1
+            selected = select_from_list("Select UI mode:", options, default_idx)
+            if selected is not None:
+                client.set_preferences(ui_mode=selected)
+                print(f"UI mode set to: {selected}")
             input("Press Enter to continue...")
 
 
@@ -464,6 +680,7 @@ def run_task_with_streaming(
     project_path: str,
     task_description: str,
     coding_account: str,
+    verification_account: str | None = None,
 ) -> int:
     """Run a task with PTY streaming via API.
 
@@ -473,7 +690,8 @@ def run_task_with_streaming(
         session_id: Session ID
         project_path: Project path
         task_description: Task description
-        coding_account: Account to use
+        coding_account: Account to use for coding
+        verification_account: Optional account to use for verification
 
     Returns:
         Exit code from the agent
@@ -487,6 +705,7 @@ def run_task_with_streaming(
         project_path=project_path,
         task_description=task_description,
         coding_agent=coding_account,
+        verification_agent=verification_account,
         terminal_rows=rows,
         terminal_cols=cols,
     )
@@ -603,6 +822,9 @@ def run_cli(client: APIClient) -> None:
                     coding_account = acc.name
                     coding_provider = acc.provider
                     break
+
+            # Get verification agent from config
+            verification_account = client.get_verification_agent()
 
             if not accounts:
                 print("No accounts configured.")
@@ -736,6 +958,7 @@ def run_cli(client: APIClient) -> None:
                     project_path=project_path,
                     task_description=task_description,
                     coding_account=coding_account,
+                    verification_account=verification_account,
                 )
 
                 print()
