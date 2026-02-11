@@ -344,6 +344,10 @@ body, .gradio-container, .gradio-container * {
   padding: 8px 14px !important;
 }
 
+.project-save-row {
+  justify-content: flex-end !important;
+}
+
 .start-task-btn,
 .start-task-btn button {
   background: var(--task-btn-bg) !important;
@@ -1020,7 +1024,7 @@ mark.live-search-match.current {
 #role-status-row-container,
 .role-status-row-container {
   display: flex;
-  justify-content: flex-end;
+  justify-content: flex-start;
   width: 100%;
   margin-top: -4px !important;
   margin-bottom: 0 !important;
@@ -1029,13 +1033,14 @@ mark.live-search-match.current {
 /* Action row: compact inline controls */
 #role-status-row,
 .role-status-row {
-  display: inline-flex !important;
+  display: flex !important;
   align-items: center;
+  justify-content: flex-start;
   gap: 4px;
   flex-wrap: nowrap;
-  width: auto !important;
-  flex: 0 0 auto;
-  max-width: 100%;
+  width: 100% !important;
+  flex: 1 1 auto;
+  min-width: 0 !important;
   background: transparent !important;
 }
 
@@ -1065,7 +1070,7 @@ mark.live-search-match.current {
   margin: 0 !important;
   min-width: 0 !important;
   width: auto !important;
-  flex-grow: 1 !important;
+  flex: 1 1 auto !important;
   max-width: 100% !important;
   overflow: visible !important;
 }
@@ -6547,6 +6552,20 @@ class ChadWebUI:
                                     interactive=True,
                                     show_label=False,
                                 )
+                            with gr.Row(
+                                equal_height=True,
+                                elem_classes=["project-save-row"],
+                            ):
+                                project_save_btn = gr.Button(
+                                    "Save",
+                                    variant="primary",
+                                    size="sm",
+                                    interactive=False,
+                                    key=f"project-save-{session_id}",
+                                    elem_classes=["project-save-btn"],
+                                    min_width=80,
+                                    scale=0,
+                                )
                         # Action row stays outside the project accordion so it remains
                         # available when project details are collapsed.
                         with gr.Row(
@@ -6562,15 +6581,6 @@ class ChadWebUI:
                                 key=f"cancel-btn-{session_id}",
                                 elem_id="cancel-task-btn" if is_first else None,
                                 elem_classes=["cancel-task-btn"],
-                                min_width=80,
-                                scale=0,
-                            )
-                            project_save_btn = gr.Button(
-                                "Save",
-                                variant="primary",
-                                size="sm",
-                                key=f"project-save-{session_id}",
-                                elem_classes=["project-save-btn"],
                                 min_width=80,
                                 scale=0,
                             )
@@ -6828,6 +6838,29 @@ class ChadWebUI:
         # Event handlers - must be defined inside @gr.render
 
         # Project setup handlers
+        def project_settings_snapshot(path_val, lint_cmd, test_cmd, instructions_path_val, architecture_path_val):
+            return (
+                str(path_val or "").strip(),
+                str(lint_cmd or "").strip(),
+                str(test_cmd or "").strip(),
+                str(instructions_path_val or "").strip(),
+                str(architecture_path_val or "").strip(),
+            )
+
+        project_saved_state = gr.State(
+            value=project_settings_snapshot(
+                default_path,
+                initial_lint,
+                initial_test,
+                initial_instructions,
+                initial_architecture,
+            )
+        )
+
+        def update_project_save_button(path_val, lint_cmd, test_cmd, instructions_path_val, architecture_path_val, saved_state):
+            current = project_settings_snapshot(path_val, lint_cmd, test_cmd, instructions_path_val, architecture_path_val)
+            return gr.update(interactive=(current != tuple(saved_state)))
+
         def on_project_path_change(path_val):
             """Auto-detect project type and commands when path changes."""
             empty_previews = build_prompt_previews(None)
@@ -6894,7 +6927,7 @@ class ChadWebUI:
                 gr.update(value=previews.verification),
             )
 
-        project_path.change(
+        project_path_changed = project_path.change(
             on_project_path_change,
             inputs=[project_path],
             outputs=[
@@ -6909,6 +6942,67 @@ class ChadWebUI:
                 implementation_prompt_display,
                 verification_prompt_display,
             ],
+        )
+        project_path_changed.then(
+            update_project_save_button,
+            inputs=[
+                project_path,
+                lint_cmd_input,
+                test_cmd_input,
+                instructions_input,
+                architecture_input,
+                project_saved_state,
+            ],
+            outputs=[project_save_btn],
+        )
+
+        lint_cmd_input.change(
+            update_project_save_button,
+            inputs=[
+                project_path,
+                lint_cmd_input,
+                test_cmd_input,
+                instructions_input,
+                architecture_input,
+                project_saved_state,
+            ],
+            outputs=[project_save_btn],
+        )
+        test_cmd_input.change(
+            update_project_save_button,
+            inputs=[
+                project_path,
+                lint_cmd_input,
+                test_cmd_input,
+                instructions_input,
+                architecture_input,
+                project_saved_state,
+            ],
+            outputs=[project_save_btn],
+        )
+        instructions_input.change(
+            update_project_save_button,
+            inputs=[
+                project_path,
+                lint_cmd_input,
+                test_cmd_input,
+                instructions_input,
+                architecture_input,
+                project_saved_state,
+            ],
+            outputs=[project_save_btn],
+        )
+        architecture_input.change(
+            update_project_save_button,
+            inputs=[
+                project_path,
+                lint_cmd_input,
+                test_cmd_input,
+                instructions_input,
+                architecture_input,
+                project_saved_state,
+            ],
+            outputs=[project_save_btn],
         )
 
         def on_lint_test(path_val, lint_cmd):
@@ -6941,12 +7035,27 @@ class ChadWebUI:
             outputs=[test_status],
         )
 
-        def on_project_save(path_val, lint_cmd, test_cmd, instructions_path_val, architecture_path_val):
+        def on_project_save(path_val, lint_cmd, test_cmd, instructions_path_val, architecture_path_val, saved_state):
+            current_snapshot = project_settings_snapshot(
+                path_val,
+                lint_cmd,
+                test_cmd,
+                instructions_path_val,
+                architecture_path_val,
+            )
             if not path_val:
-                return "Enter a project path"
+                return (
+                    "Enter a project path",
+                    saved_state,
+                    gr.update(interactive=(current_snapshot != tuple(saved_state))),
+                )
             path_obj = Path(path_val).expanduser().resolve()
             if not path_obj.exists():
-                return "Path not found"
+                return (
+                    "Path not found",
+                    saved_state,
+                    gr.update(interactive=(current_snapshot != tuple(saved_state))),
+                )
 
             saved = save_project_settings(
                 path_obj,
@@ -6955,12 +7064,16 @@ class ChadWebUI:
                 instructions_path=instructions_path_val or None,
                 architecture_path=architecture_path_val or None,
             )
-            return f"Project settings saved (type: {saved.project_type})"
+            return (
+                f"Project settings saved (type: {saved.project_type})",
+                current_snapshot,
+                gr.update(interactive=False),
+            )
 
         project_save_btn.click(
             on_project_save,
-            inputs=[project_path, lint_cmd_input, test_cmd_input, instructions_input, architecture_input],
-            outputs=[task_status],
+            inputs=[project_path, lint_cmd_input, test_cmd_input, instructions_input, architecture_input, project_saved_state],
+            outputs=[task_status, project_saved_state, project_save_btn],
         )
 
         def start_task_wrapper(
