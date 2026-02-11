@@ -248,8 +248,10 @@ class TestCodingAgentLayout:
         _collapse_project_information(page)
         status_row = page.locator("#role-status-row")
         cancel_btn = page.locator("#cancel-task-btn")
+        save_btn = page.locator(".project-save-btn")
         expect(status_row).to_be_visible()
         expect(cancel_btn).to_be_visible()
+        expect(save_btn).to_be_hidden()
 
         inside_project_accordion = page.evaluate(
             """
@@ -416,32 +418,46 @@ class TestCodingAgentLayout:
         ), "Action row should stay under project info, not in the right agent panel"
 
     def test_cancel_button_in_status_row(self, page: Page):
-        """Cancel button should be in the status row, to the left of the save button."""
+        """Cancel button should remain in status row, with session log to its right."""
         cancel_btn = page.locator("#cancel-task-btn")
-        save_btn = page.locator(".project-save-btn")
+        session_log_btn = page.locator("#session-log-btn")
         status_row = page.locator("#role-status-row")
 
         expect(cancel_btn).to_be_visible()
-        expect(save_btn).to_be_visible()
+        expect(session_log_btn).to_be_visible()
         expect(status_row).to_be_visible()
 
         cancel_box = cancel_btn.bounding_box()
-        save_box = save_btn.bounding_box()
+        session_log_box = session_log_btn.bounding_box()
         status_box = status_row.bounding_box()
 
-        assert cancel_box and save_box and status_box
+        assert cancel_box and session_log_box and status_box
 
-        # Cancel and Save should share the same action-row baseline.
-        # Some Gradio wrappers report slightly different row-box offsets, so
-        # validate button-to-button alignment directly.
-        assert abs(cancel_box["y"] - save_box["y"]) < 40, (
-            f"Cancel button (y={cancel_box['y']}) should align with save button (y={save_box['y']})"
+        # Cancel and Session Log should share the same action-row baseline.
+        assert abs(cancel_box["y"] - session_log_box["y"]) < 40, (
+            f"Cancel button (y={cancel_box['y']}) should align with session log (y={session_log_box['y']})"
         )
 
-        # Cancel button should be to the left of the save button
-        assert cancel_box["x"] < save_box["x"], (
-            f"Cancel button (x={cancel_box['x']}) should be to the left of save button (x={save_box['x']})"
+        # Cancel button should be to the left of session log
+        assert cancel_box["x"] < session_log_box["x"], (
+            f"Cancel button (x={cancel_box['x']}) should be to the left of session log (x={session_log_box['x']})"
         )
+
+    def test_project_save_button_in_project_info_and_dirty_only(self, page: Page):
+        """Save button should live in Project Information and enable only after edits."""
+        save_btn = page.locator(".project-save-btn")
+
+        _expand_project_information(page)
+        expect(save_btn).to_be_visible()
+        expect(save_btn).to_be_disabled()
+
+        lint_cmd = page.get_by_label("Lint Command")
+        original = lint_cmd.input_value()
+        lint_cmd.fill(f"{original} --changed")
+        expect(save_btn).to_be_enabled()
+
+        lint_cmd.fill(original)
+        expect(save_btn).to_be_disabled()
 
     def test_cancel_button_visible_light_and_dark(self, page: Page):
         """Cancel button should stay visible in both color schemes."""
