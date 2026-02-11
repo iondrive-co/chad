@@ -140,6 +140,17 @@ class VerificationDropdownState:
     interactive: bool
 
 
+@dataclass
+class CodingDropdownState:
+    """Resolved state for coding model/reasoning dropdowns."""
+
+    model_choices: list[str]
+    model_value: str
+    reasoning_choices: list[str]
+    reasoning_value: str
+    interactive: bool
+
+
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:\][^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")
 CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
 
@@ -3338,6 +3349,44 @@ class ChadWebUI:
 
         return actual_account, resolved_model, resolved_reasoning
 
+    def _build_coding_dropdown_state(
+        self,
+        coding_agent: str | None,
+        accounts=None,
+    ) -> CodingDropdownState:
+        """Resolve coding model/reasoning dropdown values from the selected provider account."""
+        if accounts is None:
+            accounts = self.api_client.list_accounts()
+        accounts_map = {acc.name: acc for acc in accounts}
+        account = accounts_map.get(coding_agent or "")
+        if not account:
+            return CodingDropdownState(
+                ["default"],
+                "default",
+                ["default"],
+                "default",
+                False,
+            )
+
+        model_choices = self.get_models_for_account(account.name) or ["default"]
+        stored_model = account.model or "default"
+        model_value = stored_model if stored_model in model_choices else model_choices[0]
+
+        provider_type = account.provider or ""
+        reasoning_choices = self.get_reasoning_choices(provider_type, account.name) or ["default"]
+        stored_reasoning = account.reasoning or "default"
+        reasoning_value = (
+            stored_reasoning if stored_reasoning in reasoning_choices else reasoning_choices[0]
+        )
+
+        return CodingDropdownState(
+            model_choices=model_choices,
+            model_value=model_value,
+            reasoning_choices=reasoning_choices,
+            reasoning_value=reasoning_value,
+            interactive=True,
+        )
+
     def _build_verification_dropdown_state(
         self,
         coding_agent: str | None,
@@ -6358,27 +6407,11 @@ class ChadWebUI:
             initial_verification = self.SAME_AS_CODING
 
         # Get initial model/reasoning choices for coding agent
-        coding_model_choices = self.get_models_for_account(initial_coding) if initial_coding else ["default"]
-        if not coding_model_choices:
-            coding_model_choices = ["default"]
-        coding_acc = accounts_map.get(initial_coding)
-        stored_coding_model = coding_acc.model if coding_acc else "default"
-        coding_model_value = (
-            stored_coding_model if stored_coding_model in coding_model_choices else coding_model_choices[0]
-        )
-
-        coding_provider_type = coding_acc.provider if coding_acc else ""
-        coding_reasoning_choices = (
-            self.get_reasoning_choices(coding_provider_type, initial_coding) if coding_provider_type else ["default"]
-        )
-        if not coding_reasoning_choices:
-            coding_reasoning_choices = ["default"]
-        stored_coding_reasoning = coding_acc.reasoning if coding_acc else "default"
-        coding_reasoning_value = (
-            stored_coding_reasoning
-            if stored_coding_reasoning in coding_reasoning_choices
-            else coding_reasoning_choices[0]
-        )
+        coding_state = self._build_coding_dropdown_state(initial_coding, accounts=accounts)
+        coding_model_choices = coding_state.model_choices
+        coding_model_value = coding_state.model_value
+        coding_reasoning_choices = coding_state.reasoning_choices
+        coding_reasoning_value = coding_state.reasoning_value
 
         # Load preferred verification model from config
         stored_verification_model = (
@@ -6616,7 +6649,7 @@ class ChadWebUI:
                             choices=coding_model_choices,
                             value=coding_model_value,
                             label="Model",
-                            allow_custom_value=True,
+                            allow_custom_value=False,
                             scale=1,
                             min_width=200,
                             key=f"coding-model-{session_id}",
@@ -7373,24 +7406,11 @@ class ChadWebUI:
             proj_path = session.project_path
             is_ready, _ = self.get_role_config_status(worktree_path=wt_path, project_path=proj_path)
 
-            # Get model choices for the selected account
-            model_choices = self.get_models_for_account(selected_account)
-            if not model_choices:
-                model_choices = ["default"]
-            try:
-                acc = self.api_client.get_account(selected_account)
-                stored_model = acc.model or "default"
-            except Exception:
-                stored_model = "default"
-            model_value = stored_model if stored_model in model_choices else model_choices[0]
-
-            # Get reasoning choices
-            provider_type = acc.provider if acc else ""
-            reasoning_choices = self.get_reasoning_choices(provider_type, selected_account)
-            if not reasoning_choices:
-                reasoning_choices = ["default"]
-            stored_reasoning = acc.reasoning if acc else "default"
-            reasoning_value = stored_reasoning if stored_reasoning in reasoning_choices else reasoning_choices[0]
+            coding_state = self._build_coding_dropdown_state(selected_account)
+            model_choices = coding_state.model_choices
+            model_value = coding_state.model_value
+            reasoning_choices = coding_state.reasoning_choices
+            reasoning_value = coding_state.reasoning_value
 
             verif_model_update, verif_reasoning_update = verification_dropdown_updates(
                 selected_account,
@@ -7668,19 +7688,12 @@ class ChadWebUI:
             ]
 
             def coding_model_state(selected_agent: str | None) -> tuple[list[str], str, bool]:
-                if not selected_agent:
-                    return (["default"], "default", False)
-
-                model_choices = self.get_models_for_account(selected_agent) or ["default"]
-                try:
-                    acc = self.api_client.get_account(selected_agent)
-                    stored_model = (acc.model if acc else None) or "default"
-                except Exception:
-                    stored_model = "default"
-                if stored_model not in model_choices:
-                    model_choices = [*model_choices, stored_model]
-                model_value = stored_model if stored_model else model_choices[0]
-                return (model_choices, model_value, True)
+                coding_state = self._build_coding_dropdown_state(selected_agent, accounts=accounts)
+                return (
+                    coding_state.model_choices,
+                    coding_state.model_value,
+                    coding_state.interactive,
+                )
 
             def verification_model_state(selected_agent: str | None) -> tuple[list[str], str, bool, bool]:
                 if not selected_agent or selected_agent == self.SAME_AS_CODING or selected_agent == self.VERIFICATION_NONE:
@@ -7722,7 +7735,7 @@ class ChadWebUI:
                     label="Preferred Coding Model",
                     choices=coding_model_choices,
                     value=coding_model_value,
-                    allow_custom_value=True,
+                    allow_custom_value=False,
                     interactive=coding_model_interactive,
                 )
                 verification_pref = gr.Dropdown(

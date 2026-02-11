@@ -212,6 +212,25 @@ class TestChadWebUI:
         assert "❌" in result
         assert "select a role" in result
 
+    def test_build_coding_dropdown_state_uses_selected_provider_models(self, web_ui, mock_api_client, monkeypatch):
+        """Coding model dropdown must never keep a model outside the selected provider catalog."""
+        mock_account = MockAccount(
+            name="testy",
+            provider="mock",
+            model="gemini-2.5-flash",
+            reasoning="default",
+            role="CODING",
+        )
+        mock_api_client.list_accounts.return_value = [mock_account]
+        mock_api_client.get_account.side_effect = lambda name: mock_account if name == "testy" else None
+        monkeypatch.setattr(web_ui.model_catalog, "get_models", lambda provider, acct=None: ["default"])
+
+        state = web_ui._build_coding_dropdown_state("testy", accounts=[mock_account])
+
+        assert state.model_choices == ["default"]
+        assert state.model_value == "default"
+        assert state.interactive is True
+
     def test_delete_provider_success(self, web_ui, mock_api_client):
         """Test deleting a provider successfully."""
         result = web_ui.delete_provider("claude", True)[0]
