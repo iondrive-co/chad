@@ -233,7 +233,7 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
         # Run interactive kimi login in the terminal
         kimi_cli = shutil.which("kimi")
         if not kimi_cli:
-            return False, "Kimi CLI not found. Install with: npm install -g @anthropic-ai/kimi-code"
+            return False, "Kimi CLI not found. Install with: pip install kimi-cli"
 
         kimi_home.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
@@ -248,6 +248,12 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
                 timeout=120,
             )
             if result.returncode == 0 and creds_file.exists():
+                return True, "Logged in successfully"
+            # Kimi may persist credentials before a non-fatal model listing error.
+            # Accept this as logged in and repair config if needed.
+            if creds_file.exists() or global_creds.exists():
+                if not (config_file.exists() and "[models." in config_file.read_text(encoding="utf-8")):
+                    _write_kimi_default_config(config_file)
                 return True, "Logged in successfully"
             return False, "Kimi login did not complete"
         except subprocess.TimeoutExpired:

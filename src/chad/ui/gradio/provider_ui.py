@@ -2181,7 +2181,7 @@ class ProviderUIManager:
                         result = (
                             "❌ Kimi CLI not found.\n\n"
                             "Please install Kimi Code first:\n"
-                            "```\nnpm install -g @anthropic-ai/kimi-code\n```"
+                            "```\npip install kimi-cli\n```"
                         )
                         base_response = self.provider_action_response(result, card_slots)
                         return (*base_response, name_field_value, add_btn_state, accordion_state)
@@ -2228,7 +2228,7 @@ class ProviderUIManager:
                             except Exception:
                                 pass
                     except FileNotFoundError:
-                        result = "❌ Kimi CLI not found."
+                        result = "❌ Kimi CLI not found.\n\nInstall with: `pip install kimi-cli`"
                         base_response = self.provider_action_response(result, card_slots)
                         return (*base_response, name_field_value, add_btn_state, accordion_state)
 

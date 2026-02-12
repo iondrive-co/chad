@@ -69,6 +69,7 @@ class TestProviderOauthFlow:
 
         assert success is False
         assert "not found" in message.lower()
+        assert "pip install kimi-cli" in message
 
     def test_kimi_accepts_complete_credentials(self, monkeypatch, tmp_path):
         """Kimi add should succeed when creds AND populated config exist."""
@@ -109,6 +110,34 @@ class TestProviderOauthFlow:
         config_text = (kimi_dir / "config.toml").read_text()
         assert "[models." in config_text
         assert "kimi-k2.5" in config_text
+
+    def test_kimi_accepts_nonzero_login_if_creds_were_written(self, monkeypatch, tmp_path):
+        """Kimi add should succeed if login writes credentials even when process exits non-zero."""
+        from chad.ui.cli.app import _run_provider_oauth
+
+        class Completed:
+            returncode = 1
+
+        def fake_run(cmd, env, timeout):
+            # Simulate successful OAuth followed by model-fetch failure.
+            kimi_home = Path(env["HOME"])
+            creds_dir = kimi_home / ".kimi" / "credentials"
+            creds_dir.mkdir(parents=True, exist_ok=True)
+            (creds_dir / "kimi-code.json").write_text('{"token": "test"}')
+            return Completed()
+
+        from pathlib import Path
+
+        monkeypatch.setattr("chad.ui.cli.app.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("chad.ui.cli.app.shutil.which", lambda _cmd: "/tmp/kimi")
+        monkeypatch.setattr("chad.ui.cli.app.subprocess.run", fake_run)
+
+        success, message = _run_provider_oauth("kimi", "my-kimi")
+
+        assert success is True
+        assert "Logged in successfully" in message
+        config_text = (tmp_path / ".chad" / "kimi-homes" / "my-kimi" / ".kimi" / "config.toml").read_text()
+        assert "[models." in config_text
 
     def test_mistral_uses_vibe_setup_command(self, monkeypatch, tmp_path):
         """Mistral auth should invoke `vibe --setup` when not yet configured."""

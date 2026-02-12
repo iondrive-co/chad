@@ -672,6 +672,19 @@ class TestChadWebUI:
         assert "❌" in result
         mock_api_client.create_account.assert_not_called()
 
+    def test_add_provider_kimi_missing_cli_suggests_pip_install(self, web_ui, mock_api_client):
+        """Kimi missing CLI message should match the managed pip install path."""
+        mock_api_client.list_accounts.return_value = []
+        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/kimi"))
+        web_ui.provider_ui.installer.resolve_tool_path = Mock(return_value=None)
+
+        with patch("chad.ui.gradio.provider_ui.shutil.which", return_value=None):
+            result = web_ui.add_provider("kimi-1", "kimi")[0]
+
+        assert "❌" in result
+        assert "pip install kimi-cli" in result
+        mock_api_client.create_account.assert_not_called()
+
     def test_add_provider_kimi_creds_saved_but_error_event(self, web_ui, mock_api_client, tmp_path):
         """Kimi login should succeed when CLI saves creds but emits error (model listing fails)."""
         mock_api_client.list_accounts.return_value = []
