@@ -1,9 +1,7 @@
 """Tests for Mistral Vibe pip installation."""
 
 from pathlib import Path
-from unittest.mock import Mock, patch
 import sys
-import tempfile
 
 from chad.util.installer import AIToolInstaller
 
@@ -127,6 +125,49 @@ if __name__ == '__main__':
     content = script.read_text()
     assert "sys.path.insert" in content
     assert "site-packages" in content
+
+
+def test_vibe_repairs_broken_shebang(monkeypatch, tmp_path):
+    """Existing vibe scripts with dead shebangs should be repaired automatically."""
+
+    installer = AIToolInstaller(tools_dir=tmp_path / "tools")
+
+    # Create the expected site-packages directory so the path fix is applied
+    site_packages = (
+        tmp_path
+        / "tools"
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    site_packages.mkdir(parents=True, exist_ok=True)
+
+    bin_dir = tmp_path / "tools" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    # Simulate a stale pip script pointing at a removed virtualenv
+    orig_script = bin_dir / "vibe.orig"
+    orig_script.write_text("""#!/tmp/vanished/.venv/bin/python
+print('broken vibe')
+""")
+    orig_script.chmod(0o755)
+
+    # Bash wrapper that execs the broken script (matches the user's observed state)
+    wrapper = bin_dir / "vibe"
+    wrapper.write_text(f"#!/usr/bin/env bash\nexec \"{orig_script}\" \"$@\"\n")
+    wrapper.chmod(0o755)
+
+    # Ensure we don't fall back to a global binary
+    monkeypatch.setattr("chad.util.installer.is_tool_installed", lambda _x: False)
+
+    ok, path = installer.ensure_tool("vibe")
+
+    assert ok
+    assert Path(path) == wrapper
+
+    repaired_lines = orig_script.read_text().splitlines()
+    assert repaired_lines[0].strip() == "#!/usr/bin/env python3"
+    assert any("CHAD_PYTHONPATH_FIX" in line for line in repaired_lines)
 
 
 def test_vibe_installation_permission_error_handling(monkeypatch, tmp_path):

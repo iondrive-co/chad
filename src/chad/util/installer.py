@@ -124,6 +124,8 @@ class AIToolInstaller:
 
         existing = self.resolve_tool_path(spec.binary)
         if existing:
+            if tool_key == "vibe":
+                self._repair_vibe_install(Path(existing))
             return True, str(existing)
 
         if spec.installer == "npm":
@@ -341,3 +343,66 @@ sys.path.insert(0, r'{site_packages}')
         except (OSError, IOError):
             # If we can't modify the script, continue anyway
             pass
+
+    def _normalize_python_shebang(self, script_path: Path) -> None:
+        """Rewrite shebang to a stable python3 interpreter for managed scripts."""
+        import stat
+
+        if not script_path.exists():
+            return
+
+        resolved_path = script_path.resolve()
+        if not str(script_path).startswith(str(self.tools_dir)) and not str(resolved_path).startswith(str(self.tools_dir)):
+            return  # Only touch managed installs
+
+        try:
+            lines = script_path.read_text().splitlines()
+        except (OSError, UnicodeDecodeError):
+            return
+
+        if not lines:
+            return
+
+        lines[0] = "#!/usr/bin/env python3"
+        new_content = "\n".join(lines)
+        if not new_content.endswith("\n"):
+            new_content += "\n"
+
+        try:
+            script_path.write_text(new_content)
+            # Keep it executable
+            mode = script_path.stat().st_mode
+            script_path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        except OSError:
+            return
+
+    def _repair_vibe_install(self, resolved: Path) -> None:
+        """Repair stale Mistral Vibe scripts created by pip in our tools dir."""
+        try:
+            if not resolved.exists():
+                return
+            resolved_real = resolved.resolve()
+            if not str(resolved).startswith(str(self.tools_dir)) and not str(resolved_real).startswith(str(self.tools_dir)):
+                return
+
+            bin_dir = resolved.parent
+            orig_script = bin_dir / "vibe.orig"
+
+            # Prefer repairing the underlying python script; wrapper stays as-is
+            targets: list[Path] = []
+            try:
+                first_line = resolved.read_text().splitlines()[0]
+            except Exception:
+                first_line = ""
+
+            if first_line.startswith("#!") and "python" in first_line:
+                targets.append(resolved)
+
+            if orig_script.exists():
+                targets.append(orig_script)
+
+            for script in targets:
+                self._normalize_python_shebang(script)
+                self._fix_pip_script_pythonpath(script)
+        except OSError:
+            return
