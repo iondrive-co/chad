@@ -1297,6 +1297,19 @@ class TaskExecutor:
             emit("status", status=f"Starting {coding_provider} agent...")
             emit("message_start", speaker="CODING AI")
 
+            # Create quota checker from provider type
+            quota_checker = None
+            try:
+                from chad.util.providers import create_provider, ModelConfig
+                _check_provider = create_provider(ModelConfig(
+                    provider=coding_provider,
+                    model_name=coding_model or "default",
+                    account_name=coding_account,
+                ))
+                quota_checker = _check_provider.is_quota_exhausted
+            except Exception:
+                pass
+
             # Create event loop for milestone detection
             event_loop = SessionEventLoop(
                 session_id=session.id,
@@ -1305,6 +1318,7 @@ class TaskExecutor:
                 run_phase_fn=self._run_phase,
                 emit_fn=emit,
                 worktree_path=worktree_path,
+                is_quota_exhausted_fn=quota_checker,
             )
             task._session_event_loop = event_loop
 

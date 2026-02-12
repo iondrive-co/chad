@@ -235,6 +235,31 @@ class ProviderUIManager:
 
         return 0.3  # Unknown provider, bias low
 
+    def get_weekly_remaining_usage(self, account_name: str) -> float | None:
+        """Get weekly remaining usage as 0.0-1.0, or None if unavailable.
+
+        Only providers with weekly limits (Claude, Codex) return a value.
+        """
+        try:
+            account = self.api_client.get_account(account_name)
+            provider = account.provider
+        except Exception:
+            return None
+
+        if provider == "anthropic":
+            from chad.util.providers import _get_claude_weekly_usage_percentage
+            pct = _get_claude_weekly_usage_percentage(account_name)
+            if pct is not None:
+                return max(0.0, min(1.0, 1.0 - (pct / 100.0)))
+            return None
+        if provider == "openai":
+            from chad.util.providers import _get_codex_weekly_usage_percentage
+            pct = _get_codex_weekly_usage_percentage(account_name)
+            if pct is not None:
+                return max(0.0, min(1.0, 1.0 - (pct / 100.0)))
+            return None
+        return None
+
     def _get_claude_remaining_usage(self, account_name: str) -> float:
         """Get Claude remaining usage from API (0.0-1.0)."""
         import requests

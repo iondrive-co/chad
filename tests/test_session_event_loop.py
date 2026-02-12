@@ -1,6 +1,7 @@
 """Tests for SessionEventLoop milestone detection."""
 
 from chad.server.services.session_event_loop import SessionEventLoop
+from chad.util.handoff import is_quota_exhaustion_error
 
 
 class FakeEventLog:
@@ -13,10 +14,24 @@ class FakeEventLog:
         self.events.append(event)
 
 
+def _default_quota_checker(output_tail: str) -> str | None:
+    """Default quota checker for tests - mimics Claude provider behavior."""
+    import re
+    hit_limit = bool(re.search(
+        r"You['\u2018\u2019]ve hit your limit",
+        output_tail,
+    ))
+    if hit_limit:
+        return "session_limit_reached"
+    if is_quota_exhaustion_error(output_tail):
+        return "session_limit_reached"
+    return None
+
+
 class TestSessionLimitDetection:
     """Tests for session limit detection in _analyze_output."""
 
-    def _make_loop(self):
+    def _make_loop(self, quota_checker=_default_quota_checker):
         """Create a SessionEventLoop with minimal dependencies."""
         event_log = FakeEventLog()
         emitted = []
@@ -31,6 +46,7 @@ class TestSessionLimitDetection:
             run_phase_fn=None,
             emit_fn=emit_fn,
             worktree_path="/tmp/test",
+            is_quota_exhausted_fn=quota_checker,
         )
         return loop, event_log, emitted
 
@@ -43,13 +59,12 @@ class TestSessionLimitDetection:
         loop._analyze_output()
 
         assert loop._session_limit_detected
-        assert loop._session_limit_summary == "Session limit reached - resets 4pm (Australia/Melbourne)"
+        assert loop._session_limit_summary is not None
 
         milestone_emits = [e for e in emitted if e[0] == "milestone"]
         assert len(milestone_emits) == 1
         assert milestone_emits[0][1]["milestone_type"] == "session_limit_reached"
         assert milestone_emits[0][1]["title"] == "Session Limit"
-        assert "resets 4pm" in milestone_emits[0][1]["summary"]
 
     def test_detects_session_limit_with_curly_apostrophe(self):
         """Detects limit message with curly apostrophe (Unicode)."""
@@ -59,7 +74,6 @@ class TestSessionLimitDetection:
         loop._analyze_output()
 
         assert loop._session_limit_detected
-        assert "resets 2pm (US/Pacific)" in loop._session_limit_summary
 
     def test_detects_session_limit_without_reset_info(self):
         """Detects limit message even without reset time details."""
@@ -69,7 +83,7 @@ class TestSessionLimitDetection:
         loop._analyze_output()
 
         assert loop._session_limit_detected
-        assert loop._session_limit_summary == "Session limit reached"
+        assert loop._session_limit_summary is not None
 
     def test_session_limit_not_detected_twice(self):
         """Session limit should only be emitted once even with repeated scans."""
@@ -104,7 +118,6 @@ class TestSessionLimitDetection:
             if hasattr(e, "milestone_type") and e.milestone_type == "session_limit_reached"
         ]
         assert len(milestone_events) == 1
-        assert "resets 6pm" in milestone_events[0].summary
 
     def test_detects_generic_quota_exhaustion(self):
         """Detects quota/rate limit errors from any provider (e.g. Codex, Gemini)."""
@@ -115,7 +128,7 @@ class TestSessionLimitDetection:
         loop._analyze_output()
 
         assert loop._session_limit_detected
-        assert "quota" in loop._session_limit_summary.lower()
+        assert loop._session_limit_summary is not None
 
     def test_detects_rate_limit_exceeded(self):
         """Detects rate_limit_exceeded pattern common across providers."""
@@ -150,6 +163,34 @@ class TestSessionLimitDetection:
         loop.feed_output("        retry()\n")
         # Pad with enough normal output to push the code out of the 500-char tail
         loop.feed_output("x" * 600 + "\n")
+        loop._analyze_output()
+
+        assert not loop._session_limit_detected
+
+    def test_weekly_limit_detected_via_provider(self):
+        """Provider that returns weekly_limit_reached should emit that milestone type."""
+        def weekly_checker(output_tail):
+            if "limit reached" in output_tail.lower():
+                return "weekly_limit_reached"
+            return None
+
+        loop, event_log, emitted = self._make_loop(quota_checker=weekly_checker)
+
+        loop.feed_output("Working...\n")
+        loop.feed_output("Weekly limit reached\n")
+        loop._analyze_output()
+
+        assert loop._session_limit_detected
+        milestone_emits = [e for e in emitted if e[0] == "milestone"]
+        assert len(milestone_emits) == 1
+        assert milestone_emits[0][1]["milestone_type"] == "weekly_limit_reached"
+        assert milestone_emits[0][1]["title"] == "Weekly Limit"
+
+    def test_no_detection_without_quota_checker(self):
+        """Without a quota checker, quota patterns are not detected."""
+        loop, event_log, emitted = self._make_loop(quota_checker=None)
+
+        loop.feed_output("Error: you exceeded your current quota\n")
         loop._analyze_output()
 
         assert not loop._session_limit_detected

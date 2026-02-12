@@ -4040,6 +4040,23 @@ class TestPhaseMilestones:
             msg = make_phase_milestone(phase, "acct", "model-x", 50)
             assert f"**{phase}:**" in msg["content"]
 
+    def test_make_phase_milestone_with_weekly_usage(self):
+        """make_phase_milestone should include weekly usage when provided."""
+        from chad.ui.gradio.web_ui import make_phase_milestone
+
+        msg = make_phase_milestone("Coding", "claude-1", "claude-opus-4", 18, weekly_usage_pct=85)
+        assert msg["role"] == "user"
+        assert "Usage: 18%" in msg["content"]
+        assert "Weekly: 85%" in msg["content"]
+
+    def test_make_phase_milestone_weekly_without_session(self):
+        """make_phase_milestone should show weekly even without session usage."""
+        from chad.ui.gradio.web_ui import make_phase_milestone
+
+        msg = make_phase_milestone("Coding", "claude-1", "claude-opus-4", weekly_usage_pct=100)
+        assert "Weekly: 100%" in msg["content"]
+        assert "Usage:" not in msg["content"].split("Weekly")[0]
+
     def test_idle_status_shows_ready_with_model(self):
         """Idle status should show Ready with coding model info (get_role_config_status still works)."""
         from chad.ui.gradio.provider_ui import ProviderUIManager
