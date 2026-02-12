@@ -15,6 +15,7 @@ import pexpect
 
 from chad.util.git_worktree import GitWorktreeManager
 from chad.util.providers import ModelConfig, MockProvider
+from chad.ui.gradio.provider_ui import ProviderUIManager
 
 
 @dataclass
@@ -4239,9 +4240,8 @@ class TestPhaseMilestones:
         assert "Coding" in status
         assert "claude-main" in status
 
-    def test_format_usage_metrics_returns_percentages(self):
+    def test_format_usage_metrics_returns_percentages(self, web_ui, monkeypatch):
         """_format_usage_metrics should return formatted usage percentage."""
-        from chad.ui.gradio.provider_ui import ProviderUIManager
 
         class MockAPIClient:
             def __init__(self):
@@ -4257,8 +4257,37 @@ class TestPhaseMilestones:
                 return self._mock_usage.get(name, 0.5)
 
         ui = ProviderUIManager(MockAPIClient())
+
+        # Mock get_weekly_remaining_usage for this test
+        monkeypatch.setattr(ui, "get_weekly_remaining_usage", lambda name: 0.85)
+
         metrics = ui._format_usage_metrics("test-account")
-        assert "Usage: 75%" in metrics
+        assert "session usage: 75%" in metrics
+        assert "weekly usage: 85%" in metrics
+
+    def test_format_usage_metrics_returns_only_session_if_no_weekly(self, web_ui, monkeypatch):
+        """_format_usage_metrics should return only session usage if no weekly data."""
+        class MockAPIClient:
+            def __init__(self):
+                self._mock_usage = {"test-account": 0.75}
+
+            def list_accounts(self):
+                return [MockAccount(name="test-account", provider="mock", role="CODING")]
+
+            def get_account(self, name):
+                return MockAccount(name=name, provider="mock", role="CODING")
+
+            def get_mock_remaining_usage(self, name):
+                return self._mock_usage.get(name, 0.5)
+
+        ui = ProviderUIManager(MockAPIClient())
+
+        # Mock get_weekly_remaining_usage to return None
+        monkeypatch.setattr(ui, "get_weekly_remaining_usage", lambda name: None)
+
+        metrics = ui._format_usage_metrics("test-account")
+        assert "session usage: 75%" in metrics
+        assert "weekly usage" not in metrics
 
     def test_ready_status_includes_usage_metrics(self):
         """Ready status should include usage metrics when available."""

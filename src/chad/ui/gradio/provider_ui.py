@@ -2332,7 +2332,13 @@ class ProviderUIManager:
             usage_remaining = self.get_remaining_usage(account_name)
             # Use floor for remaining so any usage reduces from 100%
             usage_pct = int(usage_remaining * 100)
-            return f"[Usage: {usage_pct}%]"
+            result = f"[session usage: {usage_pct}%]"
+
+            weekly_remaining = self.get_weekly_remaining_usage(account_name)
+            if weekly_remaining is not None:
+                weekly_pct = int(weekly_remaining * 100)
+                result += f", weekly usage: {weekly_pct}%"
+            return result
         except Exception:
             return ""
 
