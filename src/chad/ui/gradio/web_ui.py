@@ -2616,6 +2616,12 @@ class ChadWebUI:
                                 before_description=event.data.get("before_description"),
                             )
                             message_queue.put(("progress", progress))
+                    elif event_type == "milestone":
+                        # Server-side milestone from SessionEventLoop
+                        milestone_type = event.data.get("milestone_type", "")
+                        summary = event.data.get("summary", "")
+                        if summary:
+                            message_queue.put(("milestone", milestone_type, summary))
                     elif event_type == "terminal_output":
                         # Fallback for parsed terminal output from EventLog
                         # This ensures content is shown even if raw PTY parsing fails
@@ -3996,6 +4002,26 @@ class ChadWebUI:
                         )
                         last_yield_time = time_module.time()
 
+                    elif msg_type == "milestone":
+                        milestone_type = msg[1]
+                        milestone_summary = msg[2]
+                        # Only show exploration milestones as chat bubbles
+                        if milestone_type == "exploration":
+                            milestone_msg = {
+                                "role": "user",
+                                "content": f"**Discovery:** {milestone_summary}",
+                            }
+                            if pending_message_idx is not None:
+                                chat_history.insert(pending_message_idx, milestone_msg)
+                                pending_message_idx += 1
+                            else:
+                                chat_history.append(milestone_msg)
+                            yield make_yield(
+                                chat_history, current_status, last_live_stream,
+                                task_state="running",
+                            )
+                            last_yield_time = time_module.time()
+
                     elif msg_type == "ai_switch":
                         current_ai = msg[1]
                         streaming_buffer = ""
@@ -5216,6 +5242,21 @@ class ChadWebUI:
                                 merge_updates=merge_no_change,
                             )
                             last_yield_time = now
+
+                elif msg_type == "milestone":
+                    milestone_type = msg[1]
+                    milestone_summary = msg[2]
+                    if milestone_type == "exploration":
+                        milestone_msg = {
+                            "role": "user",
+                            "content": f"**Discovery:** {milestone_summary}",
+                        }
+                        chat_history.append(milestone_msg)
+                        yield make_followup_yield(
+                            chat_history, live_stream,
+                            working=True, merge_updates=merge_no_change,
+                        )
+                        last_yield_time = time_module.time()
 
                 elif msg_type == "activity":
                     now = time_module.time()
