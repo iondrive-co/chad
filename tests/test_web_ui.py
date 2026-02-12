@@ -8,8 +8,10 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import ANY, Mock, patch, MagicMock
 import pytest
+
+import pexpect
 
 from chad.util.git_worktree import GitWorktreeManager
 from chad.util.providers import ModelConfig, MockProvider
@@ -527,12 +529,16 @@ class TestChadWebUI:
         assert "Node missing" in result
         mock_api_client.create_account.assert_not_called()
 
-    @patch("subprocess.run")
-    def test_add_provider_mistral_runs_setup_before_account_creation(self, mock_run, web_ui, mock_api_client):
-        """Mistral add flow should run setup and only then create the account."""
+    @patch("pexpect.spawn")
+    def test_add_provider_mistral_runs_setup_before_account_creation(self, mock_spawn, web_ui, mock_api_client):
+        """Mistral add flow should run setup via PTY and then create the account."""
         mock_api_client.list_accounts.return_value = []
         web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/vibe"))
-        mock_run.return_value = Mock(returncode=0)
+
+        child = MagicMock()
+        child.isalive.side_effect = [True, False]
+        child.read_nonblocking.side_effect = pexpect.TIMEOUT("timeout")
+        mock_spawn.return_value = child
 
         with (
             patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
@@ -546,15 +552,27 @@ class TestChadWebUI:
 
         assert "✅" in result
         assert "mistral-1" in result
-        mock_run.assert_called_once_with(["/tmp/vibe", "--setup"], timeout=120)
+        mock_spawn.assert_called_once_with(
+            "/tmp/vibe",
+            ["--setup"],
+            timeout=ANY,
+            encoding="utf-8",
+            env=ANY,
+            dimensions=(50, 120),
+            cwd=ANY,
+        )
         mock_api_client.create_account.assert_called_once_with("mistral-1", "mistral")
 
-    @patch("subprocess.run")
-    def test_add_provider_mistral_setup_failure_blocks_account_creation(self, mock_run, web_ui, mock_api_client):
+    @patch("pexpect.spawn")
+    def test_add_provider_mistral_setup_failure_blocks_account_creation(self, mock_spawn, web_ui, mock_api_client):
         """Mistral add flow should fail cleanly when setup does not authenticate."""
         mock_api_client.list_accounts.return_value = []
         web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/vibe"))
-        mock_run.return_value = Mock(returncode=1)
+
+        child = MagicMock()
+        child.isalive.return_value = False
+        child.read_nonblocking.side_effect = pexpect.TIMEOUT("timeout")
+        mock_spawn.return_value = child
 
         with (
             patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
@@ -568,8 +586,70 @@ class TestChadWebUI:
 
         assert "❌" in result
         assert "Login failed" in result
-        mock_run.assert_called_once_with(["/tmp/vibe", "--setup"], timeout=120)
+        mock_spawn.assert_called_once()
         mock_api_client.create_account.assert_not_called()
+
+    @patch("chad.ui.gradio.provider_ui.safe_home")
+    @patch("pexpect.spawn")
+    def test_add_provider_mistral_trust_prompt_is_auto_answered(self, mock_spawn, mock_safe_home, web_ui, mock_api_client, tmp_path):
+        """Trust prompts during setup should be acknowledged automatically so OAuth can continue."""
+
+        mock_api_client.list_accounts.return_value = []
+        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/vibe"))
+        mock_safe_home.return_value = tmp_path
+
+        # Simulate a trust prompt followed by process exit
+        class DummyChild:
+            def __init__(self):
+                self.sent = []
+                self._alive = True
+                self._chunks = [
+                    "Do you trust the folder /home/miles/chad? [y/N]",
+                    "Redirecting to browser...",
+                ]
+                self._idx = 0
+
+            def isalive(self):
+                return self._alive
+
+            def read_nonblocking(self, size=1, timeout=0.1):
+                if self._idx < len(self._chunks):
+                    chunk = self._chunks[self._idx]
+                    self._idx += 1
+                    if self._idx >= len(self._chunks):
+                        # Next iteration will see EOF
+                        self._alive = False
+                    return chunk
+                raise pexpect.EOF("done")
+
+            def sendline(self, data):
+                self.sent.append(data)
+
+            def send(self, data):
+                self.sent.append(data)
+
+            def close(self, force=False):
+                self._alive = False
+
+        dummy_child = DummyChild()
+        mock_spawn.return_value = dummy_child
+
+        vibe_config = tmp_path / ".vibe" / "config.toml"
+        vibe_config.parent.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
+            patch.object(
+                web_ui.provider_ui,
+                "_check_provider_login",
+                side_effect=[(False, "Not logged in"), (True, "Logged in")],
+            ),
+        ):
+            result = web_ui.add_provider("mistral-1", "mistral")[0]
+
+        assert "✅" in result
+        assert any(ans.strip().lower() == "y" for ans in dummy_child.sent)
+        mock_api_client.create_account.assert_called_once_with("mistral-1", "mistral")
 
     def test_add_provider_kimi_login_flow_failure(self, web_ui, mock_api_client):
         """Kimi login flow shows error on failure (no creds written)."""

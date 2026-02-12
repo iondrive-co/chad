@@ -2082,8 +2082,54 @@ class ProviderUIManager:
                             except Exception:
                                 pass
                         else:
-                            subprocess.run([vibe_cli, "--setup"], timeout=120)
+                            import pexpect
+
+                            env = os.environ.copy()
+                            env["TERM"] = "xterm-256color"
+
+                            # Run setup in a PTY so we can auto-accept trust prompts
+                            child = pexpect.spawn(
+                                vibe_cli,
+                                ["--setup"],
+                                timeout=180,
+                                encoding="utf-8",
+                                env=env,
+                                dimensions=(50, 120),
+                                cwd=str(safe_home()),
+                            )
+
+                            try:
+                                start_time = time.time()
+                                timeout_secs = 120
+                                while time.time() - start_time < timeout_secs:
+                                    if vibe_config.exists():
+                                        login_success = True
+                                        break
+
+                                    if not child.isalive():
+                                        break
+
+                                    try:
+                                        chunk = child.read_nonblocking(size=4000, timeout=0.2)
+                                        if chunk:
+                                            lowered = chunk.lower()
+                                            # Mistral Vibe prompts for folder trust on first run.
+                                            if "trust" in lowered and ("[y/n" in lowered or "[y/n]" in lowered):
+                                                child.sendline("y")
+                                    except (pexpect.TIMEOUT, pexpect.EOF):
+                                        pass
+
+                                    time.sleep(0.3)
+
+                            finally:
+                                try:
+                                    child.close(force=True)
+                                except Exception:
+                                    pass
+
+                            # Re-check login after setup attempt
                             login_success, _ = self._check_provider_login(provider_type, account_name)
+
                     except FileNotFoundError:
                         result = (
                             "❌ Mistral Vibe CLI not found.\n\n"
