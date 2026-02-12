@@ -387,11 +387,11 @@ class ProgressUpdate:
 
 # Error patterns that indicate a provider failure rather than a parse issue
 _PROVIDER_ERROR_PATTERNS = [
-    (r"Error:\s*.*execution stalled", "Verification agent stalled (no output)"),
-    (r"Error:\s*.*execution timed out", "Verification agent timed out"),
-    (r"Failed to run.*command not found", "Verification agent CLI not installed"),
-    (r"No response from", "Verification agent returned no response"),
-    (r"Failed to run.*:", "Verification agent execution error"),
+    (r"error:\s*.+execution stalled(?:\s*\([^)]*\))?", "Verification agent stalled (no output)"),
+    (r"error:\s*.+execution timed out(?:\s*\([^)]*\))?", "Verification agent timed out"),
+    (r"failed to run.+command not found(?:\s+install with:.+)?", "Verification agent CLI not installed"),
+    (r"no response from.+", "Verification agent returned no response"),
+    (r"failed to run.+:.+", "Verification agent execution error"),
 ]
 
 
@@ -409,12 +409,6 @@ def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
     """
     import json
     import re
-
-    # Check for known provider error patterns before parsing
-    # These indicate execution failures that should fail verification gracefully
-    for pattern, error_msg in _PROVIDER_ERROR_PATTERNS:
-        if re.search(pattern, response, re.IGNORECASE):
-            return False, error_msg, [response.strip()[:500]]
 
     # Strip thinking/reasoning prefixes that some models add before JSON
     # e.g., "*Thinking: **Ensuring valid JSON output***\n\n{..."
@@ -475,9 +469,6 @@ def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
             seen.add(normalized)
             candidates.append(normalized)
 
-    if not candidates:
-        raise VerificationParseError(f"No JSON found in response: {response[:200]}")
-
     # If multiple JSON objects exist, prefer one that includes `passed`.
     prioritized = sorted(candidates, key=lambda text: '"passed"' not in text)
     data = None
@@ -500,6 +491,22 @@ def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
         missing_passed_seen = True
 
     if data is None:
+        # Fall back to provider-error matching only when the whole response
+        # looks like an execution error payload. This avoids false positives
+        # from snippets like: response = "Error: ... timed out ...".
+        ansi_stripped = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", cleaned).strip()
+        fence_match = re.fullmatch(r"```(?:\w+)?\s*(.*?)\s*```", ansi_stripped, re.DOTALL)
+        if fence_match:
+            ansi_stripped = fence_match.group(1).strip()
+        error_candidate_lines = [line.strip() for line in ansi_stripped.splitlines() if line.strip()]
+        if error_candidate_lines and len(error_candidate_lines) <= 4:
+            error_candidate = "\n".join(error_candidate_lines)
+            for pattern, error_msg in _PROVIDER_ERROR_PATTERNS:
+                if re.fullmatch(pattern, error_candidate, re.IGNORECASE | re.DOTALL):
+                    return False, error_msg, [error_candidate[:500]]
+
+        if not candidates:
+            raise VerificationParseError(f"No JSON found in response: {response[:200]}")
         if missing_passed_seen:
             raise VerificationParseError("Missing required field 'passed' in JSON response")
         if parse_error is not None:

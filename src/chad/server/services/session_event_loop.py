@@ -57,7 +57,9 @@ class SessionEventLoop:
         self._tick_thread: threading.Thread | None = None
 
         # Milestone detection state
-        self._output_scan_pos = 0
+        self._exploration_chunks_processed = 0
+        self._exploration_partial_line = ""
+        self._seen_exploration_summaries: set[str] = set()
         self._coding_complete_detected = False
         self._coding_summary: CodingSummary | None = None
         self._session_limit_detected = False
@@ -146,22 +148,72 @@ class SessionEventLoop:
             time.sleep(0.5)
 
     # ---- Exploration marker detection ----
-    _EXPLORATION_RE = re.compile(r"EXPLORATION_RESULT:\s*(.+?)(?:\n\n|\n(?=[A-Z•\-\*#])|$)", re.DOTALL)
+    _EXPLORATION_LINE_RE = re.compile(r"^\s*EXPLORATION_RESULT:\s*(?P<summary>.+?)\s*$")
+    _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+    _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+    _INVALID_EXPLORATION_PREFIXES = (
+        "workdir:",
+        "model:",
+        "session id:",
+        "/bin/bash -lc",
+        "exec ",
+    )
 
-    def _analyze_output(self) -> None:
+    def _sanitize_exploration_text(self, text: str) -> str:
+        """Strip ANSI/control characters before parsing exploration markers."""
+        if not text:
+            return ""
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = self._ANSI_RE.sub("", normalized)
+        return self._CONTROL_RE.sub("", normalized)
+
+    def _normalize_exploration_summary(self, summary: str) -> str | None:
+        """Normalize and validate an exploration summary line."""
+        cleaned = " ".join(summary.split()).strip()
+        if len(cleaned) < 8 or len(cleaned) > 400:
+            return None
+        lower = cleaned.lower()
+        if lower.startswith(self._INVALID_EXPLORATION_PREFIXES):
+            return None
+        return cleaned
+
+    def _scan_exploration_markers(self, new_text: str, finalize: bool = False) -> None:
+        """Parse incremental output for EXPLORATION_RESULT markers."""
+        text = self._exploration_partial_line + self._sanitize_exploration_text(new_text)
+        if not text:
+            return
+
+        lines = text.split("\n")
+        if text.endswith("\n") or finalize:
+            complete_lines = lines
+            self._exploration_partial_line = ""
+        else:
+            complete_lines = lines[:-1]
+            self._exploration_partial_line = lines[-1]
+
+        for line in complete_lines:
+            match = self._EXPLORATION_LINE_RE.match(line)
+            if not match:
+                continue
+            summary = self._normalize_exploration_summary(match.group("summary"))
+            if not summary:
+                continue
+            summary_key = summary.casefold()
+            if summary_key in self._seen_exploration_summaries:
+                continue
+            self._seen_exploration_summaries.add(summary_key)
+            self._emit_milestone("exploration", summary)
+
+    def _analyze_output(self, finalize: bool = False) -> None:
         """Scan output buffer for milestone markers."""
         with self._output_lock:
             if not self._output_buffer:
                 return
             joined = "\n".join(self._output_buffer)
+            new_chunks = self._output_buffer[self._exploration_chunks_processed:]
+            self._exploration_chunks_processed = len(self._output_buffer)
 
-        # Scan for EXPLORATION_RESULT: markers
-        for match in self._EXPLORATION_RE.finditer(joined, self._output_scan_pos):
-            summary_text = match.group(1).strip()
-            if summary_text:
-                self._emit_milestone("exploration", summary_text)
-
-        self._output_scan_pos = len(joined)
+        self._scan_exploration_markers("".join(new_chunks), finalize=finalize)
 
         # Scan for session/quota limit messages in the tail of output
         # (only check the last ~500 chars to avoid false positives from code edits)
@@ -354,7 +406,7 @@ class SessionEventLoop:
             override_prompt=override_prompt,
         )
         # Final scan to catch output that arrived just before exit
-        self._analyze_output()
+        self._analyze_output(finalize=True)
 
         if exit_code < 0:
             return exit_code, output
@@ -500,6 +552,6 @@ class SessionEventLoop:
             override_prompt=revision_prompt,
         )
         # Final scan to catch output that arrived just before exit
-        self._analyze_output()
+        self._analyze_output(finalize=True)
 
         self.accumulated_output += "\n" + output

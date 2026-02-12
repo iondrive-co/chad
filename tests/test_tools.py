@@ -289,3 +289,32 @@ class TestParseVerificationResponse:
 
         with pytest.raises(VerificationParseError):
             parse_verification_response('{"summary":"No passed field"}')
+
+    def test_parse_does_not_misclassify_embedded_timeout_text_when_json_exists(self):
+        """Embedded timeout strings in analysis text should not override valid verdict JSON."""
+        from chad.util.prompts import parse_verification_response
+
+        response = (
+            "I inspected this line from a test fixture:\n"
+            'response = "Error: Qwen execution timed out (30 minutes)"\n\n'
+            "Final verification verdict:\n"
+            '```json\n{"passed": false, "summary": "Needs fixes", "issues": ["A"]}\n```'
+        )
+
+        passed, summary, issues = parse_verification_response(response)
+
+        assert passed is False
+        assert summary == "Needs fixes"
+        assert issues == ["A"]
+
+    def test_parse_embedded_timeout_text_without_json_raises(self):
+        """Timeout-like text inside other content should not be treated as provider execution error."""
+        from chad.util.prompts import parse_verification_response, VerificationParseError
+
+        response = (
+            'This code snippet is only an example: "Error: Gemini execution timed out (30 minutes)".\n'
+            "No verification JSON was produced."
+        )
+
+        with pytest.raises(VerificationParseError):
+            parse_verification_response(response)
