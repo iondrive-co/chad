@@ -291,3 +291,177 @@ class TestCodingCompleteMilestone:
         ]
         assert len(coding_emits) == 1
         assert "session limit" in coding_emits[0][1]["summary"].lower()
+
+
+class TestUsageThresholdMonitoring:
+    """Tests for usage threshold crossing detection."""
+
+    def _make_loop(self, session_fn=None, weekly_fn=None, context_fn=None):
+        """Create a SessionEventLoop with usage monitoring functions."""
+        event_log = FakeEventLog()
+        emitted = []
+
+        def emit_fn(event_type, **kwargs):
+            emitted.append((event_type, kwargs))
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=None,
+            run_phase_fn=None,
+            emit_fn=emit_fn,
+            worktree_path="/tmp/test",
+            get_session_usage_fn=session_fn,
+            get_weekly_usage_fn=weekly_fn,
+            get_context_usage_fn=context_fn,
+        )
+        return loop, event_log, emitted
+
+    def _usage_milestones(self, emitted):
+        return [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "usage_threshold"
+        ]
+
+    def test_emits_milestone_on_session_threshold_crossing(self):
+        """Session usage crossing 90% emits a usage_threshold milestone."""
+        pct = [80.0]
+        loop, event_log, emitted = self._make_loop(session_fn=lambda: pct[0])
+
+        # First check seeds the previous value
+        loop._check_usage_thresholds()
+        assert len(self._usage_milestones(emitted)) == 0
+
+        # Cross the threshold
+        pct[0] = 92.0
+        loop._check_usage_thresholds()
+
+        milestones = self._usage_milestones(emitted)
+        assert len(milestones) == 1
+        assert milestones[0][1]["title"] == "Usage Warning"
+        assert "Session" in milestones[0][1]["summary"]
+        assert "92%" in milestones[0][1]["summary"]
+        assert milestones[0][1]["details"]["metric"] == "session"
+        assert milestones[0][1]["details"]["percentage"] == 92.0
+
+    def test_emits_milestone_on_weekly_threshold_crossing(self):
+        """Weekly usage crossing 90% emits a milestone."""
+        pct = [85.0]
+        loop, event_log, emitted = self._make_loop(weekly_fn=lambda: pct[0])
+
+        loop._check_usage_thresholds()
+        pct[0] = 91.0
+        loop._check_usage_thresholds()
+
+        milestones = self._usage_milestones(emitted)
+        assert len(milestones) == 1
+        assert "Weekly" in milestones[0][1]["summary"]
+        assert milestones[0][1]["details"]["metric"] == "weekly"
+
+    def test_emits_milestone_on_context_threshold_crossing(self):
+        """Context usage crossing 90% emits a milestone."""
+        pct = [70.0]
+        loop, event_log, emitted = self._make_loop(context_fn=lambda: pct[0])
+
+        loop._check_usage_thresholds()
+        pct[0] = 95.0
+        loop._check_usage_thresholds()
+
+        milestones = self._usage_milestones(emitted)
+        assert len(milestones) == 1
+        assert "Context" in milestones[0][1]["summary"]
+        assert milestones[0][1]["details"]["metric"] == "context"
+
+    def test_no_milestone_when_already_above_threshold(self):
+        """No milestone if previous reading was already above 90%."""
+        pct = [91.0]
+        loop, event_log, emitted = self._make_loop(session_fn=lambda: pct[0])
+
+        loop._check_usage_thresholds()
+        pct[0] = 95.0
+        loop._check_usage_thresholds()
+
+        assert len(self._usage_milestones(emitted)) == 0
+
+    def test_no_milestone_when_still_below_threshold(self):
+        """No milestone if usage stays below 90%."""
+        pct = [50.0]
+        loop, event_log, emitted = self._make_loop(session_fn=lambda: pct[0])
+
+        loop._check_usage_thresholds()
+        pct[0] = 80.0
+        loop._check_usage_thresholds()
+
+        assert len(self._usage_milestones(emitted)) == 0
+
+    def test_no_milestone_when_fn_returns_none(self):
+        """No milestone when usage function returns None."""
+        loop, event_log, emitted = self._make_loop(session_fn=lambda: None)
+
+        loop._check_usage_thresholds()
+        loop._check_usage_thresholds()
+
+        assert len(self._usage_milestones(emitted)) == 0
+
+    def test_no_milestone_when_fn_not_provided(self):
+        """No milestone when no usage functions are provided."""
+        loop, event_log, emitted = self._make_loop()
+
+        loop._check_usage_thresholds()
+        loop._check_usage_thresholds()
+
+        assert len(self._usage_milestones(emitted)) == 0
+
+    def test_multiple_thresholds_can_fire_independently(self):
+        """Session and weekly thresholds can both fire in the same check cycle."""
+        session_pct = [80.0]
+        weekly_pct = [85.0]
+        loop, event_log, emitted = self._make_loop(
+            session_fn=lambda: session_pct[0],
+            weekly_fn=lambda: weekly_pct[0],
+        )
+
+        # Seed previous values
+        loop._check_usage_thresholds()
+
+        # Both cross threshold simultaneously
+        session_pct[0] = 93.0
+        weekly_pct[0] = 91.0
+        loop._check_usage_thresholds()
+
+        milestones = self._usage_milestones(emitted)
+        assert len(milestones) == 2
+        metrics = {m[1]["details"]["metric"] for m in milestones}
+        assert metrics == {"session", "weekly"}
+
+    def test_fn_exception_is_silently_ignored(self):
+        """If a usage function raises, it's caught and doesn't break the loop."""
+        call_count = [0]
+
+        def bad_fn():
+            call_count[0] += 1
+            raise RuntimeError("provider error")
+
+        loop, event_log, emitted = self._make_loop(session_fn=bad_fn)
+
+        # Should not raise
+        loop._check_usage_thresholds()
+        loop._check_usage_thresholds()
+
+        assert call_count[0] == 2
+        assert len(self._usage_milestones(emitted)) == 0
+
+    def test_milestone_logged_to_event_log(self):
+        """Usage threshold milestone should appear in the EventLog."""
+        pct = [80.0]
+        loop, event_log, emitted = self._make_loop(session_fn=lambda: pct[0])
+
+        loop._check_usage_thresholds()
+        pct[0] = 92.0
+        loop._check_usage_thresholds()
+
+        milestone_events = [
+            e for e in event_log.events
+            if hasattr(e, "milestone_type") and e.milestone_type == "usage_threshold"
+        ]
+        assert len(milestone_events) == 1

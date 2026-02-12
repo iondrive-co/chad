@@ -1299,6 +1299,7 @@ class TaskExecutor:
 
             # Create quota checker from provider type
             quota_checker = None
+            _check_provider = None
             try:
                 from chad.util.providers import create_provider, ModelConfig
                 _check_provider = create_provider(ModelConfig(
@@ -1319,6 +1320,9 @@ class TaskExecutor:
                 emit_fn=emit,
                 worktree_path=worktree_path,
                 is_quota_exhausted_fn=quota_checker,
+                get_session_usage_fn=_check_provider.get_session_usage_percentage if _check_provider else None,
+                get_weekly_usage_fn=_check_provider.get_weekly_usage_percentage if _check_provider else None,
+                get_context_usage_fn=_check_provider.get_context_usage_percentage if _check_provider else None,
             )
             task._session_event_loop = event_loop
 

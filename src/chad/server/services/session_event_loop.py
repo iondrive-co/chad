@@ -31,6 +31,9 @@ class SessionEventLoop:
         worktree_path,
         max_verification_attempts: int = 5,
         is_quota_exhausted_fn: Callable[[str], str | None] | None = None,
+        get_session_usage_fn: Callable[[], float | None] | None = None,
+        get_weekly_usage_fn: Callable[[], float | None] | None = None,
+        get_context_usage_fn: Callable[[], float | None] | None = None,
     ):
         self.session_id = session_id
         self.event_log = event_log
@@ -58,6 +61,15 @@ class SessionEventLoop:
         self._coding_summary: CodingSummary | None = None
         self._session_limit_detected = False
         self._session_limit_summary: str | None = None
+
+        # Usage threshold monitoring state
+        self._get_session_usage_fn = get_session_usage_fn
+        self._get_weekly_usage_fn = get_weekly_usage_fn
+        self._get_context_usage_fn = get_context_usage_fn
+        self._prev_session_pct: float | None = None
+        self._prev_weekly_pct: float | None = None
+        self._prev_context_pct: float | None = None
+        self._usage_check_counter = 0
 
         # Accumulated output from all phases
         self.accumulated_output = ""
@@ -89,6 +101,7 @@ class SessionEventLoop:
         "coding_complete": "Coding Complete",
         "session_limit_reached": "Session Limit",
         "weekly_limit_reached": "Weekly Limit",
+        "usage_threshold": "Usage Warning",
         "verification_started": "Verification",
         "verification_passed": "Verification Passed",
         "verification_failed": "Verification Failed",
@@ -124,6 +137,10 @@ class SessionEventLoop:
         """Background tick loop for milestone detection and message processing."""
         while self._running:
             self._analyze_output()
+            self._usage_check_counter += 1
+            if self._usage_check_counter >= 20:  # 20 * 0.5s = 10 seconds
+                self._usage_check_counter = 0
+                self._check_usage_thresholds()
             time.sleep(0.5)
 
     # ---- Exploration marker detection ----
@@ -179,6 +196,33 @@ class SessionEventLoop:
                     summary.change_summary,
                     details,
                 )
+
+    _USAGE_THRESHOLD = 90.0
+
+    def _check_usage_thresholds(self) -> None:
+        """Check provider usage metrics for threshold crossings."""
+        checks = [
+            ("context", self._get_context_usage_fn, "_prev_context_pct"),
+            ("session", self._get_session_usage_fn, "_prev_session_pct"),
+            ("weekly", self._get_weekly_usage_fn, "_prev_weekly_pct"),
+        ]
+        for label, fn, prev_attr in checks:
+            if fn is None:
+                continue
+            try:
+                current = fn()
+            except Exception:
+                continue
+            if current is None:
+                continue
+            prev = getattr(self, prev_attr)
+            if prev is not None and prev < self._USAGE_THRESHOLD and current >= self._USAGE_THRESHOLD:
+                self._emit_milestone(
+                    "usage_threshold",
+                    f"{label.title()} usage reached {current:.0f}%",
+                    {"metric": label, "percentage": current},
+                )
+            setattr(self, prev_attr, current)
 
     def run(
         self,
