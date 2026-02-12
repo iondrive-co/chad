@@ -2627,6 +2627,65 @@ class TestProviderQuotaDetection:
 class TestUsagePercentageCalculation:
     """Tests for usage percentage calculation from local session files."""
 
+    def _write_claude_creds(self, base_dir: Path, account: str) -> Path:
+        """Helper to create Claude credential file in a temp home."""
+        cred_dir = base_dir / ".chad" / "claude_homes" / account / ".claude"
+        cred_dir.mkdir(parents=True, exist_ok=True)
+        cred_path = cred_dir / ".credentials.json"
+        cred_path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "test-token"}}))
+        return cred_path
+
+    def test_claude_usage_percentage_scales_fractional_utilization(self, tmp_path):
+        """Claude usage API returns fractions (0-1); function should convert to percent."""
+        from chad.util.providers import _get_claude_usage_percentage
+
+        account = "claude-fractional"
+        self._write_claude_creds(tmp_path, account)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"five_hour": {"utilization": 0.32}}
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path), \
+                patch("requests.get", return_value=mock_response):
+            pct = _get_claude_usage_percentage(account)
+
+        assert pct == pytest.approx(32.0)
+
+    def test_claude_usage_percentage_preserves_percent_inputs(self, tmp_path):
+        """Claude usage function should keep already-percentage values unchanged."""
+        from chad.util.providers import _get_claude_usage_percentage
+
+        account = "claude-percent"
+        self._write_claude_creds(tmp_path, account)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"five_hour": {"utilization": 87}}
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path), \
+                patch("requests.get", return_value=mock_response):
+            pct = _get_claude_usage_percentage(account)
+
+        assert pct == pytest.approx(87.0)
+
+    def test_claude_weekly_usage_percentage_scales_fractional_utilization(self, tmp_path):
+        """Weekly usage should also scale fractional utilization to percentage."""
+        from chad.util.providers import _get_claude_weekly_usage_percentage
+
+        account = "claude-weekly"
+        self._write_claude_creds(tmp_path, account)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"seven_day": {"utilization": 0.5}}
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path), \
+                patch("requests.get", return_value=mock_response):
+            pct = _get_claude_weekly_usage_percentage(account)
+
+        assert pct == pytest.approx(50.0)
+
     def test_gemini_usage_not_logged_in(self, tmp_path):
         """Gemini returns None when oauth credentials don't exist."""
         from chad.util.providers import _get_gemini_usage_percentage
