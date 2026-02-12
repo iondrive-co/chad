@@ -11,6 +11,7 @@ import time
 from typing import Any, Callable
 
 from chad.util.event_log import EventLog, MilestoneEvent, UserMessageEvent
+from chad.server.services.pty_stream import get_pty_stream_service
 from chad.util.prompts import extract_coding_summary, CodingSummary
 
 
@@ -136,6 +137,7 @@ class SessionEventLoop:
     def _loop(self) -> None:
         """Background tick loop for milestone detection and message processing."""
         while self._running:
+            self._process_messages()
             self._analyze_output()
             self._usage_check_counter += 1
             if self._usage_check_counter >= 20:  # 20 * 0.5s = 10 seconds
@@ -196,6 +198,32 @@ class SessionEventLoop:
                     summary.change_summary,
                     details,
                 )
+
+    def _process_messages(self) -> None:
+        """Send queued user messages to the active PTY session."""
+        if not self.task or not getattr(self.task, "stream_id", None):
+            return
+
+        pty_service = get_pty_stream_service()
+        pty_session = pty_service.get_session(self.task.stream_id)
+        if not pty_session or not getattr(pty_session, "active", False):
+            return
+
+        while not self._message_queue.empty():
+            try:
+                msg = self._message_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            content = (msg or {}).get("content", "")
+            if not content:
+                continue
+
+            data = content if content.endswith("\n") else content + "\n"
+            ok = pty_service.send_input(self.task.stream_id, data.encode(), close_stdin=False)
+            if not ok:
+                self._message_queue.put(msg)
+                break
 
     _USAGE_THRESHOLD = 90.0
 

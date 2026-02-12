@@ -1,5 +1,6 @@
 """Tests for SessionEventLoop milestone detection."""
 
+import chad.server.services.session_event_loop as session_event_loop
 from chad.server.services.session_event_loop import SessionEventLoop
 from chad.util.handoff import is_quota_exhaustion_error
 
@@ -465,3 +466,71 @@ class TestUsageThresholdMonitoring:
             if hasattr(e, "milestone_type") and e.milestone_type == "usage_threshold"
         ]
         assert len(milestone_events) == 1
+
+
+
+class TestMessageForwarding:
+    """Tests for forwarding queued user messages to the active PTY."""
+
+    class DummyPTYService:
+        def __init__(self):
+            self.sent: list[tuple[str, bytes, bool]] = []
+            self.sessions: dict[str, object] = {}
+
+        def get_session(self, stream_id):
+            return self.sessions.get(stream_id)
+
+        def send_input(self, stream_id, data: bytes, close_stdin: bool = False):
+            self.sent.append((stream_id, data, close_stdin))
+            return True
+
+    def _make_loop(self, monkeypatch, stream_id: str | None):
+        service = self.DummyPTYService()
+        if stream_id:
+            service.sessions[stream_id] = type('Session', (), {'active': True})()
+        monkeypatch.setattr(session_event_loop, 'get_pty_stream_service', lambda: service)
+
+        emitted = []
+
+        def emit_fn(event_type, **kwargs):
+            emitted.append((event_type, kwargs))
+
+        task = type('Task', (), {'stream_id': stream_id})()
+        loop = SessionEventLoop(
+            session_id='s1',
+            event_log=FakeEventLog(),
+            task=task,
+            run_phase_fn=None,
+            emit_fn=emit_fn,
+            worktree_path='/tmp/test',
+        )
+        return loop, service, emitted
+
+    def test_forwards_queued_messages_to_active_pty(self, monkeypatch):
+        """Enqueued messages are written to the PTY with a trailing newline."""
+        loop, service, _ = self._make_loop(monkeypatch, stream_id='stream-1')
+
+        loop.enqueue_message('please keep going', source='ui')
+        loop._process_messages()
+
+        assert service.sent == [('stream-1', b'please keep going\n', False)]
+        assert loop._message_queue.empty()
+
+    def test_defers_messages_until_stream_available(self, monkeypatch):
+        """Messages stay queued until a PTY stream is available and active."""
+        loop, service, _ = self._make_loop(monkeypatch, stream_id=None)
+
+        loop.enqueue_message('hold this', source='ui')
+        loop._process_messages()
+
+        # No stream yet, message should remain queued
+        assert service.sent == []
+        assert loop._message_queue.qsize() == 1
+
+        # Stream appears later
+        loop.task.stream_id = 'stream-live'
+        service.sessions['stream-live'] = type('Session', (), {'active': True})()
+        loop._process_messages()
+
+        assert service.sent == [('stream-live', b'hold this\n', False)]
+        assert loop._message_queue.empty()
