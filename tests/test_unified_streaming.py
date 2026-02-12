@@ -1234,10 +1234,18 @@ class TestAgentHandover:
             },
         )
 
-        time.sleep(1)
+        def _wait_for_events(session_id: str, timeout: float = 5.0, interval: float = 0.1):
+            deadline = time.time() + timeout
+            last_events: list[dict] = []
+            while time.time() < deadline:
+                last_events = client.get(f"/api/v1/sessions/{session_id}/events").json()["events"]
+                if last_events:
+                    return last_events
+                time.sleep(interval)
+            return last_events
 
-        # Agent 2 should have its own events
-        agent2_events = client.get(f"/api/v1/sessions/{session2_id}/events").json()["events"]
+        # Agent 2 should have its own events (allow extra time under parallel load)
+        agent2_events = _wait_for_events(session2_id)
         assert len(agent2_events) > 0
 
         # Both logs should exist in the log directory

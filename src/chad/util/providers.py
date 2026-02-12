@@ -1515,7 +1515,7 @@ class ClaudeCodeProvider(AIProvider):
                         line_queue.put(line)
                     elif self.process.poll() is not None:
                         break
-            except (OSError, ValueError):
+            except (OSError, ValueError, StopIteration):
                 pass
 
         reader = threading.Thread(target=reader_thread, daemon=True)
