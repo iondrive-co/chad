@@ -16,104 +16,13 @@ from pathlib import Path
 # - {task} replaced with the user's task description
 
 # =============================================================================
-# PHASE 1: EXPLORATION PROMPT
+# CODING AGENT PROMPT
 # =============================================================================
-# The exploration phase does initial codebase exploration and outputs a progress
-# update. This phase ends after outputting the progress JSON.
-
-EXPLORATION_PROMPT = """\
-{project_docs}
-
-{verification_instructions}
-
-You need to complete the following task:
----
-# Task
-
-{task}
----
-
-## Phase 1: Exploration
-
-CRITICAL: This phase MUST complete within 60 seconds. Read only 2-3 key files to understand the area - do not spend excessive time exploring.
-If the project instructions include a Class Map, use it first to choose your initial files before running broad searches.
-
-When you have completed your quick exploration, IMMEDIATELY output a progress update using this JSON format:
-```json
-{{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45", "next_step": "Writing tests to verify the retry behavior"}}
-```
-
-This marks the end of the exploration phase. The implementation phase will continue from here.
-"""
-
-# =============================================================================
-# PHASE 2: IMPLEMENTATION PROMPT
-# =============================================================================
-# The implementation phase receives the exploration output and continues with
-# writing tests, making changes, and running verification.
-
-IMPLEMENTATION_PROMPT = """\
-{project_docs}
-
-{verification_instructions}
-
-You need to complete the following task:
----
-# Task
-
-{task}
----
-
-## Previous Exploration
-
-The exploration phase found:
-{exploration_output}
-
-## Phase 2: Implementation
-
-Continue from the exploration above. Complete the following steps:
-
-1. Write test(s) that should fail until the fix/feature is implemented (you can explore more code if needed)
-2. Make the changes, adjusting tests and exploring more code as needed. If no changes are required, skip to step 5.
-3. Once you believe your changes will complete the task, run verification commands (lint and tests) as described above.
-4. Fix ALL failures and retest if required.
-5. End your response with a JSON summary block like this:
-```json
-{{
-  "change_summary": "One sentence describing what was changed",
-  "files_changed": ["src/auth.py", "tests/test_auth.py"],
-  "completion_status": "success",
-  "hypothesis": "Brief root cause explanation (include if investigating a bug)"
-}}
-```
-Required fields:
-- change_summary: One sentence describing what was done
-- files_changed: Array of file paths that were modified, or "info_only" if this was just an information request with no file changes
-- completion_status: One of "success", "partial" (hit context/token limit), "blocked" (needs user input), or "error"
-Optional fields:
-- hypothesis: Include only when investigating a bug
-"""
-
-# =============================================================================
-# COMBINED CODING PROMPT (for providers that support continuous execution)
-# =============================================================================
-# This combines both phases for providers that can execute without interruption.
-# Used as fallback or for testing.
+# Single prompt that combines exploration and implementation. The agent emits
+# EXPLORATION_RESULT: markers as it discovers things, then outputs a completion
+# JSON when done.
 
 CODING_AGENT_PROMPT = """\
-## URGENT: PROGRESS UPDATE REQUIRED
-
-STOP! Before doing anything else, you MUST:
-1. Spend AT MOST 30 seconds reading 1-2 key files
-2. IMMEDIATELY output a progress update in this exact JSON format:
-```json
-{{"type": "progress", "summary": "Brief description of what you found", "location": "file:line", "next_step": "What you will do next"}}
-```
-
-This progress update tells the user you are working. Output it NOW, within 30 seconds of starting.
-
----
-
 {project_docs}
 
 {verification_instructions}
@@ -124,12 +33,18 @@ This progress update tells the user you are working. Output it NOW, within 30 se
 
 ---
 
-## After your progress update, continue with:
+## Instructions
 
-3. Write test(s) that should fail until the fix/feature is implemented
-4. Make the changes, adjusting tests as needed. If no changes are required, skip to step 6.
-5. Run verification commands (lint and tests) and fix ALL failures.
-6. End your response with a JSON summary:
+As you explore the codebase, each time you discover something relevant, output a line starting with \
+`EXPLORATION_RESULT:` followed by a brief description of what you found. For example:
+`EXPLORATION_RESULT: The authentication logic is in src/auth.py, using JWT tokens with a 24h expiry`
+
+Then complete these steps:
+
+1. Write test(s) that should fail until the fix/feature is implemented
+2. Make the changes, adjusting tests as needed. If no changes are required, skip to step 4.
+3. Run verification commands (lint and tests) and fix ALL failures.
+4. End your response with a JSON summary:
 ```json
 {{
   "change_summary": "One sentence describing what was changed",
@@ -251,9 +166,17 @@ Output ONLY the JSON block, no other text.
 class PromptPreviews:
     """Pre-filled prompt templates with project docs but task placeholders."""
 
-    exploration: str
-    implementation: str
+    coding: str
     verification: str
+    # Legacy aliases for backwards compatibility in tests
+    exploration: str = ""
+    implementation: str = ""
+
+    def __post_init__(self):
+        if not self.exploration:
+            self.exploration = self.coding
+        if not self.implementation:
+            self.implementation = self.coding
 
 
 def build_prompt_previews(project_path: str | Path | None) -> PromptPreviews:
@@ -266,7 +189,7 @@ def build_prompt_previews(project_path: str | Path | None) -> PromptPreviews:
         project_path: Path to the project directory
 
     Returns:
-        PromptPreviews with all three prompts partially filled
+        PromptPreviews with coding and verification prompts partially filled
     """
     from chad.util.project_setup import build_doc_reference_text
 
@@ -276,16 +199,10 @@ def build_prompt_previews(project_path: str | Path | None) -> PromptPreviews:
 
     docs_section, verification_section = _build_docs_and_verification(project_docs, project_path)
 
-    exploration = EXPLORATION_PROMPT.format(
+    coding = CODING_AGENT_PROMPT.format(
         project_docs=docs_section,
         verification_instructions=verification_section,
         task="{task}",
-    )
-    implementation = IMPLEMENTATION_PROMPT.format(
-        project_docs=docs_section,
-        verification_instructions=verification_section,
-        task="{task}",
-        exploration_output="{exploration_output}",
     )
     verification = VERIFICATION_EXPLORATION_PROMPT.format(
         task="{task}",
@@ -293,8 +210,7 @@ def build_prompt_previews(project_path: str | Path | None) -> PromptPreviews:
     )
 
     return PromptPreviews(
-        exploration=exploration,
-        implementation=implementation,
+        coding=coding,
         verification=verification,
     )
 
@@ -327,77 +243,15 @@ def _build_docs_and_verification(
     return docs_section, verification_section
 
 
-def build_exploration_prompt(
+def build_prompt(
     task: str,
     project_docs: str | None = None,
     project_path: str | Path | None = None,
     screenshots: list[str] | None = None,
 ) -> str:
-    """Build the exploration phase prompt for the coding agent.
+    """Build the prompt for the coding agent.
 
-    This is Phase 1 of the 3-phase execution. The agent explores the codebase
-    and outputs a progress JSON when done.
-
-    Args:
-        task: The user's task description
-        project_docs: Optional project documentation references (paths to read)
-        project_path: Optional project path for detecting verification commands
-        screenshots: Optional list of screenshot file paths to include
-
-    Returns:
-        Exploration prompt for Phase 1
-    """
-    docs_section, verification_section = _build_docs_and_verification(project_docs, project_path)
-    task_with_screenshots = _build_task_with_screenshots(task, screenshots)
-
-    return EXPLORATION_PROMPT.format(
-        project_docs=docs_section,
-        verification_instructions=verification_section,
-        task=task_with_screenshots,
-    )
-
-
-def build_implementation_prompt(
-    task: str,
-    exploration_output: str,
-    project_docs: str | None = None,
-    project_path: str | Path | None = None,
-) -> str:
-    """Build the implementation phase prompt for the coding agent.
-
-    This is Phase 2 of the 3-phase execution. The agent receives the exploration
-    output and continues with writing tests, making changes, and verification.
-
-    Args:
-        task: The user's task description
-        exploration_output: Output from the exploration phase
-        project_docs: Optional project documentation references (paths to read)
-        project_path: Optional project path for detecting verification commands
-
-    Returns:
-        Implementation prompt for Phase 2
-    """
-    docs_section, verification_section = _build_docs_and_verification(project_docs, project_path)
-
-    return IMPLEMENTATION_PROMPT.format(
-        project_docs=docs_section,
-        verification_instructions=verification_section,
-        task=task,
-        exploration_output=exploration_output,
-    )
-
-
-def build_coding_prompt(
-    task: str,
-    project_docs: str | None = None,
-    project_path: str | Path | None = None,
-    screenshots: list[str] | None = None,
-) -> str:
-    """Build the complete prompt for the coding agent (combined phases).
-
-    This is the legacy single-prompt approach for providers that support
-    continuous execution without interruption. For 3-phase execution,
-    use build_exploration_prompt() and build_implementation_prompt().
+    Single combined prompt that handles exploration and implementation.
 
     Args:
         task: The user's task description
@@ -416,6 +270,30 @@ def build_coding_prompt(
         verification_instructions=verification_section,
         task=task_with_screenshots,
     )
+
+
+# Legacy aliases for backwards compatibility
+build_coding_prompt = build_prompt
+
+
+def build_exploration_prompt(
+    task: str,
+    project_docs: str | None = None,
+    project_path: str | Path | None = None,
+    screenshots: list[str] | None = None,
+) -> str:
+    """Legacy alias for build_prompt."""
+    return build_prompt(task, project_docs, project_path, screenshots)
+
+
+def build_implementation_prompt(
+    task: str,
+    exploration_output: str = "",
+    project_docs: str | None = None,
+    project_path: str | Path | None = None,
+) -> str:
+    """Legacy alias for build_prompt (exploration_output ignored)."""
+    return build_prompt(task, project_docs, project_path)
 
 
 def get_verification_prompt(coding_output: str, task: str = "", change_summary: str | None = None) -> str:
@@ -887,6 +765,41 @@ def get_continuation_prompt(previous_output: str) -> str:
         Continuation prompt to re-invoke the agent
     """
     return CONTINUATION_PROMPT
+
+
+# =============================================================================
+# REVISION PROMPT
+# =============================================================================
+# Used when verification fails and the coding agent needs to fix issues.
+
+REVISION_PROMPT = """\
+Verification found issues with your changes. Please fix the following problems:
+
+{feedback}
+
+After fixing:
+1. Run verification commands (lint and tests) and fix ALL failures.
+2. End with a JSON summary block:
+```json
+{{
+  "change_summary": "One sentence describing what was fixed",
+  "files_changed": ["src/file.py", "tests/test_file.py"],
+  "completion_status": "success"
+}}
+```
+"""
+
+
+def get_revision_prompt(feedback: str) -> str:
+    """Build a revision prompt with verification feedback.
+
+    Args:
+        feedback: The verification feedback describing issues to fix
+
+    Returns:
+        Revision prompt to re-invoke the coding agent
+    """
+    return REVISION_PROMPT.format(feedback=feedback)
 
 
 # =============================================================================

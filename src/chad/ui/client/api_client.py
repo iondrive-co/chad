@@ -289,6 +289,51 @@ class APIClient:
             ready=data.get("ready", False),
         )
 
+    # Messages
+    def send_message(
+        self,
+        session_id: str,
+        content: str,
+        source: str = "ui",
+    ) -> dict[str, Any]:
+        """Send a user message to a running session.
+
+        Args:
+            session_id: Session ID
+            content: Message content
+            source: Message source (ui, cli, slack, api)
+
+        Returns:
+            Response dict with success status
+        """
+        resp = self._client.post(
+            self._url(f"/sessions/{session_id}/messages"),
+            json={"content": content, "source": source},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_milestones(
+        self,
+        session_id: str,
+        since_seq: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Get milestones for a session (polling catch-up).
+
+        Args:
+            session_id: Session ID
+            since_seq: Return milestones after this sequence
+
+        Returns:
+            List of milestone dicts
+        """
+        resp = self._client.get(
+            self._url(f"/sessions/{session_id}/milestones"),
+            params={"since_seq": since_seq},
+        )
+        resp.raise_for_status()
+        return resp.json().get("milestones", [])
+
     # Tasks
     def start_task(
         self,
@@ -305,6 +350,8 @@ class APIClient:
         terminal_rows: int | None = None,
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
+        override_prompt: str | None = None,
+        # Legacy kwargs
         override_exploration_prompt: str | None = None,
         override_implementation_prompt: str | None = None,
     ) -> TaskStatus:
@@ -314,8 +361,7 @@ class APIClient:
             terminal_rows: Terminal height in rows (for PTY sizing)
             terminal_cols: Terminal width in columns (for PTY sizing)
             screenshots: Optional list of screenshot file paths for agent reference
-            override_exploration_prompt: User-edited exploration prompt override
-            override_implementation_prompt: User-edited implementation prompt override
+            override_prompt: User-edited coding prompt override
         """
         data = {
             "project_path": project_path,
@@ -340,10 +386,9 @@ class APIClient:
             data["terminal_cols"] = terminal_cols
         if screenshots:
             data["screenshots"] = screenshots
-        if override_exploration_prompt:
-            data["override_exploration_prompt"] = override_exploration_prompt
-        if override_implementation_prompt:
-            data["override_implementation_prompt"] = override_implementation_prompt
+        effective_prompt = override_prompt or override_exploration_prompt
+        if effective_prompt:
+            data["override_prompt"] = effective_prompt
 
         resp = self._client.post(
             self._url(f"/sessions/{session_id}/tasks"),

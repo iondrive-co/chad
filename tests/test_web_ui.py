@@ -683,8 +683,8 @@ class TestChadWebUI:
 
         assert len(updates) == 1
         update = updates[0]
-        # 24 elements: 18 base (role_status removed) + 6 prompt outputs
-        assert len(update) == 24
+        # 22 elements: 18 base + 4 prompt outputs (coding + verification)
+        assert len(update) == 22
         assert "already running" in update[2].get("value", "").lower()
         assert update[5].get("interactive") is True
         assert update[6].get("interactive") is False
@@ -987,17 +987,13 @@ class TestChadWebUI:
         )]
         assert len(content_updates) > 0, f"Live stream should have content during streaming. Got updates: {progress_updates[:5]}"
 
-    def test_coding_milestone_inserted_on_phase2_status(self, monkeypatch, web_ui, git_repo):
-        """Coding milestone appears when Phase 2 status is received, even without progress JSON."""
+    def test_coding_milestone_inserted_at_start(self, monkeypatch, web_ui, git_repo):
+        """Coding milestone appears at the start of a task, before any streaming."""
 
         def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
             message_queue.put(("ai_switch", "CODING AI"))
             message_queue.put(("message_start", "CODING AI"))
-            message_queue.put(("stream", "exploring...\n"))
-            # Phase 2 status triggers the Coding milestone
-            message_queue.put(("status", "Phase 2: Implementing changes..."))
-            time.sleep(0.02)
-            message_queue.put(("stream", "implementing...\n"))
+            message_queue.put(("stream", "working...\n"))
             message_queue.put(("message_complete", "CODING AI", "Task done"))
             return True, "completed", "server-session", None
 
@@ -1008,7 +1004,7 @@ class TestChadWebUI:
 
         # Collect all chat history snapshots
         all_histories = [u[1] for u in updates if isinstance(u[1], list)]
-        # The final chat history should contain a Coding milestone
+        # The final chat history should contain exactly one Coding milestone
         final_history = all_histories[-1] if all_histories else []
         coding_milestones = [
             msg for msg in final_history
@@ -1020,16 +1016,14 @@ class TestChadWebUI:
         )
 
     def test_coding_milestone_not_duplicated_with_progress_json(self, monkeypatch, web_ui, git_repo):
-        """Coding milestone is not duplicated when both Phase 2 status and progress JSON appear."""
+        """Coding milestone is not duplicated when progress JSON appears in stream."""
 
         def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
             message_queue.put(("ai_switch", "CODING AI"))
             message_queue.put(("message_start", "CODING AI"))
             message_queue.put(("stream", "exploring...\n"))
-            # Phase 2 status first
-            message_queue.put(("status", "Phase 2: Implementing changes..."))
             time.sleep(0.02)
-            # Then progress JSON
+            # Progress JSON in stream
             progress_json = '{"type": "progress", "summary": "Found bug", "location": "x.py:1", "next_step": "Fix"}'
             message_queue.put(("stream", progress_json))
             time.sleep(0.02)
@@ -1052,8 +1046,8 @@ class TestChadWebUI:
             f"Expected exactly 1 Coding milestone even with progress JSON, found {len(coding_milestones)}"
         )
 
-    def test_structured_progress_renders_before_coding_milestone(self, monkeypatch, web_ui, git_repo):
-        """Structured progress events should appear before the coding phase milestone."""
+    def test_structured_progress_renders_after_coding_milestone(self, monkeypatch, web_ui, git_repo):
+        """Structured progress events should appear after the initial coding milestone."""
         from chad.util.prompts import ProgressUpdate
 
         def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
@@ -1061,14 +1055,11 @@ class TestChadWebUI:
             message_queue.put(("message_start", "CODING AI"))
             message_queue.put(("stream", "exploring...\n"))
             time.sleep(0.02)
-            # TaskExecutor emits structured progress before Phase 2 status.
             message_queue.put(("progress", ProgressUpdate(
                 summary="Found bug",
                 location="x.py:1",
                 next_step="Fix",
             )))
-            time.sleep(0.02)
-            message_queue.put(("status", "Phase 2: Implementing changes..."))
             time.sleep(0.02)
             # Delayed echoed JSON should not create a second progress bubble.
             message_queue.put((
@@ -1105,9 +1096,8 @@ class TestChadWebUI:
             f"Expected exactly one coding milestone, got {len(coding_indices)} "
             f"with history: {[m.get('content', '')[:80] for m in final_history if isinstance(m, dict)]}"
         )
-        assert progress_indices[0] < coding_indices[0], (
-            "Progress bubble should be shown before the Coding milestone when structured progress "
-            "arrives first"
+        assert coding_indices[0] < progress_indices[0], (
+            "Coding milestone should appear first since it is inserted at task start"
         )
 
 
@@ -1629,8 +1619,8 @@ class TestClaudeJsonParsingIntegration:
         assert "Mock Agent v1.0" in output
         assert "\x1b" not in output
 
-    def test_run_task_emits_separate_exploration_and_coding_messages(self, web_ui, mock_api_client, git_repo):
-        """Phase 2 transition should close exploration bubble and start a coding bubble."""
+    def test_run_task_emits_single_coding_message(self, web_ui, mock_api_client, git_repo):
+        """Combined coding phase should emit a single message_complete event."""
         import base64
         import queue
         from unittest.mock import Mock
@@ -1641,23 +1631,14 @@ class TestClaudeJsonParsingIntegration:
         ]
 
         mock_session = Mock()
-        mock_session.id = "server-sess-phase-split"
+        mock_session.id = "server-sess-combined"
         mock_api_client.create_session.return_value = mock_session
 
-        exploration = b"Prompt: Exploration\nExploring files...\n"
-        implementation = b"Prompt: Implementation\nApplying fix...\n"
+        coding_output = b"Exploring files...\nApplying fix...\n"
 
-        exploration_event = Mock()
-        exploration_event.event_type = "terminal"
-        exploration_event.data = {"data": base64.b64encode(exploration).decode()}
-
-        phase_event = Mock()
-        phase_event.event_type = "event"
-        phase_event.data = {"type": "status", "status": "Phase 2: Implementing changes..."}
-
-        implementation_event = Mock()
-        implementation_event.event_type = "terminal"
-        implementation_event.data = {"data": base64.b64encode(implementation).decode()}
+        terminal_event = Mock()
+        terminal_event.event_type = "terminal"
+        terminal_event.data = {"data": base64.b64encode(coding_output).decode()}
 
         complete_event = Mock()
         complete_event.event_type = "complete"
@@ -1665,7 +1646,7 @@ class TestClaudeJsonParsingIntegration:
 
         mock_stream_client = Mock()
         mock_stream_client.stream_events.return_value = iter(
-            [exploration_event, phase_event, implementation_event, complete_event]
+            [terminal_event, complete_event]
         )
         web_ui._stream_client = mock_stream_client
 
@@ -1679,8 +1660,7 @@ class TestClaudeJsonParsingIntegration:
         )
 
         assert success
-        assert "Prompt: Exploration" in output
-        assert "Prompt: Implementation" in output
+        assert "Exploring files" in output
 
         completes = []
         while not message_queue.empty():
@@ -1688,9 +1668,9 @@ class TestClaudeJsonParsingIntegration:
             if msg[0] == "message_complete":
                 completes.append(msg[2])
 
-        assert len(completes) == 2
-        assert "Prompt: Exploration" in completes[0]
-        assert "Prompt: Implementation" in completes[1]
+        # Combined model: single message_complete event
+        assert len(completes) == 1
+        assert "Exploring files" in completes[0]
 
     def test_run_task_reused_session_streams_only_new_events(self, web_ui, mock_api_client, git_repo):
         """Reused server sessions should stream from latest sequence, not from the beginning."""
@@ -4600,11 +4580,10 @@ class TestPromptPreviews:
         from chad.util.prompts import build_prompt_previews
 
         previews = build_prompt_previews(None)
-        assert "{task}" in previews.exploration
-        assert "{task}" in previews.implementation
+        assert "{task}" in previews.coding
         assert "{task}" in previews.verification
-        assert "{exploration_output}" in previews.implementation
-        assert "Project Documentation" not in previews.exploration
+        assert "EXPLORATION_RESULT:" in previews.coding
+        assert "Project Documentation" not in previews.coding
 
     def test_previews_with_project_path(self, tmp_path):
         """Previews with a project path should include docs and verification instructions."""
@@ -4616,18 +4595,17 @@ class TestPromptPreviews:
 
         previews = build_prompt_previews(tmp_path)
         # Should still have {task} placeholder
-        assert "{task}" in previews.exploration
-        assert "{task}" in previews.implementation
+        assert "{task}" in previews.coding
         # Should have project docs filled in (reference to AGENTS.md)
-        assert "AGENTS.md" in previews.exploration
-        assert "AGENTS.md" in previews.implementation
+        assert "AGENTS.md" in previews.coding
 
-    def test_previews_keep_exploration_output_placeholder(self):
-        """Implementation preview should keep {exploration_output} as placeholder."""
+    def test_previews_legacy_aliases(self):
+        """Legacy exploration/implementation aliases should map to coding prompt."""
         from chad.util.prompts import build_prompt_previews
 
         previews = build_prompt_previews(None)
-        assert "{exploration_output}" in previews.implementation
+        assert previews.exploration == previews.coding
+        assert previews.implementation == previews.coding
 
     def test_previews_verification_has_coding_output_placeholder(self):
         """Verification preview should keep {coding_output} as placeholder."""
@@ -4640,9 +4618,9 @@ class TestPromptPreviews:
 class TestScreenshotUpload:
     """Tests for screenshot upload functionality."""
 
-    def test_exploration_prompt_includes_screenshot_paths(self, tmp_path):
-        """build_exploration_prompt should include screenshot file paths when provided."""
-        from chad.util.prompts import build_exploration_prompt
+    def test_coding_prompt_includes_screenshot_paths(self, tmp_path):
+        """build_prompt should include screenshot file paths when provided."""
+        from chad.util.prompts import build_prompt
 
         # Create test screenshot files
         screenshot1 = tmp_path / "screenshot1.png"
@@ -4650,7 +4628,7 @@ class TestScreenshotUpload:
         screenshot1.write_bytes(b"PNG mock data 1")
         screenshot2.write_bytes(b"PNG mock data 2")
 
-        prompt = build_exploration_prompt(
+        prompt = build_prompt(
             task="Fix the UI layout",
             screenshots=[str(screenshot1), str(screenshot2)],
         )
@@ -4661,29 +4639,25 @@ class TestScreenshotUpload:
         # Should have a screenshots section
         assert "Screenshot" in prompt or "screenshot" in prompt
 
-    def test_exploration_prompt_works_without_screenshots(self):
-        """build_exploration_prompt should work without screenshots (backwards compatible)."""
-        from chad.util.prompts import build_exploration_prompt
+    def test_coding_prompt_works_without_screenshots(self):
+        """build_prompt should work without screenshots."""
+        from chad.util.prompts import build_prompt
 
-        prompt = build_exploration_prompt(task="Simple task")
+        prompt = build_prompt(task="Simple task")
 
         assert "Simple task" in prompt
         # No screenshot references should be present
         assert "Screenshot" not in prompt
 
-    def test_exploration_prompt_includes_phase_info(self):
-        """Exploration prompt should include phase info, class-map guidance, and progress JSON requirement."""
-        from chad.util.prompts import build_exploration_prompt
+    def test_coding_prompt_includes_exploration_markers(self):
+        """Coding prompt should include EXPLORATION_RESULT markers and completion JSON requirement."""
+        from chad.util.prompts import build_prompt
 
-        prompt = build_exploration_prompt(task="Do thing")
-        # Should have Phase 1 marker
-        assert "Phase 1" in prompt
-        # Exploration should steer agents toward using the class map when present
-        assert "Class Map" in prompt
-        # Progress update requirement should be present
-        assert "progress" in prompt.lower()
-        # Time constraint should be present (60 seconds for exploration)
-        assert "60 seconds" in prompt or "within" in prompt.lower()
+        prompt = build_prompt(task="Do thing")
+        # Should have EXPLORATION_RESULT marker instruction
+        assert "EXPLORATION_RESULT:" in prompt
+        # Completion JSON requirement should be present
+        assert "change_summary" in prompt
 
     def test_progress_is_extracted_correctly(self):
         """Progress JSON should be correctly extracted from agent output.

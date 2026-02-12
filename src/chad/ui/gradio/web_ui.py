@@ -44,8 +44,7 @@ from chad.util.handoff import (
 from chad.util.providers import ModelConfig, parse_codex_output, create_provider
 from chad.util.model_catalog import ModelCatalog
 from chad.util.prompts import (
-    build_exploration_prompt,
-    build_implementation_prompt,
+    build_prompt,
     build_prompt_previews,
     extract_coding_summary,
     extract_progress_update,
@@ -93,8 +92,7 @@ class Session:
     has_worktree_changes: bool = False
     merge_conflicts: list[MergeConflict] | None = None
     # Prompt tracking for display
-    last_exploration_prompt: str | None = None
-    last_implementation_prompt: str | None = None
+    last_coding_prompt: str | None = None
     last_verification_prompt: str | None = None
     # Live stream DOM patching support - track if initial render is done
     has_initial_live_render: bool = False
@@ -2305,8 +2303,7 @@ class ChadWebUI:
         server_session_id: str | None = None,
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
-        override_exploration_prompt: str | None = None,
-        override_implementation_prompt: str | None = None,
+        override_prompt: str | None = None,
     ) -> tuple[bool, str, str | None, dict | None]:
         """Run a task via the API and post events to the message queue.
 
@@ -2323,6 +2320,7 @@ class ChadWebUI:
             coding_reasoning: Optional reasoning level
             terminal_cols: Terminal width in columns (calculated from panel width)
             screenshots: Optional list of screenshot file paths for agent reference
+            override_prompt: Optional user-edited coding prompt
 
         Returns:
             Tuple of (success, final_output_text, server_session_id, work_done)
@@ -2375,8 +2373,7 @@ class ChadWebUI:
                 terminal_rows=TERMINAL_ROWS,
                 terminal_cols=effective_cols,
                 screenshots=screenshots,
-                override_exploration_prompt=override_exploration_prompt,
-                override_implementation_prompt=override_implementation_prompt,
+                override_prompt=override_prompt,
             )
         except Exception as e:
             message_queue.put(("status", f"❌ Failed to start task: {e}"))
@@ -2407,7 +2404,6 @@ class ChadWebUI:
         # currently active chat phase (exploration vs implementation message bubbles).
         full_output_chunks: list[str] = []
         phase_output_chunks: list[str] = []
-        phase_message_split_done = False
 
         def _record_output_chunk(chunk: str) -> None:
             if not chunk:
@@ -2608,16 +2604,6 @@ class ChadWebUI:
                     elif event_type == "status":
                         status_text = event.data.get("status", "")
                         if status_text:
-                            if (
-                                status_text == "Phase 2: Implementing changes..."
-                                and not phase_message_split_done
-                            ):
-                                exploration_output = _sanitize_terminal_text("\n".join(phase_output_chunks)).strip()
-                                if exploration_output:
-                                    message_queue.put(("message_complete", "CODING AI", exploration_output))
-                                    message_queue.put(("message_start", "CODING AI"))
-                                    phase_message_split_done = True
-                                phase_output_chunks = []
                             message_queue.put(("status", status_text))
                     elif event_type == "progress":
                         summary = str(event.data.get("summary", "")).strip()
@@ -3472,8 +3458,7 @@ class ChadWebUI:
         verification_reasoning: str | None = None,
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
-        override_exploration_prompt: str | None = None,
-        override_implementation_prompt: str | None = None,
+        override_prompt: str | None = None,
     ) -> Iterator[
         tuple[
             list,
@@ -3541,10 +3526,8 @@ class ChadWebUI:
                             gr.update(),  # diff_full_content
                             "",  # merge_section_header
                             "",  # live_patch_trigger
-                            gr.update(),  # exploration_prompt_accordion
-                            gr.update(),  # exploration_prompt_content
-                            gr.update(),  # implementation_prompt_accordion
-                            gr.update(),  # implementation_prompt_content
+                            gr.update(),  # coding_prompt_accordion
+                            gr.update(),  # coding_prompt_content
                             gr.update(),  # verification_prompt_accordion
                             gr.update(),  # verification_prompt_content
                         )
@@ -3570,10 +3553,12 @@ class ChadWebUI:
             live_patch: tuple[str, str] | None = None,
             task_state: str | None = None,
             task_ended: bool = False,
-            exploration_prompt: str | None = None,
-            implementation_prompt: str | None = None,
+            coding_prompt: str | None = None,
             verification_prompt: str | None = None,
             verification_account: str | None = None,
+            # Legacy aliases
+            exploration_prompt: str | None = None,
+            implementation_prompt: str | None = None,
         ):
             """Format output tuple for Gradio with current UI state.
 
@@ -3627,33 +3612,23 @@ class ChadWebUI:
             # This allows JS to patch the DOM in-place without Gradio replacing it
             live_stream_update = gr.update() if display_stream is None else gr.update(value=display_stream)
             # Prompt textboxes - update content and interactivity based on phase
-            # During task: lock prompts for phases that have started
+            # During task: lock prompts that have started
             # After task ends: unlock all prompts for editing
-            _explore_interactive = True if task_ended else (
+            # Handle legacy aliases
+            effective_coding_prompt = coding_prompt or exploration_prompt or implementation_prompt
+            _coding_interactive = True if task_ended else (
                 True if task_state is None else False
-            )
-            _impl_interactive = True if task_ended else (
-                True if task_state is None else (
-                    task_state == "running"  # Still editable during exploration
-                )
             )
             _verif_interactive = True if task_ended else (
                 True if task_state is None else (
-                    task_state in ("running",)  # Still editable during exploration/implementation
+                    task_state in ("running",)
                 )
             )
-            _explore_acc = gr.update(visible=True) if exploration_prompt else gr.update()
-            _explore_val = (
-                gr.update(value=exploration_prompt, interactive=_explore_interactive)
-                if exploration_prompt else (
-                    gr.update(interactive=_explore_interactive) if task_state is not None or task_ended else gr.update()
-                )
-            )
-            _impl_acc = gr.update(visible=True) if implementation_prompt else gr.update()
-            _impl_val = (
-                gr.update(value=implementation_prompt, interactive=_impl_interactive)
-                if implementation_prompt else (
-                    gr.update(interactive=_impl_interactive) if task_state is not None or task_ended else gr.update()
+            _coding_acc = gr.update(visible=True) if effective_coding_prompt else gr.update()
+            _coding_val = (
+                gr.update(value=effective_coding_prompt, interactive=_coding_interactive)
+                if effective_coding_prompt else (
+                    gr.update(interactive=_coding_interactive) if task_state is not None or task_ended else gr.update()
                 )
             )
             _verif_acc = gr.update(visible=True) if verification_prompt else gr.update()
@@ -3683,8 +3658,7 @@ class ChadWebUI:
                 gr.update(value=diff_full),  # Full diff content
                 header_text,  # merge_section_header - dynamic header
                 patch_html,  # live_patch_trigger - JS reads this to patch content
-                _explore_acc, _explore_val,
-                _impl_acc, _impl_val,
+                _coding_acc, _coding_val,
                 _verif_acc, _verif_val,
             )
 
@@ -3791,32 +3765,24 @@ class ChadWebUI:
             chat_history.append({"role": "user", "content": f"**Task**\n\n{task_description}"})
             session.event_log.log(UserMessageEvent(content=task_description))
 
-            # Build the exploration and implementation prompts for display
-            # Use override prompts if user edited them, otherwise auto-generate
+            # Build the coding prompt for display
+            # Use override prompt if user edited it, otherwise auto-generate
             project_docs = self._read_project_docs(path_obj)
-            display_exploration_prompt = override_exploration_prompt or build_exploration_prompt(
+            display_coding_prompt = override_prompt or build_prompt(
                 task_description, project_docs, str(path_obj)
             )
-            display_implementation_prompt = override_implementation_prompt or build_implementation_prompt(
-                task_description,
-                "{exploration_output}",  # Placeholder until exploration completes
-                project_docs,
-                str(path_obj),
-            )
-            session.last_exploration_prompt = display_exploration_prompt
-            session.last_implementation_prompt = display_implementation_prompt
+            session.last_coding_prompt = display_coding_prompt
 
-            # Insert exploration phase milestone
+            # Insert coding phase milestone
             chat_history.append(
-                self._make_phase_milestone("Exploration", coding_account, selected_model)
+                self._make_phase_milestone("Coding", coding_account, selected_model)
             )
 
             initial_status = f"{status_prefix}⏳ Initializing session..."
             yield make_yield(
                 chat_history, initial_status, summary=initial_status, interactive=False,
                 task_state="running",
-                exploration_prompt=display_exploration_prompt,
-                implementation_prompt=display_implementation_prompt,
+                coding_prompt=display_coding_prompt,
             )
 
             # Use the streaming API to run the task
@@ -3839,8 +3805,7 @@ class ChadWebUI:
                         coding_reasoning=selected_reasoning if selected_reasoning != "default" else None,
                         terminal_cols=terminal_cols,
                         screenshots=screenshots,
-                        override_exploration_prompt=override_exploration_prompt,
-                        override_implementation_prompt=override_implementation_prompt,
+                        override_prompt=override_prompt,
                     )
                     # Store work_done for later use in revision context
                     session.last_work_done = work_done
@@ -3905,7 +3870,7 @@ class ChadWebUI:
             pending_message_idx = None
             render_state = LiveStreamRenderState()
             progress_emitted = False  # Track if we've shown a progress update bubble
-            coding_milestone_emitted = False  # Track if we've shown the Coding milestone
+            coding_milestone_emitted = True  # Already inserted at start of coding phase
             while not relay_complete.is_set() and not session.cancel_requested:
                 try:
                     msg = message_queue.get(timeout=0.02)
@@ -3963,17 +3928,6 @@ class ChadWebUI:
                         current_live_stream = ""
                         latest_pyte_html = ""
                         render_state.reset()
-                        # Insert Coding milestone when Phase 2 starts
-                        if "Phase 2" in msg[1] and not coding_milestone_emitted:
-                            coding_milestone_emitted = True
-                            coding_milestone = self._make_phase_milestone(
-                                "Coding", coding_account, selected_model
-                            )
-                            if pending_message_idx is not None:
-                                chat_history.insert(pending_message_idx, coding_milestone)
-                                pending_message_idx += 1
-                            else:
-                                chat_history.append(coding_milestone)
                         summary_text = current_status
                         yield make_yield(
                             chat_history,
@@ -6536,32 +6490,15 @@ class ChadWebUI:
 
                             # Prompt display accordions - editable textboxes
                             with gr.Accordion(
-                                "Exploration Prompt",
+                                "Coding Prompt",
                                 open=False,
                                 visible=True,
-                                key=f"exploration-prompt-accordion-{session_id}",
+                                key=f"coding-prompt-accordion-{session_id}",
                                 elem_classes=["prompt-accordion"],
-                            ) as exploration_prompt_accordion:
-                                exploration_prompt_display = gr.Textbox(
-                                    value=_initial_previews.exploration,
-                                    key=f"exploration-prompt-display-{session_id}",
-                                    elem_classes=["prompt-display"],
-                                    lines=10,
-                                    max_lines=30,
-                                    interactive=True,
-                                    show_label=False,
-                                )
-
-                            with gr.Accordion(
-                                "Implementation Prompt",
-                                open=False,
-                                visible=True,
-                                key=f"implementation-prompt-accordion-{session_id}",
-                                elem_classes=["prompt-accordion"],
-                            ) as implementation_prompt_accordion:
-                                implementation_prompt_display = gr.Textbox(
-                                    value=_initial_previews.implementation,
-                                    key=f"implementation-prompt-display-{session_id}",
+                            ) as coding_prompt_accordion:
+                                coding_prompt_display = gr.Textbox(
+                                    value=_initial_previews.coding,
+                                    key=f"coding-prompt-display-{session_id}",
                                     elem_classes=["prompt-display"],
                                     lines=10,
                                     max_lines=30,
@@ -6906,8 +6843,7 @@ class ChadWebUI:
                     gr.update(value=""),
                     "",
                     "",
-                    gr.update(value=empty_previews.exploration),
-                    gr.update(value=empty_previews.implementation),
+                    gr.update(value=empty_previews.coding),
                     gr.update(value=empty_previews.verification),
                 )
             path_obj = Path(path_val).expanduser().resolve()
@@ -6920,8 +6856,7 @@ class ChadWebUI:
                     gr.update(value=""),
                     "",
                     "",
-                    gr.update(value=empty_previews.exploration),
-                    gr.update(value=empty_previews.implementation),
+                    gr.update(value=empty_previews.coding),
                     gr.update(value=empty_previews.verification),
                 )
 
@@ -6939,8 +6874,7 @@ class ChadWebUI:
                     gr.update(value=(docs.architecture_path or "")),
                     "",
                     "",
-                    gr.update(value=previews.exploration),
-                    gr.update(value=previews.implementation),
+                    gr.update(value=previews.coding),
                     gr.update(value=previews.verification),
                 )
 
@@ -6955,8 +6889,7 @@ class ChadWebUI:
                 gr.update(value=detected_docs.architecture_path or ""),
                 "",
                 "",
-                gr.update(value=previews.exploration),
-                gr.update(value=previews.implementation),
+                gr.update(value=previews.coding),
                 gr.update(value=previews.verification),
             )
 
@@ -6971,8 +6904,7 @@ class ChadWebUI:
                 architecture_input,
                 lint_status,
                 test_status,
-                exploration_prompt_display,
-                implementation_prompt_display,
+                coding_prompt_display,
                 verification_prompt_display,
             ],
         )
@@ -7119,8 +7051,7 @@ class ChadWebUI:
             v_model,
             v_reason,
             term_cols,
-            explore_prompt_val,
-            impl_prompt_val,
+            coding_prompt_val,
         ):
             # Extract text and file paths from MultimodalTextbox
             task_desc = ""
@@ -7134,18 +7065,13 @@ class ChadWebUI:
                 else:
                     task_desc = str(task_input)
 
-            # Detect if user edited prompts by comparing with auto-generated defaults
-            override_explore = None
-            override_impl = None
-            if task_desc and proj_path:
+            # Detect if user edited the coding prompt
+            override_prompt = None
+            if task_desc and proj_path and coding_prompt_val:
                 from chad.util.prompts import build_prompt_previews as _bpp
                 defaults = _bpp(proj_path)
-                if explore_prompt_val and explore_prompt_val.strip() != defaults.exploration.strip():
-                    # Replace {task} placeholder with actual task description
-                    override_explore = explore_prompt_val.replace("{task}", task_desc)
-                if impl_prompt_val and impl_prompt_val.strip() != defaults.implementation.strip():
-                    # Replace {task} placeholder; {exploration_output} is replaced server-side
-                    override_impl = impl_prompt_val.replace("{task}", task_desc)
+                if coding_prompt_val.strip() != defaults.coding.strip():
+                    override_prompt = coding_prompt_val.replace("{task}", task_desc)
 
             yield from self.start_chad_task(
                 session_id,
@@ -7159,8 +7085,7 @@ class ChadWebUI:
                 v_reason,
                 terminal_cols=int(term_cols) if term_cols else None,
                 screenshots=screenshot_paths,
-                override_exploration_prompt=override_explore,
-                override_implementation_prompt=override_impl,
+                override_prompt=override_prompt,
             )
 
         def cancel_wrapper():
@@ -7230,8 +7155,7 @@ class ChadWebUI:
             verification_model,
             verification_reasoning,
             terminal_cols_state,
-            exploration_prompt_display,
-            implementation_prompt_display,
+            coding_prompt_display,
         ]
         _task_start_outputs = [
             live_stream,
@@ -7252,10 +7176,8 @@ class ChadWebUI:
             diff_content,
             merge_section_header,
             live_patch_trigger,
-            exploration_prompt_accordion,
-            exploration_prompt_display,
-            implementation_prompt_accordion,
-            implementation_prompt_display,
+            coding_prompt_accordion,
+            coding_prompt_display,
             verification_prompt_accordion,
             verification_prompt_display,
         ]
