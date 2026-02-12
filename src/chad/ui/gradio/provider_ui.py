@@ -2009,6 +2009,68 @@ class ProviderUIManager:
                     base_response = self.provider_action_response(result, card_slots)
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
 
+            elif provider_type == "mistral":
+                # Mistral uses interactive vibe setup to configure credentials.
+                import time
+
+                vibe_cli = cli_detail or "vibe"
+                is_windows = self._is_windows()
+                vibe_config = safe_home() / ".vibe" / "config.toml"
+
+                login_success, _ = self._check_provider_login(provider_type, account_name)
+
+                if not login_success:
+                    try:
+                        if is_windows:
+                            CREATE_NEW_CONSOLE = 0x00000010
+                            process = subprocess.Popen(
+                                [vibe_cli, "--setup"],
+                                creationflags=CREATE_NEW_CONSOLE,
+                            )
+
+                            start_time = time.time()
+                            timeout_secs = 120
+                            while time.time() - start_time < timeout_secs:
+                                if vibe_config.exists():
+                                    login_success = True
+                                    break
+                                time.sleep(2)
+
+                            try:
+                                process.terminate()
+                            except Exception:
+                                pass
+                        else:
+                            subprocess.run([vibe_cli, "--setup"], timeout=120)
+                            login_success, _ = self._check_provider_login(provider_type, account_name)
+                    except FileNotFoundError:
+                        result = (
+                            "❌ Mistral Vibe CLI not found.\n\n"
+                            "Please install Mistral Vibe first:\n"
+                            "```\npip install mistral-vibe\n```"
+                        )
+                        base_response = self.provider_action_response(result, card_slots)
+                        return (*base_response, name_field_value, add_btn_state, accordion_state)
+                    except Exception:
+                        pass
+
+                if login_success:
+                    self.api_client.create_account(account_name, provider_type)
+                    result = f"✅ Provider '{account_name}' added and logged in!"
+                    name_field_value = ""
+                    add_btn_state = gr.update(interactive=False)
+                    accordion_state = gr.update(open=False)
+                else:
+                    if is_windows:
+                        result = (
+                            f"❌ Login timed out for '{account_name}'.\n\n"
+                            "A Mistral Vibe CLI window should have opened. Please try again."
+                        )
+                    else:
+                        result = f"❌ Login failed for '{account_name}'. Please try again."
+                    base_response = self.provider_action_response(result, card_slots)
+                    return (*base_response, name_field_value, add_btn_state, accordion_state)
+
             elif provider_type == "kimi":
                 # Kimi login via `kimi login --json` which emits structured JSON events.
                 # The CLI itself opens the browser — we must NOT open it again.
@@ -2139,32 +2201,16 @@ class ProviderUIManager:
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
 
             else:
-                # Generic flow for mistral and other providers
+                # Generic flow for providers without dedicated login steps
                 login_success, login_msg = self._check_provider_login(provider_type, account_name)
-                auth_info = {
-                    "mistral": ("vibe --setup", "Set up your Mistral API key"),
-                }
-
-                # Gate account creation for providers that require up-front CLI auth.
-                if provider_type in auth_info and not login_success:
-                    auth_cmd, auth_desc = auth_info[provider_type]
-                    result = (
-                        f"❌ {provider_type.capitalize()} is not logged in yet.\n\n"
-                        f"Run `{auth_cmd}` in terminal ({auth_desc}), then add this provider again."
-                    )
-                    base_response = self.provider_action_response(result, card_slots)
-                    return (*base_response, name_field_value, add_btn_state, accordion_state)
 
                 self.api_client.create_account(account_name, provider_type)
                 result = f"✓ Provider '{account_name}' ({provider_type}) added."
 
                 if login_success:
                     result += f" ✅ {login_msg}"
-                else:
+                elif login_msg:
                     result += f" ⚠️ {login_msg}"
-                    auth_cmd, auth_desc = auth_info.get(provider_type, ("unknown", ""))
-                    if auth_cmd != "unknown":
-                        result += f" — manual login: run `{auth_cmd}` ({auth_desc})"
 
                 name_field_value = ""
                 add_btn_state = gr.update(interactive=False)
