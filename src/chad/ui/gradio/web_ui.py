@@ -98,6 +98,8 @@ class Session:
     has_initial_live_render: bool = False
     # Persistent live stream content for tab switch restoration
     last_live_stream: str = ""
+    # Session limit tracking
+    session_limit_summary: str | None = None
     # Track file modifications from last coding run (for revision context)
     last_work_done: dict | None = None
 
@@ -2619,9 +2621,10 @@ class ChadWebUI:
                     elif event_type == "milestone":
                         # Server-side milestone from SessionEventLoop
                         milestone_type = event.data.get("milestone_type", "")
+                        title = event.data.get("title", "")
                         summary = event.data.get("summary", "")
                         if summary:
-                            message_queue.put(("milestone", milestone_type, summary))
+                            message_queue.put(("milestone", milestone_type, title, summary))
                     elif event_type == "terminal_output":
                         # Fallback for parsed terminal output from EventLog
                         # This ensures content is shown even if raw PTY parsing fails
@@ -3487,6 +3490,7 @@ class ChadWebUI:
         prior_cancel_requested = session.cancel_requested
         session.cancel_requested = False
         session.config = None
+        session.session_limit_summary = None
 
         # Check if there's already an active task on the server for this session
         # This prevents accidental double-starts when generators get interrupted
@@ -4004,23 +4008,24 @@ class ChadWebUI:
 
                     elif msg_type == "milestone":
                         milestone_type = msg[1]
-                        milestone_summary = msg[2]
-                        # Only show exploration milestones as chat bubbles
-                        if milestone_type == "exploration":
-                            milestone_msg = {
-                                "role": "user",
-                                "content": f"**Discovery:** {milestone_summary}",
-                            }
-                            if pending_message_idx is not None:
-                                chat_history.insert(pending_message_idx, milestone_msg)
-                                pending_message_idx += 1
-                            else:
-                                chat_history.append(milestone_msg)
-                            yield make_yield(
-                                chat_history, current_status, last_live_stream,
-                                task_state="running",
-                            )
-                            last_yield_time = time_module.time()
+                        milestone_title = msg[2]
+                        milestone_summary = msg[3]
+                        if milestone_type == "session_limit_reached":
+                            session.session_limit_summary = milestone_summary
+                        milestone_msg = {
+                            "role": "user",
+                            "content": f"**{milestone_title}:** {milestone_summary}",
+                        }
+                        if pending_message_idx is not None:
+                            chat_history.insert(pending_message_idx, milestone_msg)
+                            pending_message_idx += 1
+                        else:
+                            chat_history.append(milestone_msg)
+                        yield make_yield(
+                            chat_history, current_status, last_live_stream,
+                            task_state="running",
+                        )
+                        last_yield_time = time_module.time()
 
                     elif msg_type == "ai_switch":
                         current_ai = msg[1]
@@ -4203,6 +4208,9 @@ class ChadWebUI:
                                 ))
                             # Keep showing last live stream content during transition to verification
                             yield make_yield(chat_history, current_status, last_live_stream, task_state="running")
+                        elif msg_type == "milestone":
+                            if msg[1] == "session_limit_reached":
+                                session.session_limit_summary = msg[3]
                     except queue.Empty:
                         break
 
@@ -4718,9 +4726,13 @@ class ChadWebUI:
                                         blocks=[{"kind": "text", "content": revision_output[:1000]}]
                                     ))
                             else:
+                                if session.session_limit_summary:
+                                    failure_detail = session.session_limit_summary
+                                else:
+                                    failure_detail = "Revision task did not complete successfully"
                                 chat_history.insert(revision_pending_idx, {
                                     "role": "assistant",
-                                    "content": "**CODING AI**\n\n❌ *Revision task did not complete successfully*",
+                                    "content": f"**CODING AI**\n\n❌ *{failure_detail}*",
                                 })
                                 break
 
@@ -4762,17 +4774,21 @@ class ChadWebUI:
                             completion_msg += f"\n\n*{verification_feedback}*"
                     chat_history.append({"role": "user", "content": completion_msg})
             else:
-                sanitized_reason = completion_reason[0] or ""
-                if "End your response with a JSON summary block" in sanitized_reason or '"change_summary": "One sentence describing what was changed"' in sanitized_reason:
-                    sanitized_reason = "Task ended before producing any agent output."
-                final_status = (
-                    f"❌ Task did not complete successfully\n\n*{sanitized_reason}*"
-                    if sanitized_reason
-                    else "❌ Task did not complete successfully"
-                )
-                failure_msg = "───────────── ❌ TASK FAILED ─────────────"
-                if sanitized_reason:
-                    failure_msg += f"\n\n*{sanitized_reason}*"
+                if session.session_limit_summary:
+                    final_status = f"❌ {session.session_limit_summary}"
+                    failure_msg = f"───────────── ❌ SESSION LIMIT ─────────────\n\n*{session.session_limit_summary}*"
+                else:
+                    sanitized_reason = completion_reason[0] or ""
+                    if "End your response with a JSON summary block" in sanitized_reason or '"change_summary": "One sentence describing what was changed"' in sanitized_reason:
+                        sanitized_reason = "Task ended before producing any agent output."
+                    final_status = (
+                        f"❌ Task did not complete successfully\n\n*{sanitized_reason}*"
+                        if sanitized_reason
+                        else "❌ Task did not complete successfully"
+                    )
+                    failure_msg = "───────────── ❌ TASK FAILED ─────────────"
+                    if sanitized_reason:
+                        failure_msg += f"\n\n*{sanitized_reason}*"
                 chat_history.append({"role": "user", "content": failure_msg})
 
             if final_status:
@@ -5245,18 +5261,19 @@ class ChadWebUI:
 
                 elif msg_type == "milestone":
                     milestone_type = msg[1]
-                    milestone_summary = msg[2]
-                    if milestone_type == "exploration":
-                        milestone_msg = {
-                            "role": "user",
-                            "content": f"**Discovery:** {milestone_summary}",
-                        }
-                        chat_history.append(milestone_msg)
-                        yield make_followup_yield(
-                            chat_history, live_stream,
-                            working=True, merge_updates=merge_no_change,
-                        )
-                        last_yield_time = time_module.time()
+                    milestone_title = msg[2]
+                    milestone_summary = msg[3]
+                    if milestone_type == "session_limit_reached":
+                        session.session_limit_summary = milestone_summary
+                    chat_history.append({
+                        "role": "user",
+                        "content": f"**{milestone_title}:** {milestone_summary}",
+                    })
+                    yield make_followup_yield(
+                        chat_history, live_stream,
+                        working=True, merge_updates=merge_no_change,
+                    )
+                    last_yield_time = time_module.time()
 
                 elif msg_type == "activity":
                     now = time_module.time()

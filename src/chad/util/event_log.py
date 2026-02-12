@@ -258,7 +258,9 @@ class MilestoneEvent(EventBase):
 
     milestone_type: str = ""
     # Types: exploration, coding_complete, verification_started,
-    # verification_passed, verification_failed, revision_started
+    # verification_passed, verification_failed, revision_started,
+    # session_limit_reached
+    title: str = ""  # Display-ready title for UIs (e.g. "Discovery", "Session Limit")
     summary: str = ""
     details: dict[str, Any] = field(default_factory=dict)
 
