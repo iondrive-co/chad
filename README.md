@@ -2,8 +2,9 @@
 
 Coding agents need hand holding to implement complex features, but no one holds Chad's hand. 
 
-Add one or more Codex, Claude Code, Gemini, Qwen, or Mistral Vibe coding agent sessions, ask for a coding task, and Chad 
-will verify and ralph loop to deliver a one-shot result.
+Add one or more OpenAI Codex, Claude Code, Google Gemini, Alibaba Qwen, Mistral Vibe, Moonshot Kimi, or OpenCode coding 
+agents, decide what happens when you reach a limit (wait for the reset and continue, switch provider), ask for a coding 
+task, and Chad will ralph loop to deliver a one-shot result.
 
 <p style="text-align: center;">
   <img src="docs/Chad.png" alt="Chad Code" width="80">
@@ -23,7 +24,9 @@ chad
 
 ### How is this better than $Grug?
 
--> Gradio UI to manage multiple coding agents, monitor usage quotas, run multiple tasks in parallel and merge results:
+Chad provides a Gradio UI to switch between coding agents (tokens encrypted with a master password you create and 
+provide for each session), monitors usage quotas, switches between providers, runs multiple tasks in parallel with 
+result merging from their worktrees:
 <details open>
 <summary><b>Screenshots</b></summary>
 
@@ -33,18 +36,10 @@ chad
 #### Monitor multiple provider accounts with usage tracking
 <img src="docs/screenshot-providers.png" width="800" alt="Providers tab">
 
-#### View task details
-<img src="docs/screenshot-conversation.png" width="800" alt="Completed task conversation">
-
-#### Run multiple tasks in parallel
-<img src="docs/screenshot-task-tabs.png" width="800" alt="Multiple task tabs">
-
 #### Resolve merge conflicts
 <img src="docs/screenshot-merge-conflicts.png" width="800" alt="Merge conflict resolution">
 
 </details>
-
--> Provider tokens encrypted with a master password you create and provide for each session
 
 ### Is this satire? What are you even doing here?
 
