@@ -1132,6 +1132,41 @@ class TestChadWebUI:
             "Coding milestone should appear first since it is inserted at task start"
         )
 
+    def test_exploration_milestones_appear_in_chat_history(self, monkeypatch, web_ui, git_repo):
+        """Server-side exploration milestones should appear as Discovery chat bubbles."""
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", "exploring...\n"))
+            time.sleep(0.02)
+            # Server-side milestones flow through SSE as ("milestone", type, summary)
+            message_queue.put(("milestone", "exploration", "Found auth logic in src/auth.py"))
+            message_queue.put(("milestone", "exploration", "Config is loaded from ~/.app/config"))
+            time.sleep(0.02)
+            message_queue.put(("stream", "implementing...\n"))
+            message_queue.put(("message_complete", "CODING AI", "Task done"))
+            return True, "completed", "server-session", None
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("test")
+        updates = list(web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+
+        all_histories = [u[1] for u in updates if isinstance(u[1], list)]
+        final_history = all_histories[-1] if all_histories else []
+
+        discovery_msgs = [
+            msg for msg in final_history
+            if isinstance(msg, dict) and "**Discovery:**" in msg.get("content", "")
+        ]
+        assert len(discovery_msgs) == 2, (
+            f"Expected 2 discovery milestones, found {len(discovery_msgs)}. "
+            f"History: {[m.get('content', '')[:60] for m in final_history if isinstance(m, dict)]}"
+        )
+        assert "src/auth.py" in discovery_msgs[0]["content"]
+        assert "config" in discovery_msgs[1]["content"].lower()
+
 
 class TestClaudeJsonParsingIntegration:
     """Tests for Claude stream-json parsing in the web UI."""
@@ -1703,6 +1738,64 @@ class TestClaudeJsonParsingIntegration:
         # Combined model: single message_complete event
         assert len(completes) == 1
         assert "Exploring files" in completes[0]
+
+    def test_run_task_emits_milestone_events_from_sse(self, web_ui, mock_api_client, git_repo):
+        """Milestone events from SSE stream should be forwarded to the message queue."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="mock-coding", provider="mock", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-milestone"
+        mock_api_client.create_session.return_value = mock_session
+
+        terminal_event = Mock()
+        terminal_event.event_type = "terminal"
+        terminal_event.data = {"data": base64.b64encode(b"working...\n").decode()}
+
+        milestone_event = Mock()
+        milestone_event.event_type = "event"
+        milestone_event.data = {
+            "type": "milestone",
+            "milestone_type": "exploration",
+            "summary": "Found the bug in main.py",
+        }
+
+        complete_event = Mock()
+        complete_event.event_type = "complete"
+        complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter(
+            [terminal_event, milestone_event, complete_event]
+        )
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="mock-coding",
+            message_queue=message_queue,
+        )
+
+        assert success
+
+        milestones = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "milestone":
+                milestones.append(msg)
+
+        assert len(milestones) == 1
+        assert milestones[0][1] == "exploration"
+        assert milestones[0][2] == "Found the bug in main.py"
 
     def test_run_task_reused_session_streams_only_new_events(self, web_ui, mock_api_client, git_repo):
         """Reused server sessions should stream from latest sequence, not from the beginning."""
