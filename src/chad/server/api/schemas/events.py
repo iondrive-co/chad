@@ -177,6 +177,7 @@ class MilestoneEventSchema(EventBaseSchema):
 
     type: Literal["milestone"] = "milestone"
     milestone_type: str = Field(description="Type: exploration, coding_complete, verification_started, etc.")
+    title: str = Field(default="", description="Display-ready title for UIs (e.g. Discovery, Session Limit)")
     summary: str = Field(description="Human-readable milestone summary")
     details: dict[str, Any] = Field(default_factory=dict, description="Structured milestone details")
 

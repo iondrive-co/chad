@@ -1140,9 +1140,9 @@ class TestChadWebUI:
             message_queue.put(("message_start", "CODING AI"))
             message_queue.put(("stream", "exploring...\n"))
             time.sleep(0.02)
-            # Server-side milestones flow through SSE as ("milestone", type, summary)
-            message_queue.put(("milestone", "exploration", "Found auth logic in src/auth.py"))
-            message_queue.put(("milestone", "exploration", "Config is loaded from ~/.app/config"))
+            # Server-side milestones flow through SSE as ("milestone", type, title, summary)
+            message_queue.put(("milestone", "exploration", "Discovery", "Found auth logic in src/auth.py"))
+            message_queue.put(("milestone", "exploration", "Discovery", "Config is loaded from ~/.app/config"))
             time.sleep(0.02)
             message_queue.put(("stream", "implementing...\n"))
             message_queue.put(("message_complete", "CODING AI", "Task done"))
@@ -1166,6 +1166,86 @@ class TestChadWebUI:
         )
         assert "src/auth.py" in discovery_msgs[0]["content"]
         assert "config" in discovery_msgs[1]["content"].lower()
+
+    def test_session_limit_milestone_appears_in_chat_history(self, monkeypatch, web_ui, git_repo):
+        """Session limit milestones should appear as Session Limit chat bubbles and improve failure message."""
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", "working on task...\n"))
+            time.sleep(0.02)
+            message_queue.put(("milestone", "session_limit_reached", "Session Limit", "Session limit reached - resets 4pm (Australia/Melbourne)"))
+            time.sleep(0.02)
+            message_queue.put(("status", "❌ Agent exited with code 1"))
+            message_queue.put(("message_complete", "CODING AI", "partial output"))
+            return False, "Agent exited with code 1", "server-session", None
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("test")
+        updates = list(web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+
+        all_histories = [u[1] for u in updates if isinstance(u[1], list)]
+        final_history = all_histories[-1] if all_histories else []
+
+        # Check session limit milestone appeared
+        limit_msgs = [
+            msg for msg in final_history
+            if isinstance(msg, dict) and "**Session Limit:**" in msg.get("content", "")
+        ]
+        assert len(limit_msgs) == 1, (
+            f"Expected 1 session limit milestone, found {len(limit_msgs)}. "
+            f"History: {[m.get('content', '')[:80] for m in final_history if isinstance(m, dict)]}"
+        )
+        assert "resets 4pm" in limit_msgs[0]["content"]
+
+        # Check failure message is specific (not generic)
+        failure_msgs = [
+            msg for msg in final_history
+            if isinstance(msg, dict) and "SESSION LIMIT" in msg.get("content", "")
+        ]
+        assert len(failure_msgs) == 1, (
+            f"Expected session limit failure banner, found {len(failure_msgs)}. "
+            f"History: {[m.get('content', '')[:80] for m in final_history if isinstance(m, dict)]}"
+        )
+
+    def test_session_limit_replaces_generic_revision_failure(self, monkeypatch, web_ui, git_repo):
+        """When a revision fails due to session limit, the failure message should be specific."""
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", "working...\n"))
+            # Emit session limit milestone
+            message_queue.put(("milestone", "session_limit_reached", "Session Limit", "Session limit reached - resets 4pm (Australia/Melbourne)"))
+            message_queue.put(("message_complete", "CODING AI", "partial output"))
+            return False, "Agent exited with code 1", "server-session", None
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("test")
+        list(web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+
+        # After the task, session should have the limit summary stored
+        assert session.session_limit_summary is not None
+        assert "resets 4pm" in session.session_limit_summary
+
+    def test_session_limit_summary_reset_between_tasks(self, monkeypatch, web_ui, git_repo):
+        """session_limit_summary should be reset at start of each new task."""
+        session = web_ui.create_session("test")
+        session.session_limit_summary = "old limit"
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("message_complete", "CODING AI", "done"))
+            return True, "completed", "server-session", None
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+        list(web_ui.start_chad_task(session.id, str(git_repo), "new task", "claude"))
+
+        assert session.session_limit_summary is None
 
 
 class TestClaudeJsonParsingIntegration:
@@ -1763,6 +1843,7 @@ class TestClaudeJsonParsingIntegration:
         milestone_event.data = {
             "type": "milestone",
             "milestone_type": "exploration",
+            "title": "Discovery",
             "summary": "Found the bug in main.py",
         }
 
@@ -1795,7 +1876,8 @@ class TestClaudeJsonParsingIntegration:
 
         assert len(milestones) == 1
         assert milestones[0][1] == "exploration"
-        assert milestones[0][2] == "Found the bug in main.py"
+        assert milestones[0][2] == "Discovery"
+        assert milestones[0][3] == "Found the bug in main.py"
 
     def test_run_task_reused_session_streams_only_new_events(self, web_ui, mock_api_client, git_repo):
         """Reused server sessions should stream from latest sequence, not from the beginning."""
