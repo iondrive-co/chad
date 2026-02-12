@@ -16,8 +16,10 @@ Renamed web_ui to gradio_ui. Make Remix static site ui which downloads and talks
 
 v0.14 Slip Slop Slap
 
-Session branching and resume session at startup
+Resume session at startup
 Queue of bugs/features
+Planning agent
+Session branching
 
 
 ---- Repeated failures ----
