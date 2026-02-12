@@ -527,16 +527,48 @@ class TestChadWebUI:
         assert "Node missing" in result
         mock_api_client.create_account.assert_not_called()
 
-    def test_add_provider_mistral_requires_login_before_account_creation(self, web_ui, mock_api_client):
-        """Mistral accounts should only be created after successful vibe auth."""
+    @patch("subprocess.run")
+    def test_add_provider_mistral_runs_setup_before_account_creation(self, mock_run, web_ui, mock_api_client):
+        """Mistral add flow should run setup and only then create the account."""
         mock_api_client.list_accounts.return_value = []
         web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/vibe"))
+        mock_run.return_value = Mock(returncode=0)
 
-        with patch.object(web_ui.provider_ui, "_check_provider_login", return_value=(False, "Not logged in")):
+        with (
+            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
+            patch.object(
+                web_ui.provider_ui,
+                "_check_provider_login",
+                side_effect=[(False, "Not logged in"), (True, "Logged in")],
+            ),
+        ):
+            result = web_ui.add_provider("mistral-1", "mistral")[0]
+
+        assert "✅" in result
+        assert "mistral-1" in result
+        mock_run.assert_called_once_with(["/tmp/vibe", "--setup"], timeout=120)
+        mock_api_client.create_account.assert_called_once_with("mistral-1", "mistral")
+
+    @patch("subprocess.run")
+    def test_add_provider_mistral_setup_failure_blocks_account_creation(self, mock_run, web_ui, mock_api_client):
+        """Mistral add flow should fail cleanly when setup does not authenticate."""
+        mock_api_client.list_accounts.return_value = []
+        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/vibe"))
+        mock_run.return_value = Mock(returncode=1)
+
+        with (
+            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
+            patch.object(
+                web_ui.provider_ui,
+                "_check_provider_login",
+                side_effect=[(False, "Not logged in"), (False, "Not logged in")],
+            ),
+        ):
             result = web_ui.add_provider("mistral-1", "mistral")[0]
 
         assert "❌" in result
-        assert "vibe --setup" in result
+        assert "Login failed" in result
+        mock_run.assert_called_once_with(["/tmp/vibe", "--setup"], timeout=120)
         mock_api_client.create_account.assert_not_called()
 
     def test_add_provider_kimi_login_flow_failure(self, web_ui, mock_api_client):
