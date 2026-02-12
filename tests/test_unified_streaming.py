@@ -862,21 +862,7 @@ class TestPlainTextTerminalEvents:
         class DummyAPI:
             base_url = "http://localhost:8000"
 
-            def start_task(
-                self,
-                *,
-                session_id: str,
-                project_path: str,
-                task_description: str,
-                coding_agent: str,
-                coding_model=None,
-                coding_reasoning=None,
-                terminal_rows=None,
-                terminal_cols=None,
-                screenshots=None,
-                override_exploration_prompt=None,
-                override_implementation_prompt=None,
-            ):
+            def start_task(self, **kwargs):
                 return None
 
         class DummyStreamClient:

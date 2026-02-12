@@ -25,10 +25,7 @@ from chad.util.event_log import (
     SessionEndedEvent,
 )
 from chad.util.prompts import (
-    build_exploration_prompt,
-    build_implementation_prompt,
-    extract_coding_summary,
-    extract_progress_update,
+    build_prompt,
     get_continuation_prompt,
 )
 from chad.util.installer import AIToolInstaller
@@ -391,6 +388,7 @@ class Task:
     _provider: Any = field(default=None, repr=False)
     _last_terminal_snapshot: str = field(default="", repr=False)
     _mock_duration_applied: bool = field(default=False, repr=False)
+    _session_event_loop: Any = field(default=None, repr=False)
 
 
 _BINARY_GARBAGE_RE = re.compile(r'[@#%*&^]{10,}')
@@ -456,23 +454,18 @@ def build_agent_command(
     full_prompt: str | None = None
     if override_prompt:
         full_prompt = override_prompt
-        # Replace remaining placeholders in user-edited prompts
-        if phase == "implementation" and exploration_output:
-            full_prompt = full_prompt.replace("{exploration_output}", exploration_output)
     elif task_description:
         project_docs = _read_project_docs(project_path)
-        if phase == "exploration":
-            # Phase 1: Explore codebase and output progress JSON
-            full_prompt = build_exploration_prompt(
+        if phase in ("combined", "exploration", "implementation"):
+            # Single combined prompt for coding
+            full_prompt = build_prompt(
                 task_description, project_docs, project_path, screenshots
-            )
-        elif phase == "implementation":
-            # Phase 2: Continue with implementation using exploration output
-            full_prompt = build_implementation_prompt(
-                task_description, exploration_output or "", project_docs, project_path
             )
         elif phase == "continuation":
             # Agent exited early without completion - send continuation prompt
+            full_prompt = get_continuation_prompt(exploration_output or "")
+        elif phase == "revision":
+            # Revision after verification failure - override_prompt already set above
             full_prompt = get_continuation_prompt(exploration_output or "")
 
     if provider == "anthropic":
@@ -764,6 +757,11 @@ class TaskExecutor:
         terminal_rows: int | None = None,
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
+        override_prompt: str | None = None,
+        verification_account: str | None = None,
+        verification_model: str | None = None,
+        verification_reasoning: str | None = None,
+        # Legacy kwargs for backwards compatibility
         override_exploration_prompt: str | None = None,
         override_implementation_prompt: str | None = None,
     ) -> Task:
@@ -780,10 +778,17 @@ class TaskExecutor:
             terminal_rows: Optional terminal height (default: TERMINAL_ROWS)
             terminal_cols: Optional terminal width (default: TERMINAL_COLS)
             screenshots: Optional list of screenshot file paths for agent reference
+            override_prompt: Optional override for the coding prompt
+            verification_account: Optional account for verification
+            verification_model: Optional model override for verification
+            verification_reasoning: Optional reasoning level for verification
 
         Returns:
             The created Task object
         """
+        # Handle legacy prompt overrides
+        if not override_prompt and override_exploration_prompt:
+            override_prompt = override_exploration_prompt
         session = self.session_manager.get_session(session_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
@@ -819,6 +824,15 @@ class TaskExecutor:
         # Get provider info
         coding_provider = accounts[coding_account]
 
+        # Build verification config if account specified
+        verification_config = None
+        if verification_account:
+            verification_config = {
+                "verification_account": verification_account,
+                "verification_model": verification_model,
+                "verification_reasoning": verification_reasoning,
+            }
+
         # Start execution thread
         thread = threading.Thread(
             target=self._run_task,
@@ -836,8 +850,8 @@ class TaskExecutor:
                 terminal_rows,
                 terminal_cols,
                 screenshots,
-                override_exploration_prompt,
-                override_implementation_prompt,
+                override_prompt,
+                verification_config,
             ),
             daemon=True,
         )
@@ -958,6 +972,15 @@ class TaskExecutor:
         # Create JSON parser for providers that use stream-json output
         json_parser = ClaudeStreamJsonParser() if coding_provider in ("anthropic", "qwen", "gemini", "kimi") else None
 
+        # Get event loop for feeding output
+        session_event_loop = getattr(task, '_session_event_loop', None)
+
+        def _feed_captured(text: str):
+            """Feed captured text to the event loop for milestone detection."""
+            captured_output.append(text)
+            if session_event_loop:
+                session_event_loop.feed_output(text)
+
         def log_pty_event(event: PTYEvent):
             nonlocal last_output_time
             nonlocal first_stream_chunk_seen
@@ -990,7 +1013,7 @@ class TaskExecutor:
                         emit("stream", chunk=encoded)
                         with terminal_lock:
                             terminal_buffer.extend(readable_text.encode())
-                        captured_output.append(readable_text)
+                        _feed_captured(readable_text)
                 else:
                     # Non-anthropic (Codex): filter out prompt echo
                     # Codex output structure:
@@ -1030,7 +1053,7 @@ class TaskExecutor:
                                     emit("stream", chunk=encoded)
                                     with terminal_lock:
                                         terminal_buffer.extend(pre_echo.encode())
-                                    captured_output.append(pre_echo)
+                                    _feed_captured(pre_echo)
                                 # Now in prompt echo section - update buffer
                                 codex_in_prompt_echo = True
                                 codex_output_buffer = normalized[match.end():]
@@ -1060,7 +1083,7 @@ class TaskExecutor:
                                 emit("stream", chunk=encoded)
                                 with terminal_lock:
                                     terminal_buffer.extend(agent_output.encode())
-                                captured_output.append(agent_output)
+                                _feed_captured(agent_output)
                             return
 
                         # If not in prompt echo yet, emit normally (content before markers)
@@ -1075,7 +1098,7 @@ class TaskExecutor:
                                     emit("stream", chunk=encoded)
                                     with terminal_lock:
                                         terminal_buffer.extend(to_emit.encode())
-                                    captured_output.append(to_emit)
+                                    _feed_captured(to_emit)
                         return
 
                     # Past prompt echo - emit after stripping binary garbage
@@ -1086,7 +1109,7 @@ class TaskExecutor:
                         emit("stream", chunk=encoded)
                         with terminal_lock:
                             terminal_buffer.extend(cleaned_bytes)
-                        captured_output.append(cleaned)
+                        _feed_captured(cleaned)
 
         # Start PTY session
         stream_id = pty_service.start_pty_session(
@@ -1196,16 +1219,16 @@ class TaskExecutor:
         terminal_rows: int | None,
         terminal_cols: int | None,
         screenshots: list[str] | None,
-        override_exploration_prompt: str | None = None,
-        override_implementation_prompt: str | None = None,
+        override_prompt: str | None = None,
+        verification_config: dict | None = None,
     ):
         """Execute the task in a background thread using PTY.
 
-        Uses a 3-phase approach:
-        1. Exploration - Agent explores codebase and outputs progress JSON
-        2. Implementation - Agent implements the fix using exploration context
-        3. Verification - Separate verification agent (handled by UI)
+        Uses SessionEventLoop for single-phase coding with server-side
+        milestone detection and optional verification.
         """
+        from chad.server.services.session_event_loop import SessionEventLoop
+
         rows = terminal_rows if terminal_rows else TERMINAL_ROWS
         cols = terminal_cols if terminal_cols else TERMINAL_COLS
         status_logging_enabled = [False]
@@ -1271,41 +1294,41 @@ class TaskExecutor:
                 task.event_log.log(UserMessageEvent(content=task_description))
                 status_logging_enabled[0] = True
 
-            # All providers use phased execution: exploration → implementation → continuation
             emit("status", status=f"Starting {coding_provider} agent...")
             emit("message_start", speaker="CODING AI")
 
-            accumulated_output = ""
-            final_exit_code = 0
-            max_continuation_attempts = 3
-
-            # Phase 1: Exploration - agent explores codebase and outputs progress JSON
-            emit("status", status="Phase 1: Exploring codebase...")
-            exit_code, exploration_output = self._run_phase(
+            # Create event loop for milestone detection
+            event_loop = SessionEventLoop(
+                session_id=session.id,
+                event_log=task.event_log,
                 task=task,
-                session=session,
+                run_phase_fn=self._run_phase,
+                emit_fn=emit,
                 worktree_path=worktree_path,
+            )
+            task._session_event_loop = event_loop
+
+            # Run coding + optional verification (blocks until complete)
+            final_exit_code, accumulated_output = event_loop.run(
+                session=session,
                 task_description=task_description,
                 coding_account=coding_account,
                 coding_provider=coding_provider,
                 screenshots=screenshots,
-                phase="exploration",
-                exploration_output=None,
                 rows=rows,
                 cols=cols,
-                emit=emit,
                 git_mgr=git_mgr,
                 coding_model=coding_model,
                 coding_reasoning=coding_reasoning,
-                override_prompt=override_exploration_prompt,
+                override_prompt=override_prompt,
+                verification_config=verification_config,
             )
-            accumulated_output = exploration_output
-            final_exit_code = exit_code
-            if exit_code == 0:
+
+            if final_exit_code == 0:
                 self._decrement_mock_usage(coding_provider, coding_account)
 
-            # Handle cancellation/timeout from exploration phase
-            if task.cancel_requested or exit_code == -1:
+            # Handle cancellation
+            if task.cancel_requested or final_exit_code == -1:
                 emit("status", status="Task cancelled")
                 task.state = TaskState.CANCELLED
                 task.completed_at = datetime.now(timezone.utc)
@@ -1313,144 +1336,18 @@ class TaskExecutor:
                     task.event_log.log(SessionEndedEvent(success=False, reason="cancelled"))
                 return
 
-            if exit_code == -2:
-                emit("complete", success=False, message="Agent timed out during exploration", exit_code=-1)
+            # Handle timeout
+            if final_exit_code == -2:
+                emit("complete", success=False, message="Agent timed out", exit_code=-1)
                 emit("message_complete", speaker="CODING AI", content="Task timed out")
                 task.state = TaskState.FAILED
-                task.error = "Agent timed out during exploration"
+                task.error = "Agent timed out"
                 task.completed_at = datetime.now(timezone.utc)
                 session.active = False
                 session.has_worktree_changes = git_mgr.has_changes(task.session_id)
                 if task.event_log:
                     task.event_log.log(SessionEndedEvent(success=False, reason="timeout"))
                 return
-
-            # Extract progress update from exploration phase
-            progress = extract_progress_update(exploration_output)
-            if progress:
-                emit("progress", summary=progress.summary, location=progress.location, next_step=progress.next_step)
-
-            # Never treat exploration output as task completion. Exploration should
-            # always hand off into implementation after a clean exit.
-            if exit_code == 0:
-                # Check provider thresholds before implementation phase
-                coding_account, coding_provider, switched = self._check_provider_threshold(
-                    coding_account, coding_provider, emit
-                )
-                if switched:
-                    session.coding_account = coding_account
-
-                # Phase 2: Implementation - agent continues with implementation
-                emit("status", status="Phase 2: Implementing changes...")
-                exit_code, impl_output = self._run_phase(
-                    task=task,
-                    session=session,
-                    worktree_path=worktree_path,
-                    task_description=task_description,
-                    coding_account=coding_account,
-                    coding_provider=coding_provider,
-                    screenshots=None,  # Screenshots already shown in exploration
-                    phase="implementation",
-                    exploration_output=exploration_output,
-                    rows=rows,
-                    cols=cols,
-                    emit=emit,
-                    git_mgr=git_mgr,
-                    coding_model=coding_model,
-                    coding_reasoning=coding_reasoning,
-                    override_prompt=override_implementation_prompt,
-                )
-                accumulated_output += "\n" + impl_output
-                final_exit_code = exit_code
-                if exit_code == 0:
-                    self._decrement_mock_usage(coding_provider, coding_account)
-
-                # Handle cancellation/timeout from implementation phase
-                if task.cancel_requested or exit_code == -1:
-                    emit("status", status="Task cancelled")
-                    task.state = TaskState.CANCELLED
-                    task.completed_at = datetime.now(timezone.utc)
-                    if task.event_log:
-                        task.event_log.log(SessionEndedEvent(success=False, reason="cancelled"))
-                    return
-
-                if exit_code == -2:
-                    emit("complete", success=False, message="Agent timed out during implementation", exit_code=-1)
-                    emit("message_complete", speaker="CODING AI", content="Task timed out")
-                    task.state = TaskState.FAILED
-                    task.error = "Agent timed out during implementation"
-                    task.completed_at = datetime.now(timezone.utc)
-                    session.active = False
-                    session.has_worktree_changes = git_mgr.has_changes(task.session_id)
-                    if task.event_log:
-                        task.event_log.log(SessionEndedEvent(success=False, reason="timeout"))
-                    return
-
-                # Check if agent completed after implementation
-                summary = extract_coding_summary(accumulated_output)
-
-                # Continuation loop if agent exited without completion
-                if summary is None and exit_code == 0:
-                    for attempt in range(max_continuation_attempts):
-                        # Check provider thresholds before each continuation
-                        coding_account, coding_provider, switched = self._check_provider_threshold(
-                            coding_account, coding_provider, emit
-                        )
-                        if switched:
-                            session.coding_account = coding_account
-                        emit("status", status=f"Agent continuing (attempt {attempt + 1})...")
-                        exit_code, cont_output = self._run_phase(
-                            task=task,
-                            session=session,
-                            worktree_path=worktree_path,
-                            task_description=task_description,
-                            coding_account=coding_account,
-                            coding_provider=coding_provider,
-                            screenshots=None,
-                            phase="continuation",
-                            exploration_output=accumulated_output,
-                            rows=rows,
-                            cols=cols,
-                            emit=emit,
-                            git_mgr=git_mgr,
-                            coding_model=coding_model,
-                            coding_reasoning=coding_reasoning,
-                        )
-                        accumulated_output += "\n" + cont_output
-                        final_exit_code = exit_code
-                        if exit_code == 0:
-                            self._decrement_mock_usage(coding_provider, coding_account)
-
-                        # Handle cancellation
-                        if task.cancel_requested or exit_code == -1:
-                            emit("status", status="Task cancelled")
-                            task.state = TaskState.CANCELLED
-                            task.completed_at = datetime.now(timezone.utc)
-                            if task.event_log:
-                                task.event_log.log(SessionEndedEvent(success=False, reason="cancelled"))
-                            return
-
-                        # Handle timeout
-                        if exit_code == -2:
-                            emit("complete", success=False, message="Agent timed out", exit_code=-1)
-                            emit("message_complete", speaker="CODING AI", content="Task timed out")
-                            task.state = TaskState.FAILED
-                            task.error = "Agent timed out"
-                            task.completed_at = datetime.now(timezone.utc)
-                            session.active = False
-                            session.has_worktree_changes = git_mgr.has_changes(task.session_id)
-                            if task.event_log:
-                                task.event_log.log(SessionEndedEvent(success=False, reason="timeout"))
-                            return
-
-                        # Check if agent completed
-                        summary = extract_coding_summary(accumulated_output)
-                        if summary is not None:
-                            break
-
-                        # Only continue if exit was clean
-                        if exit_code != 0:
-                            break
 
             # Emit completion
             emit("message_complete", speaker="CODING AI", content="Task completed")
@@ -1484,7 +1381,7 @@ class TaskExecutor:
             if task.event_log:
                 task.event_log.log(SessionEndedEvent(
                     success=task.state == TaskState.COMPLETED,
-                    reason="completed" if exit_code == 0 else f"exit_code_{exit_code}",
+                    reason="completed" if final_exit_code == 0 else f"exit_code_{final_exit_code}",
                 ))
 
         except Exception as e:

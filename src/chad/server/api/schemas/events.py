@@ -172,6 +172,15 @@ class TerminalOutputEventSchema(EventBaseSchema):
     data: str = Field(description="Human-readable terminal screen text")
 
 
+class MilestoneEventSchema(EventBaseSchema):
+    """Milestone event - significant task progress marker."""
+
+    type: Literal["milestone"] = "milestone"
+    milestone_type: str = Field(description="Type: exploration, coding_complete, verification_started, etc.")
+    summary: str = Field(description="Human-readable milestone summary")
+    details: dict[str, Any] = Field(default_factory=dict, description="Structured milestone details")
+
+
 class SessionEndedEventSchema(EventBaseSchema):
     """Session ended event."""
 
@@ -244,6 +253,13 @@ class ResizeTerminalRequest(BaseModel):
 
     rows: int = Field(ge=1, le=500, description="Terminal rows")
     cols: int = Field(ge=1, le=500, description="Terminal columns")
+
+
+class SendMessageRequest(BaseModel):
+    """Request body for sending a user message to a running session."""
+
+    content: str = Field(description="Message content")
+    source: str = Field(default="ui", description="Message source: ui, cli, slack, api")
 
 
 class StreamEventsParams(BaseModel):

@@ -209,8 +209,8 @@ class TestClaudeStreamJsonParser:
 class TestBuildAgentCommand:
     """Tests for build_agent_command function."""
 
-    def test_anthropic_uses_stream_json_and_exploration_prompt(self, tmp_path):
-        """Anthropic provider sends exploration prompt via argv in stream-json mode."""
+    def test_anthropic_uses_stream_json_and_coding_prompt(self, tmp_path):
+        """Anthropic provider sends coding prompt via argv in stream-json mode."""
         cmd, env, initial_input = build_agent_command(
             "anthropic", "test-account", tmp_path, "Fix the bug"
         )
@@ -219,10 +219,10 @@ class TestBuildAgentCommand:
         assert "-p" in cmd
         assert "--output-format" in cmd and "stream-json" in cmd
         assert "--permission-mode" in cmd
-        # The exploration prompt must include the task and phase info
+        # The coding prompt must include the task description
         prompt_arg = [arg for arg in cmd if "Fix the bug" in arg]
         assert len(prompt_arg) == 1
-        assert "Phase 1: Exploration" in prompt_arg[0]
+        assert "EXPLORATION_RESULT:" in prompt_arg[0]
         assert initial_input is None
 
     def test_anthropic_without_task(self, tmp_path):
@@ -251,7 +251,7 @@ class TestBuildAgentCommand:
         assert "-p" in cmd
         prompt_idx = cmd.index("-p")
         assert "Fix the bug" in cmd[prompt_idx + 1]
-        assert "Phase 1: Exploration" in cmd[prompt_idx + 1]
+        assert "EXPLORATION_RESULT:" in cmd[prompt_idx + 1]
         assert initial_input is None
 
     def test_mock_provider_produces_output(self, tmp_path):
@@ -311,20 +311,17 @@ class TestBuildAgentCommand:
         assert "continue" in initial_input.lower()
         assert "progress update" in initial_input.lower() or "completion" in initial_input.lower()
 
-    def test_implementation_phase_uses_implementation_prompt(self, tmp_path):
-        """Implementation phase uses the implementation prompt with exploration context."""
-        exploration_output = "Found the bug in src/main.py - missing null check"
+    def test_implementation_phase_maps_to_combined_prompt(self, tmp_path):
+        """Implementation phase now maps to the combined coding prompt."""
         cmd, env, initial_input = build_agent_command(
             "openai", "test-account", tmp_path, "Fix the bug",
             phase="implementation",
-            exploration_output=exploration_output
         )
 
-        # The prompt should have Phase 2 markers and include exploration output
+        # Implementation phase maps to combined - should have coding prompt
         assert initial_input is not None
-        assert "Phase 2: Implementation" in initial_input
-        assert "Previous Exploration" in initial_input
-        assert exploration_output in initial_input
+        assert "Fix the bug" in initial_input
+        assert "EXPLORATION_RESULT:" in initial_input
 
     def test_override_prompt_replaces_auto_generated(self, tmp_path):
         """Override prompt is used instead of auto-generated prompt."""
@@ -337,17 +334,14 @@ class TestBuildAgentCommand:
         # OpenAI uses initial_input for the prompt (with trailing newline)
         assert initial_input.strip() == override
 
-    def test_override_prompt_replaces_exploration_output_placeholder(self, tmp_path):
-        """Override implementation prompt has {exploration_output} replaced."""
-        override = "Implement based on: {exploration_output}"
-        exploration = "Found bug in line 42"
+    def test_override_prompt_used_directly(self, tmp_path):
+        """Override prompt is used as-is for the combined coding phase."""
+        override = "Custom instructions for the agent"
         cmd, env, initial_input = build_agent_command(
             "openai", "test-account", tmp_path, "Fix the bug",
-            phase="implementation",
-            exploration_output=exploration,
             override_prompt=override,
         )
-        assert initial_input.strip() == "Implement based on: Found bug in line 42"
+        assert initial_input.strip() == override
 
     def test_override_prompt_anthropic_uses_cmd_arg(self, tmp_path):
         """Override prompt for Anthropic goes into command args, not initial_input."""
@@ -576,8 +570,8 @@ def test_terminal_output_is_periodically_flushed_and_decoded(tmp_path, monkeypat
     assert len(terminal_events) >= 1, "Expected at least one terminal_output snapshot"
 
 
-def test_phase_status_events_are_logged_for_streaming(tmp_path, monkeypatch):
-    """Event log should include progress and phase status updates in phase order."""
+def test_coding_status_events_are_logged_for_streaming(tmp_path, monkeypatch):
+    """Event log should include coding status events."""
     repo_path = tmp_path / "repo"
     _init_git_repo(repo_path)
 
@@ -594,10 +588,7 @@ def test_phase_status_events_are_logged_for_streaming(tmp_path, monkeypatch):
 
     def scripted_command(provider, account_name, project_path, task_description=None,
                          screenshots=None, phase="combined", exploration_output=None, **kwargs):
-        if phase == "exploration":
-            script = "echo '{\"type\":\"progress\",\"summary\":\"Scoped\",\"location\":\"x.py:1\",\"next_step\":\"Implement\"}'"
-        else:
-            script = "echo '```json'; echo '{\"change_summary\":\"Done\",\"files_changed\":[\"x.py\"],\"completion_status\":\"success\"}'; echo '```'"
+        script = "echo '```json'; echo '{\"change_summary\":\"Done\",\"files_changed\":[\"x.py\"],\"completion_status\":\"success\"}'; echo '```'"
         return ["bash", "-c", script], {}, None
 
     monkeypatch.setattr(te, "build_agent_command", scripted_command)
@@ -605,31 +596,17 @@ def test_phase_status_events_are_logged_for_streaming(tmp_path, monkeypatch):
     task = executor.start_task(
         session_id=session.id,
         project_path=str(repo_path),
-        task_description="Ensure phase status events are logged",
+        task_description="Ensure coding status events are logged",
         coding_account="mock-acct",
     )
     task._thread.join(timeout=10)
 
     assert task.state == TaskState.COMPLETED
     events = task.event_log.get_events()
-    statuses = [e.get("status", "") for e in events if e.get("type") == "status"]
-    assert any("Phase 1: Exploring codebase..." in s for s in statuses), statuses
-    assert any("Phase 2: Implementing changes..." in s for s in statuses), statuses
-
-    progress_events = [e for e in events if e.get("type") == "progress"]
-    assert len(progress_events) == 1, f"Expected one progress event, got: {progress_events}"
-    assert progress_events[0].get("summary") == "Scoped"
-    assert progress_events[0].get("location") == "x.py:1"
-    assert progress_events[0].get("next_step") == "Implement"
-
-    phase2_events = [
-        e for e in events
-        if e.get("type") == "status" and "Phase 2: Implementing changes..." in (e.get("status") or "")
-    ]
-    assert phase2_events, f"Expected phase 2 status event, got: {events}"
-    assert progress_events[0]["seq"] < phase2_events[0]["seq"], (
-        "Progress event must be logged before phase 2 status so UI can render the handoff in order"
-    )
+    # Should have session_started and session_ended events
+    types = [e.get("type") for e in events]
+    assert "session_started" in types
+    assert "session_ended" in types
 
 
 def test_continuation_loop_waits_for_completion_json(tmp_path, monkeypatch):
@@ -692,8 +669,8 @@ def test_continuation_loop_waits_for_completion_json(tmp_path, monkeypatch):
     assert ended_events[-1].get("success") is True
 
 
-def test_exploration_summary_does_not_skip_implementation_phase(tmp_path, monkeypatch):
-    """Exploration output containing completion JSON must still run implementation."""
+def test_combined_coding_phase_completes_with_json(tmp_path, monkeypatch):
+    """Combined coding phase uses a single prompt and completes on completion JSON."""
     repo_path = tmp_path / "repo"
     _init_git_repo(repo_path)
 
@@ -703,7 +680,7 @@ def test_exploration_summary_does_not_skip_implementation_phase(tmp_path, monkey
     monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
 
     session_manager = SessionManager()
-    session = session_manager.create_session(project_path=str(repo_path), name="phase-transition-test")
+    session = session_manager.create_session(project_path=str(repo_path), name="combined-phase-test")
 
     executor = TaskExecutor(
         ConfigManager(),
@@ -717,23 +694,11 @@ def test_exploration_summary_does_not_skip_implementation_phase(tmp_path, monkey
 
     def mock_command(provider, account_name, project_path, task_description=None, screenshots=None, phase="combined", exploration_output=None, **kwargs):
         phases.append(phase)
-        if phase == "exploration":
-            # Exploration includes progress + accidental completion JSON.
-            script = (
-                "echo '{\"type\":\"progress\",\"summary\":\"Investigating\",\"location\":\"src/main.py:1\",\"next_step\":\"Implementing\"}'; "
-                "echo '```json'; "
-                "echo '{\"change_summary\":\"Premature summary from exploration\",\"files_changed\":[\"src/main.py\"],\"completion_status\":\"success\"}'; "
-                "echo '```'"
-            )
-        elif phase == "implementation":
-            script = (
-                "echo '```json'; "
-                "echo '{\"change_summary\":\"Implemented actual fix\",\"files_changed\":[\"src/main.py\"],\"completion_status\":\"success\"}'; "
-                "echo '```'"
-            )
-        else:
-            script = "echo 'unexpected phase'"
-
+        script = (
+            "echo '```json'; "
+            "echo '{\"change_summary\":\"Done\",\"files_changed\":[\"src/main.py\"],\"completion_status\":\"success\"}'; "
+            "echo '```'"
+        )
         return ["bash", "-c", script], {}, None
 
     monkeypatch.setattr(te, "build_agent_command", mock_command)
@@ -748,8 +713,7 @@ def test_exploration_summary_does_not_skip_implementation_phase(tmp_path, monkey
     task._thread.join(timeout=10)
 
     assert task.state == TaskState.COMPLETED, f"Task state was {task.state}, error: {task.error}"
-    assert "exploration" in phases
-    assert "implementation" in phases, f"Expected implementation phase, got phases: {phases}"
+    assert "combined" in phases, f"Expected combined phase, got phases: {phases}"
 
 
 class TestModelPassThrough:
@@ -877,10 +841,7 @@ class TestMockUsageDecrement:
         def mock_command(provider, account_name, project_path, task_description=None,
                          screenshots=None, phase="combined", exploration_output=None, **kwargs):
             run_count[0] += 1
-            if phase == "exploration":
-                script = "echo '{\"type\":\"progress\",\"summary\":\"Found it\",\"location\":\"x.py:1\",\"next_step\":\"Fix\"}'"
-            else:
-                script = "echo '```json'; echo '{\"change_summary\":\"Done\",\"files_changed\":[\"x.py\"],\"completion_status\":\"success\"}'; echo '```'"
+            script = "echo '```json'; echo '{\"change_summary\":\"Done\",\"files_changed\":[\"x.py\"],\"completion_status\":\"success\"}'; echo '```'"
             return ["bash", "-c", script], {}, None
 
         monkeypatch.setattr(te, "build_agent_command", mock_command)
@@ -894,10 +855,10 @@ class TestMockUsageDecrement:
         task._thread.join(timeout=10)
 
         assert task.state == TaskState.COMPLETED
-        # Two successful phases (exploration + implementation) should decrement 0.01 each
+        # Single combined phase should decrement 0.01 once
         remaining = cm.get_mock_remaining_usage("mock-acct")
         assert remaining < 0.50, f"Usage should have decreased from 0.50, got {remaining}"
-        assert abs(remaining - 0.48) < 0.001, f"Expected ~0.48 after 2 decrements, got {remaining}"
+        assert abs(remaining - 0.49) < 0.001, f"Expected ~0.49 after 1 decrement, got {remaining}"
 
     def test_no_decrement_for_non_mock_provider(self, tmp_path, monkeypatch):
         """Non-mock providers don't trigger usage decrement."""

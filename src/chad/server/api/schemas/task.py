@@ -25,9 +25,11 @@ class TaskCreate(BaseModel):
     terminal_cols: int | None = Field(default=None, ge=40, le=500, description="Terminal columns (width)")
     # Screenshots for the agent to reference
     screenshots: list[str] | None = Field(default=None, description="List of screenshot file paths")
-    # User-edited prompt overrides (used instead of auto-generated prompts)
-    override_exploration_prompt: str | None = Field(default=None, description="Override for the exploration prompt")
-    override_implementation_prompt: str | None = Field(default=None, description="Override for the implementation prompt")
+    # User-edited prompt override (used instead of auto-generated prompt)
+    override_prompt: str | None = Field(default=None, description="Override for the coding prompt")
+    # Legacy fields for backwards compatibility
+    override_exploration_prompt: str | None = Field(default=None, description="Legacy: alias for override_prompt")
+    override_implementation_prompt: str | None = Field(default=None, description="Legacy: ignored")
 
 
 class TaskStatusResponse(BaseModel):

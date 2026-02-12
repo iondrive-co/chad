@@ -16,6 +16,7 @@ from chad.server.api.schemas import (
 )
 from chad.server.api.schemas.events import (
     SendInputRequest,
+    SendMessageRequest,
     ResizeTerminalRequest,
 )
 from chad.server.services import Session, get_session_manager, get_task_executor, TaskState
@@ -156,8 +157,10 @@ async def start_task(session_id: str, request: TaskCreate) -> TaskStatusResponse
             terminal_rows=request.terminal_rows,
             terminal_cols=request.terminal_cols,
             screenshots=request.screenshots,
-            override_exploration_prompt=request.override_exploration_prompt,
-            override_implementation_prompt=request.override_implementation_prompt,
+            override_prompt=request.override_prompt or request.override_exploration_prompt,
+            verification_account=request.verification_agent,
+            verification_model=request.verification_model,
+            verification_reasoning=request.verification_reasoning,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -307,6 +310,70 @@ async def resize_terminal(session_id: str, request: ResizeTerminalRequest) -> di
         raise HTTPException(status_code=500, detail="Failed to resize terminal")
 
     return {"success": True, "rows": request.rows, "cols": request.cols}
+
+
+@router.post("/{session_id}/messages")
+async def send_message(session_id: str, request: SendMessageRequest) -> dict:
+    """Send a user message to the running session.
+
+    The message is forwarded to the session's event loop, which writes it
+    to the active PTY.
+    """
+    manager = get_session_manager()
+    session = manager.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+    executor = get_task_executor()
+    task = None
+    for t in executor._tasks.values():
+        if t.session_id == session_id:
+            task = t
+            break
+
+    if not task:
+        raise HTTPException(status_code=400, detail="No active task in session")
+
+    event_loop = getattr(task, "_session_event_loop", None)
+    if event_loop is None:
+        raise HTTPException(status_code=400, detail="No active event loop in session")
+
+    event_loop.enqueue_message(request.content, request.source)
+    return {"success": True, "session_id": session_id}
+
+
+@router.get("/{session_id}/milestones")
+async def get_milestones(
+    session_id: str,
+    since_seq: int = Query(default=0, description="Return milestones after this sequence"),
+) -> dict:
+    """Get milestones for a session (polling catch-up).
+
+    Milestones also flow through the SSE endpoint via EventLog events,
+    but this endpoint allows catch-up after reconnection.
+    """
+    manager = get_session_manager()
+    session = manager.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+    executor = get_task_executor()
+    task = None
+    for t in executor._tasks.values():
+        if t.session_id == session_id:
+            task = t
+            break
+
+    if not task:
+        return {"milestones": [], "latest_seq": 0}
+
+    event_loop = getattr(task, "_session_event_loop", None)
+    if event_loop is None:
+        return {"milestones": [], "latest_seq": 0}
+
+    milestones = event_loop.get_milestones(since_seq)
+    latest_seq = event_loop.get_latest_milestone_seq()
+    return {"milestones": milestones, "latest_seq": latest_seq}
 
 
 @router.get("/{session_id}/events")
