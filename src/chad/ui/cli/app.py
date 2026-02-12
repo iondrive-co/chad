@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import termios
+import threading
 import tty
 from pathlib import Path
 
@@ -716,6 +717,51 @@ def run_task_with_streaming(
         terminal_cols=cols,
     )
 
+    milestone_since_seq = 0
+    milestone_poll_stop = threading.Event()
+
+    def _emit_milestones_once() -> None:
+        nonlocal milestone_since_seq
+        try:
+            milestones = client.get_milestones(session_id, since_seq=milestone_since_seq)
+        except Exception:
+            return
+
+        if not isinstance(milestones, list):
+            return
+
+        max_seq = milestone_since_seq
+        for milestone in milestones:
+            if not isinstance(milestone, dict):
+                continue
+
+            seq = milestone.get("seq", 0)
+            try:
+                seq_int = int(seq)
+            except (TypeError, ValueError):
+                seq_int = 0
+            if seq_int > max_seq:
+                max_seq = seq_int
+
+            summary = str(milestone.get("summary", "")).strip()
+            if not summary:
+                continue
+
+            title = str(milestone.get("title", "")).strip()
+            line = f"\r\n[MILESTONE] {title}: {summary}\r\n"
+            os.write(sys.stdout.fileno(), line.encode("utf-8", errors="replace"))
+
+        milestone_since_seq = max_seq
+
+    def _milestone_poll_loop() -> None:
+        while not milestone_poll_stop.is_set():
+            _emit_milestones_once()
+            milestone_poll_stop.wait(0.5)
+
+    _emit_milestones_once()
+    milestone_poll_thread = threading.Thread(target=_milestone_poll_loop, daemon=True)
+    milestone_poll_thread.start()
+
     # Save terminal state
     old_settings = None
     try:
@@ -788,6 +834,10 @@ def run_task_with_streaming(
                         pass
 
     finally:
+        milestone_poll_stop.set()
+        milestone_poll_thread.join(timeout=1.0)
+        _emit_milestones_once()
+
         # Restore SIGWINCH handler
         if old_sigwinch is not None:
             try:

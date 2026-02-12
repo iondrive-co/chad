@@ -86,6 +86,7 @@ class TestChadWebUI:
             "gpt": gpt_account,
         }.get(name, Mock(name=name, provider="unknown", model="default", reasoning="default", role=None))
         client.get_verification_agent.return_value = None
+        client.get_milestones.return_value = []
         client.get_preferences.return_value = Mock(last_project_path=None, dark_mode=True, ui_mode="gradio")
         client.get_cleanup_settings.return_value = Mock(retention_days=7, auto_cleanup=True)
         return client
@@ -1912,8 +1913,8 @@ class TestClaudeJsonParsingIntegration:
         assert len(completes) == 1
         assert "Exploring files" in completes[0]
 
-    def test_run_task_emits_milestone_events_from_sse(self, web_ui, mock_api_client, git_repo):
-        """Milestone events from SSE stream should be forwarded to the message queue."""
+    def test_run_task_emits_milestone_events_from_api(self, web_ui, mock_api_client, git_repo):
+        """Milestones should be polled from the dedicated API endpoint."""
         import base64
         import queue
         from unittest.mock import Mock
@@ -1926,19 +1927,21 @@ class TestClaudeJsonParsingIntegration:
         mock_session = Mock()
         mock_session.id = "server-sess-milestone"
         mock_api_client.create_session.return_value = mock_session
+        mock_api_client.get_milestones.side_effect = [
+            [
+                {
+                    "seq": 1,
+                    "milestone_type": "exploration",
+                    "title": "Discovery",
+                    "summary": "Found the bug in main.py",
+                }
+            ],
+            [],
+        ]
 
         terminal_event = Mock()
         terminal_event.event_type = "terminal"
         terminal_event.data = {"data": base64.b64encode(b"working...\n").decode()}
-
-        milestone_event = Mock()
-        milestone_event.event_type = "event"
-        milestone_event.data = {
-            "type": "milestone",
-            "milestone_type": "exploration",
-            "title": "Discovery",
-            "summary": "Found the bug in main.py",
-        }
 
         complete_event = Mock()
         complete_event.event_type = "complete"
@@ -1946,7 +1949,7 @@ class TestClaudeJsonParsingIntegration:
 
         mock_stream_client = Mock()
         mock_stream_client.stream_events.return_value = iter(
-            [terminal_event, milestone_event, complete_event]
+            [terminal_event, complete_event]
         )
         web_ui._stream_client = mock_stream_client
 
@@ -1971,6 +1974,57 @@ class TestClaudeJsonParsingIntegration:
         assert milestones[0][1] == "exploration"
         assert milestones[0][2] == "Discovery"
         assert milestones[0][3] == "Found the bug in main.py"
+        assert mock_api_client.get_milestones.call_count >= 1
+
+    def test_run_task_ignores_milestone_events_from_sse(self, web_ui, mock_api_client, git_repo):
+        """SSE milestone events should be ignored in favor of the dedicated endpoint."""
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="mock-coding", provider="mock", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-milestone"
+        mock_api_client.create_session.return_value = mock_session
+        mock_api_client.get_milestones.return_value = []
+
+        milestone_event = Mock()
+        milestone_event.event_type = "event"
+        milestone_event.data = {
+            "type": "milestone",
+            "milestone_type": "exploration",
+            "title": "Discovery",
+            "summary": "Should be ignored",
+        }
+
+        complete_event = Mock()
+        complete_event.event_type = "complete"
+        complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([milestone_event, complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, _, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="mock-coding",
+            message_queue=message_queue,
+        )
+
+        assert success
+        milestones = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "milestone":
+                milestones.append(msg)
+
+        assert milestones == []
 
     def test_run_task_reused_session_streams_only_new_events(self, web_ui, mock_api_client, git_repo):
         """Reused server sessions should stream from latest sequence, not from the beginning."""

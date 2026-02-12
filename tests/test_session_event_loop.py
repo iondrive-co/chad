@@ -468,7 +468,6 @@ class TestUsageThresholdMonitoring:
         assert len(milestone_events) == 1
 
 
-
 class TestMessageForwarding:
     """Tests for forwarding queued user messages to the active PTY."""
 
