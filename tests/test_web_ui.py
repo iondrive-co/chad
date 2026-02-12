@@ -2623,6 +2623,26 @@ class TestRemainingUsage:
         assert result == 0.75  # 1.0 - 0.25
 
     @patch("pathlib.Path.home")
+    @patch("requests.get")
+    def test_claude_remaining_usage_fractional_utilization(self, mock_get, mock_home, web_ui, tmp_path):
+        """Fractional utilization values (0-1) should be treated as percentages."""
+        import json
+
+        mock_home.return_value = tmp_path
+        claude_dir = tmp_path / ".chad" / "claude-configs" / "claude-1"
+        claude_dir.mkdir(parents=True)
+        creds = {"claudeAiOauth": {"accessToken": "test-token", "subscriptionType": "PRO"}}
+        (claude_dir / ".credentials.json").write_text(json.dumps(creds))
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"five_hour": {"utilization": 0.25}}
+        mock_get.return_value = mock_response
+
+        result = web_ui._get_claude_remaining_usage("claude-1")
+        assert result == 0.75  # 25% used -> 75% remaining
+
+    @patch("pathlib.Path.home")
     def test_codex_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
         """Codex not logged in returns 0.0."""
         mock_home.return_value = tmp_path

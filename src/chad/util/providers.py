@@ -10,6 +10,7 @@ import subprocess
 import time
 import threading
 import queue
+import math
 from datetime import datetime, timezone
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -672,6 +673,23 @@ def _stream_pty_output(
     return "".join(output_chunks), timed_out, idle_stalled
 
 
+def _normalize_usage_percentage(util_value: float | int | None) -> float | None:
+    """Convert utilization values to 0-100 percentage, scaling fractional inputs."""
+    try:
+        pct = float(util_value)
+    except (TypeError, ValueError):
+        return None
+
+    if math.isnan(pct) or math.isinf(pct):
+        return None
+
+    # Anthropic usage APIs sometimes return 0.0-1.0 fractions; scale those.
+    if 0.0 <= pct <= 1.0:
+        pct *= 100.0
+
+    return max(0.0, min(100.0, pct))
+
+
 def _get_claude_usage_percentage(account_name: str) -> float | None:
     """Get Claude usage percentage from Anthropic API.
 
@@ -720,11 +738,9 @@ def _get_claude_usage_percentage(account_name: str) -> float | None:
         usage_data = response.json()
         five_hour = usage_data.get("five_hour", {})
         util = five_hour.get("utilization")
-        if util is not None:
-            try:
-                return float(util)
-            except (ValueError, TypeError):
-                pass
+        pct = _normalize_usage_percentage(util)
+        if pct is not None:
+            return pct
 
         return None
 
@@ -779,11 +795,9 @@ def _get_claude_weekly_usage_percentage(account_name: str) -> float | None:
         usage_data = response.json()
         seven_day = usage_data.get("seven_day", {})
         util = seven_day.get("utilization")
-        if util is not None:
-            try:
-                return float(util)
-            except (ValueError, TypeError):
-                pass
+        pct = _normalize_usage_percentage(util)
+        if pct is not None:
+            return pct
 
         return None
 

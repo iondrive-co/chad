@@ -182,6 +182,22 @@ class ProviderUIManager:
 
         return max(0.0, min(100.0, pct))
 
+    @staticmethod
+    def _normalize_usage_utilization(value: float | int | None) -> float:
+        """Normalize usage utilization where APIs may return 0-1 fractions."""
+        try:
+            pct = float(0.0 if value is None else value)
+        except (TypeError, ValueError):
+            return 0.0
+
+        if math.isnan(pct) or math.isinf(pct):
+            return 0.0
+
+        if 0.0 <= pct <= 1.0:
+            pct *= 100.0
+
+        return max(0.0, min(100.0, pct))
+
     def _progress_bar(self, utilization_pct: float | int | None, width: int = 20) -> str:
         """Create a text progress bar for usage displays."""
         pct = self._normalize_pct(utilization_pct)
@@ -294,7 +310,7 @@ class ProviderUIManager:
 
             usage_data = response.json()
             five_hour = usage_data.get("five_hour", {})
-            util = self._normalize_pct(five_hour.get("utilization"))
+            util = self._normalize_usage_utilization(five_hour.get("utilization"))
             return max(0.0, min(1.0, 1.0 - (util / 100.0)))
 
         except Exception:
@@ -891,7 +907,7 @@ class ProviderUIManager:
 
             five_hour = usage_data.get("five_hour", {})
             if five_hour:
-                util = self._normalize_pct(five_hour.get("utilization"))
+                util = self._normalize_usage_utilization(five_hour.get("utilization"))
                 reset_at = five_hour.get("resets_at", "")
                 bar = self._progress_bar(util)
 
@@ -912,7 +928,7 @@ class ProviderUIManager:
 
             seven_day = usage_data.get("seven_day")
             if seven_day:
-                util = self._normalize_pct(seven_day.get("utilization"))
+                util = self._normalize_usage_utilization(seven_day.get("utilization"))
                 reset_at = seven_day.get("resets_at", "")
                 bar = self._progress_bar(util)
 
@@ -935,7 +951,7 @@ class ProviderUIManager:
             if extra and extra.get("is_enabled"):
                 used = extra.get("used_credits", 0)
                 limit = extra.get("monthly_limit", 0)
-                util = self._normalize_pct(extra.get("utilization"))
+                util = self._normalize_usage_utilization(extra.get("utilization"))
                 bar = self._progress_bar(util)
                 result += "**Extra credits**\n"
                 result += (
