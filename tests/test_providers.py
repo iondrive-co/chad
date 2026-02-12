@@ -2493,7 +2493,7 @@ class TestProviderUsageReporting:
         config = ModelConfig(provider="anthropic", model_name="claude-sonnet-4")
         provider = ClaudeCodeProvider(config)
         assert provider.supports_usage_reporting() is True
-        # get_usage_percentage returns None when credentials not available
+        # get_session_usage_percentage returns None when credentials not available
         # (we can't test actual API calls in unit tests)
 
     def test_codex_provider_supports_usage_reporting(self):
@@ -2501,7 +2501,7 @@ class TestProviderUsageReporting:
         config = ModelConfig(provider="openai", model_name="gpt-4")
         provider = OpenAICodexProvider(config)
         assert provider.supports_usage_reporting() is True
-        # get_usage_percentage returns None when session files not available
+        # get_session_usage_percentage returns None when session files not available
 
     def test_gemini_provider_supports_usage_reporting(self):
         """Gemini provider supports usage percentage reporting via local session files."""
@@ -2532,6 +2532,96 @@ class TestProviderUsageReporting:
         config = ModelConfig(provider="kimi", model_name="default")
         provider = KimiCodeProvider(config)
         assert provider.supports_usage_reporting() is True
+
+
+class TestProviderQuotaDetection:
+    """Tests for is_quota_exhausted() on each provider."""
+
+    def test_claude_detects_hit_limit(self):
+        """Claude's is_quota_exhausted recognizes 'You've hit your limit'."""
+        config = ModelConfig(provider="anthropic", model_name="claude-sonnet-4", account_name="test")
+        provider = ClaudeCodeProvider(config)
+        # Without real API access, weekly check returns None so it defaults to session
+        result = provider.is_quota_exhausted("You've hit your limit · resets 4pm")
+        assert result == "session_limit_reached"
+
+    def test_claude_returns_none_for_normal_output(self):
+        """Claude's is_quota_exhausted returns None for normal output."""
+        config = ModelConfig(provider="anthropic", model_name="claude-sonnet-4", account_name="test")
+        provider = ClaudeCodeProvider(config)
+        result = provider.is_quota_exhausted("Working on the task, reading files...")
+        assert result is None
+
+    def test_codex_detects_quota_error(self):
+        """Codex's is_quota_exhausted recognizes quota exhaustion patterns."""
+        config = ModelConfig(provider="openai", model_name="gpt-4", account_name="test")
+        provider = OpenAICodexProvider(config)
+        result = provider.is_quota_exhausted("Error: you exceeded your current quota")
+        assert result == "session_limit_reached"
+
+    def test_codex_returns_none_for_normal_output(self):
+        """Codex's is_quota_exhausted returns None for normal output."""
+        config = ModelConfig(provider="openai", model_name="gpt-4", account_name="test")
+        provider = OpenAICodexProvider(config)
+        result = provider.is_quota_exhausted("Running command: pytest tests/")
+        assert result is None
+
+    def test_base_provider_detects_generic_patterns(self):
+        """Base AIProvider.is_quota_exhausted uses handoff patterns."""
+        config = ModelConfig(provider="gemini", model_name="default")
+        provider = GeminiCodeAssistProvider(config)
+        result = provider.is_quota_exhausted("Error: insufficient credits")
+        assert result == "session_limit_reached"
+
+    def test_base_provider_returns_none_for_normal_output(self):
+        """Base AIProvider.is_quota_exhausted returns None for normal text."""
+        config = ModelConfig(provider="gemini", model_name="default")
+        provider = GeminiCodeAssistProvider(config)
+        result = provider.is_quota_exhausted("Analyzing the codebase structure...")
+        assert result is None
+
+    def test_all_providers_have_is_quota_exhausted(self):
+        """Every provider class has an is_quota_exhausted method."""
+        from chad.util.providers import (
+            ClaudeCodeProvider, OpenAICodexProvider, GeminiCodeAssistProvider,
+            QwenCodeProvider, OpenCodeProvider, KimiCodeProvider,
+            MistralVibeProvider, MockProvider,
+        )
+        provider_classes = [
+            ClaudeCodeProvider, OpenAICodexProvider, GeminiCodeAssistProvider,
+            QwenCodeProvider, OpenCodeProvider, KimiCodeProvider,
+            MistralVibeProvider, MockProvider,
+        ]
+        for cls in provider_classes:
+            assert hasattr(cls, "is_quota_exhausted"), f"{cls.__name__} missing is_quota_exhausted"
+
+    def test_all_providers_have_weekly_usage(self):
+        """Every provider class has a get_weekly_usage_percentage method."""
+        from chad.util.providers import (
+            ClaudeCodeProvider, OpenAICodexProvider, GeminiCodeAssistProvider,
+            QwenCodeProvider, OpenCodeProvider, KimiCodeProvider,
+            MistralVibeProvider, MockProvider,
+        )
+        provider_classes = [
+            ClaudeCodeProvider, OpenAICodexProvider, GeminiCodeAssistProvider,
+            QwenCodeProvider, OpenCodeProvider, KimiCodeProvider,
+            MistralVibeProvider, MockProvider,
+        ]
+        for cls in provider_classes:
+            assert hasattr(cls, "get_weekly_usage_percentage"), f"{cls.__name__} missing get_weekly_usage_percentage"
+
+    def test_providers_without_weekly_return_none(self):
+        """Providers that don't have weekly data return None."""
+        providers = [
+            GeminiCodeAssistProvider(ModelConfig(provider="gemini", model_name="default")),
+            QwenCodeProvider(ModelConfig(provider="qwen", model_name="default")),
+            MistralVibeProvider(ModelConfig(provider="mistral", model_name="default")),
+            OpenCodeProvider(ModelConfig(provider="opencode", model_name="default")),
+            KimiCodeProvider(ModelConfig(provider="kimi", model_name="default")),
+            MockProvider(ModelConfig(provider="mock", model_name="default")),
+        ]
+        for p in providers:
+            assert p.get_weekly_usage_percentage() is None, f"{type(p).__name__} should return None"
 
 
 class TestUsagePercentageCalculation:

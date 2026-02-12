@@ -128,17 +128,20 @@ Each provider implements `AIProvider` (in `chad.util.providers`) with these capa
 
 **Usage Reporting** enables automatic provider switching based on quota consumption:
 - `supports_usage_reporting()`: Returns `True` if the provider can report usage percentage
-- `get_usage_percentage()`: Returns 0-100 usage percentage, or `None` if unavailable
+- `get_session_usage_percentage()`: Returns 0-100 session usage percentage, or `None` if unavailable
+- `get_weekly_usage_percentage()`: Returns 0-100 weekly usage percentage, or `None` if unavailable
+- `is_quota_exhausted(output_tail)`: Checks CLI output for quota errors, returns milestone type or `None`
 
 When a provider's usage exceeds the configured threshold (`usage_switch_threshold`, default 90%), Chad can automatically switch to the next provider in `provider_fallback_order`.
 
-For providers without usage reporting, Chad relies on error pattern matching to detect quota exhaustion (rate limits, insufficient credits, etc.) and trigger automatic switching.
+Quota detection is provider-specific via `is_quota_exhausted()`. Providers that can distinguish session vs weekly limits (Claude, Codex) return `"weekly_limit_reached"` when the weekly limit is hit, allowing the UI to show the correct milestone type.
 
 **Adding Usage Support to a Provider:**
 1. Implement a way to fetch usage data (API call, session file parsing, etc.)
 2. Override `supports_usage_reporting()` to return `True`
-3. Override `get_usage_percentage()` to return usage as 0-100
-4. Update this table
+3. Override `get_session_usage_percentage()` to return session usage as 0-100
+4. Optionally override `get_weekly_usage_percentage()` and `is_quota_exhausted()`
+5. Update this table
 
 ## Provider Handoff
 

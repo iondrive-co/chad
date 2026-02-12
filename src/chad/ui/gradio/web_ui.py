@@ -2167,14 +2167,16 @@ def make_progress_message(progress: ProgressUpdate) -> dict:
 
 
 def make_phase_milestone(phase_name: str, account_name: str, model_name: str,
-                         usage_pct: int | None = None) -> dict:
+                         usage_pct: int | None = None,
+                         weekly_usage_pct: int | None = None) -> dict:
     """Create a chatbot message marking a phase transition with provider info.
 
     Args:
         phase_name: Phase name (e.g., "Exploration", "Coding", "Verification").
         account_name: Provider account name.
         model_name: Model identifier.
-        usage_pct: Usage used percentage (0-100), or None if unavailable.
+        usage_pct: Session usage percentage (0-100), or None if unavailable.
+        weekly_usage_pct: Weekly usage percentage (0-100), or None if unavailable.
 
     Returns:
         Chat message dict with role="user" for display in the milestones panel.
@@ -2182,6 +2184,8 @@ def make_phase_milestone(phase_name: str, account_name: str, model_name: str,
     metrics = ""
     if usage_pct is not None:
         metrics = f" Usage: {usage_pct}%"
+    if weekly_usage_pct is not None:
+        metrics += f" Weekly: {weekly_usage_pct}%"
     content = f"**{phase_name}:** {account_name} ({model_name}{metrics})"
     return {"role": "user", "content": content}
 
@@ -3213,7 +3217,14 @@ class ChadWebUI:
             usage_pct = math.ceil((1.0 - usage_remaining) * 100)
         except Exception:
             usage_pct = None
-        return make_phase_milestone(phase_name, account_name, model_name, usage_pct)
+        weekly_pct = None
+        try:
+            weekly_remaining = self.provider_ui.get_weekly_remaining_usage(account_name)
+            if weekly_remaining is not None:
+                weekly_pct = math.ceil((1.0 - weekly_remaining) * 100)
+        except Exception:
+            pass
+        return make_phase_milestone(phase_name, account_name, model_name, usage_pct, weekly_pct)
 
     def assign_role(self, account_name: str, role: str):
         return self.provider_ui.assign_role(account_name, role, self.provider_card_count)
@@ -4010,7 +4021,7 @@ class ChadWebUI:
                         milestone_type = msg[1]
                         milestone_title = msg[2]
                         milestone_summary = msg[3]
-                        if milestone_type == "session_limit_reached":
+                        if milestone_type in ("session_limit_reached", "weekly_limit_reached"):
                             session.session_limit_summary = milestone_summary
                         milestone_msg = {
                             "role": "user",
@@ -4209,7 +4220,7 @@ class ChadWebUI:
                             # Keep showing last live stream content during transition to verification
                             yield make_yield(chat_history, current_status, last_live_stream, task_state="running")
                         elif msg_type == "milestone":
-                            if msg[1] == "session_limit_reached":
+                            if msg[1] in ("session_limit_reached", "weekly_limit_reached"):
                                 session.session_limit_summary = msg[3]
                     except queue.Empty:
                         break
@@ -5263,7 +5274,7 @@ class ChadWebUI:
                     milestone_type = msg[1]
                     milestone_title = msg[2]
                     milestone_summary = msg[3]
-                    if milestone_type == "session_limit_reached":
+                    if milestone_type in ("session_limit_reached", "weekly_limit_reached"):
                         session.session_limit_summary = milestone_summary
                     chat_history.append({
                         "role": "user",

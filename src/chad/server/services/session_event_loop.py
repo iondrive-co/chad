@@ -11,7 +11,6 @@ import time
 from typing import Any, Callable
 
 from chad.util.event_log import EventLog, MilestoneEvent, UserMessageEvent
-from chad.util.handoff import is_quota_exhaustion_error
 from chad.util.prompts import extract_coding_summary, CodingSummary
 
 
@@ -31,6 +30,7 @@ class SessionEventLoop:
         emit_fn: Callable,
         worktree_path,
         max_verification_attempts: int = 5,
+        is_quota_exhausted_fn: Callable[[str], str | None] | None = None,
     ):
         self.session_id = session_id
         self.event_log = event_log
@@ -39,6 +39,8 @@ class SessionEventLoop:
         self._emit_fn = emit_fn
         self.worktree_path = worktree_path
         self._max_verification_attempts = max_verification_attempts
+
+        self._is_quota_exhausted_fn = is_quota_exhausted_fn
 
         self._state = "idle"
         self._message_queue: queue.Queue = queue.Queue()
@@ -86,6 +88,7 @@ class SessionEventLoop:
         "exploration": "Discovery",
         "coding_complete": "Coding Complete",
         "session_limit_reached": "Session Limit",
+        "weekly_limit_reached": "Weekly Limit",
         "verification_started": "Verification",
         "verification_passed": "Verification Passed",
         "verification_failed": "Verification Failed",
@@ -126,14 +129,6 @@ class SessionEventLoop:
     # ---- Exploration marker detection ----
     _EXPLORATION_RE = re.compile(r"EXPLORATION_RESULT:\s*(.+?)(?:\n\n|\n(?=[A-Z•\-\*#])|$)", re.DOTALL)
 
-    # ---- Session limit detection ----
-    # Claude CLI: "You've hit your limit · resets 4pm (Australia/Melbourne)"
-    _SESSION_LIMIT_RE = re.compile(
-        r"You['\u2018\u2019]ve hit your limit"
-        r"(?:\s*[\u00b7\-\u2013\u2014]\s*resets?\s+(.+?))?$",
-        re.MULTILINE,
-    )
-
     def _analyze_output(self) -> None:
         """Scan output buffer for milestone markers."""
         with self._output_lock:
@@ -153,26 +148,20 @@ class SessionEventLoop:
         # (only check the last ~500 chars to avoid false positives from code edits)
         if not self._session_limit_detected:
             tail = joined[-500:] if len(joined) > 500 else joined
-            limit_match = self._SESSION_LIMIT_RE.search(tail)
-            if limit_match:
-                self._session_limit_detected = True
-                reset_info = limit_match.group(1)
-                if reset_info:
-                    summary = f"Session limit reached - resets {reset_info}"
-                else:
-                    summary = "Session limit reached"
-                self._session_limit_summary = summary
-                self._emit_milestone("session_limit_reached", summary)
-            elif is_quota_exhaustion_error(tail):
-                self._session_limit_detected = True
-                # Extract the matching line for a useful summary
-                summary = "Provider quota or rate limit reached"
-                for line in tail.strip().splitlines():
-                    if is_quota_exhaustion_error(line):
-                        summary = line.strip()
-                        break
-                self._session_limit_summary = summary
-                self._emit_milestone("session_limit_reached", summary)
+            if self._is_quota_exhausted_fn:
+                limit_type = self._is_quota_exhausted_fn(tail)
+                if limit_type:
+                    self._session_limit_detected = True
+                    title = self._MILESTONE_TITLES.get(limit_type, "Limit Reached")
+                    summary = f"{title} - quota exhausted"
+                    # Try to extract a more useful summary from the output
+                    for line in tail.strip().splitlines():
+                        stripped = line.strip()
+                        if stripped and len(stripped) > 10:
+                            # Use the last meaningful line as the summary
+                            summary = stripped
+                    self._session_limit_summary = summary
+                    self._emit_milestone(limit_type, summary)
 
         # Scan for coding completion JSON
         if not self._coding_complete_detected:
