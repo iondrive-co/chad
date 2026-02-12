@@ -763,6 +763,41 @@ class TestClaudeCodeProvider:
 
         assert result == "Final result"
 
+    def test_get_response_reader_thread_handles_stop_iteration(self):
+        """Reader thread should treat StopIteration as clean EOF, not a thread error."""
+        import json
+        import threading
+
+        config = ModelConfig(provider="anthropic", model_name="claude-3")
+        provider = ClaudeCodeProvider(config)
+
+        mock_process = Mock()
+        mock_stdout = Mock()
+        mock_process.stdout = mock_stdout
+        mock_process.poll.return_value = None
+        provider.process = mock_process
+
+        messages = [
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Hi"}]}}),
+            json.dumps({"type": "result", "result": "Final result"}),
+        ]
+        mock_stdout.readline.side_effect = messages + [""]
+
+        thread_exceptions: list[type[BaseException]] = []
+        original_excepthook = threading.excepthook
+
+        def capture_excepthook(args: threading.ExceptHookArgs) -> None:
+            thread_exceptions.append(args.exc_type)
+
+        threading.excepthook = capture_excepthook
+        try:
+            result = provider.get_response(timeout=5.0)
+        finally:
+            threading.excepthook = original_excepthook
+
+        assert result == "Final result"
+        assert thread_exceptions == []
+
     def test_send_message_with_broken_pipe_error(self):
         """Test that BrokenPipeError is silently caught in send_message."""
         config = ModelConfig(provider="anthropic", model_name="claude-3")
