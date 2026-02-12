@@ -162,3 +162,60 @@ class TestProviderOauthFlow:
 
         assert success is True
         assert calls == [["vibe", "--setup"]]
+
+
+class TestCLIStreamingMilestones:
+    """Tests for milestone delivery in CLI task streaming."""
+
+    def test_run_task_with_streaming_emits_milestones_from_api_endpoint(self, monkeypatch):
+        """CLI should fetch milestones from the dedicated milestones API endpoint."""
+        import termios
+        from unittest.mock import Mock
+        from chad.ui.client.stream_client import StreamEvent
+        from chad.ui.cli.app import run_task_with_streaming
+
+        client = Mock()
+        client.get_milestones.side_effect = [
+            [
+                {
+                    "seq": 1,
+                    "milestone_type": "exploration",
+                    "title": "Discovery",
+                    "summary": "Found auth flow in src/auth.py",
+                }
+            ],
+            [],
+        ]
+
+        stream_client = Mock()
+        stream_client.stream_events.return_value = iter(
+            [StreamEvent(event_type="complete", data={"exit_code": 0})]
+        )
+
+        writes: list[bytes] = []
+
+        def fake_write(_fd, data):
+            writes.append(data)
+            return len(data)
+
+        def fake_tcgetattr(_fd):
+            raise termios.error("not a tty")
+
+        monkeypatch.setattr("chad.ui.cli.app.get_terminal_size", lambda: (24, 80))
+        monkeypatch.setattr("chad.ui.cli.app.termios.tcgetattr", fake_tcgetattr)
+        monkeypatch.setattr("chad.ui.cli.app.signal.signal", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("chad.ui.cli.app.os.write", fake_write)
+
+        exit_code = run_task_with_streaming(
+            client=client,
+            stream_client=stream_client,
+            session_id="sess-1",
+            project_path="/tmp/project",
+            task_description="fix task",
+            coding_account="codex",
+        )
+
+        assert exit_code == 0
+        client.get_milestones.assert_any_call("sess-1", since_seq=0)
+        rendered = b"".join(writes).decode("utf-8", errors="replace")
+        assert "[MILESTONE] Discovery: Found auth flow in src/auth.py" in rendered

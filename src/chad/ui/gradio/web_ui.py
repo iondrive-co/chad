@@ -2389,6 +2389,59 @@ class ChadWebUI:
         message_queue.put(("ai_switch", "CODING AI"))
         message_queue.put(("message_start", "CODING AI"))
 
+        # Milestones must come from the dedicated milestones endpoint, not SSE events.
+        milestone_since_seq = 0
+        milestone_poll_stop = threading.Event()
+        milestone_poll_thread: threading.Thread | None = None
+
+        def poll_milestones_once() -> None:
+            nonlocal milestone_since_seq
+            if not server_session_id:
+                return
+
+            get_milestones = getattr(self.api_client, "get_milestones", None)
+            if not callable(get_milestones):
+                return
+
+            try:
+                milestones = get_milestones(server_session_id, since_seq=milestone_since_seq)
+            except Exception:
+                return
+
+            if not isinstance(milestones, list):
+                return
+
+            max_seq = milestone_since_seq
+            for milestone in milestones:
+                if not isinstance(milestone, dict):
+                    continue
+
+                seq = milestone.get("seq", 0)
+                try:
+                    seq_int = int(seq)
+                except (TypeError, ValueError):
+                    seq_int = 0
+                if seq_int > max_seq:
+                    max_seq = seq_int
+
+                summary = str(milestone.get("summary", "")).strip()
+                if not summary:
+                    continue
+
+                message_queue.put((
+                    "milestone",
+                    str(milestone.get("milestone_type", "")),
+                    str(milestone.get("title", "")),
+                    summary,
+                ))
+
+            milestone_since_seq = max_seq
+
+        def milestone_poll_loop() -> None:
+            while not milestone_poll_stop.is_set():
+                poll_milestones_once()
+                milestone_poll_stop.wait(0.5)
+
         # Stream output via SSE using server session ID
         stream_client = self._get_stream_client()
         exit_code = 0
@@ -2454,6 +2507,10 @@ class ChadWebUI:
             r'(?:\x1b\[[0-9;]*m)*mcp startup:(?:\x1b\[[0-9;]*m)*[^\n]*\n',
             re.IGNORECASE,
         )
+
+        poll_milestones_once()
+        milestone_poll_thread = threading.Thread(target=milestone_poll_loop, daemon=True)
+        milestone_poll_thread.start()
 
         try:
             try:
@@ -2622,13 +2679,6 @@ class ChadWebUI:
                                 before_description=event.data.get("before_description"),
                             )
                             message_queue.put(("progress", progress))
-                    elif event_type == "milestone":
-                        # Server-side milestone from SessionEventLoop
-                        milestone_type = event.data.get("milestone_type", "")
-                        title = event.data.get("title", "")
-                        summary = event.data.get("summary", "")
-                        if summary:
-                            message_queue.put(("milestone", milestone_type, title, summary))
                     elif event_type == "terminal_output":
                         # Fallback for parsed terminal output from EventLog
                         # This ensures content is shown even if raw PTY parsing fails
@@ -2663,6 +2713,11 @@ class ChadWebUI:
         except Exception as e:
             message_queue.put(("status", f"❌ Stream error: {e}"))
             return False, str(e), server_session_id, work_done
+        finally:
+            milestone_poll_stop.set()
+            if milestone_poll_thread is not None:
+                milestone_poll_thread.join(timeout=1.0)
+            poll_milestones_once()
 
         # Check if stream ended without completion event - this indicates a bug
         # where the SSE stream dropped unexpectedly (e.g., PTY session marked inactive
