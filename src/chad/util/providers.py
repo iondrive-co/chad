@@ -1344,6 +1344,10 @@ class AIProvider(ABC):
         """Get weekly usage as a percentage (0-100), or None if unavailable."""
         return None
 
+    def get_context_usage_percentage(self) -> float | None:
+        """Get context window usage as a percentage (0-100), or None if unavailable."""
+        return None
+
     def is_quota_exhausted(self, output_tail: str) -> str | None:
         """Check if output indicates quota exhaustion.
 

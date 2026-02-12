@@ -12,10 +12,8 @@ will verify and ralph loop to deliver a one-shot result.
 **The First Warning:** Chad was developed with...  Chad. Yes, this material writes itself. No, high quality robust code 
 this is not. 
 
-**World Warning II:** Chad is a risk-taker who knows no limits. Chad has access to everything on your hard drive and 
-your internet connection. Responsible models will stop Chad if they have the right context to do so, and I added a 
-safety prompt which will try to give them that context. However, if Chad REALLY wants to complete your task there
-are only so many ways I can explicitly prohibit it from ruining your life.
+**World Warning II:** Chad is a risk-taker who knows no limits. Chad runs agents in YOLO mode and has access to 
+everything on your hard drive and your internet connection.
 
 ### Blah blah how do I run it?
 ```bash
