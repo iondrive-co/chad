@@ -250,6 +250,91 @@ class TestExplorationMilestoneDetection:
         ]
         assert len(exploration_emits) == 2
 
+    def test_detects_marker_split_across_chunks(self):
+        """Split marker tokens across chunks should still emit one discovery."""
+        loop, event_log, emitted = self._make_loop()
+
+        loop.feed_output("EXPLORATION_RES")
+        loop.feed_output("ULT: Found split marker handling in parser\n")
+        loop._analyze_output()
+
+        exploration_emits = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
+        ]
+        assert len(exploration_emits) == 1
+        assert "split marker handling" in exploration_emits[0][1]["summary"]
+
+    def test_deduplicates_repeated_exploration_marker(self):
+        """Repeated identical discovery lines should emit only once."""
+        loop, event_log, emitted = self._make_loop()
+
+        marker = "EXPLORATION_RESULT: Found auth logic in src/auth.py\n"
+        loop.feed_output(marker)
+        loop.feed_output(marker)
+        loop._analyze_output()
+
+        exploration_emits = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
+        ]
+        assert len(exploration_emits) == 1
+
+    def test_strips_ansi_codes_before_marker_matching(self):
+        """ANSI color codes around marker text should not block parsing."""
+        loop, event_log, emitted = self._make_loop()
+
+        loop.feed_output("\x1b[32mEXPLORATION_RESULT:\x1b[0m Found parser cleanup in event loop\n")
+        loop._analyze_output()
+
+        exploration_emits = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
+        ]
+        assert len(exploration_emits) == 1
+        assert "parser cleanup" in exploration_emits[0][1]["summary"]
+
+    def test_ignores_non_marker_line_mentions(self):
+        """Lines that merely mention EXPLORATION_RESULT should not emit milestones."""
+        loop, event_log, emitted = self._make_loop()
+
+        loop.feed_output("I will output EXPLORATION_RESULT lines after discovery\n")
+        loop.feed_output("prefix EXPLORATION_RESULT: not a marker because no line prefix match\n")
+        loop._analyze_output()
+
+        exploration_emits = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
+        ]
+        assert len(exploration_emits) == 0
+
+    def test_flushes_partial_marker_line_on_finalize(self):
+        """Finalize scan should emit trailing marker lines without newline."""
+        loop, event_log, emitted = self._make_loop()
+
+        loop.feed_output("EXPLORATION_RESULT: Found final flush without newline")
+        loop._analyze_output(finalize=True)
+
+        exploration_emits = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
+        ]
+        assert len(exploration_emits) == 1
+
+    def test_ignores_invalid_terminal_metadata_summaries(self):
+        """Discovery markers with terminal metadata should be ignored."""
+        loop, event_log, emitted = self._make_loop()
+
+        loop.feed_output("EXPLORATION_RESULT: workdir: /home/miles/chad/.chad-worktrees/abc123\n")
+        loop.feed_output("EXPLORATION_RESULT: model: gpt-5.1-codex\n")
+        loop._analyze_output()
+
+        exploration_emits = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
+        ]
+        assert len(exploration_emits) == 0
+
 
 class TestCodingCompleteMilestone:
     """Tests for coding complete detection in _analyze_output."""
