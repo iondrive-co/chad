@@ -40,10 +40,12 @@ class SessionEventLoop:
         get_account_info_fn: Callable[[str], dict | None] | None = None,
         get_session_reset_eta_fn: Callable[[], str | None] | None = None,
         get_weekly_reset_eta_fn: Callable[[], str | None] | None = None,
+        notify_slack: bool = False,
     ):
         self.session_id = session_id
         self.event_log = event_log
         self.task = task
+        self._notify_slack = notify_slack
         self._run_phase_fn = run_phase_fn
         self._emit_fn = emit_fn
         self.worktree_path = worktree_path
@@ -157,11 +159,11 @@ class SessionEventLoop:
 
         self._emit_fn("milestone", milestone_type=milestone_type, title=title, summary=summary, details=details)
 
-        # Notify Slack (fire-and-forget)
-        from chad.server.services.slack_service import get_slack_service
-        get_slack_service().post_milestone_async(
-            self.session_id, milestone_type, title, summary,
-        )
+        if self._notify_slack:
+            from chad.server.services.slack_service import get_slack_service
+            get_slack_service().post_milestone_async(
+                self.session_id, milestone_type, title, summary,
+            )
 
     def _loop(self) -> None:
         """Background tick loop for milestone detection and message processing."""

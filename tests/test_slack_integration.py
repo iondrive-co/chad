@@ -301,6 +301,7 @@ class TestMilestoneSlackHook:
         loop._milestones = []
         loop._milestone_lock = __import__("threading").Lock()
         loop._emit_fn = MagicMock()
+        loop._notify_slack = True
 
         mock_svc = MagicMock()
         with patch(
@@ -315,3 +316,25 @@ class TestMilestoneSlackHook:
         mock_svc.post_milestone_async.assert_called_once_with(
             "test-sess", "coding_complete", "Coding Complete", "Task done",
         )
+
+    def test_emit_milestone_skips_slack_by_default(self):
+        """notify_slack defaults to False so tests don't leak real Slack calls."""
+        from chad.server.services.session_event_loop import SessionEventLoop
+
+        loop = SessionEventLoop.__new__(SessionEventLoop)
+        loop.session_id = "test-sess"
+        loop.event_log = None
+        loop._milestone_seq = 0
+        loop._milestones = []
+        loop._milestone_lock = __import__("threading").Lock()
+        loop._emit_fn = MagicMock()
+        loop._notify_slack = False
+
+        mock_svc = MagicMock()
+        with patch(
+            "chad.server.services.slack_service.get_slack_service",
+            return_value=mock_svc,
+        ):
+            loop._emit_milestone("coding_complete", "Task done")
+
+        mock_svc.post_milestone_async.assert_not_called()

@@ -1324,6 +1324,7 @@ class TaskExecutor:
                 get_account_info_fn=get_account_info,
                 get_session_reset_eta_fn=_check_provider.get_session_reset_eta if _check_provider else None,
                 get_weekly_reset_eta_fn=_check_provider.get_weekly_reset_eta if _check_provider else None,
+                notify_slack=True,
             )
             task._session_event_loop = event_loop
 
