@@ -2306,6 +2306,9 @@ class ChadWebUI:
         message_queue: "queue.Queue",
         coding_model: str | None = None,
         coding_reasoning: str | None = None,
+        verification_account: str | None = None,
+        verification_model: str | None = None,
+        verification_reasoning: str | None = None,
         server_session_id: str | None = None,
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
@@ -2324,6 +2327,9 @@ class ChadWebUI:
             message_queue: Queue to post events to (for UI integration)
             coding_model: Optional model override
             coding_reasoning: Optional reasoning level
+            verification_account: Optional verification account override
+            verification_model: Optional verification model override
+            verification_reasoning: Optional verification reasoning override
             terminal_cols: Terminal width in columns (calculated from panel width)
             screenshots: Optional list of screenshot file paths for agent reference
             override_prompt: Optional user-edited coding prompt
@@ -2367,6 +2373,18 @@ class ChadWebUI:
         # Use provided terminal_cols or fall back to default
         effective_cols = terminal_cols if terminal_cols else TERMINAL_COLS
 
+        accounts = []
+        provider_by_account: dict[str, str] = {}
+        try:
+            accounts = self.api_client.list_accounts()
+            provider_by_account = {
+                str(acc.name): str(acc.provider)
+                for acc in accounts
+                if getattr(acc, "name", None) and getattr(acc, "provider", None)
+            }
+        except Exception:
+            pass
+
         # Start the task via API using the server session ID
         try:
             self.api_client.start_task(
@@ -2376,6 +2394,9 @@ class ChadWebUI:
                 coding_agent=coding_account,
                 coding_model=coding_model,
                 coding_reasoning=coding_reasoning,
+                verification_agent=verification_account,
+                verification_model=verification_model,
+                verification_reasoning=verification_reasoning,
                 terminal_rows=TERMINAL_ROWS,
                 terminal_cols=effective_cols,
                 screenshots=screenshots,
@@ -2393,6 +2414,7 @@ class ChadWebUI:
         milestone_since_seq = 0
         milestone_poll_stop = threading.Event()
         milestone_poll_thread: threading.Thread | None = None
+        stream_mode_lock = threading.Lock()
 
         def poll_milestones_once() -> None:
             nonlocal milestone_since_seq
@@ -2428,9 +2450,18 @@ class ChadWebUI:
                 if not summary:
                     continue
 
+                milestone_type = str(milestone.get("milestone_type", ""))
+                if milestone_type == "verification_started":
+                    _switch_stream_mode(
+                        verification_account or coding_account,
+                        "VERIFICATION AI",
+                    )
+                elif milestone_type == "revision_started":
+                    _switch_stream_mode(coding_account, "CODING AI")
+
                 message_queue.put((
                     "milestone",
-                    str(milestone.get("milestone_type", "")),
+                    milestone_type,
                     str(milestone.get("title", "")),
                     summary,
                 ))
@@ -2447,18 +2478,6 @@ class ChadWebUI:
         exit_code = 0
         got_complete_event = False
 
-        # Detect if this is a provider that outputs stream-json (needs parsing)
-        # Claude/Qwen/Gemini/Kimi share line-delimited JSON output modes.
-        json_parser = None
-        try:
-            accounts = self.api_client.list_accounts()
-            for acc in accounts:
-                if acc.name == coding_account and acc.provider in ("anthropic", "qwen", "gemini", "kimi"):
-                    json_parser = ClaudeStreamJsonParser()
-                    break
-        except Exception:
-            pass  # Fall back to raw output if we can't determine provider
-
         # Track output across the entire run (for verification input) and for the
         # currently active chat phase (exploration vs implementation message bubbles).
         full_output_chunks: list[str] = []
@@ -2470,19 +2489,11 @@ class ChadWebUI:
             full_output_chunks.append(chunk)
             phase_output_chunks.append(chunk)
 
-        # For stream-json providers: parse text directly (no terminal width constraints).
-        # For others: use pyte terminal emulation for proper ANSI/cursor handling.
-        terminal = None if json_parser else TerminalEmulator(cols=effective_cols, rows=TERMINAL_ROWS)
-
-        # Detect provider for Codex prompt echo filtering
+        json_stream_providers = {"anthropic", "qwen", "gemini", "kimi"}
+        current_stream_provider = provider_by_account.get(coding_account)
+        json_parser: ClaudeStreamJsonParser | None = None
+        terminal: TerminalEmulator | None = None
         is_codex = False
-        try:
-            for acc in accounts:
-                if acc.name == coding_account and acc.provider == "openai":
-                    is_codex = True
-                    break
-        except Exception:
-            pass
 
         # Codex prompt echo filtering state
         # Codex echoes stdin after the header. The structure is:
@@ -2497,8 +2508,8 @@ class ChadWebUI:
         #
         # We keep everything up to the colored "user" line, filter the prompt,
         # and show everything after "mcp startup:"
-        codex_in_prompt_echo = False  # True when we're in the echoed prompt section
-        codex_past_prompt_echo = False  # True when we've seen "mcp startup:" and are done
+        codex_in_prompt_echo = False
+        codex_past_prompt_echo = False
         codex_output_buffer = ""
         codex_ansi_pattern = re.compile(r'\x1b\[[0-9;]*m')
         codex_user_line_pattern = re.compile(r'\n--------\nuser\n')
@@ -2507,6 +2518,32 @@ class ChadWebUI:
             r'(?:\x1b\[[0-9;]*m)*mcp startup:(?:\x1b\[[0-9;]*m)*[^\n]*\n',
             re.IGNORECASE,
         )
+
+        def _reset_codex_filter_state() -> None:
+            nonlocal codex_in_prompt_echo, codex_past_prompt_echo, codex_output_buffer
+            codex_in_prompt_echo = False
+            codex_past_prompt_echo = False
+            codex_output_buffer = ""
+
+        def _apply_stream_mode(provider_name: str | None) -> None:
+            nonlocal current_stream_provider, json_parser, terminal, is_codex
+            current_stream_provider = provider_name
+            is_json_provider = provider_name in json_stream_providers
+            json_parser = ClaudeStreamJsonParser() if is_json_provider else None
+            terminal = None if is_json_provider else TerminalEmulator(cols=effective_cols, rows=TERMINAL_ROWS)
+            is_codex = provider_name == "openai"
+            _reset_codex_filter_state()
+
+        def _switch_stream_mode(account_name: str | None, ai_name: str) -> None:
+            account_key = account_name or ""
+            provider_name = provider_by_account.get(account_key, current_stream_provider)
+            with stream_mode_lock:
+                if provider_name != current_stream_provider:
+                    _apply_stream_mode(provider_name)
+            message_queue.put(("ai_switch", ai_name))
+
+        with stream_mode_lock:
+            _apply_stream_mode(current_stream_provider)
 
         poll_milestones_once()
         milestone_poll_thread = threading.Thread(target=milestone_poll_loop, daemon=True)
@@ -2535,123 +2572,110 @@ class ChadWebUI:
                         except Exception:
                             raw_bytes = b""
 
-                    # For anthropic, parse stream-json and render directly (no terminal emulation)
-                    if json_parser:
-                        text_chunks = json_parser.feed(raw_bytes)
-                        if text_chunks:
-                            # Accumulate parsed text and render as HTML directly
-                            for text_chunk in text_chunks:
-                                _record_output_chunk(text_chunk)
-                            readable_text = "\n".join(text_chunks) + "\n"
-                            # Escape HTML and preserve newlines
-                            all_text = "\n".join(full_output_chunks)
-                            html_output = html.escape(all_text)
-                            message_queue.put(("stream", readable_text, html_output))
-                        # If no complete lines yet, don't emit anything
-                    else:
-                        decoded = raw_bytes.decode("utf-8", errors="replace")
+                    with stream_mode_lock:
+                        active_json_parser = json_parser
+                        active_terminal = terminal
+                        active_is_codex = is_codex
 
-                        # Each task phase starts a new Codex process. If we see a fresh
-                        # Codex banner while in passthrough mode, restart prompt filtering
-                        # so the implementation prompt gets stripped too.
-                        if is_codex and codex_past_prompt_echo:
-                            banner_probe = codex_ansi_pattern.sub('', decoded).lower()
-                            if "openai codex" in banner_probe and "--------" in banner_probe:
-                                codex_past_prompt_echo = False
-                                codex_in_prompt_echo = False
-                                codex_output_buffer = ""
+                        # For stream-json providers: parse text directly (no terminal emulation)
+                        if active_json_parser:
+                            text_chunks = active_json_parser.feed(raw_bytes)
+                            if text_chunks:
+                                for text_chunk in text_chunks:
+                                    _record_output_chunk(text_chunk)
+                                readable_text = "\n".join(text_chunks) + "\n"
+                                all_text = "\n".join(full_output_chunks)
+                                html_output = html.escape(all_text)
+                                message_queue.put(("stream", readable_text, html_output))
+                        else:
+                            decoded = raw_bytes.decode("utf-8", errors="replace")
 
-                        # Filter Codex prompt echo
-                        # Codex output structure:
-                        #   [banner]
-                        #   --------
-                        #   [header info]
-                        #   --------
-                        #   user  (or [36muser[0m with ANSI)
-                        #   [prompt - FILTER THIS]
-                        #   mcp startup: ...
-                        #   [agent work - KEEP THIS]
-                        if is_codex and not codex_past_prompt_echo:
-                            codex_output_buffer += decoded
-                            normalized = codex_output_buffer.replace("\r\n", "\n").replace("\r", "\n")
+                            # Each task phase starts a new Codex process. If we see a fresh
+                            # Codex banner while in passthrough mode, restart prompt filtering
+                            # so the implementation prompt gets stripped too.
+                            if active_is_codex and codex_past_prompt_echo:
+                                banner_probe = codex_ansi_pattern.sub('', decoded).lower()
+                                if "openai codex" in banner_probe and "--------" in banner_probe:
+                                    _reset_codex_filter_state()
 
-                            # Strip ANSI codes for pattern matching
-                            stripped = codex_ansi_pattern.sub('', normalized)
+                            # Filter Codex prompt echo
+                            if active_is_codex and not codex_past_prompt_echo:
+                                codex_output_buffer += decoded
+                                normalized = codex_output_buffer.replace("\r\n", "\n").replace("\r", "\n")
+                                stripped = codex_ansi_pattern.sub('', normalized)
+                                user_line_match = codex_user_line_pattern.search(stripped)
 
-                            # Look for "user" on its own line (after second --------)
-                            # This marks the start of the echoed prompt
-                            user_line_match = codex_user_line_pattern.search(stripped)
+                                if not codex_in_prompt_echo and user_line_match:
+                                    match = codex_user_pattern.search(normalized)
+                                    if match:
+                                        pre_echo = normalized[:match.start()]
+                                        if pre_echo.strip():
+                                            if active_terminal:
+                                                active_terminal.feed(pre_echo.encode("utf-8"))
+                                                html_output = active_terminal.render_html()
+                                            else:
+                                                html_output = html.escape(pre_echo)
+                                            _record_output_chunk(pre_echo)
+                                            message_queue.put(("stream", pre_echo, html_output))
+                                        codex_in_prompt_echo = True
+                                        codex_output_buffer = normalized[match.end():]
+                                        normalized = codex_output_buffer
+                                        stripped = codex_ansi_pattern.sub('', normalized)
 
-                            # Check if we're entering the prompt echo section
-                            if not codex_in_prompt_echo and user_line_match:
-                                # Found start of prompt echo - emit content before it
-                                # Find the position in the original (non-stripped) string
-                                # by finding the pattern with ANSI codes
-                                match = codex_user_pattern.search(normalized)
-                                if match:
-                                    pre_echo = normalized[:match.start()]
-                                    if pre_echo.strip():
-                                        terminal.feed(pre_echo.encode("utf-8"))
-                                        _record_output_chunk(pre_echo)
-                                        html_output = terminal.render_html()
-                                        message_queue.put(("stream", pre_echo, html_output))
-                                    # Now in prompt echo section - update buffer
-                                    codex_in_prompt_echo = True
-                                    codex_output_buffer = normalized[match.end():]
-                                    normalized = codex_output_buffer
-                                    stripped = codex_ansi_pattern.sub('', normalized)
-
-                            # Check if we've passed the prompt echo section
-                            if codex_in_prompt_echo and "mcp startup:" in stripped.lower():
-                                # Found end of prompt echo - extract agent output after marker
-                                match = codex_mcp_pattern.search(normalized)
-                                if match:
-                                    agent_output = normalized[match.end():]
-                                else:
-                                    # Fallback: find in stripped and estimate position
-                                    marker_pos = stripped.lower().find("mcp startup:")
-                                    newline_after = stripped.find("\n", marker_pos)
-                                    if newline_after != -1:
-                                        agent_output = normalized[newline_after + 1:]
+                                if codex_in_prompt_echo and "mcp startup:" in stripped.lower():
+                                    match = codex_mcp_pattern.search(normalized)
+                                    if match:
+                                        agent_output = normalized[match.end():]
                                     else:
-                                        agent_output = ""
-                                codex_past_prompt_echo = True
-                                codex_output_buffer = ""
-                                if agent_output.strip():
-                                    terminal.feed(agent_output.encode("utf-8"))
-                                    _record_output_chunk(agent_output)
-                                    html_output = terminal.render_html()
-                                    message_queue.put(("stream", agent_output, html_output))
-                                continue
+                                        marker_pos = stripped.lower().find("mcp startup:")
+                                        newline_after = stripped.find("\n", marker_pos)
+                                        if newline_after != -1:
+                                            agent_output = normalized[newline_after + 1:]
+                                        else:
+                                            agent_output = ""
+                                    codex_past_prompt_echo = True
+                                    codex_output_buffer = ""
+                                    if agent_output.strip():
+                                        if active_terminal:
+                                            active_terminal.feed(agent_output.encode("utf-8"))
+                                            html_output = active_terminal.render_html()
+                                        else:
+                                            html_output = html.escape(agent_output)
+                                        _record_output_chunk(agent_output)
+                                        message_queue.put(("stream", agent_output, html_output))
+                                    continue
 
-                            # If not in prompt echo yet, emit normally but keep buffer small
-                            if not codex_in_prompt_echo:
-                                if len(codex_output_buffer) > 2000:
-                                    # No marker found - emit older content and keep looking
+                                if not codex_in_prompt_echo and len(codex_output_buffer) > 2000:
                                     to_emit = codex_output_buffer[:-500]
                                     codex_output_buffer = codex_output_buffer[-500:]
                                     if to_emit.strip():
-                                        terminal.feed(to_emit.encode("utf-8"))
+                                        if active_terminal:
+                                            active_terminal.feed(to_emit.encode("utf-8"))
+                                            html_output = active_terminal.render_html()
+                                        else:
+                                            html_output = html.escape(to_emit)
                                         _record_output_chunk(to_emit)
-                                        html_output = terminal.render_html()
                                         message_queue.put(("stream", to_emit, html_output))
-                            continue
+                                continue
 
-                        # Past prompt echo - pass through raw PTY output with terminal emulation
-                        terminal.feed(raw_bytes)
-                        _record_output_chunk(decoded)
-                        html_output = terminal.render_html()
-                        message_queue.put(("stream", decoded, html_output))
+                            if active_terminal:
+                                active_terminal.feed(raw_bytes)
+                                html_output = active_terminal.render_html()
+                            else:
+                                html_output = html.escape(decoded)
+                            _record_output_chunk(decoded)
+                            message_queue.put(("stream", decoded, html_output))
 
                 elif event.event_type == "complete":
                     exit_code = event.data.get("exit_code", 0)
                     got_complete_event = True
                     # Flush any remaining Codex output buffer
-                    if is_codex and codex_output_buffer.strip():
-                        if terminal:
-                            terminal.feed(codex_output_buffer.encode("utf-8"))
-                        _record_output_chunk(codex_output_buffer)
-                        codex_output_buffer = ""
+                    with stream_mode_lock:
+                        if is_codex and codex_output_buffer.strip():
+                            if terminal:
+                                terminal.feed(codex_output_buffer.encode("utf-8"))
+                            _record_output_chunk(codex_output_buffer)
+                            codex_output_buffer = ""
                     break
 
                 elif event.event_type == "error":
@@ -2685,7 +2709,9 @@ class ChadWebUI:
                         data = event.data.get("data", "")
                         if data and data.strip():
                             # For JSON providers, use the already-parsed EventLog text
-                            if json_parser:
+                            with stream_mode_lock:
+                                use_json_parser = json_parser is not None
+                            if use_json_parser:
                                 full_output_chunks = [data]  # Replace with EventLog content
                                 phase_output_chunks = [data]
                                 html_output = html.escape(data)
@@ -3822,6 +3848,10 @@ class ChadWebUI:
                 verification_model_value,
                 verification_reasoning_value,
             )
+            verification_enabled = (
+                verification_agent != self.VERIFICATION_NONE
+                and actual_verification_account is not None
+            )
 
             try:
                 self.api_client.set_account_model(coding_account, selected_model)
@@ -3904,6 +3934,9 @@ class ChadWebUI:
                         message_queue=message_queue,
                         coding_model=selected_model if selected_model != "default" else None,
                         coding_reasoning=selected_reasoning if selected_reasoning != "default" else None,
+                        verification_account=actual_verification_account if verification_enabled else None,
+                        verification_model=resolved_verification_model if verification_enabled else None,
+                        verification_reasoning=resolved_verification_reasoning if verification_enabled else None,
                         terminal_cols=terminal_cols,
                         screenshots=screenshots,
                         override_prompt=override_prompt,
@@ -3972,6 +4005,7 @@ class ChadWebUI:
             render_state = LiveStreamRenderState()
             progress_emitted = False  # Track if we've shown a progress update bubble
             coding_milestone_emitted = True  # Already inserted at start of coding phase
+            api_verification_status: str | None = None
             while not relay_complete.is_set() and not session.cancel_requested:
                 try:
                     msg = message_queue.get(timeout=0.02)
@@ -4103,6 +4137,10 @@ class ChadWebUI:
                         milestone_summary = msg[3]
                         if milestone_type in ("session_limit_reached", "weekly_limit_reached"):
                             session.session_limit_summary = milestone_summary
+                        if milestone_type == "verification_passed":
+                            api_verification_status = "passed"
+                        elif milestone_type == "verification_failed":
+                            api_verification_status = "failed"
                         milestone_msg = {
                             "role": "user",
                             "content": f"**{milestone_title}:** {milestone_summary}",
@@ -4302,6 +4340,10 @@ class ChadWebUI:
                         elif msg_type == "milestone":
                             if msg[1] in ("session_limit_reached", "weekly_limit_reached"):
                                 session.session_limit_summary = msg[3]
+                            if msg[1] == "verification_passed":
+                                api_verification_status = "passed"
+                            elif msg[1] == "verification_failed":
+                                api_verification_status = "failed"
                     except queue.Empty:
                         break
 
@@ -4310,8 +4352,8 @@ class ChadWebUI:
             # Track the active configuration only when the session can continue
             session.config = coding_config if session.active else None
 
-            verification_enabled = verification_agent != self.VERIFICATION_NONE
             verification_account_for_run = actual_verification_account if verification_enabled else None
+            verification_managed_by_api = verification_enabled and session.server_session_id is not None
             verification_log: list[dict[str, object]] = []
             verified: bool | None = None  # Track verification result
 
@@ -4328,6 +4370,20 @@ class ChadWebUI:
             elif task_success[0] and not verification_enabled:
                 final_status = "✓ Task completed (verification disabled)"
                 completion_msg = "───────────── ✅ TASK COMPLETED (VERIFICATION DISABLED) ─────────────"
+                chat_history.append({"role": "user", "content": completion_msg})
+            elif task_success[0] and verification_managed_by_api:
+                if api_verification_status == "passed":
+                    verified = True
+                    final_status = "✓ Task completed and verified!"
+                    completion_msg = "───────────── ✅ TASK COMPLETED (VERIFIED) ─────────────"
+                elif api_verification_status == "failed":
+                    verified = False
+                    final_status = "❌ Task failed - verification failed"
+                    completion_msg = "───────────── ❌ TASK FAILED (VERIFICATION) ─────────────"
+                else:
+                    verified = None
+                    final_status = "✓ Task completed"
+                    completion_msg = "───────────── ✅ TASK COMPLETED ─────────────"
                 chat_history.append({"role": "user", "content": completion_msg})
             elif task_success[0]:
                 # Get the last coding output for verification
@@ -4894,6 +4950,12 @@ class ChadWebUI:
             elif not verification_enabled:
                 session_status = "completed"
                 overall_success = True
+            elif verification_managed_by_api:
+                if verified is False:
+                    session_status = "failed"
+                else:
+                    session_status = "completed"
+                    overall_success = True
             elif verified is True:
                 session_status = "completed"
                 overall_success = True
