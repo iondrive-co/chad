@@ -5783,7 +5783,7 @@ class TestFollowupEventLogging:
         session.provider = None
 
         followup_msg = "Now fix the tests"
-        results = list(web_ui.send_followup(
+        list(web_ui.send_followup(
             "event-log-display",
             followup_msg,
             session.chat_history,

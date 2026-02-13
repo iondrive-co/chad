@@ -742,8 +742,19 @@ def check_verification_mentioned(response: str) -> bool:
 # Used when agent exits without completing (only progress update, no completion JSON)
 
 CONTINUATION_PROMPT = """\
-Your previous response ended with a progress update but you did not complete the task. \
-Continue from where you left off:
+Your previous response ended with a progress update but you did not complete the task.
+
+Continue the SAME task below. Do not start a different task or rediscover scope from repo history.
+
+Original task:
+---
+{task}
+---
+
+Most recent output from your previous attempt:
+---
+{previous_output}
+---
 
 1. Write test(s) that should fail until the fix/feature is implemented
 2. Make the changes, adjusting tests as needed
@@ -762,16 +773,35 @@ Do NOT output another progress update - continue directly with implementation.
 """
 
 
-def get_continuation_prompt(previous_output: str) -> str:
+MAX_CONTINUATION_OUTPUT_CHARS = 6000
+
+
+def _compact_continuation_output(previous_output: str) -> str:
+    """Keep continuation context bounded while preserving recent details."""
+    text = previous_output.strip()
+    if not text:
+        return "(no previous output captured)"
+    if len(text) <= MAX_CONTINUATION_OUTPUT_CHARS:
+        return text
+    return (
+        f"(truncated to last {MAX_CONTINUATION_OUTPUT_CHARS} chars)\n"
+        + text[-MAX_CONTINUATION_OUTPUT_CHARS:]
+    )
+
+
+def get_continuation_prompt(task: str, previous_output: str) -> str:
     """Build a continuation prompt when agent exits early (progress but no completion).
 
     Args:
+        task: Original task description that must be preserved across retries
         previous_output: The output from the previous run (included for context)
 
     Returns:
         Continuation prompt to re-invoke the agent
     """
-    return CONTINUATION_PROMPT
+    task_text = task.strip() or "(no task provided)"
+    output_text = _compact_continuation_output(previous_output)
+    return CONTINUATION_PROMPT.format(task=task_text, previous_output=output_text)
 
 
 # =============================================================================

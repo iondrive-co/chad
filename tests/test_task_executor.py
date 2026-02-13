@@ -300,8 +300,9 @@ class TestBuildAgentCommand:
     def test_continuation_phase_uses_continuation_prompt(self, tmp_path):
         """Continuation phase uses the continuation prompt when agent exits early."""
         previous_output = "Found the bug in src/main.py:42"
+        task_description = "Fix the bug in src/main.py"
         cmd, env, initial_input = build_agent_command(
-            "openai", "test-account", tmp_path, "Fix the bug",
+            "openai", "test-account", tmp_path, task_description,
             phase="continuation",
             exploration_output=previous_output
         )
@@ -310,6 +311,9 @@ class TestBuildAgentCommand:
         assert initial_input is not None
         assert "continue" in initial_input.lower()
         assert "progress update" in initial_input.lower() or "completion" in initial_input.lower()
+        # Continuation must include original task context so retries stay on-task
+        assert task_description in initial_input
+        assert previous_output in initial_input
 
     def test_implementation_phase_maps_to_combined_prompt(self, tmp_path):
         """Implementation phase now maps to the combined coding prompt."""
