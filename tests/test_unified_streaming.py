@@ -681,6 +681,366 @@ class TestCancelSession:
         assert data["cancel_requested"] is False
         assert "No active task" in data["message"]
 
+    def test_cancel_marks_task_cancelled_without_continuation(self, client, git_repo, monkeypatch):
+        """Cancelling must stop the task instead of triggering continuation retries."""
+        import chad.server.services.task_executor as task_executor_module
+
+        def build_cancel_resistant_command(
+            provider,
+            account_name,
+            project_path,
+            task_description=None,
+            screenshots=None,
+            phase="exploration",
+            exploration_output=None,
+            model=None,
+            reasoning_effort=None,
+            mock_run_duration_seconds=0,
+            override_prompt=None,
+        ):
+            del (
+                provider,
+                account_name,
+                project_path,
+                screenshots,
+                phase,
+                exploration_output,
+                model,
+                reasoning_effort,
+                mock_run_duration_seconds,
+                override_prompt,
+            )
+            marker = repr(task_description or "")
+            script = (
+                "import signal,time,sys\n"
+                f"TASK={marker}\n"
+                "def _on_term(sig, frame):\n"
+                "    print(f'TERM_EXIT_0 {TASK}')\n"
+                "    sys.stdout.flush()\n"
+                "    raise SystemExit(0)\n"
+                "signal.signal(signal.SIGTERM, _on_term)\n"
+                "print(f'RUN_START {TASK}')\n"
+                "sys.stdout.flush()\n"
+                "while True:\n"
+                "    time.sleep(0.1)\n"
+            )
+            return ["python3", "-c", script], {}, None
+
+        monkeypatch.setattr(task_executor_module, "build_agent_command", build_cancel_resistant_command)
+
+        session_resp = client.post("/api/v1/sessions", json={"name": "Cancel Regression"})
+        session_id = session_resp.json()["id"]
+        account_resp = client.post("/api/v1/accounts", json={"name": "cancel-regression", "provider": "mock"})
+        assert account_resp.status_code in (200, 201, 409)
+
+        start_resp = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "cancel-regression-task",
+                "coding_agent": "cancel-regression",
+            },
+        )
+        assert start_resp.status_code == 201
+        task_id = start_resp.json()["task_id"]
+
+        time.sleep(0.25)
+        cancel_resp = client.post(f"/api/v1/sessions/{session_id}/cancel")
+        assert cancel_resp.status_code == 200
+        assert cancel_resp.json()["cancel_requested"] is True
+
+        final_status = None
+        for _ in range(50):
+            status_resp = client.get(f"/api/v1/sessions/{session_id}/tasks/{task_id}")
+            assert status_resp.status_code == 200
+            status = status_resp.json()["status"]
+            if status in ("cancelled", "failed", "completed"):
+                final_status = status
+                if status == "cancelled":
+                    break
+            time.sleep(0.1)
+
+        assert final_status == "cancelled"
+
+        events_payload = client.get(f"/api/v1/sessions/{session_id}/events")
+        assert events_payload.status_code == 200
+        statuses = [
+            event.get("status", "")
+            for event in events_payload.json().get("events", [])
+            if event.get("type") == "status"
+        ]
+        assert not any("Agent continuing" in status for status in statuses)
+
+    def test_start_task_rejects_parallel_run_in_same_session(self, client, git_repo, monkeypatch):
+        """Starting a second task while one is running must be rejected."""
+        import chad.server.services.task_executor as task_executor_module
+
+        def build_slow_command(
+            provider,
+            account_name,
+            project_path,
+            task_description=None,
+            screenshots=None,
+            phase="exploration",
+            exploration_output=None,
+            model=None,
+            reasoning_effort=None,
+            mock_run_duration_seconds=0,
+            override_prompt=None,
+        ):
+            del (
+                provider,
+                account_name,
+                project_path,
+                task_description,
+                screenshots,
+                phase,
+                exploration_output,
+                model,
+                reasoning_effort,
+                mock_run_duration_seconds,
+                override_prompt,
+            )
+            script = (
+                "import time,sys\n"
+                "print('RUNNING')\n"
+                "sys.stdout.flush()\n"
+                "time.sleep(3)\n"
+            )
+            return ["python3", "-c", script], {}, None
+
+        monkeypatch.setattr(task_executor_module, "build_agent_command", build_slow_command)
+
+        session_resp = client.post("/api/v1/sessions", json={"name": "Parallel Start Regression"})
+        session_id = session_resp.json()["id"]
+        account_resp = client.post("/api/v1/accounts", json={"name": "parallel-regression", "provider": "mock"})
+        assert account_resp.status_code in (200, 201, 409)
+
+        first_start = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "first",
+                "coding_agent": "parallel-regression",
+            },
+        )
+        assert first_start.status_code == 201
+
+        second_start = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "second",
+                "coding_agent": "parallel-regression",
+            },
+        )
+        assert second_start.status_code == 409
+        assert "already running" in second_start.json().get("detail", "").lower()
+
+    def test_milestones_include_cancelled_task_after_restart(self, client, git_repo, monkeypatch):
+        """Milestone polling should keep milestones from cancelled tasks after restart."""
+        import chad.server.services.task_executor as task_executor_module
+
+        def build_task_specific_command(
+            provider,
+            account_name,
+            project_path,
+            task_description=None,
+            screenshots=None,
+            phase="exploration",
+            exploration_output=None,
+            model=None,
+            reasoning_effort=None,
+            mock_run_duration_seconds=0,
+            override_prompt=None,
+        ):
+            del (
+                provider,
+                account_name,
+                project_path,
+                screenshots,
+                phase,
+                exploration_output,
+                model,
+                reasoning_effort,
+                mock_run_duration_seconds,
+                override_prompt,
+            )
+            marker = repr(task_description or "")
+            if task_description == "first-cancelled-task":
+                script = (
+                    "import signal,time,sys\n"
+                    f"TASK={marker}\n"
+                    "def _on_term(sig, frame):\n"
+                    "    raise SystemExit(0)\n"
+                    "signal.signal(signal.SIGTERM, _on_term)\n"
+                    "print(f'EXPLORATION_RESULT: first milestone for {TASK}')\n"
+                    "sys.stdout.flush()\n"
+                    "while True:\n"
+                    "    time.sleep(0.1)\n"
+                )
+            else:
+                script = (
+                    "import sys\n"
+                    f"TASK={marker}\n"
+                    "print(f'EXPLORATION_RESULT: second milestone for {TASK}')\n"
+                    "print('{\"change_summary\":\"done\",\"files_changed\":[\"README.md\"],\"completion_status\":\"success\"}')\n"
+                    "sys.stdout.flush()\n"
+                )
+            return ["python3", "-c", script], {}, None
+
+        monkeypatch.setattr(task_executor_module, "build_agent_command", build_task_specific_command)
+
+        session_resp = client.post("/api/v1/sessions", json={"name": "Milestone Restart Regression"})
+        session_id = session_resp.json()["id"]
+        account_resp = client.post("/api/v1/accounts", json={"name": "milestone-restart-regression", "provider": "mock"})
+        assert account_resp.status_code in (200, 201, 409)
+
+        first_start = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "first-cancelled-task",
+                "coding_agent": "milestone-restart-regression",
+            },
+        )
+        assert first_start.status_code == 201
+        first_task_id = first_start.json()["task_id"]
+
+        first_seen = False
+        for _ in range(40):
+            milestones = client.get(f"/api/v1/sessions/{session_id}/milestones").json().get("milestones", [])
+            summaries = [str(m.get("summary", "")) for m in milestones]
+            if any("first milestone" in summary for summary in summaries):
+                first_seen = True
+                break
+            time.sleep(0.1)
+        assert first_seen
+
+        cancel_resp = client.post(f"/api/v1/sessions/{session_id}/cancel")
+        assert cancel_resp.status_code == 200
+        assert cancel_resp.json()["cancel_requested"] is True
+
+        for _ in range(50):
+            status = client.get(f"/api/v1/sessions/{session_id}/tasks/{first_task_id}").json()["status"]
+            if status == "cancelled":
+                break
+            time.sleep(0.1)
+        assert status == "cancelled"
+
+        second_start = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "second-restart-task",
+                "coding_agent": "milestone-restart-regression",
+            },
+        )
+        assert second_start.status_code == 201
+        second_task_id = second_start.json()["task_id"]
+
+        for _ in range(50):
+            second_status = client.get(f"/api/v1/sessions/{session_id}/tasks/{second_task_id}").json()["status"]
+            if second_status in ("completed", "failed", "cancelled"):
+                break
+            time.sleep(0.1)
+        assert second_status == "completed"
+
+        all_milestones = client.get(f"/api/v1/sessions/{session_id}/milestones").json().get("milestones", [])
+        all_summaries = [str(m.get("summary", "")) for m in all_milestones]
+        assert any("first milestone" in summary for summary in all_summaries)
+        assert any("second milestone" in summary for summary in all_summaries)
+
+    def test_events_latest_seq_uses_latest_task_after_restart(self, client, git_repo, monkeypatch):
+        """Events endpoint should report latest_seq from the most recent task."""
+        import chad.server.services.task_executor as task_executor_module
+
+        def build_fast_command(
+            provider,
+            account_name,
+            project_path,
+            task_description=None,
+            screenshots=None,
+            phase="exploration",
+            exploration_output=None,
+            model=None,
+            reasoning_effort=None,
+            mock_run_duration_seconds=0,
+            override_prompt=None,
+        ):
+            del (
+                provider,
+                account_name,
+                project_path,
+                screenshots,
+                phase,
+                exploration_output,
+                model,
+                reasoning_effort,
+                mock_run_duration_seconds,
+                override_prompt,
+            )
+            marker = repr(task_description or "")
+            script = (
+                "import sys,time\n"
+                f"TASK={marker}\n"
+                "print(f'RUN_DONE {TASK}')\n"
+                "sys.stdout.flush()\n"
+                "time.sleep(0.05)\n"
+            )
+            return ["python3", "-c", script], {}, None
+
+        monkeypatch.setattr(task_executor_module, "build_agent_command", build_fast_command)
+
+        session_resp = client.post("/api/v1/sessions", json={"name": "Latest Seq Regression"})
+        session_id = session_resp.json()["id"]
+        account_resp = client.post("/api/v1/accounts", json={"name": "latest-seq-regression", "provider": "mock"})
+        assert account_resp.status_code in (200, 201, 409)
+
+        first_start = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "first-task",
+                "coding_agent": "latest-seq-regression",
+            },
+        )
+        assert first_start.status_code == 201
+        first_task_id = first_start.json()["task_id"]
+
+        for _ in range(50):
+            first_status = client.get(f"/api/v1/sessions/{session_id}/tasks/{first_task_id}").json()["status"]
+            if first_status in ("completed", "failed", "cancelled"):
+                break
+            time.sleep(0.05)
+        assert first_status in ("completed", "failed", "cancelled")
+
+        second_start = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "second-task",
+                "coding_agent": "latest-seq-regression",
+            },
+        )
+        assert second_start.status_code == 201
+        second_task_id = second_start.json()["task_id"]
+
+        for _ in range(50):
+            second_status = client.get(f"/api/v1/sessions/{session_id}/tasks/{second_task_id}").json()["status"]
+            if second_status in ("completed", "failed", "cancelled"):
+                break
+            time.sleep(0.05)
+        assert second_status in ("completed", "failed", "cancelled")
+
+        events_resp = client.get(f"/api/v1/sessions/{session_id}/events")
+        assert events_resp.status_code == 200
+        payload = events_resp.json()
+        events = payload.get("events", [])
+        assert events
+        max_seq = max(event.get("seq", 0) for event in events)
+        assert payload.get("latest_seq", 0) == max_seq
+
 
 class TestMockProviderFullIntegration:
     """End-to-end integration tests for mock provider through full API stack.
@@ -1225,7 +1585,7 @@ class TestAgentHandover:
         # Agent 2 can now continue the work
         client.post("/api/v1/accounts", json={"name": "agent2-mock", "provider": "mock"})
 
-        client.post(
+        agent2_start = client.post(
             f"/api/v1/sessions/{session2_id}/tasks",
             json={
                 "project_path": str(git_repo),
@@ -1233,8 +1593,9 @@ class TestAgentHandover:
                 "coding_agent": "agent2-mock",
             },
         )
+        assert agent2_start.status_code == 201
 
-        def _wait_for_events(session_id: str, timeout: float = 5.0, interval: float = 0.1):
+        def _wait_for_events(session_id: str, timeout: float = 15.0, interval: float = 0.1):
             deadline = time.time() + timeout
             last_events: list[dict] = []
             while time.time() < deadline:

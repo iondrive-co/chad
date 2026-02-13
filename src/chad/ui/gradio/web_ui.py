@@ -2969,6 +2969,60 @@ class ChadWebUI:
 
         return build_doc_reference_text(project_path)
 
+    def _resolve_override_prompt(
+        self,
+        project_path: str | None,
+        task_description: str | None,
+        coding_prompt_value: str | None,
+    ) -> str | None:
+        """Resolve whether the prompt textbox content should be sent as override.
+
+        The prompt editor normally shows a generated template with a `{task}`
+        placeholder. During runs we show the fully rendered prompt (with the
+        previous task text), so restart runs must not treat that stale generated
+        prompt as a manual override.
+        """
+        if not project_path or not task_description or not coding_prompt_value:
+            return None
+
+        task_text = task_description.strip()
+        prompt_text = coding_prompt_value.strip()
+        if not task_text or not prompt_text:
+            return None
+
+        path_obj = Path(project_path).expanduser().resolve()
+        previews = build_prompt_previews(path_obj)
+        template_prompt = previews.coding
+        template_prompt_stripped = template_prompt.strip()
+
+        # Unedited preview template -> no override.
+        if prompt_text == template_prompt_stripped:
+            return None
+
+        # Freshly generated prompt for current task -> no override.
+        current_generated_prompt = build_prompt(
+            task_text,
+            self._read_project_docs(path_obj),
+            str(path_obj),
+        ).strip()
+        if prompt_text == current_generated_prompt:
+            return None
+
+        # Detect stale generated prompt from an earlier task:
+        # same template shell, different inserted task body.
+        if "{task}" in template_prompt:
+            prefix, suffix = template_prompt.split("{task}", 1)
+            if coding_prompt_value.startswith(prefix) and coding_prompt_value.endswith(suffix):
+                end = len(coding_prompt_value) - len(suffix) if suffix else len(coding_prompt_value)
+                embedded_task = coding_prompt_value[len(prefix):end].strip()
+                if embedded_task != task_text:
+                    return None
+
+        # Manual template edits should still support {task} replacement.
+        if "{task}" in coding_prompt_value:
+            return coding_prompt_value.replace("{task}", task_text)
+        return coding_prompt_value
+
     def _run_verification(
         self,
         project_path: str,
@@ -7170,13 +7224,11 @@ class ChadWebUI:
                 else:
                     task_desc = str(task_input)
 
-            # Detect if user edited the coding prompt
-            override_prompt = None
-            if task_desc and proj_path and coding_prompt_val:
-                from chad.util.prompts import build_prompt_previews as _bpp
-                defaults = _bpp(proj_path)
-                if coding_prompt_val.strip() != defaults.coding.strip():
-                    override_prompt = coding_prompt_val.replace("{task}", task_desc)
+            override_prompt = self._resolve_override_prompt(
+                project_path=proj_path,
+                task_description=task_desc,
+                coding_prompt_value=coding_prompt_val,
+            )
 
             yield from self.start_chad_task(
                 session_id,

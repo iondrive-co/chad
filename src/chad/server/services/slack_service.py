@@ -104,12 +104,8 @@ class SlackService:
         session = target_sessions[0]
 
         # Find the active task's event loop for this session
-        event_loop = None
-        with executor._lock:
-            for task in executor._tasks.values():
-                if task.session_id == session.id and task._session_event_loop:
-                    event_loop = task._session_event_loop
-                    break
+        task = executor.get_running_task_for_session(session.id)
+        event_loop = task._session_event_loop if task else None
         if event_loop is None:
             return False
 

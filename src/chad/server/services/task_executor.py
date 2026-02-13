@@ -787,6 +787,13 @@ class TaskExecutor:
 
         now = time.time()
         with self._lock:
+            for existing_task in self._tasks.values():
+                if existing_task.session_id != session_id:
+                    continue
+                if existing_task.state == TaskState.RUNNING:
+                    raise ValueError(
+                        f"Task {existing_task.id} is already running in session {session_id}"
+                    )
             self._tasks[task.id] = task
             self._activity_times[task.id] = now
 
@@ -1161,6 +1168,9 @@ class TaskExecutor:
         flush_terminal_buffer()
         pty_service.cleanup_session(stream_id)
 
+        if task.cancel_requested:
+            return -1, "\n".join(captured_output)
+
         # Write Gemini usage stats captured from stream-json result event
         if json_parser and coding_provider == "gemini":
             from chad.util.providers import _append_gemini_usage
@@ -1341,6 +1351,7 @@ class TaskExecutor:
                 emit("status", status="Task cancelled")
                 task.state = TaskState.CANCELLED
                 task.completed_at = datetime.now(timezone.utc)
+                session.active = False
                 if task.event_log:
                     task.event_log.log(SessionEndedEvent(success=False, reason="cancelled"))
                 return
@@ -1424,6 +1435,43 @@ class TaskExecutor:
         now = time.time()
         with self._lock:
             self._activity_times[task_id] = now
+
+    def get_latest_task_for_session(self, session_id: str) -> Task | None:
+        """Get the most recently created task for a session."""
+        with self._lock:
+            for task in reversed(list(self._tasks.values())):
+                if task.session_id == session_id:
+                    return task
+        return None
+
+    def get_running_task_for_session(self, session_id: str) -> Task | None:
+        """Get the most recent running task for a session."""
+        with self._lock:
+            for task in reversed(list(self._tasks.values())):
+                if task.session_id == session_id and task.state == TaskState.RUNNING:
+                    return task
+        return None
+
+    def cancel_tasks_for_session(self, session_id: str) -> int:
+        """Request cancellation for all running tasks in a session."""
+        stream_ids: list[str] = []
+        cancelled_count = 0
+
+        with self._lock:
+            for task in self._tasks.values():
+                if task.session_id != session_id or task.state != TaskState.RUNNING:
+                    continue
+                task.cancel_requested = True
+                cancelled_count += 1
+                if task.stream_id:
+                    stream_ids.append(task.stream_id)
+
+        if stream_ids:
+            pty_service = get_pty_stream_service()
+            for stream_id in stream_ids:
+                pty_service.terminate(stream_id)
+
+        return cancelled_count
 
     def cancel_task(self, task_id: str) -> bool:
         """Request cancellation of a task."""
