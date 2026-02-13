@@ -294,8 +294,8 @@ class TestFormatForProvider:
         result = format_for_provider([], "anthropic", new_message="Hello")
         assert "[User]: Hello" in result
 
-    def test_truncates_long_tool_results(self):
-        """Test that long tool results are truncated."""
+    def test_preserves_full_tool_results(self):
+        """Test that long tool results are preserved without truncation."""
         long_result = "x" * 1000
         turns = [
             ConversationTurn(
@@ -306,13 +306,12 @@ class TestFormatForProvider:
             ),
         ]
 
-        result = format_for_provider(turns, "anthropic")
+        for provider in ("anthropic", "openai", "gemini"):
+            result = format_for_provider(turns, provider)
+            assert long_result in result, f"Tool result truncated for {provider}"
 
-        assert "..." in result
-        # Should not contain the full 1000 chars
-
-    def test_truncates_long_thinking(self):
-        """Test that long thinking blocks are truncated."""
+    def test_preserves_full_thinking_blocks(self):
+        """Test that long thinking blocks are preserved without truncation."""
         long_thinking = "y" * 2000
         turns = [
             ConversationTurn(
@@ -323,10 +322,13 @@ class TestFormatForProvider:
             ),
         ]
 
+        # Codex includes reasoning
         result = format_for_provider(turns, "openai")
+        assert long_thinking in result
 
-        assert "..." in result
-        # Reasoning should be included but truncated
+        # Generic includes thinking
+        result = format_for_provider(turns, "gemini")
+        assert long_thinking in result
 
 
 class TestProviderSpecificFormatting:
