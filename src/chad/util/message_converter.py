@@ -149,9 +149,7 @@ def _format_for_claude(turns: list[ConversationTurn], new_message: str | None) -
                 elif kind == "tool_result":
                     content = block.get("content", "")
                     if content:
-                        # Truncate long results
-                        truncated = content[:500] + "..." if len(content) > 500 else content
-                        assistant_parts.append(f"[Result]: {truncated}")
+                        assistant_parts.append(f"[Result]: {content}")
 
             if assistant_parts:
                 lines.append("[Assistant]:")
@@ -190,9 +188,7 @@ def _format_for_codex(turns: list[ConversationTurn], new_message: str | None) ->
                 if kind == "thinking":
                     content = block.get("content", "")
                     if content:
-                        # Truncate very long thinking
-                        truncated = content[:1000] + "..." if len(content) > 1000 else content
-                        assistant_parts.append(f"[Reasoning]: {truncated}")
+                        assistant_parts.append(f"[Reasoning]: {content}")
 
                 elif kind == "text":
                     content = block.get("content", "")
@@ -209,8 +205,7 @@ def _format_for_codex(turns: list[ConversationTurn], new_message: str | None) ->
                 elif kind == "tool_result":
                     content = block.get("content", "")
                     if content:
-                        truncated = content[:500] + "..." if len(content) > 500 else content
-                        assistant_parts.append(f"[Result]: {truncated}")
+                        assistant_parts.append(f"[Result]: {content}")
 
             if assistant_parts:
                 lines.append("[Assistant]:")
@@ -248,8 +243,7 @@ def _format_for_generic(turns: list[ConversationTurn], new_message: str | None) 
                 if kind == "thinking":
                     content = block.get("content", "")
                     if content:
-                        truncated = content[:1000] + "..." if len(content) > 1000 else content
-                        lines.append(f"<thinking>{truncated}</thinking>")
+                        lines.append(f"<thinking>{content}</thinking>")
 
                 elif kind == "text":
                     content = block.get("content", "")
@@ -266,8 +260,7 @@ def _format_for_generic(turns: list[ConversationTurn], new_message: str | None) 
                 elif kind == "tool_result":
                     content = block.get("content", "")
                     if content:
-                        truncated = content[:500] + "..." if len(content) > 500 else content
-                        lines.append(f"<result>{truncated}</result>")
+                        lines.append(f"<result>{content}</result>")
 
             lines.append("</turn>")
             lines.append("")

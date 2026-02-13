@@ -5327,12 +5327,10 @@ class ChadWebUI:
             return
 
         # Add user's follow-up message to history
-        if provider_changed:
-            # Extract just the user's actual message after handoff context
-            display_msg = followup_message.split("# Follow-up Request")[-1].strip()
-            user_content = f"**Follow-up** (via {coding_agent})\n\n{display_msg}"
-        else:
-            user_content = f"**Follow-up**\n\n{followup_message}"
+        # Always use raw_followup_message for display — followup_message may contain
+        # the resume prompt XML which should not be shown to the user
+        display_prefix = f"**Follow-up** (via {coding_agent})" if provider_changed else "**Follow-up**"
+        user_content = f"{display_prefix}\n\n{raw_followup_message}"
         chat_history.append({"role": "user", "content": user_content})
 
         # Log follow-up user message to event log

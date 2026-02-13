@@ -5739,3 +5739,46 @@ class TestFollowupEventLogging:
         )
         # session.task_description should also be updated
         assert session.task_description == followup_msg
+
+    def test_followup_after_session_end_displays_raw_message_not_resume_prompt(
+        self, web_ui, git_repo, monkeypatch
+    ):
+        """When session restarts after completion, chat should show the raw user
+        message, not the internal <previous_session> resume prompt XML."""
+        session = self._setup_session(web_ui, "event-log-display", git_repo, monkeypatch)
+
+        # Log some initial conversation so build_resume_prompt has content
+        from chad.util.event_log import UserMessageEvent, AssistantMessageEvent
+        session.event_log.log(UserMessageEvent(content="Initial task"))
+        session.event_log.log(
+            AssistantMessageEvent(blocks=[{"kind": "text", "content": "Done with initial task."}])
+        )
+
+        # Simulate session ended (e.g. rate limit or task completed)
+        session.active = False
+        session.provider = None
+
+        followup_msg = "Now fix the tests"
+        results = list(web_ui.send_followup(
+            "event-log-display",
+            followup_msg,
+            session.chat_history,
+            coding_agent="claude",
+            verification_agent=web_ui.VERIFICATION_NONE,
+        ))
+
+        # Find the user message that was added to chat history
+        user_messages = [
+            msg for msg in session.chat_history
+            if msg.get("role") == "user" and "Follow-up" in msg.get("content", "")
+        ]
+        assert user_messages, "Expected a follow-up user message in chat history"
+
+        last_followup = user_messages[-1]["content"]
+        # The raw message should be displayed, not the resume prompt
+        assert followup_msg in last_followup, (
+            f"Expected raw message '{followup_msg}' in display, got: {last_followup[:200]}"
+        )
+        assert "<previous_session>" not in last_followup, (
+            f"Resume prompt XML leaked into chat display: {last_followup[:200]}"
+        )
