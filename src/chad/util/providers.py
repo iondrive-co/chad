@@ -690,6 +690,25 @@ def _normalize_usage_percentage(util_value: float | int | None) -> float | None:
     return max(0.0, min(100.0, pct))
 
 
+def _find_claude_credentials(account_name: str) -> Path | None:
+    """Find the Claude credentials file for an account.
+
+    Checks the per-account config directory first, then falls back to
+    the default ``~/.claude`` location.
+    """
+    base_home = safe_home()
+    candidates = []
+    if account_name:
+        # Per-account isolated dir (matches ClaudeCodeProvider._get_claude_config_dir)
+        candidates.append(Path(base_home) / ".chad" / "claude-configs" / account_name / ".credentials.json")
+    # Default location
+    candidates.append(Path(base_home) / ".claude" / ".credentials.json")
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
 def _get_claude_usage_percentage(account_name: str) -> float | None:
     """Get Claude usage percentage from Anthropic API.
 
@@ -701,15 +720,8 @@ def _get_claude_usage_percentage(account_name: str) -> float | None:
     """
     import requests
 
-    # Get the isolated config directory for this account
-    base_home = safe_home()
-    if account_name:
-        config_dir = Path(base_home) / ".chad" / "claude_homes" / account_name / ".claude"
-    else:
-        config_dir = Path(base_home) / ".claude"
-
-    creds_file = config_dir / ".credentials.json"
-    if not creds_file.exists():
+    creds_file = _find_claude_credentials(account_name)
+    if not creds_file:
         return None
 
     try:
@@ -759,14 +771,8 @@ def _get_claude_weekly_usage_percentage(account_name: str) -> float | None:
     """
     import requests
 
-    base_home = safe_home()
-    if account_name:
-        config_dir = Path(base_home) / ".chad" / "claude_homes" / account_name / ".claude"
-    else:
-        config_dir = Path(base_home) / ".claude"
-
-    creds_file = config_dir / ".credentials.json"
-    if not creds_file.exists():
+    creds_file = _find_claude_credentials(account_name)
+    if not creds_file:
         return None
 
     try:
@@ -818,14 +824,8 @@ def _get_claude_reset_eta(account_name: str, period_key: str) -> str | None:
     import requests
     from datetime import datetime, timezone
 
-    base_home = safe_home()
-    if account_name:
-        config_dir = Path(base_home) / ".chad" / "claude_homes" / account_name / ".claude"
-    else:
-        config_dir = Path(base_home) / ".claude"
-
-    creds_file = config_dir / ".credentials.json"
-    if not creds_file.exists():
+    creds_file = _find_claude_credentials(account_name)
+    if not creds_file:
         return None
 
     try:
