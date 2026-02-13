@@ -24,8 +24,7 @@ CONFIG_BASE_KEYS: set[str] = {
     "cleanup_days",
     "ui_mode",
     "projects",  # Per-project settings keyed by absolute project path
-    "provider_fallback_order",  # List of account names for auto-switching on quota exhaustion
-    "usage_switch_threshold",  # Percentage (0-100) of usage before auto-switching providers
+    "action_settings",  # List of {event, threshold, action, target_account?} for usage actions
     "mock_remaining_usage",  # Dict of account_name -> 0.0-1.0 for mock provider testing
     "mock_run_duration_seconds",  # Dict of account_name -> 0-3600 mock run duration for handover testing
     "max_verification_attempts",  # Maximum verification attempts before giving up (default 5)
@@ -45,6 +44,34 @@ class ConfigManager:
         else:
             self.config_path = config_path or Path.home() / ".chad.conf"
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_config()
+
+    def _migrate_legacy_config(self) -> None:
+        """One-time migration from legacy config keys to current format."""
+        if not self.config_path.exists():
+            return
+        try:
+            config = self.load_config()
+        except Exception:
+            return
+        changed = False
+        # Migrate provider_fallback_order + usage_switch_threshold -> action_settings
+        if "action_settings" not in config and (
+            "provider_fallback_order" in config or "usage_switch_threshold" in config
+        ):
+            threshold = config.get("usage_switch_threshold", 90)
+            config["action_settings"] = [
+                {"event": "session_usage", "threshold": threshold, "action": "notify"},
+                {"event": "weekly_usage", "threshold": threshold, "action": "notify"},
+                {"event": "context_usage", "threshold": threshold, "action": "notify"},
+            ]
+            changed = True
+        for key in ("provider_fallback_order", "usage_switch_threshold"):
+            if key in config:
+                del config[key]
+                changed = True
+        if changed:
+            self.save_config(config)
 
     def _derive_encryption_key(self, password: str, salt: bytes) -> bytes:
         """Derive an encryption key from password using PBKDF2."""
@@ -681,91 +708,67 @@ class ConfigManager:
         config = self.load_config()
         return config.get("projects", {})
 
-    def get_provider_fallback_order(self) -> list[str]:
-        """Get the ordered list of account names for auto-switching on quota exhaustion.
+    VALID_ACTION_EVENTS = ("session_usage", "weekly_usage", "context_usage")
+    VALID_ACTIONS = ("notify", "switch_provider", "await_reset")
 
-        When a provider runs out of credits/quota, the system will automatically
-        switch to the next provider in this list.
+    _DEFAULT_ACTION_SETTINGS: list[dict] = [
+        {"event": "session_usage", "threshold": 90, "action": "notify"},
+        {"event": "weekly_usage", "threshold": 90, "action": "notify"},
+        {"event": "context_usage", "threshold": 90, "action": "notify"},
+    ]
+
+    def get_action_settings(self) -> list[dict]:
+        """Get usage action settings.
 
         Returns:
-            List of account names in fallback priority order
+            List of action setting dicts, or defaults if not configured.
         """
         config = self.load_config()
-        order = config.get("provider_fallback_order", [])
-        # Filter out accounts that no longer exist
-        valid_accounts = set(self.list_accounts().keys())
-        return [acc for acc in order if acc in valid_accounts]
+        return config.get("action_settings", list(self._DEFAULT_ACTION_SETTINGS))
 
-    def set_provider_fallback_order(self, account_names: list[str]) -> None:
-        """Set the ordered list of account names for auto-switching.
-
-        Args:
-            account_names: List of account names in fallback priority order.
-                          Accounts not in this list will not be used for auto-switching.
+    def set_action_settings(self, settings: list[dict]) -> None:
+        """Validate and save action settings.
 
         Raises:
-            ValueError: If any account name doesn't exist
+            ValueError: On invalid settings.
         """
-        valid_accounts = set(self.list_accounts().keys())
-        invalid = [name for name in account_names if name not in valid_accounts]
-        if invalid:
-            raise ValueError(f"Unknown account(s): {', '.join(invalid)}")
-
+        self._validate_action_settings(settings)
         config = self.load_config()
-        config["provider_fallback_order"] = account_names
+        config["action_settings"] = settings
         self.save_config(config)
 
-    def get_next_fallback_provider(self, current_account: str) -> str | None:
-        """Get the next provider in the fallback order after the current one.
-
-        Args:
-            current_account: The currently active account name
-
-        Returns:
-            Next account name in fallback order, or None if no more fallbacks
-        """
-        order = self.get_provider_fallback_order()
-        if not order:
-            return None
-
-        try:
-            current_idx = order.index(current_account)
-            if current_idx + 1 < len(order):
-                return order[current_idx + 1]
-        except ValueError:
-            # Current account not in fallback order, return first in order
-            if order:
-                return order[0]
-
+    def get_action_for_event(self, event_type: str) -> dict | None:
+        """Convenience lookup for a single event type's action."""
+        for s in self.get_action_settings():
+            if s.get("event") == event_type:
+                return s
         return None
 
-    def get_usage_switch_threshold(self) -> int:
-        """Get the usage percentage threshold for auto-switching providers.
+    def _validate_action_settings(self, settings: list[dict]) -> None:
+        valid_accounts = set(self.list_accounts().keys())
 
-        When a provider reports usage above this percentage of its limit,
-        the system will automatically switch to the next fallback provider.
+        for entry in settings:
+            event = entry.get("event")
+            if event not in self.VALID_ACTION_EVENTS:
+                raise ValueError(f"Invalid event type: {event}")
 
-        Returns:
-            Percentage threshold (0-100), defaults to 90
-        """
-        config = self.load_config()
-        return config.get("usage_switch_threshold", 90)
+            threshold = entry.get("threshold")
+            if not isinstance(threshold, (int, float)) or not (0 <= threshold <= 100):
+                raise ValueError(f"Threshold must be 0-100, got {threshold}")
 
-    def set_usage_switch_threshold(self, percentage: int) -> None:
-        """Set the usage percentage threshold for auto-switching providers.
+            action = entry.get("action")
+            if action not in self.VALID_ACTIONS:
+                raise ValueError(f"Invalid action: {action}")
 
-        Args:
-            percentage: Threshold percentage (0-100). Use 100 to disable
-                       usage-based switching (only error-based switching).
+            if action == "await_reset" and event == "context_usage":
+                raise ValueError("await_reset is not valid for context_usage (context doesn't reset)")
 
-        Raises:
-            ValueError: If percentage is not between 0 and 100
-        """
-        if not 0 <= percentage <= 100:
-            raise ValueError("usage_switch_threshold must be between 0 and 100")
-        config = self.load_config()
-        config["usage_switch_threshold"] = percentage
-        self.save_config(config)
+            if action == "switch_provider":
+                target = entry.get("target_account")
+                if not target or target not in valid_accounts:
+                    raise ValueError(
+                        f"switch_provider requires a valid target_account, got '{target}'"
+                    )
 
     def get_mock_remaining_usage(self, account_name: str) -> float:
         """Get mock remaining usage for a mock provider account.

@@ -1309,27 +1309,24 @@ class TestUsageBasedProviderSwitch:
         resp = client.get("/api/v1/config/mock-remaining-usage/usage-mock-1")
         assert resp.json()["remaining"] == 0.2
 
-    def test_usage_threshold_triggers_switch(self, client, git_repo):
-        """Test that exceeding usage threshold triggers provider switch.
+    def test_action_settings_switch_provider(self, client, git_repo):
+        """Test that action settings can configure provider switch on threshold.
 
-        When the primary provider's usage exceeds the configured threshold,
-        the system should automatically switch to the next fallback provider.
+        When session_usage exceeds the configured threshold with a switch_provider
+        action, the system should be configured to switch to the target account.
         """
         # Create two mock provider accounts
         client.post("/api/v1/accounts", json={"name": "primary-mock", "provider": "mock"})
         client.post("/api/v1/accounts", json={"name": "fallback-mock", "provider": "mock"})
 
-        # Set up fallback order: primary-mock -> fallback-mock
+        # Configure action settings: switch provider at 50% session usage
         resp = client.put(
-            "/api/v1/config/provider-fallback-order",
-            json={"order": ["primary-mock", "fallback-mock"]}
-        )
-        assert resp.status_code == 200
-
-        # Set usage threshold to 50% (switch when usage exceeds 50%)
-        resp = client.put(
-            "/api/v1/config/usage-switch-threshold",
-            json={"threshold": 50}
+            "/api/v1/config/action-settings",
+            json={"settings": [
+                {"event": "session_usage", "threshold": 50, "action": "switch_provider", "target_account": "fallback-mock"},
+                {"event": "weekly_usage", "threshold": 90, "action": "notify"},
+                {"event": "context_usage", "threshold": 90, "action": "notify"},
+            ]}
         )
         assert resp.status_code == 200
 
@@ -1354,19 +1351,27 @@ class TestUsageBasedProviderSwitch:
         resp = client.get("/api/v1/config/mock-remaining-usage/fallback-mock")
         assert resp.json()["remaining"] == 0.8
 
-        resp = client.get("/api/v1/config/usage-switch-threshold")
-        assert resp.json()["threshold"] == 50
-
-        resp = client.get("/api/v1/config/provider-fallback-order")
-        assert resp.json()["order"] == ["primary-mock", "fallback-mock"]
+        resp = client.get("/api/v1/config/action-settings")
+        settings = resp.json()["settings"]
+        session_setting = next(s for s in settings if s["event"] == "session_usage")
+        assert session_setting["threshold"] == 50
+        assert session_setting["action"] == "switch_provider"
+        assert session_setting["target_account"] == "fallback-mock"
 
     def test_no_switch_when_under_threshold(self, client, git_repo):
         """Test that no switch occurs when usage is under threshold."""
         # Create a mock provider
         client.post("/api/v1/accounts", json={"name": "healthy-mock", "provider": "mock"})
 
-        # Set threshold to 90%
-        client.put("/api/v1/config/usage-switch-threshold", json={"threshold": 90})
+        # Configure action settings with notify at 90%
+        client.put(
+            "/api/v1/config/action-settings",
+            json={"settings": [
+                {"event": "session_usage", "threshold": 90, "action": "notify"},
+                {"event": "weekly_usage", "threshold": 90, "action": "notify"},
+                {"event": "context_usage", "threshold": 90, "action": "notify"},
+            ]}
+        )
 
         # Set usage to 70% (30% remaining) - under the 90% threshold
         client.put(
@@ -1378,12 +1383,16 @@ class TestUsageBasedProviderSwitch:
         resp = client.get("/api/v1/config/mock-remaining-usage/healthy-mock")
         assert resp.json()["remaining"] == 0.3
 
-    def test_switch_disabled_at_100_percent(self, client):
-        """Test that usage-based switching is disabled when threshold is 100%."""
-        # Set threshold to 100% (disabled)
-        resp = client.put("/api/v1/config/usage-switch-threshold", json={"threshold": 100})
+    def test_action_settings_notify_only(self, client):
+        """Test that action settings default to notify-only actions."""
+        # Get default action settings
+        resp = client.get("/api/v1/config/action-settings")
         assert resp.status_code == 200
-        assert resp.json()["threshold"] == 100
+        settings = resp.json()["settings"]
+        # All defaults should be notify at 90%
+        for setting in settings:
+            assert setting["action"] == "notify"
+            assert setting["threshold"] == 90
 
 
 class TestMockRunDurationAPI:

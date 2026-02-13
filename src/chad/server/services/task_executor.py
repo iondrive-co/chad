@@ -702,38 +702,6 @@ class TaskExecutor:
             return max(0.5, self.inactivity_timeout * 0.5)
         return warn_after
 
-    def _check_provider_threshold(
-        self,
-        coding_account: str,
-        coding_provider: str,
-        emit: Callable,
-    ) -> tuple[str, str, str | None]:
-        """Check usage/context thresholds and switch provider if needed.
-
-        Returns:
-            (account, provider, switched_from) - switched_from is set if a switch happened.
-        """
-        try:
-            # Check usage threshold
-            usage_threshold = self.config_manager.get_usage_switch_threshold()
-            if usage_threshold < 100:
-                remaining = self.config_manager.get_mock_remaining_usage(coding_account)
-                used_pct = (1.0 - remaining) * 100
-                if used_pct >= usage_threshold:
-                    next_account = self.config_manager.get_next_fallback_provider(coding_account)
-                    if next_account:
-                        accounts = self.config_manager.list_accounts()
-                        next_info = accounts.get(next_account)
-                        if next_info:
-                            next_provider = next_info.get("provider", coding_provider)
-                            emit("status", status=f"Switching from {coding_account} to {next_account} (usage threshold)")
-                            return next_account, next_provider, coding_account
-
-        except Exception:
-            pass  # Don't fail the task if threshold checking fails
-
-        return coding_account, coding_provider, None
-
     def _decrement_mock_usage(self, coding_provider: str, coding_account: str) -> None:
         """Decrement mock usage after a successful PTY phase completion."""
         if coding_provider != "mock":
@@ -1311,6 +1279,23 @@ class TaskExecutor:
             except Exception:
                 pass
 
+            # Build action-settings callbacks
+            action_settings = self.config_manager.get_action_settings()
+
+            def terminate_pty():
+                if task.stream_id:
+                    get_pty_stream_service().terminate(task.stream_id)
+
+            def get_account_info(account_name):
+                accounts = self.config_manager.list_accounts()
+                if account_name not in accounts:
+                    return None
+                return {
+                    "provider": accounts[account_name],
+                    "model": self.config_manager.get_account_model(account_name),
+                    "reasoning": self.config_manager.get_account_reasoning(account_name),
+                }
+
             # Create event loop for milestone detection
             event_loop = SessionEventLoop(
                 session_id=session.id,
@@ -1323,6 +1308,11 @@ class TaskExecutor:
                 get_session_usage_fn=_check_provider.get_session_usage_percentage if _check_provider else None,
                 get_weekly_usage_fn=_check_provider.get_weekly_usage_percentage if _check_provider else None,
                 get_context_usage_fn=_check_provider.get_context_usage_percentage if _check_provider else None,
+                action_settings=action_settings,
+                terminate_pty_fn=terminate_pty,
+                get_account_info_fn=get_account_info,
+                get_session_reset_eta_fn=_check_provider.get_session_reset_eta if _check_provider else None,
+                get_weekly_reset_eta_fn=_check_provider.get_weekly_reset_eta if _check_provider else None,
             )
             task._session_event_loop = event_loop
 

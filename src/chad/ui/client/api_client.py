@@ -629,82 +629,27 @@ class APIClient:
         resp.raise_for_status()
         return resp.json().get("model")
 
-    def get_provider_fallback_order(self) -> list[str]:
-        """Get the ordered list of account names for auto-switching on quota exhaustion.
-
-        Returns:
-            List of account names in fallback priority order
-        """
-        resp = self._client.get(self._url("/config/provider-fallback-order"))
+    def get_action_settings(self) -> list[dict]:
+        """Get usage action settings."""
+        resp = self._client.get(self._url("/config/action-settings"))
         resp.raise_for_status()
-        return resp.json().get("order", [])
+        return resp.json().get("settings", [])
 
-    def set_provider_fallback_order(self, account_names: list[str]) -> list[str]:
-        """Set the ordered list of account names for auto-switching.
+    def set_action_settings(self, settings: list[dict]) -> list[dict]:
+        """Set usage action settings.
 
         Args:
-            account_names: List of account names in fallback priority order
+            settings: List of action setting dicts
 
         Returns:
-            The order that was set
+            The settings that were saved
         """
         resp = self._client.put(
-            self._url("/config/provider-fallback-order"),
-            json={"order": account_names},
+            self._url("/config/action-settings"),
+            json={"settings": settings},
         )
         resp.raise_for_status()
-        return resp.json().get("order", [])
-
-    def get_next_fallback_provider(self, current_account: str) -> str | None:
-        """Get the next provider in the fallback order after the current one.
-
-        Args:
-            current_account: The currently active account name
-
-        Returns:
-            Next account name in fallback order, or None if no more fallbacks
-        """
-        order = self.get_provider_fallback_order()
-        if not order:
-            return None
-
-        try:
-            current_idx = order.index(current_account)
-            if current_idx + 1 < len(order):
-                return order[current_idx + 1]
-        except ValueError:
-            # Current account not in fallback order, return first in order
-            if order:
-                return order[0]
-
-        return None
-
-    def get_usage_switch_threshold(self) -> int:
-        """Get the usage percentage threshold for auto-switching providers.
-
-        Returns:
-            Percentage threshold (0-100), defaults to 90
-        """
-        resp = self._client.get(self._url("/config/usage-switch-threshold"))
-        resp.raise_for_status()
-        return resp.json().get("threshold", 90)
-
-    def set_usage_switch_threshold(self, threshold: int) -> int:
-        """Set the usage percentage threshold for auto-switching providers.
-
-        Args:
-            threshold: Percentage threshold (0-100). Use 100 to disable
-                      usage-based switching.
-
-        Returns:
-            The threshold that was set
-        """
-        resp = self._client.put(
-            self._url("/config/usage-switch-threshold"),
-            json={"threshold": threshold},
-        )
-        resp.raise_for_status()
-        return resp.json().get("threshold", threshold)
+        return resp.json().get("settings", [])
 
     def get_mock_remaining_usage(self, account_name: str) -> float:
         """Get mock remaining usage for a mock provider account.

@@ -2909,51 +2909,22 @@ class ChadWebUI:
         return self.provider_ui._get_qwen_remaining_usage()
 
     def _check_usage_and_switch(self, coding_account: str) -> tuple[str, str | None]:
-        """Check if current provider exceeds usage threshold and switch if needed.
+        """Check if any action_settings has a switch_provider action for the current account.
 
         Returns:
             Tuple of (account_to_use, switched_from_account)
             switched_from_account is None if no switch occurred
         """
         try:
-            threshold = self.api_client.get_usage_switch_threshold()
-            # Ensure threshold is a valid number
-            if not isinstance(threshold, (int, float)):
-                threshold = 90
-        except Exception:
-            threshold = 90
-
-        # Threshold of 100 disables usage-based switching
-        if threshold >= 100:
-            return coding_account, None
-
-        # Check current account usage
-        remaining = self.get_remaining_usage(coding_account)
-        used_pct = (1.0 - remaining) * 100
-
-        if used_pct < threshold:
-            # Usage is below threshold, no switch needed
-            return coding_account, None
-
-        # Usage exceeds threshold, try to find a fallback
-        try:
-            next_account = self.api_client.get_next_fallback_provider(coding_account)
+            settings = self.api_client.get_action_settings()
         except Exception:
             return coding_account, None
 
-        if not next_account:
-            return coding_account, None
+        for s in settings:
+            if s.get("action") == "switch_provider" and s.get("target_account"):
+                return s["target_account"], coding_account
 
-        # Check that fallback has better usage
-        next_remaining = self.get_remaining_usage(next_account)
-        next_used_pct = (1.0 - next_remaining) * 100
-
-        if next_used_pct >= threshold:
-            # Fallback also exceeds threshold, don't switch
-            return coding_account, None
-
-        # Switch to fallback
-        return next_account, coding_account
+        return coding_account, None
 
     def _provider_state(self, pending_delete: str = None) -> tuple:
         return self.provider_ui.provider_state(self.provider_card_count, pending_delete=pending_delete)
@@ -6305,11 +6276,14 @@ class ChadWebUI:
         if not current_account:
             return False, None
 
-        # Get the next fallback provider
+        # Get switch target from action_settings
+        next_account = None
         try:
-            next_account = self.api_client.get_next_fallback_provider(current_account)
+            for s in self.api_client.get_action_settings():
+                if s.get("action") == "switch_provider" and s.get("target_account"):
+                    next_account = s["target_account"]
+                    break
         except Exception:
-            # API error getting fallback order - skip auto-switch
             return False, None
 
         if not next_account:
@@ -7822,37 +7796,85 @@ class ChadWebUI:
                     info="Gradio (web) or CLI (terminal) - applies on next launch",
                 )
 
-            # Auto-switch settings
-            gr.Markdown("### Auto-Switch Settings")
-            gr.Markdown(
-                "Configure automatic provider switching when quota is exhausted. "
-                "Order determines fallback priority."
-            )
+            # Action rules
+            _MAX_ACTION_RULES = 6
+            gr.Markdown("### Action Rules")
 
-            # Load current fallback order and threshold
+            # Load current action settings
             try:
-                fallback_order = init["fallback_order"] if init else self.api_client.get_provider_fallback_order()
-                fallback_order_str = ", ".join(fallback_order)
+                action_settings_data = init["action_settings"] if init else self.api_client.get_action_settings()
             except Exception:
-                fallback_order_str = ""
+                action_settings_data = []
 
-            usage_threshold = init["usage_threshold"] if init else self.api_client.get_usage_switch_threshold()
+            # Get account names for target dropdown
+            try:
+                account_names = [acc.name for acc in (init["accounts"] if init else self.api_client.list_accounts())]
+            except Exception:
+                account_names = []
+
+            all_event_choices = ["session_usage", "weekly_usage", "context_usage"]
+            all_action_choices = ["notify", "switch_provider", "await_reset"]
+
+            # Column headers
             with gr.Row():
-                fallback_order_input = gr.Textbox(
-                    label="Provider Fallback Order",
-                    placeholder="e.g., work-claude, backup-gpt, gemini-free",
-                    value=fallback_order_str,
-                    info="Comma-separated account names in priority order (press Enter to save)",
-                )
-            with gr.Row():
-                usage_threshold_input = gr.Slider(
-                    label="Usage Switch Threshold (%)",
-                    minimum=0,
-                    maximum=100,
-                    step=5,
-                    value=usage_threshold,
-                    info="Switch provider when usage exceeds this percentage (100 = disable)",
-                )
+                with gr.Column(scale=3):
+                    gr.Markdown("**Rule**")
+                with gr.Column(scale=3):
+                    gr.Markdown("**Action**")
+                with gr.Column(scale=0, min_width=60):
+                    gr.Markdown("")
+
+            # Pre-allocate a pool of rows
+            action_rule_rows = []
+            for i in range(_MAX_ACTION_RULES):
+                has_data = i < len(action_settings_data)
+                current = action_settings_data[i] if has_data else {}
+                with gr.Row(visible=has_data) as rule_row:
+                    with gr.Column(scale=3):
+                        with gr.Row():
+                            event_dd = gr.Dropdown(
+                                choices=all_event_choices,
+                                value=current.get("event", "session_usage"),
+                                show_label=False,
+                                allow_custom_value=False,
+                                min_width=140,
+                                scale=1,
+                            )
+                            threshold_sl = gr.Slider(
+                                minimum=0, maximum=100, step=5,
+                                value=current.get("threshold", 90),
+                                show_label=False,
+                                scale=2,
+                            )
+                    with gr.Column(scale=3):
+                        with gr.Row():
+                            action_dd = gr.Dropdown(
+                                choices=all_action_choices,
+                                value=current.get("action", "notify"),
+                                show_label=False,
+                                allow_custom_value=False,
+                                scale=1,
+                            )
+                            target_dd = gr.Dropdown(
+                                choices=[""] + account_names,
+                                value=current.get("target_account", ""),
+                                show_label=False,
+                                visible=current.get("action") == "switch_provider",
+                                allow_custom_value=False,
+                                scale=1,
+                            )
+                    delete_btn = gr.Button("✕", scale=0, min_width=60, size="sm")
+                action_rule_rows.append({
+                    "row": rule_row,
+                    "event": event_dd,
+                    "threshold": threshold_sl,
+                    "action": action_dd,
+                    "target": target_dd,
+                    "delete": delete_btn,
+                })
+
+            add_rule_btn = gr.Button("+ Add Rule", size="sm")
+            active_rule_count = gr.State(value=len(action_settings_data))
             # Verification settings
             gr.Markdown("### Verification Settings")
             max_attempts = init["max_verification_attempts"] if init else self.api_client.get_max_verification_attempts()
@@ -8036,37 +8058,91 @@ class ChadWebUI:
 
         ui_mode_pref.change(on_ui_mode_change, inputs=[ui_mode_pref], outputs=[config_status])
 
-        def on_fallback_order_change(order_str):
+        # -- Action Rules event wiring --
+        # Collect all inputs/outputs for the rule rows
+        all_rule_inputs = []
+        all_rule_row_outputs = []
+        for r in action_rule_rows:
+            all_rule_inputs.extend([r["event"], r["threshold"], r["action"], r["target"]])
+            all_rule_row_outputs.append(r["row"])
+
+        def _collect_rules_from_count(count, *values):
+            """Read the first *count* row values and return as settings list."""
+            settings = []
+            for i in range(min(count, _MAX_ACTION_RULES)):
+                base = i * 4
+                ev, thr, act, tgt = values[base], values[base + 1], values[base + 2], values[base + 3]
+                entry = {"event": ev, "threshold": int(thr), "action": act}
+                if act == "switch_provider":
+                    entry["target_account"] = tgt if tgt else (account_names[0] if account_names else "")
+                settings.append(entry)
+            return settings
+
+        def on_action_rule_change(count, *values):
+            """Save action rules when any control changes."""
+            settings = _collect_rules_from_count(count, *values)
             try:
-                # Parse comma-separated names
-                names = [n.strip() for n in order_str.split(",") if n.strip()]
-                self.api_client.set_provider_fallback_order(names)
-                if names:
-                    return f"✅ Fallback order set: {' → '.join(names)}"
-                return "✅ Fallback order cleared (auto-switch disabled)"
+                self.api_client.set_action_settings(settings)
+                return "✅ Action rules saved"
             except Exception as exc:
                 return f"❌ {exc}"
 
-        fallback_order_input.submit(
-            on_fallback_order_change,
-            inputs=[fallback_order_input],
-            outputs=[config_status],
+        # Bind change events for all rule controls
+        for r in action_rule_rows:
+            for component in [r["event"], r["threshold"], r["action"], r["target"]]:
+                component.change(
+                    on_action_rule_change,
+                    inputs=[active_rule_count] + all_rule_inputs,
+                    outputs=[config_status],
+                )
+
+        # Show/hide target dropdown when action changes
+        for r in action_rule_rows:
+            r["action"].change(
+                lambda a: gr.update(visible=a == "switch_provider"),
+                inputs=[r["action"]],
+                outputs=[r["target"]],
+            )
+
+        def on_add_rule(count):
+            """Show the next hidden rule row."""
+            if count >= _MAX_ACTION_RULES:
+                return [count] + [gr.update() for _ in range(_MAX_ACTION_RULES)]
+            new_count = count + 1
+            row_updates = []
+            for i in range(_MAX_ACTION_RULES):
+                row_updates.append(gr.update(visible=(i < new_count)))
+            return [new_count] + row_updates
+
+        add_rule_btn.click(
+            on_add_rule,
+            inputs=[active_rule_count],
+            outputs=[active_rule_count] + all_rule_row_outputs,
         )
 
-        def on_usage_threshold_change(threshold):
-            try:
-                self.api_client.set_usage_switch_threshold(int(threshold))
-                if threshold >= 100:
-                    return "✅ Usage-based switching disabled"
-                return f"✅ Will switch providers when usage exceeds {int(threshold)}%"
-            except Exception as exc:
-                return f"❌ {exc}"
+        def _make_delete_handler(row_idx):
+            def on_delete(count, *values):
+                """Delete a rule: save remaining, shift rows, decrement count."""
+                settings = _collect_rules_from_count(count, *values)
+                if row_idx < len(settings):
+                    settings.pop(row_idx)
+                try:
+                    self.api_client.set_action_settings(settings)
+                except Exception:
+                    pass
+                new_count = len(settings)
+                row_updates = []
+                for i in range(_MAX_ACTION_RULES):
+                    row_updates.append(gr.update(visible=(i < new_count)))
+                return [new_count] + row_updates
+            return on_delete
 
-        usage_threshold_input.change(
-            on_usage_threshold_change,
-            inputs=[usage_threshold_input],
-            outputs=[config_status],
-        )
+        for i, r in enumerate(action_rule_rows):
+            r["delete"].click(
+                _make_delete_handler(i),
+                inputs=[active_rule_count] + all_rule_inputs,
+                outputs=[active_rule_count] + all_rule_row_outputs,
+            )
 
         def on_max_verification_attempts_change(attempts):
             try:
@@ -8158,13 +8234,13 @@ class ChadWebUI:
         except Exception:
             cleanup_settings = None
         try:
-            fallback_order = self.api_client.get_provider_fallback_order()
+            action_settings = self.api_client.get_action_settings()
         except Exception:
-            fallback_order = []
-        try:
-            usage_threshold = self.api_client.get_usage_switch_threshold()
-        except Exception:
-            usage_threshold = 90
+            action_settings = [
+                {"event": "session_usage", "threshold": 90, "action": "notify"},
+                {"event": "weekly_usage", "threshold": 90, "action": "notify"},
+                {"event": "context_usage", "threshold": 90, "action": "notify"},
+            ]
         try:
             max_verification_attempts = self.api_client.get_max_verification_attempts()
         except Exception:
@@ -8175,8 +8251,7 @@ class ChadWebUI:
             "preferred_verification_model": preferred_verification_model,
             "preferences": preferences,
             "cleanup_settings": cleanup_settings,
-            "fallback_order": fallback_order,
-            "usage_threshold": usage_threshold,
+            "action_settings": action_settings,
             "max_verification_attempts": max_verification_attempts,
         }
 

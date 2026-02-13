@@ -13,6 +13,7 @@ v0.13 Intentionality Reduction
 
 Packaging for different platforms
 Renamed web_ui to gradio_ui. Make Remix static site ui which downloads and talks to the server on localhost
+Integrate with slopus/happy app
 
 v0.14 Slip Slop Slap
 

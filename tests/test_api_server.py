@@ -231,15 +231,17 @@ class TestConfigEndpoints:
         get_data = get_response.json()
         assert get_data["account_name"] is None
 
-    def test_set_provider_fallback_order_invalid_account_returns_400(self, client):
-        """Fallback order should return 400 when any account does not exist."""
+    def test_set_action_settings_invalid_account_returns_400(self, client):
+        """Action settings with invalid switch target should return 400."""
         response = client.put(
-            "/api/v1/config/provider-fallback-order",
-            json={"order": ["codex-work"]},
+            "/api/v1/config/action-settings",
+            json={"settings": [
+                {"event": "session_usage", "threshold": 90, "action": "switch_provider", "target_account": "nonexistent"},
+            ]},
         )
 
         assert response.status_code == 400
-        assert "Unknown account(s): codex-work" in response.json()["detail"]
+        assert "valid target_account" in response.json()["detail"]
 
     def test_mock_run_duration_endpoints(self, client):
         """Can get/set per-account mock run duration."""

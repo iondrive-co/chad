@@ -10,7 +10,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from chad.util.event_log import EventLog, MilestoneEvent, UserMessageEvent
+from chad.util.event_log import EventLog, MilestoneEvent, ProviderSwitchedEvent, UserMessageEvent
 from chad.server.services.pty_stream import get_pty_stream_service
 from chad.util.prompts import extract_coding_summary, CodingSummary
 
@@ -35,6 +35,11 @@ class SessionEventLoop:
         get_session_usage_fn: Callable[[], float | None] | None = None,
         get_weekly_usage_fn: Callable[[], float | None] | None = None,
         get_context_usage_fn: Callable[[], float | None] | None = None,
+        action_settings: list[dict] | None = None,
+        terminate_pty_fn: Callable[[], None] | None = None,
+        get_account_info_fn: Callable[[str], dict | None] | None = None,
+        get_session_reset_eta_fn: Callable[[], str | None] | None = None,
+        get_weekly_reset_eta_fn: Callable[[], str | None] | None = None,
     ):
         self.session_id = session_id
         self.event_log = event_log
@@ -74,8 +79,24 @@ class SessionEventLoop:
         self._prev_context_pct: float | None = None
         self._usage_check_counter = 0
 
+        # Action settings
+        self._action_settings = action_settings or []
+        self._terminate_pty_fn = terminate_pty_fn
+        self._get_account_info_fn = get_account_info_fn
+        self._get_session_reset_eta_fn = get_session_reset_eta_fn
+        self._get_weekly_reset_eta_fn = get_weekly_reset_eta_fn
+        self._pending_action: dict | None = None
+        self._pending_action_lock = threading.Lock()
+
         # Accumulated output from all phases
         self.accumulated_output = ""
+
+    # Map event types to their usage functions and previous-value attrs
+    _EVENT_USAGE_MAP = {
+        "session_usage": ("_get_session_usage_fn", "_prev_session_pct", "session"),
+        "weekly_usage": ("_get_weekly_usage_fn", "_prev_weekly_pct", "weekly"),
+        "context_usage": ("_get_context_usage_fn", "_prev_context_pct", "context"),
+    }
 
     def feed_output(self, text: str) -> None:
         """Called by _run_phase's PTY callback with parsed text."""
@@ -277,32 +298,51 @@ class SessionEventLoop:
                 self._message_queue.put(msg)
                 break
 
-    _USAGE_THRESHOLD = 90.0
-
     def _check_usage_thresholds(self) -> None:
-        """Check provider usage metrics for threshold crossings."""
-        checks = [
-            ("context", self._get_context_usage_fn, "_prev_context_pct"),
-            ("session", self._get_session_usage_fn, "_prev_session_pct"),
-            ("weekly", self._get_weekly_usage_fn, "_prev_weekly_pct"),
-        ]
-        for label, fn, prev_attr in checks:
+        """Check provider usage metrics for threshold crossings based on action_settings."""
+        for setting in self._action_settings:
+            event_type = setting.get("event")
+            threshold = setting.get("threshold", 90)
+            action = setting.get("action", "notify")
+
+            mapping = self._EVENT_USAGE_MAP.get(event_type)
+            if not mapping:
+                continue
+            fn_attr, prev_attr, label = mapping
+            fn = getattr(self, fn_attr, None)
             if fn is None:
                 continue
+
             try:
                 current = fn()
             except Exception:
                 continue
             if current is None:
                 continue
+
             prev = getattr(self, prev_attr)
-            if prev is not None and prev < self._USAGE_THRESHOLD and current >= self._USAGE_THRESHOLD:
+            crossed = prev is not None and prev < threshold and current >= threshold
+            setattr(self, prev_attr, current)
+
+            if not crossed:
+                continue
+
+            if action == "notify":
                 self._emit_milestone(
                     "usage_threshold",
                     f"{label.title()} usage reached {current:.0f}%",
                     {"metric": label, "percentage": current},
                 )
-            setattr(self, prev_attr, current)
+            elif action in ("switch_provider", "await_reset"):
+                with self._pending_action_lock:
+                    self._pending_action = {**setting, "current_pct": current, "label": label}
+                self._emit_milestone(
+                    "usage_threshold",
+                    f"{label.title()} usage reached {current:.0f}% - {action.replace('_', ' ')}",
+                    {"metric": label, "percentage": current, "action": action},
+                )
+                if self._terminate_pty_fn:
+                    self._terminate_pty_fn()
 
     def run(
         self,
@@ -411,6 +451,28 @@ class SessionEventLoop:
         if exit_code < 0:
             return exit_code, output
 
+        # Check for pending action from background threshold check
+        with self._pending_action_lock:
+            pending = self._pending_action
+            self._pending_action = None
+
+        if pending:
+            action = pending.get("action")
+            if action == "switch_provider":
+                action_output = self._handle_switch_provider(
+                    pending, session, task_description, output,
+                    screenshots, rows, cols, git_mgr,
+                    coding_account, coding_provider, coding_model, coding_reasoning,
+                )
+                return 0, output + "\n" + action_output
+            elif action == "await_reset":
+                action_output = self._handle_await_reset(
+                    pending, session, task_description, output,
+                    screenshots, rows, cols, git_mgr,
+                    coding_account, coding_provider, coding_model, coding_reasoning,
+                )
+                return 0, output + "\n" + action_output
+
         # Check if coding completed
         summary = extract_coding_summary(output)
 
@@ -447,6 +509,174 @@ class SessionEventLoop:
                     break
 
         return exit_code, output
+
+    def _handle_switch_provider(
+        self,
+        action: dict,
+        session,
+        task_description: str,
+        previous_output: str,
+        screenshots: list[str] | None,
+        rows: int,
+        cols: int,
+        git_mgr,
+        old_account: str,
+        old_provider: str,
+        old_model: str | None,
+        old_reasoning: str | None,
+    ) -> str:
+        """Handle switch_provider action: log checkpoint, switch, resume."""
+        from chad.util.handoff import log_handoff_checkpoint, build_resume_prompt
+
+        target_account = action.get("target_account", "")
+        label = action.get("label", "usage")
+
+        account_info = self._get_account_info_fn(target_account) if self._get_account_info_fn else None
+        if not account_info:
+            self._emit_milestone(
+                "usage_threshold",
+                f"Cannot switch to {target_account}: account not found",
+            )
+            return ""
+
+        new_provider = account_info["provider"]
+        new_model = account_info.get("model")
+        new_reasoning = account_info.get("reasoning")
+
+        self._emit_milestone(
+            "usage_threshold",
+            f"Switching from {old_account} to {target_account} ({label} threshold)",
+        )
+
+        if self.event_log:
+            log_handoff_checkpoint(
+                self.event_log,
+                task_description,
+                target_provider=new_provider,
+            )
+
+        resume_prompt = None
+        if self.event_log:
+            resume_prompt = build_resume_prompt(self.event_log, target_provider=new_provider)
+
+        if self.event_log:
+            self.event_log.log(ProviderSwitchedEvent(
+                from_provider=old_provider,
+                to_provider=new_provider,
+                from_model=old_model or "",
+                to_model=new_model or "",
+                reason=f"{label} threshold reached",
+            ))
+
+        self._emit_fn("status", status=f"Continuing with {target_account}...")
+        exit_code, cont_output = self._run_phase_fn(
+            task=self.task,
+            session=session,
+            worktree_path=self.worktree_path,
+            task_description=task_description,
+            coding_account=target_account,
+            coding_provider=new_provider,
+            screenshots=None,
+            phase="continuation",
+            exploration_output=previous_output,
+            rows=rows,
+            cols=cols,
+            emit=self._emit_fn,
+            git_mgr=git_mgr,
+            coding_model=new_model,
+            coding_reasoning=new_reasoning,
+            override_prompt=resume_prompt,
+        )
+        self._analyze_output(finalize=True)
+        return cont_output
+
+    def _handle_await_reset(
+        self,
+        action: dict,
+        session,
+        task_description: str,
+        previous_output: str,
+        screenshots: list[str] | None,
+        rows: int,
+        cols: int,
+        git_mgr,
+        coding_account: str,
+        coding_provider: str,
+        coding_model: str | None,
+        coding_reasoning: str | None,
+    ) -> str:
+        """Handle await_reset action: poll until usage drops, then resume."""
+        event_type = action.get("event")
+        threshold = action.get("threshold", 90)
+        label = action.get("label", "usage")
+
+        # Determine which ETA and usage functions to use
+        eta_fn = None
+        mapping = self._EVENT_USAGE_MAP.get(event_type)
+        if not mapping:
+            return ""
+        fn_attr = mapping[0]
+        usage_fn = getattr(self, fn_attr, None)
+        if usage_fn is None:
+            return ""
+
+        if event_type == "session_usage":
+            eta_fn = self._get_session_reset_eta_fn
+        elif event_type == "weekly_usage":
+            eta_fn = self._get_weekly_reset_eta_fn
+
+        eta_str = ""
+        if eta_fn:
+            try:
+                eta = eta_fn()
+                if eta:
+                    eta_str = f" (ETA: {eta})"
+            except Exception:
+                pass
+
+        self._emit_milestone(
+            "usage_threshold",
+            f"Paused, waiting for {label} reset{eta_str}",
+        )
+
+        # Poll until usage drops below threshold
+        while self._running and not getattr(self.task, "cancel_requested", False):
+            time.sleep(10)
+            try:
+                current = usage_fn()
+            except Exception:
+                continue
+            if current is not None and current < threshold:
+                break
+
+        if not self._running or getattr(self.task, "cancel_requested", False):
+            return ""
+
+        self._emit_milestone(
+            "usage_threshold",
+            f"{label.title()} reset detected, resuming",
+        )
+
+        self._emit_fn("status", status="Resuming after reset...")
+        exit_code, cont_output = self._run_phase_fn(
+            task=self.task,
+            session=session,
+            worktree_path=self.worktree_path,
+            task_description=task_description,
+            coding_account=coding_account,
+            coding_provider=coding_provider,
+            screenshots=None,
+            phase="continuation",
+            exploration_output=previous_output,
+            rows=rows,
+            cols=cols,
+            emit=self._emit_fn,
+            git_mgr=git_mgr,
+            coding_model=coding_model,
+            coding_reasoning=coding_reasoning,
+        )
+        self._analyze_output(finalize=True)
+        return cont_output
 
     def _run_verification_loop(
         self,

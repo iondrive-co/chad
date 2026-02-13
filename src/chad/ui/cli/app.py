@@ -330,6 +330,20 @@ def select_from_list(prompt: str, options: list[tuple[str, str]], default_idx: i
             return None
 
 
+def _format_action_settings(settings: list[dict]) -> str:
+    """Format action settings for display."""
+    lines = []
+    for s in settings:
+        event = s.get("event", "?")
+        threshold = s.get("threshold", 90)
+        action = s.get("action", "notify")
+        target = s.get("target_account", "")
+        label = event.replace("_", " ").title()
+        suffix = f" -> {target}" if action == "switch_provider" and target else ""
+        lines.append(f"    {label}: {threshold}% {action}{suffix}")
+    return "\n".join(lines) if lines else "    (none)"
+
+
 def run_settings_menu(client: APIClient) -> None:
     """Run the settings submenu.
 
@@ -350,8 +364,7 @@ def run_settings_menu(client: APIClient) -> None:
         verification_agent_name = client.get_verification_agent()
         verification_model = client.get_preferred_verification_model()
         max_verification_attempts = client.get_max_verification_attempts()
-        fallback_order = client.get_provider_fallback_order()
-        usage_threshold = client.get_usage_switch_threshold()
+        action_settings = client.get_action_settings()
         # Find coding agent from roles
         coding_agent = None
         for acc in accounts:
@@ -366,9 +379,8 @@ def run_settings_menu(client: APIClient) -> None:
         print(f"  Verification Agent: {verification_agent_name or '(not set)'}")
         print(f"  Verification Model: {verification_model or '(auto)'}")
         print(f"  Max Verif Attempts: {max_verification_attempts}")
-        fallback_str = " -> ".join(fallback_order) if fallback_order else "(none)"
-        print(f"  Fallback Order:     {fallback_str}")
-        print(f"  Usage Threshold:    {usage_threshold}%")
+        print("  Action Rules:")
+        print(_format_action_settings(action_settings))
         print()
 
         print("Settings Menu:")
@@ -377,9 +389,8 @@ def run_settings_menu(client: APIClient) -> None:
         print("  [3] Set verification agent")
         print("  [4] Set verification model")
         print("  [5] Set max verification attempts")
-        print("  [6] Set provider fallback order")
-        print("  [7] Set usage threshold")
-        print("  [8] Set UI mode")
+        print("  [6] Action rules")
+        print("  [7] Set UI mode")
         print("  [b] Back to main menu")
         print()
 
@@ -489,56 +500,103 @@ def run_settings_menu(client: APIClient) -> None:
             input("Press Enter to continue...")
 
         elif choice == "6":
-            # Set provider fallback order
+            # Action rules
             print()
-            print("Provider Fallback Order")
+            print("Action Rules")
             print("-" * 30)
-            if fallback_order:
-                print("Current order:")
-                for i, name in enumerate(fallback_order, 1):
-                    print(f"  {i}. {name}")
-            else:
-                print("No fallback order set.")
+            print(_format_action_settings(action_settings))
             print()
-            print("Enter account names separated by commas, in priority order.")
-            print("Available accounts:", ", ".join(acc.name for acc in accounts) if accounts else "(none)")
+            print("  [a] Add rule")
+            if action_settings:
+                print("  [e] Edit rule")
+                print("  [d] Delete rule")
             print()
             try:
-                order_input = input("New order (or Enter to keep current): ").strip()
-                if order_input:
-                    new_order = [name.strip() for name in order_input.split(",") if name.strip()]
-                    # Validate account names
-                    valid_names = {acc.name for acc in accounts}
-                    invalid = [name for name in new_order if name not in valid_names]
-                    if invalid:
-                        print(f"Unknown accounts: {', '.join(invalid)}")
+                sub = input("Choice (or Enter to skip): ").strip().lower()
+                event_names = ["session_usage", "weekly_usage", "context_usage"]
+                all_actions = ["notify", "switch_provider", "await_reset"]
+
+                if sub == "a":
+                    print("Event types: " + ", ".join(event_names))
+                    event_key = input("Event type: ").strip()
+                    if event_key not in event_names:
+                        print("Invalid event type")
                     else:
-                        client.set_provider_fallback_order(new_order)
-                        print(f"Fallback order set: {' -> '.join(new_order)}")
-            except Exception as e:
-                print(f"Error: {e}")
+                        cur_threshold = int(input("Threshold (0-100): ").strip())
+                        avail_actions = [a for a in all_actions if not (a == "await_reset" and event_key == "context_usage")]
+                        print(f"Actions: {', '.join(avail_actions)}")
+                        cur_action = input("Action: ").strip()
+                        if cur_action not in avail_actions:
+                            print("Invalid action")
+                        else:
+                            target = None
+                            if cur_action == "switch_provider":
+                                print("Available accounts:", ", ".join(acc.name for acc in accounts) if accounts else "(none)")
+                                target = input("Target account: ").strip() or None
+                            new_entry = {"event": event_key, "threshold": cur_threshold, "action": cur_action}
+                            if target:
+                                new_entry["target_account"] = target
+                            new_settings = list(action_settings) + [new_entry]
+                            try:
+                                client.set_action_settings(new_settings)
+                                print("Rule added.")
+                            except Exception as e:
+                                print(f"Error: {e}")
+
+                elif sub == "e" and action_settings:
+                    for i, s in enumerate(action_settings, 1):
+                        ev = s.get("event", "?")
+                        print(f"  [{i}] {ev} >= {s.get('threshold', 90)}% -> {s.get('action', 'notify')}")
+                    idx = int(input("Rule number: ").strip()) - 1
+                    if 0 <= idx < len(action_settings):
+                        current = action_settings[idx]
+                        event_key = current.get("event", "session_usage")
+                        cur_threshold = current.get("threshold", 90)
+                        cur_action = current.get("action", "notify")
+
+                        new_thr = input(f"Threshold (0-100, current {cur_threshold}): ").strip()
+                        if new_thr:
+                            cur_threshold = int(new_thr)
+
+                        avail_actions = [a for a in all_actions if not (a == "await_reset" and event_key == "context_usage")]
+                        print(f"Actions: {', '.join(avail_actions)} (current: {cur_action})")
+                        new_action = input("Action: ").strip()
+                        if new_action and new_action in avail_actions:
+                            cur_action = new_action
+
+                        target = None
+                        if cur_action == "switch_provider":
+                            print("Available accounts:", ", ".join(acc.name for acc in accounts) if accounts else "(none)")
+                            target = input("Target account: ").strip() or None
+
+                        new_entry = {"event": event_key, "threshold": cur_threshold, "action": cur_action}
+                        if target:
+                            new_entry["target_account"] = target
+                        new_settings = list(action_settings)
+                        new_settings[idx] = new_entry
+                        try:
+                            client.set_action_settings(new_settings)
+                            print("Rule updated.")
+                        except Exception as e:
+                            print(f"Error: {e}")
+
+                elif sub == "d" and action_settings:
+                    for i, s in enumerate(action_settings, 1):
+                        ev = s.get("event", "?")
+                        print(f"  [{i}] {ev} >= {s.get('threshold', 90)}% -> {s.get('action', 'notify')}")
+                    idx = int(input("Rule to delete: ").strip()) - 1
+                    if 0 <= idx < len(action_settings):
+                        new_settings = [s for j, s in enumerate(action_settings) if j != idx]
+                        try:
+                            client.set_action_settings(new_settings)
+                            print("Rule deleted.")
+                        except Exception as e:
+                            print(f"Error: {e}")
+            except ValueError:
+                print("Invalid input")
             input("Press Enter to continue...")
 
         elif choice == "7":
-            # Set usage threshold
-            print()
-            print(f"Current usage threshold: {usage_threshold}%")
-            print("When provider usage exceeds this %, auto-switch to next fallback.")
-            print("Set to 100 to disable usage-based switching.")
-            try:
-                new_threshold = input("New threshold (0-100): ").strip()
-                if new_threshold:
-                    threshold = int(new_threshold)
-                    if 0 <= threshold <= 100:
-                        client.set_usage_switch_threshold(threshold)
-                        print(f"Usage threshold set to {threshold}%")
-                    else:
-                        print("Please enter a number between 0 and 100")
-            except ValueError:
-                print("Invalid number")
-            input("Press Enter to continue...")
-
-        elif choice == "8":
             # Set UI mode
             print()
             print(f"Current UI mode: {preferences.ui_mode}")
