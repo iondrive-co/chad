@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chad Usage Guide</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #1a1a2e; background: #f8f9fa; }
+  .container { max-width: 820px; margin: 0 auto; padding: 2rem 1.5rem; }
+  h1 { font-size: 2rem; margin-bottom: 0.25rem; }
+  h1 + p { color: #555; margin-bottom: 2.5rem; }
+  h2 { font-size: 1.4rem; margin-top: 2.5rem; border-bottom: 2px solid #e0e0e0; padding-bottom: 0.3rem; }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  p, li { margin-top: 0.6rem; }
+  ul, ol { padding-left: 1.5rem; }
+  code { background: #eef; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.92em; }
+  pre { background: #1e1e2e; color: #cdd6f4; padding: 1rem 1.25rem; border-radius: 6px; overflow-x: auto; margin-top: 0.8rem; font-size: 0.88rem; line-height: 1.5; }
+  pre code { background: none; padding: 0; color: inherit; }
+  .note { background: #fff3cd; border-left: 4px solid #ffc107; padding: 0.75rem 1rem; margin-top: 1rem; border-radius: 0 4px 4px 0; }
+  .note strong { display: block; margin-bottom: 0.2rem; }
+  .warn { background: #f8d7da; border-left: 4px solid #dc3545; padding: 0.75rem 1rem; margin-top: 1rem; border-radius: 0 4px 4px 0; }
+  .warn strong { display: block; margin-bottom: 0.2rem; }
+  .step { counter-increment: step-counter; position: relative; padding-left: 2.5rem; margin-top: 1.5rem; }
+  .step::before { content: counter(step-counter); position: absolute; left: 0; top: 0; width: 1.8rem; height: 1.8rem; background: #1a1a2e; color: #fff; border-radius: 50%; text-align: center; line-height: 1.8rem; font-size: 0.85rem; font-weight: 600; }
+  .steps { counter-reset: step-counter; }
+  img.screenshot { max-width: 100%; border: 1px solid #ddd; border-radius: 6px; margin-top: 0.5rem; }
+  table { border-collapse: collapse; width: 100%; margin-top: 0.8rem; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; text-align: left; }
+  th { background: #f0f0f0; }
+  .toc { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 1.25rem 1.5rem; margin: 1.5rem 0 2rem; }
+  .toc ul { list-style: none; padding-left: 0; }
+  .toc li { margin-top: 0.35rem; }
+  .toc a { color: #1a1a2e; text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .placeholder { color: #888; font-style: italic; border: 1px dashed #ccc; padding: 1rem; border-radius: 6px; margin-top: 0.8rem; text-align: center; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #ddd; color: #888; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Chad Usage Guide</h1>
+<p>A multi-provider AI coding assistant with a web interface, CLI, and Slack integration.</p>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ul>
+    <li><a href="#getting-started">Getting Started</a></li>
+    <li><a href="#web-ui">Web Interface (Gradio)</a></li>
+    <li><a href="#cli">Command-Line Interface</a></li>
+    <li><a href="#providers">Configuring Providers</a></li>
+    <li><a href="#worktrees">Git Worktrees</a></li>
+    <li><a href="#verification">Verification Agent</a></li>
+    <li><a href="#action-rules">Action Rules</a></li>
+    <li><a href="#slack">Slack Integration</a></li>
+    <li><a href="#remote">Connecting to a Remote Server</a></li>
+    <li><a href="#troubleshooting">Troubleshooting</a></li>
+  </ul>
+</nav>
+
+<!-- ============================================================ -->
+<h2 id="getting-started">Getting Started</h2>
+<div class="placeholder">Section content coming soon.</div>
+
+<!-- ============================================================ -->
+<h2 id="web-ui">Web Interface (Gradio)</h2>
+<div class="placeholder">Section content coming soon.</div>
+
+<!-- ============================================================ -->
+<h2 id="cli">Command-Line Interface</h2>
+<div class="placeholder">Section content coming soon.</div>
+
+<!-- ============================================================ -->
+<h2 id="providers">Configuring Providers</h2>
+<div class="placeholder">Section content coming soon.</div>
+
+<!-- ============================================================ -->
+<h2 id="worktrees">Git Worktrees</h2>
+<div class="placeholder">Section content coming soon.</div>
+
+<!-- ============================================================ -->
+<h2 id="verification">Verification Agent</h2>
+<div class="placeholder">Section content coming soon.</div>
+
+<!-- ============================================================ -->
+<h2 id="action-rules">Action Rules</h2>
+<div class="placeholder">Section content coming soon.</div>
+
+<!-- ============================================================ -->
+<h2 id="slack">Slack Integration</h2>
+
+<p>
+  Chad can post milestone notifications to a Slack channel so you know when something
+  interesting happens&mdash;coding finished, verification passed or failed, a usage
+  limit was reached, and so on. Optionally you can also send messages <em>from</em>
+  Slack into a running Chad session (for example to give it extra instructions while
+  it works).
+</p>
+
+<h3>What you will need</h3>
+<ul>
+  <li>A Slack workspace where you can create apps (any free or paid plan works).</li>
+  <li>A running Chad instance (either the Gradio web UI or the CLI).</li>
+  <li>For the <em>Slack&nbsp;&rarr;&nbsp;Chad</em> direction only: a way for Slack's servers to reach
+      your Chad API over the internet (e.g.&nbsp;ngrok, a cloud VM, or Cloudflare
+      Tunnel). This is <strong>not</strong> needed if you only want
+      <em>Chad&nbsp;&rarr;&nbsp;Slack</em> notifications.</li>
+</ul>
+
+<h3>Overview</h3>
+<table>
+  <tr><th>Direction</th><th>What happens</th><th>Requires public URL?</th></tr>
+  <tr>
+    <td><strong>Chad &rarr; Slack</strong></td>
+    <td>Milestone events (discovery, coding complete, verification passed/failed,
+        usage warnings, etc.) are posted to a channel.</td>
+    <td>No</td>
+  </tr>
+  <tr>
+    <td><strong>Slack &rarr; Chad</strong></td>
+    <td>Messages you type in the Slack channel are forwarded into the
+        most recently active Chad session as user input.</td>
+    <td>Yes</td>
+  </tr>
+</table>
+
+<p>The sections below walk through both. If you only care about notifications
+   (Chad&nbsp;&rarr;&nbsp;Slack), you can skip the webhook/tunnel parts.</p>
+
+<!-- ---- Part A ---- -->
+<h3 id="slack-part-a">Part A &mdash; Notifications (Chad &rarr; Slack)</h3>
+
+<div class="steps">
+
+<div class="step">
+<strong>Create a Slack App</strong>
+<p>
+  Go to <a href="https://api.slack.com/apps">api.slack.com/apps</a> and click
+  <strong>Create New App</strong> &rarr; <strong>From scratch</strong>.
+  Give it a name (e.g.&nbsp;"Chad") and pick your workspace.
+</p>
+</div>
+
+<div class="step">
+<strong>Add bot permissions</strong>
+<p>
+  In the left sidebar, go to <strong>OAuth &amp; Permissions</strong>.
+  Scroll to <strong>Scopes &rarr; Bot Token Scopes</strong> and add:
+</p>
+<ul>
+  <li><code>chat:write</code> &mdash; lets the bot post messages.</li>
+</ul>
+<p>That is the only scope needed for notifications. (If you also want
+   Slack&nbsp;&rarr;&nbsp;Chad, you will add more scopes in Part&nbsp;B.)</p>
+</div>
+
+<div class="step">
+<strong>Install the app to your workspace</strong>
+<p>
+  Scroll back up on the same page and click
+  <strong>Install to Workspace</strong>, then <strong>Allow</strong>.
+  After the redirect you will see a <strong>Bot User OAuth Token</strong>
+  starting with <code>xoxb-</code>. Copy it&mdash;you will paste it into Chad
+  in a moment.
+</p>
+</div>
+
+<div class="step">
+<strong>Get the channel ID</strong>
+<p>
+  In Slack, open the channel you want notifications in. Click the channel name
+  at the top of the screen to open its details panel. The <strong>Channel
+  ID</strong> is shown at the very bottom of the panel (it looks like
+  <code>C0123ABCDEF</code>). Copy it.
+</p>
+<div class="note">
+  <strong>Invite the bot first.</strong>
+  The bot cannot post to a channel it hasn't been added to. In the channel,
+  type <code>/invite @Chad</code> (or whatever you named the app) and press
+  Enter.
+</div>
+</div>
+
+<div class="step">
+<strong>Configure Chad &mdash; Web UI</strong>
+<p>
+  Open the Chad web interface and go to the <strong>Setup</strong> tab.
+  Scroll down to <strong>Slack Integration</strong>. Fill in:
+</p>
+<ul>
+  <li><strong>Enable Slack notifications</strong> &mdash; check the box.</li>
+  <li><strong>Bot Token</strong> &mdash; paste the <code>xoxb-&hellip;</code> token.</li>
+  <li><strong>Channel ID</strong> &mdash; paste the channel ID.</li>
+</ul>
+<p>
+  Click <strong>Test Slack Connection</strong>. If everything is correct you
+  will see a confirmation message appear in the Slack channel.
+</p>
+</div>
+
+<div class="step">
+<strong>Configure Chad &mdash; CLI</strong>
+<p>
+  If you use the terminal UI instead:
+</p>
+<pre><code># From the main menu, choose Settings &rarr; [8] Slack integration
+
+#   [e] Toggle enabled     &mdash; turn it on
+#   [t] Set bot token       &mdash; paste xoxb-...
+#   [c] Set channel ID      &mdash; paste C0123ABCDEF
+#   [s] Send test message   &mdash; verify it works</code></pre>
+</div>
+
+<div class="step">
+<strong>You are done</strong>
+<p>
+  From now on, every milestone event Chad emits will also appear in your Slack
+  channel. The messages look like:
+</p>
+<pre><code><strong>Coding Complete</strong> &mdash; Implemented the login form with validation
+<em>Session a1b2c3d4 &middot; coding_complete</em></code></pre>
+<p>These are the milestone types you will see:</p>
+<table>
+  <tr><th>Milestone</th><th>When it fires</th></tr>
+  <tr><td>Discovery</td><td>Agent finished exploring the codebase</td></tr>
+  <tr><td>Coding Complete</td><td>Coding phase finished</td></tr>
+  <tr><td>Verification</td><td>Verification started</td></tr>
+  <tr><td>Verification Passed</td><td>Tests/linting passed</td></tr>
+  <tr><td>Verification Failed</td><td>Tests/linting failed</td></tr>
+  <tr><td>Re-coding</td><td>Agent is revising after failed verification</td></tr>
+  <tr><td>Session Limit</td><td>Provider session token limit reached</td></tr>
+  <tr><td>Weekly Limit</td><td>Provider weekly usage limit reached</td></tr>
+  <tr><td>Usage Warning</td><td>Usage crossed the threshold in your action rules</td></tr>
+</table>
+</div>
+
+</div><!-- /steps -->
+
+<!-- ---- Part B ---- -->
+<h3 id="slack-part-b">Part B &mdash; Sending messages to Chad from Slack (optional)</h3>
+
+<p>
+  This direction requires Slack's servers to make HTTP requests to your Chad API,
+  which means the API must be reachable from the public internet. If Chad is
+  running on your laptop, the easiest way to do that is with a tunnel.
+</p>
+
+<div class="steps">
+
+<div class="step">
+<strong>Expose the Chad API with a tunnel</strong>
+<p>Pick whichever tool you have available:</p>
+
+<h4 style="margin-top:0.8rem">Option&nbsp;A &mdash; ngrok (any OS)</h4>
+<ol>
+  <li>Install ngrok: <a href="https://ngrok.com/download">ngrok.com/download</a>
+      (or <code>brew install ngrok</code> / <code>choco install ngrok</code> /
+      <code>snap install ngrok</code>).</li>
+  <li>Sign up for a free account and run <code>ngrok config add-authtoken YOUR_TOKEN</code>.</li>
+  <li>Start the tunnel pointed at Chad's API port:
+<pre><code>ngrok http 8000</code></pre>
+      (Replace <code>8000</code> with the actual port if different. Chad prints
+       the port when it starts.)</li>
+  <li>Copy the <code>https://xxxx.ngrok-free.app</code> URL from the terminal
+      output. This is your public base URL.</li>
+</ol>
+
+<h4 style="margin-top:0.8rem">Option&nbsp;B &mdash; Cloudflare Tunnel (any OS)</h4>
+<pre><code># Install: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+cloudflared tunnel --url http://localhost:8000</code></pre>
+<p>Copy the <code>https://xxxx.trycloudflare.com</code> URL it prints.</p>
+
+<h4 style="margin-top:0.8rem">Option&nbsp;C &mdash; SSH reverse tunnel (Linux/macOS, if you have a server)</h4>
+<pre><code>ssh -R 80:localhost:8000 your-server.example.com</code></pre>
+
+<div class="note">
+  <strong>The tunnel must stay running</strong> for as long as you want
+  Slack&nbsp;&rarr;&nbsp;Chad to work. If you restart it, the URL may change
+  and you will need to update the Slack app's webhook URL (next step).
+</div>
+</div>
+
+<div class="step">
+<strong>Add Event Subscriptions to the Slack app</strong>
+<p>
+  Back in <a href="https://api.slack.com/apps">api.slack.com/apps</a>,
+  select your app, then go to <strong>Event Subscriptions</strong> in the
+  left sidebar.
+</p>
+<ol>
+  <li>Toggle <strong>Enable Events</strong> on.</li>
+  <li>In <strong>Request URL</strong>, enter:
+<pre><code>https://YOUR-TUNNEL-URL/api/v1/slack/webhook</code></pre>
+      For example: <code>https://abcd1234.ngrok-free.app/api/v1/slack/webhook</code>.
+      <br>Slack will immediately send a verification challenge to this URL. If
+      Chad is running and the tunnel is active, it will respond automatically
+      and you will see a green <strong>Verified</strong> checkmark.</li>
+  <li>Under <strong>Subscribe to bot events</strong>, add:
+      <ul>
+        <li><code>message.channels</code> &mdash; messages in public channels</li>
+        <li><code>message.groups</code> &mdash; messages in private channels (if needed)</li>
+      </ul>
+  </li>
+  <li>Click <strong>Save Changes</strong>.</li>
+</ol>
+</div>
+
+<div class="step">
+<strong>Re-install the app</strong>
+<p>
+  After adding new event subscriptions, Slack will show a banner at the top
+  asking you to reinstall. Click it and approve the new permissions.
+</p>
+</div>
+
+<div class="step">
+<strong>Test it</strong>
+<p>
+  Start a task in Chad so there is an active session. Then go to the Slack
+  channel and type a message. It should appear in Chad's agent input prefixed
+  with <code>[Slack]</code>.
+</p>
+<div class="warn">
+  <strong>Messages go to the most recently active session.</strong>
+  If no session has an active task, Slack messages are silently dropped.
+  Start a task first, then send the message.
+</div>
+</div>
+
+</div><!-- /steps -->
+
+<h3 id="slack-api">Configuring via the API directly</h3>
+<p>
+  If you prefer to script the setup or are running Chad headlessly, you can use
+  the REST API:
+</p>
+<pre><code># Set Slack settings
+curl -X PUT http://localhost:8000/api/v1/config/slack \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true, "bot_token": "xoxb-...", "channel": "C0123ABCDEF"}'
+
+# Check current settings (token is not returned, only has_token: true/false)
+curl http://localhost:8000/api/v1/config/slack
+
+# Send a test message
+curl -X POST http://localhost:8000/api/v1/slack/test</code></pre>
+
+<h3 id="slack-security">Security notes</h3>
+<ul>
+  <li>The bot token is stored in <code>~/.chad.conf</code> (file permissions
+      <code>600</code>). It is <em>not</em> encrypted&mdash;anyone with read
+      access to that file can see it.</li>
+  <li>The webhook endpoint (<code>/api/v1/slack/webhook</code>) does not
+      currently verify Slack request signatures. If you expose it publicly,
+      anyone who discovers the URL could send messages into your Chad session.
+      For personal use behind a tunnel this is fine; for shared/production
+      deployments, put it behind authentication or restrict access by IP.</li>
+  <li>Bot messages (those with a <code>bot_id</code>) are ignored to prevent
+      feedback loops where Chad's own Slack posts trigger new input.</li>
+</ul>
+
+<h3 id="slack-disable">Disabling Slack</h3>
+<p>Uncheck "Enable Slack notifications" in the UI, or:</p>
+<pre><code>curl -X PUT http://localhost:8000/api/v1/config/slack \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}'</code></pre>
+<p>
+  When disabled, milestones are still emitted internally (and visible in the UI
+  timeline) but no HTTP calls to Slack are made.
+</p>
+
+<!-- ============================================================ -->
+<h2 id="remote">Connecting to a Remote Server</h2>
+<div class="placeholder">Section content coming soon.</div>
+
+<!-- ============================================================ -->
+<h2 id="troubleshooting">Troubleshooting</h2>
+<div class="placeholder">Section content coming soon.</div>
+
+<footer>
+  Chad &mdash; Multi-provider AI coding assistant
+</footer>
+
+</div><!-- /container -->
+</body>
+</html>

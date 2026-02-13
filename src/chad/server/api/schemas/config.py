@@ -23,3 +23,19 @@ class UserPreferences(BaseModel):
     last_project_path: str | None = Field(default=None, description="Last used project path")
     dark_mode: bool = Field(default=True, description="Whether dark mode is enabled")
     ui_mode: str = Field(default="gradio", description="UI mode: gradio or cli")
+
+
+class SlackSettingsResponse(BaseModel):
+    """Response for Slack integration settings."""
+
+    enabled: bool = Field(default=False, description="Whether Slack integration is active")
+    channel: str | None = Field(default=None, description="Slack channel ID")
+    has_token: bool = Field(default=False, description="Whether a bot token is stored")
+
+
+class SlackSettingsUpdate(BaseModel):
+    """Request to update Slack integration settings."""
+
+    enabled: bool | None = Field(default=None, description="Enable or disable Slack integration")
+    channel: str | None = Field(default=None, description="Slack channel ID")
+    bot_token: str | None = Field(default=None, description="Slack bot token (xoxb-...)")

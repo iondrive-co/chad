@@ -744,3 +744,45 @@ class APIClient:
         )
         resp.raise_for_status()
         return resp.json().get("attempts", attempts)
+
+    def get_slack_settings(self) -> dict:
+        """Get Slack integration settings.
+
+        Returns:
+            Dict with enabled, channel, has_token
+        """
+        resp = self._client.get(self._url("/config/slack"))
+        resp.raise_for_status()
+        return resp.json()
+
+    def set_slack_settings(
+        self,
+        enabled: bool | None = None,
+        channel: str | None = None,
+        bot_token: str | None = None,
+    ) -> dict:
+        """Update Slack integration settings.
+
+        Returns:
+            Updated settings dict
+        """
+        payload: dict = {}
+        if enabled is not None:
+            payload["enabled"] = enabled
+        if channel is not None:
+            payload["channel"] = channel
+        if bot_token is not None:
+            payload["bot_token"] = bot_token
+        resp = self._client.put(self._url("/config/slack"), json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def test_slack_connection(self) -> dict:
+        """Send a test message to verify Slack configuration.
+
+        Returns:
+            Dict with ok (bool) and error (str|None)
+        """
+        resp = self._client.post(self._url("/slack/test"))
+        resp.raise_for_status()
+        return resp.json()

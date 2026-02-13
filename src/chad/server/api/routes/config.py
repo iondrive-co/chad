@@ -7,6 +7,8 @@ from chad.server.api.schemas import (
     VerificationSettings,
     CleanupSettings,
     UserPreferences,
+    SlackSettingsResponse,
+    SlackSettingsUpdate,
 )
 from chad.server.state import get_config_manager
 
@@ -339,3 +341,31 @@ async def set_max_verification_attempts(
     config_mgr.set_max_verification_attempts(request.attempts)
 
     return MaxVerificationAttemptsResponse(attempts=request.attempts)
+
+
+@router.get("/slack", response_model=SlackSettingsResponse)
+async def get_slack_settings() -> SlackSettingsResponse:
+    """Get Slack integration settings."""
+    config_mgr = get_config_manager()
+    return SlackSettingsResponse(
+        enabled=config_mgr.get_slack_enabled(),
+        channel=config_mgr.get_slack_channel(),
+        has_token=bool(config_mgr.get_slack_bot_token()),
+    )
+
+
+@router.put("/slack", response_model=SlackSettingsResponse)
+async def set_slack_settings(request: SlackSettingsUpdate) -> SlackSettingsResponse:
+    """Update Slack integration settings."""
+    config_mgr = get_config_manager()
+    if request.enabled is not None:
+        config_mgr.set_slack_enabled(request.enabled)
+    if request.channel is not None:
+        config_mgr.set_slack_channel(request.channel)
+    if request.bot_token is not None:
+        config_mgr.set_slack_bot_token(request.bot_token)
+    return SlackSettingsResponse(
+        enabled=config_mgr.get_slack_enabled(),
+        channel=config_mgr.get_slack_channel(),
+        has_token=bool(config_mgr.get_slack_bot_token()),
+    )

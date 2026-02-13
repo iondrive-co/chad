@@ -1082,6 +1082,9 @@ class TestConfigUIParity:
         "cleanup_days",
         "action_settings",
         "max_verification_attempts",
+        "slack_enabled",
+        "slack_bot_token",
+        "slack_channel",
     }
 
     # Keys that are only in Gradio UI (makes sense for web-only settings)
@@ -1125,6 +1128,9 @@ class TestConfigUIParity:
         "action_settings": ["action_settings", "action_setting", "action_rule"],
         "max_verification_attempts": ["max_verification_attempts", "verification_attempts"],
         "ui_mode": ["ui_mode"],
+        "slack_enabled": ["slack_enabled", "slack_enable", "slack_settings", "slack integration"],
+        "slack_bot_token": ["slack_bot_token", "slack_token", "bot_token", "slack_settings"],
+        "slack_channel": ["slack_channel", "slack_settings", "channel id"],
     }
 
     def test_gradio_ui_exposes_all_required_keys(self):

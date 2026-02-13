@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
 from .state import init_start_time
-from .api.routes import health, sessions, providers, worktree, config, ws
+from .api.routes import health, sessions, providers, worktree, config, ws, slack
 
 
 @asynccontextmanager
@@ -68,6 +68,7 @@ def create_app(
     app.include_router(worktree.router, prefix="/api/v1/sessions", tags=["Worktree"])
     app.include_router(config.router, prefix="/api/v1/config", tags=["Config"])
     app.include_router(ws.router, prefix="/api/v1", tags=["WebSocket"])
+    app.include_router(slack.router, prefix="/api/v1", tags=["Slack"])
 
     return app
 

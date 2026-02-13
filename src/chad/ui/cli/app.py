@@ -365,6 +365,10 @@ def run_settings_menu(client: APIClient) -> None:
         verification_model = client.get_preferred_verification_model()
         max_verification_attempts = client.get_max_verification_attempts()
         action_settings = client.get_action_settings()
+        try:
+            slack_settings = client.get_slack_settings()
+        except Exception:
+            slack_settings = {"enabled": False, "channel": None, "has_token": False}
         # Find coding agent from roles
         coding_agent = None
         for acc in accounts:
@@ -381,6 +385,9 @@ def run_settings_menu(client: APIClient) -> None:
         print(f"  Max Verif Attempts: {max_verification_attempts}")
         print("  Action Rules:")
         print(_format_action_settings(action_settings))
+        slack_status = "enabled" if slack_settings.get("enabled") else "disabled"
+        slack_ch = slack_settings.get("channel") or "(not set)"
+        print(f"  Slack:              {slack_status}, channel={slack_ch}")
         print()
 
         print("Settings Menu:")
@@ -391,6 +398,7 @@ def run_settings_menu(client: APIClient) -> None:
         print("  [5] Set max verification attempts")
         print("  [6] Action rules")
         print("  [7] Set UI mode")
+        print("  [8] Slack integration")
         print("  [b] Back to main menu")
         print()
 
@@ -609,6 +617,46 @@ def run_settings_menu(client: APIClient) -> None:
             if selected is not None:
                 client.set_preferences(ui_mode=selected)
                 print(f"UI mode set to: {selected}")
+            input("Press Enter to continue...")
+
+        elif choice == "8":
+            # Slack integration
+            print()
+            print("Slack Integration")
+            print("-" * 30)
+            print(f"  Enabled:   {slack_settings.get('enabled', False)}")
+            print(f"  Token:     {'(set)' if slack_settings.get('has_token') else '(not set)'}")
+            print(f"  Channel:   {slack_settings.get('channel') or '(not set)'}")
+            print()
+            print("  [e] Toggle enabled")
+            print("  [t] Set bot token")
+            print("  [c] Set channel ID")
+            print("  [s] Send test message")
+            print()
+            try:
+                sub = input("Choice (or Enter to skip): ").strip().lower()
+                if sub == "e":
+                    new_val = not slack_settings.get("enabled", False)
+                    client.set_slack_settings(enabled=new_val)
+                    print(f"Slack {'enabled' if new_val else 'disabled'}")
+                elif sub == "t":
+                    token = input("Bot token (xoxb-...): ").strip()
+                    if token:
+                        client.set_slack_settings(bot_token=token)
+                        print("Bot token saved")
+                elif sub == "c":
+                    channel = input("Channel ID (e.g. C0123456789): ").strip()
+                    if channel:
+                        client.set_slack_settings(channel=channel)
+                        print(f"Channel set to {channel}")
+                elif sub == "s":
+                    result = client.test_slack_connection()
+                    if result.get("ok"):
+                        print("Test message sent to Slack")
+                    else:
+                        print(f"Failed: {result.get('error', 'unknown error')}")
+            except (ValueError, EOFError):
+                pass
             input("Press Enter to continue...")
 
 

@@ -233,7 +233,15 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
             "verification agent",
             "verification model",
             "default project path",
+            "slack",
         ],
+    ),
+    "SLACK_SETTINGS": UIComponent(
+        tab="setup",
+        component="config",
+        tests=["TestSetupTab"],
+        source_file="chad/web_ui.py",
+        keywords=["slack", "slack integration", "slack bot", "slack channel", "slack notification"],
     ),
     # --- Task Tabs ---
     "TASK_TABS": UIComponent(

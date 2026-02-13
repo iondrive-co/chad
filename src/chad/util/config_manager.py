@@ -28,6 +28,9 @@ CONFIG_BASE_KEYS: set[str] = {
     "mock_remaining_usage",  # Dict of account_name -> 0.0-1.0 for mock provider testing
     "mock_run_duration_seconds",  # Dict of account_name -> 0-3600 mock run duration for handover testing
     "max_verification_attempts",  # Maximum verification attempts before giving up (default 5)
+    "slack_enabled",       # Whether Slack integration is active
+    "slack_bot_token",     # Encrypted Slack bot token (xoxb-...)
+    "slack_channel",       # Slack channel ID to post milestones to
 }
 
 
@@ -870,6 +873,57 @@ class ConfigManager:
             raise ValueError("max_verification_attempts must be between 1 and 20")
         config = self.load_config()
         config["max_verification_attempts"] = attempts
+        self.save_config(config)
+
+    def get_slack_enabled(self) -> bool:
+        """Get whether Slack integration is enabled."""
+        config = self.load_config()
+        return config.get("slack_enabled", False)
+
+    def set_slack_enabled(self, enabled: bool) -> None:
+        """Enable or disable Slack integration."""
+        config = self.load_config()
+        config["slack_enabled"] = enabled
+        self.save_config(config)
+
+    def get_slack_bot_token(self) -> str | None:
+        """Get the Slack bot token.
+
+        Returns:
+            Bot token string, or None if not set
+        """
+        config = self.load_config()
+        return config.get("slack_bot_token") or None
+
+    def set_slack_bot_token(self, token: str | None) -> None:
+        """Store the Slack bot token.
+
+        Args:
+            token: Bot token (xoxb-...), or None to clear
+        """
+        config = self.load_config()
+        if token:
+            config["slack_bot_token"] = token
+        elif "slack_bot_token" in config:
+            del config["slack_bot_token"]
+        self.save_config(config)
+
+    def get_slack_channel(self) -> str | None:
+        """Get the Slack channel ID for milestone notifications."""
+        config = self.load_config()
+        return config.get("slack_channel")
+
+    def set_slack_channel(self, channel: str | None) -> None:
+        """Set the Slack channel ID for milestone notifications.
+
+        Args:
+            channel: Slack channel ID (e.g. C0123456789), or None to clear
+        """
+        config = self.load_config()
+        if channel:
+            config["slack_channel"] = channel
+        elif "slack_channel" in config:
+            del config["slack_channel"]
         self.save_config(config)
 
 
