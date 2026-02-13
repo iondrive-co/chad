@@ -29,6 +29,7 @@ async def test_slack_connection() -> SlackTestResult:
         return SlackTestResult(ok=False, error="No bot token configured")
     if not cm.get_slack_channel():
         return SlackTestResult(ok=False, error="No channel ID configured")
+    # Signing secret is optional; do not require for test
 
     svc = get_slack_service()
     # Temporarily force enabled for the test
@@ -64,6 +65,17 @@ async def slack_webhook(request: Request) -> Response:
     - Message events (forwarded to the active Chad session)
     """
     body = await request.body()
+
+    # If a signing secret is configured, verify request signature
+    cm = get_config_manager()
+    signing_secret = cm.get_slack_signing_secret()
+    if signing_secret:
+        ts = request.headers.get("X-Slack-Request-Timestamp")
+        sig = request.headers.get("X-Slack-Signature")
+        from chad.server.services.slack_service import SlackService
+
+        if not ts or not sig or not SlackService.verify_webhook_signature(signing_secret, ts, sig, body):
+            return Response(status_code=401, content="Invalid signature")
 
     try:
         payload = json.loads(body)

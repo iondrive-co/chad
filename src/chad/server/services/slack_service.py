@@ -25,6 +25,11 @@ class SlackService:
         cm = get_config_manager()
         return cm.get_slack_enabled() and bool(cm.get_slack_bot_token()) and bool(cm.get_slack_channel())
 
+    def get_signing_secret(self) -> str | None:
+        """Return the configured Slack signing secret, or None if unset."""
+        cm = get_config_manager()
+        return cm.get_slack_signing_secret()
+
     def post_milestone(
         self,
         session_id: str,

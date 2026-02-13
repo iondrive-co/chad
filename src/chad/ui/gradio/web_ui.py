@@ -8034,6 +8034,13 @@ class ChadWebUI:
                     placeholder="xoxb-...",
                     info="Slack bot OAuth token",
                 )
+                slack_signing_secret_input = gr.Textbox(
+                    label="Signing Secret",
+                    value="" if not slack_init.get("has_signing_secret") else "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+                    type="password",
+                    placeholder="whsec-...",
+                    info="Slack app signing secret for webhook verification",
+                )
                 slack_channel_input = gr.Textbox(
                     label="Channel ID",
                     value=slack_init.get("channel") or "",
@@ -8337,6 +8344,21 @@ class ChadWebUI:
         slack_bot_token_input.change(
             on_slack_bot_token_change,
             inputs=[slack_bot_token_input],
+            outputs=[config_status],
+        )
+
+        def on_slack_signing_secret_change(secret):
+            if secret and not all(c == "\u2022" for c in secret):
+                try:
+                    self.api_client.set_slack_settings(signing_secret=secret)
+                    return "\u2705 Slack signing secret saved"
+                except Exception as exc:
+                    return f"\u274c {exc}"
+            return ""
+
+        slack_signing_secret_input.change(
+            on_slack_signing_secret_change,
+            inputs=[slack_signing_secret_input],
             outputs=[config_status],
         )
 
