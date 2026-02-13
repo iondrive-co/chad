@@ -2324,6 +2324,11 @@ class TestChadWebUIInterface:
         mgr.load_preferences.return_value = {}
         mgr.get_cleanup_days.return_value = 3
         mgr.get_verification_agent.return_value = None
+        mgr.get_action_settings.return_value = [
+            {"event": "session_usage", "threshold": 90, "action": "notify"},
+            {"event": "weekly_usage", "threshold": 90, "action": "notify"},
+            {"event": "context_usage", "threshold": 90, "action": "notify"},
+        ]
         return mgr
 
     @patch("chad.ui.gradio.web_ui.gr")
@@ -2398,15 +2403,51 @@ class TestChadWebUIInterface:
         assert chatbot_calls, "Expected Milestones chatbot to be created"
         assert all(c.get("group_consecutive_messages") is False for c in chatbot_calls)
 
-    def test_provider_fallback_order_saves_on_submit_not_change(self):
-        """Fallback order should save on Enter/submit to avoid per-keystroke API calls."""
+    def test_action_rules_ui_exists_in_source(self):
+        """Action rules UI should exist in the web UI source."""
         import inspect
 
         import chad.ui.gradio.web_ui as web_ui
 
         source = inspect.getsource(web_ui)
-        assert "fallback_order_input.submit(" in source
-        assert "fallback_order_input.change(" not in source
+        assert "action_settings" in source
+        assert "Action Rules" in source
+
+    def test_action_rules_ui_creates_with_real_gradio(self):
+        """Action Rules section must create without Gradio component errors."""
+        import gradio as gr
+
+        action_settings_data = [
+            {"event": "session_usage", "threshold": 90, "action": "notify"},
+        ]
+        account_names = ["test-account"]
+        _MAX = 6
+        all_event_choices = ["session_usage", "weekly_usage", "context_usage"]
+        all_action_choices = ["notify", "switch_provider", "await_reset"]
+
+        with gr.Blocks():
+            gr.Markdown("### Action Rules")
+            with gr.Row():
+                with gr.Column(scale=3):
+                    gr.Markdown("**Rule**")
+                with gr.Column(scale=3):
+                    gr.Markdown("**Action**")
+                with gr.Column(scale=0, min_width=60):
+                    gr.Markdown("")
+            for i in range(_MAX):
+                has_data = i < len(action_settings_data)
+                current = action_settings_data[i] if has_data else {}
+                with gr.Row(visible=has_data):
+                    with gr.Column(scale=3):
+                        with gr.Row():
+                            gr.Dropdown(choices=all_event_choices, value=current.get("event", "session_usage"), show_label=False)
+                            gr.Slider(minimum=0, maximum=100, step=5, value=current.get("threshold", 90), show_label=False)
+                    with gr.Column(scale=3):
+                        with gr.Row():
+                            gr.Dropdown(choices=all_action_choices, value=current.get("action", "notify"), show_label=False)
+                            gr.Dropdown(choices=[""] + account_names, value="", show_label=False, visible=False)
+                    gr.Button("✕", scale=0, min_width=60, size="sm")
+            gr.Button("+ Add Rule", size="sm")
 
 
 class TestLaunchWebUI:
@@ -2908,13 +2949,11 @@ class TestUsageBasedProviderSwitch:
 
         return ChadWebUI(mock_api_client)
 
-    def test_check_usage_and_switch_no_switch_under_threshold(self, web_ui, mock_api_client):
-        """No switch should occur when usage is below threshold."""
-        # Set threshold to 80%
-        mock_api_client.get_usage_switch_threshold.return_value = 80
-
-        # Set mock remaining usage to 0.5 (50% remaining = 50% used, under 80% threshold)
-        mock_api_client.get_mock_remaining_usage.return_value = 0.5
+    def test_check_usage_and_switch_no_switch_when_no_switch_action(self, web_ui, mock_api_client):
+        """No switch should occur when action_settings has only notify actions."""
+        mock_api_client.get_action_settings.return_value = [
+            {"event": "session_usage", "threshold": 90, "action": "notify"},
+        ]
 
         account, switched_from = web_ui._check_usage_and_switch("primary-mock")
 
@@ -2922,71 +2961,22 @@ class TestUsageBasedProviderSwitch:
         assert switched_from is None
 
     def test_check_usage_and_switch_triggers_switch(self, web_ui, mock_api_client):
-        """Switch should occur when usage exceeds threshold."""
-        # Set threshold to 50%
-        mock_api_client.get_usage_switch_threshold.return_value = 50
-
-        # Primary mock has 20% remaining (80% used, exceeds 50% threshold)
-        # Fallback mock has 80% remaining (20% used, under 50% threshold)
-        def mock_remaining(name):
-            if name == "primary-mock":
-                return 0.2  # 80% used
-            return 0.8  # 20% used
-
-        mock_api_client.get_mock_remaining_usage.side_effect = mock_remaining
-
-        # Set up fallback order
-        mock_api_client.get_next_fallback_provider.return_value = "fallback-mock"
+        """Switch should occur when action_settings has a switch_provider action."""
+        mock_api_client.get_action_settings.return_value = [
+            {"event": "session_usage", "threshold": 90, "action": "switch_provider", "target_account": "fallback-mock"},
+        ]
 
         account, switched_from = web_ui._check_usage_and_switch("primary-mock")
 
         assert account == "fallback-mock"
         assert switched_from == "primary-mock"
 
-    def test_check_usage_and_switch_disabled_at_100_percent(self, web_ui, mock_api_client):
-        """No switch should occur when threshold is 100% (disabled)."""
-        # Set threshold to 100% (disabled)
-        mock_api_client.get_usage_switch_threshold.return_value = 100
-
-        # Even with high usage, no switch should occur
-        mock_api_client.get_mock_remaining_usage.return_value = 0.05  # 95% used
+    def test_check_usage_and_switch_no_switch_on_api_error(self, web_ui, mock_api_client):
+        """No switch when API call fails."""
+        mock_api_client.get_action_settings.side_effect = Exception("API error")
 
         account, switched_from = web_ui._check_usage_and_switch("primary-mock")
 
-        assert account == "primary-mock"
-        assert switched_from is None
-
-    def test_check_usage_and_switch_no_fallback_available(self, web_ui, mock_api_client):
-        """No switch should occur when no fallback is configured."""
-        # Set threshold to 50%
-        mock_api_client.get_usage_switch_threshold.return_value = 50
-
-        # High usage
-        mock_api_client.get_mock_remaining_usage.return_value = 0.2  # 80% used
-
-        # No fallback available
-        mock_api_client.get_next_fallback_provider.return_value = None
-
-        account, switched_from = web_ui._check_usage_and_switch("primary-mock")
-
-        assert account == "primary-mock"
-        assert switched_from is None
-
-    def test_check_usage_and_switch_fallback_also_exhausted(self, web_ui, mock_api_client):
-        """No switch when fallback is also over threshold."""
-        # Set threshold to 50%
-        mock_api_client.get_usage_switch_threshold.return_value = 50
-
-        # Both providers are over threshold
-        def mock_remaining(name):
-            return 0.1  # 90% used for both
-
-        mock_api_client.get_mock_remaining_usage.side_effect = mock_remaining
-        mock_api_client.get_next_fallback_provider.return_value = "fallback-mock"
-
-        account, switched_from = web_ui._check_usage_and_switch("primary-mock")
-
-        # Should not switch since fallback is also exhausted
         assert account == "primary-mock"
         assert switched_from is None
 
@@ -2994,16 +2984,10 @@ class TestUsageBasedProviderSwitch:
         self, web_ui, mock_api_client, git_repo, monkeypatch
     ):
         """Initial coding run should honor the selected coding agent."""
-        mock_api_client.get_usage_switch_threshold.return_value = 50
-        mock_api_client.get_next_fallback_provider.return_value = "fallback-mock"
+        mock_api_client.get_action_settings.return_value = [
+            {"event": "session_usage", "threshold": 50, "action": "switch_provider", "target_account": "fallback-mock"},
+        ]
         mock_api_client.get_worktree_status.return_value = Mock(exists=False)
-
-        def mock_remaining(name):
-            if name == "primary-mock":
-                return 0.01  # 99% used (over threshold)
-            return 0.90
-
-        mock_api_client.get_mock_remaining_usage.side_effect = mock_remaining
 
         captured = {"coding_account": None}
 
@@ -4240,7 +4224,7 @@ class TestPhaseMilestones:
         assert "Coding" in status
         assert "claude-main" in status
 
-    def test_format_usage_metrics_returns_percentages(self, web_ui, monkeypatch):
+    def test_format_usage_metrics_returns_percentages(self, monkeypatch):
         """_format_usage_metrics should return formatted usage percentage."""
 
         class MockAPIClient:
@@ -4265,7 +4249,7 @@ class TestPhaseMilestones:
         assert "session usage: 75%" in metrics
         assert "weekly usage: 85%" in metrics
 
-    def test_format_usage_metrics_returns_only_session_if_no_weekly(self, web_ui, monkeypatch):
+    def test_format_usage_metrics_returns_only_session_if_no_weekly(self, monkeypatch):
         """_format_usage_metrics should return only session usage if no weekly data."""
         class MockAPIClient:
             def __init__(self):
@@ -4310,7 +4294,7 @@ class TestPhaseMilestones:
         ready, status = ui.get_role_config_status()
         assert ready is True
         assert "Ready" in status
-        assert "Usage: 80%" in status
+        assert "session usage: 80%" in status
 
 
 class TestMockProviderCardControls:

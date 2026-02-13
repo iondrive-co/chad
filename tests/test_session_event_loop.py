@@ -380,15 +380,24 @@ class TestCodingCompleteMilestone:
 
 
 class TestUsageThresholdMonitoring:
-    """Tests for usage threshold crossing detection."""
+    """Tests for usage threshold crossing detection using action_settings."""
 
-    def _make_loop(self, session_fn=None, weekly_fn=None, context_fn=None):
+    def _make_loop(self, session_fn=None, weekly_fn=None, context_fn=None, action_settings=None,
+                   terminate_pty_fn=None):
         """Create a SessionEventLoop with usage monitoring functions."""
         event_log = FakeEventLog()
         emitted = []
 
         def emit_fn(event_type, **kwargs):
             emitted.append((event_type, kwargs))
+
+        # Default action settings: 3 notify at 90% (matches old hardcoded behaviour)
+        if action_settings is None:
+            action_settings = [
+                {"event": "session_usage", "threshold": 90, "action": "notify"},
+                {"event": "weekly_usage", "threshold": 90, "action": "notify"},
+                {"event": "context_usage", "threshold": 90, "action": "notify"},
+            ]
 
         loop = SessionEventLoop(
             session_id="test",
@@ -400,6 +409,8 @@ class TestUsageThresholdMonitoring:
             get_session_usage_fn=session_fn,
             get_weekly_usage_fn=weekly_fn,
             get_context_usage_fn=context_fn,
+            action_settings=action_settings,
+            terminate_pty_fn=terminate_pty_fn,
         )
         return loop, event_log, emitted
 
@@ -551,6 +562,159 @@ class TestUsageThresholdMonitoring:
             if hasattr(e, "milestone_type") and e.milestone_type == "usage_threshold"
         ]
         assert len(milestone_events) == 1
+
+    def test_custom_threshold_from_action_settings(self):
+        """Action settings with a non-default threshold are respected."""
+        pct = [70.0]
+        loop, event_log, emitted = self._make_loop(
+            session_fn=lambda: pct[0],
+            action_settings=[
+                {"event": "session_usage", "threshold": 75, "action": "notify"},
+            ],
+        )
+        loop._check_usage_thresholds()
+        pct[0] = 78.0
+        loop._check_usage_thresholds()
+
+        milestones = self._usage_milestones(emitted)
+        assert len(milestones) == 1
+        assert "78%" in milestones[0][1]["summary"]
+
+    def test_no_action_with_empty_settings(self):
+        """Empty action_settings means no threshold checks at all."""
+        pct = [80.0]
+        loop, event_log, emitted = self._make_loop(
+            session_fn=lambda: pct[0],
+            action_settings=[],
+        )
+        loop._check_usage_thresholds()
+        pct[0] = 95.0
+        loop._check_usage_thresholds()
+        assert len(self._usage_milestones(emitted)) == 0
+
+
+class TestActionExecution:
+    """Tests for switch_provider and await_reset action execution."""
+
+    def _usage_milestones(self, emitted):
+        return [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "usage_threshold"
+        ]
+
+    def test_switch_provider_sets_pending_and_terminates(self):
+        """switch_provider action sets pending_action and calls terminate_pty_fn."""
+        event_log = FakeEventLog()
+        emitted = []
+        terminated = []
+
+        pct = [80.0]
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=None,
+            run_phase_fn=None,
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            get_session_usage_fn=lambda: pct[0],
+            action_settings=[
+                {"event": "session_usage", "threshold": 90, "action": "switch_provider", "target_account": "backup"},
+            ],
+            terminate_pty_fn=lambda: terminated.append(True),
+        )
+
+        # Seed
+        loop._check_usage_thresholds()
+        assert loop._pending_action is None
+
+        # Cross threshold
+        pct[0] = 92.0
+        loop._check_usage_thresholds()
+
+        assert loop._pending_action is not None
+        assert loop._pending_action["action"] == "switch_provider"
+        assert loop._pending_action["target_account"] == "backup"
+        assert len(terminated) == 1
+
+    def test_await_reset_sets_pending_and_terminates(self):
+        """await_reset action sets pending_action and calls terminate_pty_fn."""
+        event_log = FakeEventLog()
+        emitted = []
+        terminated = []
+
+        pct = [80.0]
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=None,
+            run_phase_fn=None,
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            get_weekly_usage_fn=lambda: pct[0],
+            action_settings=[
+                {"event": "weekly_usage", "threshold": 90, "action": "await_reset"},
+            ],
+            terminate_pty_fn=lambda: terminated.append(True),
+        )
+
+        loop._check_usage_thresholds()
+        pct[0] = 91.0
+        loop._check_usage_thresholds()
+
+        assert loop._pending_action is not None
+        assert loop._pending_action["action"] == "await_reset"
+        assert len(terminated) == 1
+
+    def test_no_action_when_below_threshold(self):
+        """No pending action if usage stays below threshold."""
+        event_log = FakeEventLog()
+        emitted = []
+
+        pct = [50.0]
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=None,
+            run_phase_fn=None,
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            get_session_usage_fn=lambda: pct[0],
+            action_settings=[
+                {"event": "session_usage", "threshold": 90, "action": "switch_provider", "target_account": "backup"},
+            ],
+        )
+
+        loop._check_usage_thresholds()
+        pct[0] = 80.0
+        loop._check_usage_thresholds()
+
+        assert loop._pending_action is None
+        assert len(self._usage_milestones(emitted)) == 0
+
+    def test_no_action_when_already_above(self):
+        """No pending action if previous reading was already above threshold."""
+        event_log = FakeEventLog()
+        emitted = []
+
+        pct = [92.0]
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=None,
+            run_phase_fn=None,
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            get_session_usage_fn=lambda: pct[0],
+            action_settings=[
+                {"event": "session_usage", "threshold": 90, "action": "switch_provider", "target_account": "backup"},
+            ],
+        )
+
+        loop._check_usage_thresholds()
+        pct[0] = 95.0
+        loop._check_usage_thresholds()
+
+        assert loop._pending_action is None
 
 
 class TestMessageForwarding:
