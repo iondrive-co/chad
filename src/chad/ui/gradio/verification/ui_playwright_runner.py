@@ -4,6 +4,7 @@ import base64
 import contextlib
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -256,6 +257,13 @@ def _extract_announced_port(line: str) -> int | None:
     return None
 
 
+def _find_free_port() -> int:
+    """Reserve and return an ephemeral localhost TCP port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 def _wait_for_port(process: subprocess.Popen[str], timeout: int = 30) -> int:
     """Wait for the Chad process to announce its port."""
     start = time.time()
@@ -269,13 +277,31 @@ def _wait_for_port(process: subprocess.Popen[str], timeout: int = 30) -> int:
     raise ChadLaunchError("Timed out waiting for server port announcement")
 
 
-def _wait_for_ready(port: int, timeout: int = 60) -> None:
+def _wait_for_ready(
+    port: int,
+    timeout: int = 60,
+    process: subprocess.Popen[str] | None = None,
+) -> None:
     """Wait until the web UI responds with Gradio content."""
     import urllib.request
 
     url = f"http://127.0.0.1:{port}/"
     start = time.time()
     while time.time() - start < timeout:
+        if process is not None and process.poll() is not None:
+            startup_output = ""
+            if process.stdout is not None:
+                try:
+                    startup_output = process.stdout.read().strip()
+                except Exception:
+                    startup_output = ""
+            if startup_output:
+                tail = startup_output[-2000:]
+                raise ChadLaunchError(
+                    "Chad server exited before the web UI became ready. "
+                    f"Startup output tail:\n{tail}"
+                )
+            raise ChadLaunchError("Chad server exited before the web UI became ready")
         try:
             response = urllib.request.urlopen(url, timeout=5)
             content = response.read().decode("utf-8", errors="ignore")
@@ -312,8 +338,16 @@ def start_chad(env: TempChadEnv) -> ChadInstance:
     if os.name != "nt":
         popen_kwargs["start_new_session"] = True
 
+    requested_port = _find_free_port()
     process = subprocess.Popen(
-        [os.fspath(Path(sys.executable)), "-m", "chad", "--port", "0", "--dev"],
+        [
+            os.fspath(Path(sys.executable)),
+            "-m",
+            "chad",
+            "--port",
+            str(requested_port),
+            "--dev",
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
@@ -329,9 +363,8 @@ def start_chad(env: TempChadEnv) -> ChadInstance:
     # Register process for cleanup tracking
     registry.register(process, description="chad test server (port pending)")
 
-    port = _wait_for_port(process)
-    _wait_for_ready(port)
-    return ChadInstance(process=process, port=port, env=env)
+    _wait_for_ready(requested_port, process=process)
+    return ChadInstance(process=process, port=requested_port, env=env)
 
 
 def stop_chad(instance: ChadInstance) -> None:
