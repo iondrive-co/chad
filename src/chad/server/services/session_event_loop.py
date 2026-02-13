@@ -454,6 +454,9 @@ class SessionEventLoop:
         # Final scan to catch output that arrived just before exit
         self._analyze_output(finalize=True)
 
+        if getattr(self.task, "cancel_requested", False):
+            return -1, output
+
         if exit_code < 0:
             return exit_code, output
 
@@ -506,6 +509,9 @@ class SessionEventLoop:
                 )
                 self._analyze_output()
                 output += "\n" + cont_output
+
+                if getattr(self.task, "cancel_requested", False):
+                    return -1, output
 
                 if cont_exit < 0:
                     return cont_exit, output

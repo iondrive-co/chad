@@ -1500,6 +1500,46 @@ class TestChadWebUI:
 
         assert session.session_limit_summary is None
 
+    def test_resolve_override_prompt_ignores_stale_generated_prompt(self, web_ui, git_repo):
+        """Generated prompt text from a previous task should not become an override."""
+        from chad.util.prompts import build_prompt
+
+        project_path = str(git_repo)
+        old_task = "Investigate Mistral startup behavior"
+        new_task = "Raise verification bar for second attempt"
+
+        stale_prompt = build_prompt(old_task, web_ui._read_project_docs(git_repo), project_path)
+
+        override = web_ui._resolve_override_prompt(
+            project_path=project_path,
+            task_description=new_task,
+            coding_prompt_value=stale_prompt,
+        )
+
+        assert override is None
+
+    def test_resolve_override_prompt_keeps_user_template_edits(self, web_ui, git_repo):
+        """Manual prompt edits should still be sent as override for the new task."""
+        from chad.util.prompts import build_prompt_previews
+
+        project_path = str(git_repo)
+        task = "Improve verification structure"
+        edited_template = build_prompt_previews(project_path).coding.replace(
+            "## Instructions",
+            "## Instructions\n- Add a dedicated section called Root Cause Analysis.",
+        )
+
+        override = web_ui._resolve_override_prompt(
+            project_path=project_path,
+            task_description=task,
+            coding_prompt_value=edited_template,
+        )
+
+        assert override is not None
+        assert "{task}" not in override
+        assert task in override
+        assert "Root Cause Analysis" in override
+
 
 class TestClaudeJsonParsingIntegration:
     """Tests for Claude stream-json parsing in the web UI."""

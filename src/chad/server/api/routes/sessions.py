@@ -22,6 +22,7 @@ from chad.server.api.schemas.events import (
 from chad.server.services import Session, get_session_manager, get_task_executor, TaskState
 from chad.server.services.pty_stream import get_pty_stream_service
 from chad.server.services.event_mux import EventMultiplexer, format_sse_event
+from chad.util.event_log import EventLog
 
 router = APIRouter()
 
@@ -105,7 +106,17 @@ async def cancel_session(session_id: str) -> SessionCancelResponse:
     if session is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
 
-    # Terminate PTY session if active
+    executor = get_task_executor()
+    cancelled_tasks = executor.cancel_tasks_for_session(session_id)
+    if cancelled_tasks > 0:
+        manager.set_cancel_requested(session_id, True)
+        return SessionCancelResponse(
+            session_id=session_id,
+            cancel_requested=True,
+            message="Cancellation requested",
+        )
+
+    # Fallback: terminate PTY session if active even if task tracking is unavailable
     pty_service = get_pty_stream_service()
     pty_session = pty_service.get_session_by_session_id(session_id)
     if pty_session and pty_session.active:
@@ -145,6 +156,12 @@ async def start_task(session_id: str, request: TaskCreate) -> TaskStatusResponse
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
 
     executor = get_task_executor()
+    running_task = executor.get_running_task_for_session(session_id)
+    if running_task is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A task is already running in this session (task_id={running_task.id})",
+        )
 
     try:
         task = executor.start_task(
@@ -233,12 +250,7 @@ async def stream_session(
         pty_service = get_pty_stream_service()
         executor = get_task_executor()
 
-        # Find the task for this session to access its EventLog
-        task = None
-        for t in executor._tasks.values():
-            if t.session_id == session_id:
-                task = t
-                break
+        task = executor.get_latest_task_for_session(session_id)
 
         # Create multiplexer with task's EventLog
         event_log = task.event_log if task else None
@@ -325,11 +337,7 @@ async def send_message(session_id: str, request: SendMessageRequest) -> dict:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
 
     executor = get_task_executor()
-    task = None
-    for t in executor._tasks.values():
-        if t.session_id == session_id:
-            task = t
-            break
+    task = executor.get_running_task_for_session(session_id)
 
     if not task:
         raise HTTPException(status_code=400, detail="No active task in session")
@@ -357,23 +365,24 @@ async def get_milestones(
     if session is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
 
-    executor = get_task_executor()
-    task = None
-    for t in executor._tasks.values():
-        if t.session_id == session_id:
-            task = t
-            break
+    event_log = EventLog(session_id)
+    milestone_events = event_log.get_events(since_seq=since_seq, event_types=["milestone"])
+    milestones = []
+    for event in milestone_events:
+        milestones.append(
+            {
+                "seq": event.get("seq", 0),
+                "milestone_type": event.get("milestone_type", ""),
+                "title": event.get("title", ""),
+                "summary": event.get("summary", ""),
+                "details": event.get("details", {}) if isinstance(event.get("details"), dict) else {},
+            }
+        )
 
-    if not task:
-        return {"milestones": [], "latest_seq": 0}
-
-    event_loop = getattr(task, "_session_event_loop", None)
-    if event_loop is None:
-        return {"milestones": [], "latest_seq": 0}
-
-    milestones = event_loop.get_milestones(since_seq)
-    latest_seq = event_loop.get_latest_milestone_seq()
-    return {"milestones": milestones, "latest_seq": latest_seq}
+    return {
+        "milestones": milestones,
+        "latest_seq": event_log.get_latest_seq(),
+    }
 
 
 @router.get("/{session_id}/events")
@@ -401,13 +410,8 @@ async def get_session_events(
     if session is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
 
-    # Find the task for this session to access its EventLog
     executor = get_task_executor()
-    task = None
-    for t in executor._tasks.values():
-        if t.session_id == session_id:
-            task = t
-            break
+    task = executor.get_latest_task_for_session(session_id)
 
     if not task or not task.event_log:
         return {"events": [], "latest_seq": 0}

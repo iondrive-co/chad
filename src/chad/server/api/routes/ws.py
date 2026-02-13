@@ -89,12 +89,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
         async def stream_events():
             """Stream events to WebSocket using EventMultiplexer."""
-            # Find the task for this session to access its EventLog
-            task = None
-            for t in executor._tasks.values():
-                if t.session_id == session_id:
-                    task = t
-                    break
+            task = executor.get_latest_task_for_session(session_id)
 
             # Create multiplexer with task's EventLog
             event_log = task.event_log if task else None
@@ -165,26 +160,23 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             })
 
                     elif msg_type == "cancel":
-                        # Cancel/terminate PTY
-                        pty_session = pty_service.get_session_by_session_id(session_id)
-                        if pty_session:
-                            pty_service.terminate(pty_session.stream_id)
+                        cancelled_tasks = executor.cancel_tasks_for_session(session_id)
+                        if cancelled_tasks > 0:
                             await websocket.send_json({
                                 "type": "status",
                                 "session_id": session_id,
-                                "data": {"status": "PTY terminated"},
+                                "data": {"status": "Cancellation requested"},
                             })
                         else:
-                            # Try cancelling via task executor
-                            for task_id, task in list(executor._tasks.items()):
-                                if task.session_id == session_id:
-                                    executor.cancel_task(task_id)
-                                    await websocket.send_json({
-                                        "type": "status",
-                                        "session_id": session_id,
-                                        "data": {"status": "Cancellation requested"},
-                                    })
-                                    break
+                            # Fallback: terminate any active PTY directly
+                            pty_session = pty_service.get_session_by_session_id(session_id)
+                            if pty_session:
+                                pty_service.terminate(pty_session.stream_id)
+                                await websocket.send_json({
+                                    "type": "status",
+                                    "session_id": session_id,
+                                    "data": {"status": "PTY terminated"},
+                                })
 
                 except json.JSONDecodeError:
                     await websocket.send_json({
