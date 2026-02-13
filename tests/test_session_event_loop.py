@@ -592,6 +592,85 @@ class TestUsageThresholdMonitoring:
         loop._check_usage_thresholds()
         assert len(self._usage_milestones(emitted)) == 0
 
+    def test_multiple_rules_same_event_type_both_fire(self):
+        """Two rules for session_usage at different thresholds both fire independently."""
+        pct = [70.0]
+        terminated = []
+        loop, event_log, emitted = self._make_loop(
+            session_fn=lambda: pct[0],
+            action_settings=[
+                {"event": "session_usage", "threshold": 80, "action": "notify"},
+                {"event": "session_usage", "threshold": 90, "action": "switch_provider",
+                 "target_account": "backup"},
+            ],
+            terminate_pty_fn=lambda: terminated.append(True),
+        )
+
+        # Seed previous values
+        loop._check_usage_thresholds()
+        assert len(self._usage_milestones(emitted)) == 0
+
+        # Cross 80% but not 90%
+        pct[0] = 85.0
+        loop._check_usage_thresholds()
+        milestones = self._usage_milestones(emitted)
+        assert len(milestones) == 1
+        assert "85%" in milestones[0][1]["summary"]
+        assert len(terminated) == 0
+
+        # Now cross 90%
+        pct[0] = 92.0
+        loop._check_usage_thresholds()
+        milestones = self._usage_milestones(emitted)
+        assert len(milestones) == 2
+        assert loop._pending_action is not None
+        assert loop._pending_action["action"] == "switch_provider"
+        assert len(terminated) == 1
+
+    def test_multiple_rules_same_event_simultaneous_crossing(self):
+        """Both rules for same event fire when usage jumps past both thresholds at once."""
+        pct = [70.0]
+        terminated = []
+        loop, event_log, emitted = self._make_loop(
+            session_fn=lambda: pct[0],
+            action_settings=[
+                {"event": "session_usage", "threshold": 80, "action": "notify"},
+                {"event": "session_usage", "threshold": 90, "action": "switch_provider",
+                 "target_account": "backup"},
+            ],
+            terminate_pty_fn=lambda: terminated.append(True),
+        )
+
+        # Seed
+        loop._check_usage_thresholds()
+
+        # Jump past both thresholds at once
+        pct[0] = 95.0
+        loop._check_usage_thresholds()
+        milestones = self._usage_milestones(emitted)
+        assert len(milestones) == 2
+        assert loop._pending_action is not None
+        assert loop._pending_action["action"] == "switch_provider"
+        assert len(terminated) == 1
+
+    def test_session_limit_detected_only_once_with_concurrent_calls(self):
+        """Session limit milestone emitted only once even with rapid calls."""
+        loop, event_log, emitted = self._make_loop(
+            action_settings=[],
+        )
+        loop._is_quota_exhausted_fn = _default_quota_checker
+        loop.feed_output("You've hit your limit")
+
+        # Simulate both background and main thread calling _analyze_output
+        loop._analyze_output()
+        loop._analyze_output(finalize=True)
+
+        milestone_emits = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "session_limit_reached"
+        ]
+        assert len(milestone_emits) == 1
+
 
 class TestActionExecution:
     """Tests for switch_provider and await_reset action execution."""

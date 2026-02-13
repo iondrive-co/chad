@@ -70,6 +70,7 @@ class SessionEventLoop:
         self._coding_complete_detected = False
         self._coding_summary: CodingSummary | None = None
         self._session_limit_detected = False
+        self._session_limit_lock = threading.Lock()
         self._session_limit_summary: str | None = None
 
         # Usage threshold monitoring state
@@ -91,11 +92,11 @@ class SessionEventLoop:
         # Accumulated output from all phases
         self.accumulated_output = ""
 
-    # Map event types to their usage functions and previous-value attrs
+    # Map event types to (usage_fn_attr, display_label)
     _EVENT_USAGE_MAP = {
-        "session_usage": ("_get_session_usage_fn", "_prev_session_pct", "session"),
-        "weekly_usage": ("_get_weekly_usage_fn", "_prev_weekly_pct", "weekly"),
-        "context_usage": ("_get_context_usage_fn", "_prev_context_pct", "context"),
+        "session_usage": ("_get_session_usage_fn", "session"),
+        "weekly_usage": ("_get_weekly_usage_fn", "weekly"),
+        "context_usage": ("_get_context_usage_fn", "context"),
     }
 
     def feed_output(self, text: str) -> None:
@@ -244,22 +245,23 @@ class SessionEventLoop:
 
         # Scan for session/quota limit messages in the tail of output
         # (only check the last ~500 chars to avoid false positives from code edits)
+        # Lock prevents duplicate detection from background tick + main thread
         if not self._session_limit_detected:
-            tail = joined[-500:] if len(joined) > 500 else joined
-            if self._is_quota_exhausted_fn:
-                limit_type = self._is_quota_exhausted_fn(tail)
-                if limit_type:
-                    self._session_limit_detected = True
-                    title = self._MILESTONE_TITLES.get(limit_type, "Limit Reached")
-                    summary = f"{title} - quota exhausted"
-                    # Try to extract a more useful summary from the output
-                    for line in tail.strip().splitlines():
-                        stripped = line.strip()
-                        if stripped and len(stripped) > 10:
-                            # Use the last meaningful line as the summary
-                            summary = stripped
-                    self._session_limit_summary = summary
-                    self._emit_milestone(limit_type, summary)
+            with self._session_limit_lock:
+                if not self._session_limit_detected:
+                    tail = joined[-500:] if len(joined) > 500 else joined
+                    if self._is_quota_exhausted_fn:
+                        limit_type = self._is_quota_exhausted_fn(tail)
+                        if limit_type:
+                            self._session_limit_detected = True
+                            title = self._MILESTONE_TITLES.get(limit_type, "Limit Reached")
+                            summary = f"{title} - quota exhausted"
+                            for line in tail.strip().splitlines():
+                                stripped = line.strip()
+                                if stripped and len(stripped) > 10:
+                                    summary = stripped
+                            self._session_limit_summary = summary
+                            self._emit_milestone(limit_type, summary)
 
         # Scan for coding completion JSON
         if not self._coding_complete_detected:
@@ -317,7 +319,7 @@ class SessionEventLoop:
             mapping = self._EVENT_USAGE_MAP.get(event_type)
             if not mapping:
                 continue
-            fn_attr, _unused, label = mapping
+            fn_attr, label = mapping
 
             # Fetch current value (cached per event type)
             if event_type not in current_cache:
