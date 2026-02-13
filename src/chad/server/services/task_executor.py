@@ -530,12 +530,13 @@ def build_agent_command(
             cmd.extend(["-p", full_prompt])
 
     elif provider == "mistral":
-        # Vibe CLI (Mistral)
-        cmd = [resolve_tool("vibe")]
+        # Vibe CLI (Mistral) - pass prompt via -p flag like MistralVibeProvider expects
+        cmd = [resolve_tool("vibe"), "--output", "text"]
         if model and model != "default":
             cmd.extend(["--model", model])
         if full_prompt:
-            initial_input = full_prompt + "\n"
+            cmd.extend(["-p", full_prompt])
+            initial_input = None
 
     elif provider == "opencode":
         # OpenCode CLI v1.1+ — uses `opencode run` with --format json

@@ -386,6 +386,21 @@ class TestBuildAgentCommand:
         m_idx = cmd.index("-m")
         assert cmd[m_idx + 1] == "anthropic/claude-sonnet-4-5"
 
+    def test_mistral_prompt_passed_via_p_flag(self, tmp_path):
+        """Mistral provider should pass prompt via -p flag like MistralVibeProvider expects."""
+        cmd, env, initial_input = build_agent_command(
+            "mistral", "test-account", tmp_path, "Fix the bug"
+        )
+
+        assert "vibe" in Path(cmd[0]).name
+        # Should pass prompt via -p flag, not stdin
+        assert "-p" in cmd
+        p_idx = cmd.index("-p")
+        assert "Fix the bug" in cmd[p_idx + 1]
+        assert "EXPLORATION_RESULT:" in cmd[p_idx + 1]
+        # Should NOT use stdin
+        assert initial_input is None
+
 
 def _init_git_repo(repo_path: Path) -> None:
     repo_path.mkdir(parents=True, exist_ok=True)
