@@ -2175,6 +2175,125 @@ class TestClaudeJsonParsingIntegration:
         assert milestones[0][3] == "Found the bug in main.py"
         assert mock_api_client.get_milestones.call_count >= 1
 
+    def test_run_task_switches_to_verification_parser_for_qwen(self, web_ui, mock_api_client, git_repo):
+        """Verification phase should parse Qwen stream-json even when coding provider differs."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="codex", provider="openai", model=None, reasoning=None, role="CODING", ready=True),
+            Account(name="qwen-verifier", provider="qwen", model=None, reasoning=None, role="VERIFICATION", ready=True),
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-verify-qwen"
+        mock_api_client.create_session.return_value = mock_session
+        mock_api_client.get_milestones.side_effect = [
+            [
+                {
+                    "seq": 1,
+                    "milestone_type": "verification_started",
+                    "title": "Verification",
+                    "summary": "Attempt 1",
+                }
+            ],
+            [],
+        ]
+
+        qwen_json_lines = (
+            b'{"type":"system","subtype":"init","session_id":"abc"}\n'
+            b'{"type":"assistant","message":{"content":[{"type":"text","text":"Verification phase output"}]}}\n'
+        )
+
+        terminal_event = Mock()
+        terminal_event.event_type = "terminal"
+        terminal_event.data = {"data": base64.b64encode(qwen_json_lines).decode()}
+
+        complete_event = Mock()
+        complete_event.event_type = "complete"
+        complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([terminal_event, complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="codex",
+            verification_account="qwen-verifier",
+            message_queue=message_queue,
+        )
+
+        assert success is True
+        combined_stream = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "stream":
+                combined_stream.append(msg[1])
+
+        rendered = "\n".join(combined_stream)
+        assert "Verification phase output" in rendered
+        assert '{"type":"system"' not in rendered
+        assert '{"type":"assistant"' not in rendered
+
+    def test_run_task_emits_ai_switch_for_verification_milestone(self, web_ui, mock_api_client, git_repo):
+        """verification_started milestone should emit ai_switch so live header updates immediately."""
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="codex", provider="openai", model=None, reasoning=None, role="CODING", ready=True),
+            Account(name="qwen-verifier", provider="qwen", model=None, reasoning=None, role="VERIFICATION", ready=True),
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-ai-switch"
+        mock_api_client.create_session.return_value = mock_session
+        mock_api_client.get_milestones.side_effect = [
+            [
+                {
+                    "seq": 1,
+                    "milestone_type": "verification_started",
+                    "title": "Verification",
+                    "summary": "Attempt 1",
+                }
+            ],
+            [],
+        ]
+
+        complete_event = Mock()
+        complete_event.event_type = "complete"
+        complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([complete_event])
+        web_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, _, _, _ = web_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="codex",
+            verification_account="qwen-verifier",
+            message_queue=message_queue,
+        )
+
+        assert success is True
+        switches = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "ai_switch":
+                switches.append(msg[1])
+
+        assert "VERIFICATION AI" in switches
+
     def test_run_task_ignores_milestone_events_from_sse(self, web_ui, mock_api_client, git_repo):
         """SSE milestone events should be ignored in favor of the dedicated endpoint."""
         import queue
@@ -2288,6 +2407,67 @@ class TestLiveStreamPresentation:
 
         assert "first line\nsecond block\nthird" in rendered
         assert "\n\n" not in rendered
+
+
+class TestVerificationApiForwarding:
+    """Ensure start_chad_task runs verification through API execution path."""
+
+    @pytest.fixture
+    def mock_api_client(self):
+        """Create a mock API client."""
+        client = Mock()
+        claude_account = MockAccount(name="claude", provider="anthropic", role="CODING")
+        qwen_account = MockAccount(name="qwen-verifier", provider="qwen", role="VERIFICATION")
+        client.list_accounts.return_value = [claude_account, qwen_account]
+        client.get_account.side_effect = lambda name: {
+            "claude": claude_account,
+            "qwen-verifier": qwen_account,
+        }.get(name, Mock(name=name, provider="unknown", model="default", reasoning="default", role=None))
+        client.get_verification_agent.return_value = None
+        client.get_milestones.return_value = []
+        client.get_preferences.return_value = Mock(last_project_path=None, dark_mode=True, ui_mode="gradio")
+        client.get_cleanup_settings.return_value = Mock(retention_days=7, auto_cleanup=True)
+        return client
+
+    @pytest.fixture
+    def web_ui(self, mock_api_client, monkeypatch, tmp_path):
+        """Create a ChadWebUI instance with mocked dependencies."""
+        from chad.ui.gradio.web_ui import ChadWebUI
+
+        monkeypatch.setenv("CHAD_CONFIG", str(tmp_path / "test_chad.conf"))
+        ui = ChadWebUI(mock_api_client)
+        ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/codex"))
+        return ui
+
+    def test_start_task_forwards_verification_settings_to_api_run(self, monkeypatch, web_ui, git_repo):
+        """Regression: verification config must be passed to run_task_via_api."""
+        captured_kwargs = {}
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            captured_kwargs.update(kwargs)
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("message_complete", "CODING AI", "Done"))
+            return True, "Done", "server-session", None
+
+        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = web_ui.create_session("verification-forwarding")
+        list(
+            web_ui.start_chad_task(
+                session.id,
+                str(git_repo),
+                "do something",
+                "claude",
+                verification_agent="qwen-verifier",
+                verification_model="qwen3-coder",
+                verification_reasoning="high",
+            )
+        )
+
+        assert captured_kwargs.get("verification_account") == "qwen-verifier"
+        assert captured_kwargs.get("verification_model") == "qwen3-coder"
+        assert captured_kwargs.get("verification_reasoning") == "high"
 
 
 class TestLiveStreamSearch:
