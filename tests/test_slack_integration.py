@@ -2,6 +2,8 @@
 
 import hashlib
 import hmac
+import json
+import os
 import time
 from unittest.mock import MagicMock, patch
 
@@ -9,6 +11,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from chad.util.config_manager import ConfigManager
+from pathlib import Path
+
+
+def sign_slack_request(body: bytes, secret: str) -> tuple[str, str]:
+    """Return timestamp and signature for a Slack webhook payload."""
+
+    ts = str(int(time.time()))
+    sig_basestring = f"v0:{ts}:{body.decode('utf-8')}"
+    sig = "v0=" + hmac.new(secret.encode(), sig_basestring.encode(), hashlib.sha256).hexdigest()
+    return ts, sig
 
 
 class TestSlackConfigManager:
@@ -53,6 +65,15 @@ class TestSlackConfigManager:
         self.cm.set_slack_channel("C0123456789")
         self.cm.set_slack_channel(None)
         assert self.cm.get_slack_channel() is None
+
+    def test_slack_signing_secret_default_none(self):
+        assert self.cm.get_slack_signing_secret() is None
+
+    def test_slack_signing_secret_roundtrip(self):
+        self.cm.set_slack_signing_secret("secret123")
+        assert self.cm.get_slack_signing_secret() == "secret123"
+        self.cm.set_slack_signing_secret(None)
+        assert self.cm.get_slack_signing_secret() is None
 
 
 class TestSlackService:
@@ -244,23 +265,27 @@ class TestSlackConfigEndpoints:
         assert data["enabled"] is False
         assert data["channel"] is None
         assert data["has_token"] is False
+        assert data["has_signing_secret"] is False
 
     def test_put_slack_settings(self):
         resp = self.client.put("/api/v1/config/slack", json={
             "enabled": True,
             "channel": "C999",
             "bot_token": "xoxb-abc",
+            "signing_secret": "sec-123",
         })
         assert resp.status_code == 200
         data = resp.json()
         assert data["enabled"] is True
         assert data["channel"] == "C999"
         assert data["has_token"] is True
+        assert data["has_signing_secret"] is True
 
         # Verify persisted
         assert self.cm.get_slack_enabled() is True
         assert self.cm.get_slack_channel() == "C999"
         assert self.cm.get_slack_bot_token() == "xoxb-abc"
+        assert self.cm.get_slack_signing_secret() == "sec-123"
 
     def test_put_partial_update(self):
         self.cm.set_slack_enabled(True)
@@ -285,6 +310,75 @@ class TestSlackConfigEndpoints:
         data = resp.json()
         assert data["ok"] is False
         assert "channel" in data["error"].lower()
+
+
+class TestSlackWebhookSignature:
+    """Ensure Slack webhook requests are verified when a signing secret is set."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_path, monkeypatch):
+        from chad.server.main import create_app
+
+        # Isolate config for this test class
+        config_path = tmp_path / "test_chad.conf"
+        monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+
+        cm = ConfigManager(config_path=config_path)
+        cm.save_config({
+            "password_hash": "x",
+            "encryption_salt": "dGVzdHNhbHQ=",
+            "slack_signing_secret": "sigsecret",
+        })
+
+        # Patch the global config manager used by the route to our temp config
+        self._patcher = patch("chad.server.state._config_manager", cm)
+        self._patcher.start()
+
+        self.app = create_app()
+        self.client = TestClient(self.app)
+        self.secret = "sigsecret"
+
+    def teardown_method(self):
+        self._patcher.stop()
+
+    def _post(self, payload: dict, secret: str | None = None, tamper: bool = False, omit_headers: bool = False):
+        """Helper to POST to webhook with signed headers."""
+        body = json.dumps(payload).encode()
+        headers = {"Content-Type": "application/json"}
+        if not omit_headers:
+            ts, sig = sign_slack_request(body, secret or self.secret)
+            if tamper:
+                sig = sig[:-1] + ("0" if sig[-1] != "0" else "1")
+            headers.update({
+                "X-Slack-Request-Timestamp": ts,
+                "X-Slack-Signature": sig,
+            })
+        return self.client.post("/api/v1/slack/webhook", data=body, headers=headers)
+
+    def test_webhook_rejects_bad_signature(self):
+        payload = {"type": "event_callback", "event": {"type": "message", "text": "hi"}}
+        resp = self._post(payload, tamper=True)
+        assert resp.status_code == 401
+
+    def test_webhook_rejects_missing_signature(self):
+        payload = {"type": "event_callback", "event": {"type": "message", "text": "hi"}}
+        resp = self._post(payload, omit_headers=True)
+        assert resp.status_code == 401
+
+    def test_webhook_accepts_valid_signature(self):
+        payload = {"type": "url_verification", "challenge": "abc"}
+        resp = self._post(payload)
+        assert resp.status_code == 200
+        assert resp.json()["challenge"] == "abc"
+
+    def test_webhook_accepts_when_no_signing_secret_configured(self, tmp_path, monkeypatch):
+        # Remove signing secret and ensure request is accepted without headers
+        config_path = Path(os.environ.get("CHAD_CONFIG", tmp_path / "test_chad.conf"))
+        cm = ConfigManager(config_path=config_path)
+        cm.set_slack_signing_secret(None)
+        payload = {"type": "event_callback", "event": {"type": "message", "text": "hi"}}
+        resp = self.client.post("/api/v1/slack/webhook", json=payload)
+        assert resp.status_code == 200
 
 
 class TestMilestoneSlackHook:

@@ -760,6 +760,7 @@ class APIClient:
         enabled: bool | None = None,
         channel: str | None = None,
         bot_token: str | None = None,
+        signing_secret: str | None = None,
     ) -> dict:
         """Update Slack integration settings.
 
@@ -773,6 +774,8 @@ class APIClient:
             payload["channel"] = channel
         if bot_token is not None:
             payload["bot_token"] = bot_token
+        if signing_secret is not None:
+            payload["signing_secret"] = signing_secret
         resp = self._client.put(self._url("/config/slack"), json=payload)
         resp.raise_for_status()
         return resp.json()

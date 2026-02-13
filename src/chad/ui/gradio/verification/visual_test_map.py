@@ -241,7 +241,14 @@ UI_COMPONENT_MAP: dict[str, UIComponent] = {
         component="config",
         tests=["TestSetupTab"],
         source_file="chad/web_ui.py",
-        keywords=["slack", "slack integration", "slack bot", "slack channel", "slack notification"],
+        keywords=[
+            "slack",
+            "slack integration",
+            "slack bot",
+            "slack channel",
+            "slack notification",
+            "signing secret",
+        ],
     ),
     # --- Task Tabs ---
     "TASK_TABS": UIComponent(

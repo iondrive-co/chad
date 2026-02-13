@@ -1085,6 +1085,7 @@ class TestConfigUIParity:
         "slack_enabled",
         "slack_bot_token",
         "slack_channel",
+        "slack_signing_secret",
     }
 
     # Keys that are only in Gradio UI (makes sense for web-only settings)
@@ -1131,6 +1132,7 @@ class TestConfigUIParity:
         "slack_enabled": ["slack_enabled", "slack_enable", "slack_settings", "slack integration"],
         "slack_bot_token": ["slack_bot_token", "slack_token", "bot_token", "slack_settings"],
         "slack_channel": ["slack_channel", "slack_settings", "channel id"],
+        "slack_signing_secret": ["slack_signing_secret", "signing secret", "slack_settings"],
     }
 
     def test_gradio_ui_exposes_all_required_keys(self):

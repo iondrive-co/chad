@@ -626,10 +626,12 @@ def run_settings_menu(client: APIClient) -> None:
             print("-" * 30)
             print(f"  Enabled:   {slack_settings.get('enabled', False)}")
             print(f"  Token:     {'(set)' if slack_settings.get('has_token') else '(not set)'}")
+            print(f"  Signing:   {'(set)' if slack_settings.get('has_signing_secret') else '(not set)'}")
             print(f"  Channel:   {slack_settings.get('channel') or '(not set)'}")
             print()
             print("  [e] Toggle enabled")
             print("  [t] Set bot token")
+            print("  [g] Set signing secret")
             print("  [c] Set channel ID")
             print("  [s] Send test message")
             print()
@@ -644,6 +646,11 @@ def run_settings_menu(client: APIClient) -> None:
                     if token:
                         client.set_slack_settings(bot_token=token)
                         print("Bot token saved")
+                elif sub == "g":
+                    secret = input("Signing secret: ").strip()
+                    if secret:
+                        client.set_slack_settings(signing_secret=secret)
+                        print("Signing secret saved")
                 elif sub == "c":
                     channel = input("Channel ID (e.g. C0123456789): ").strip()
                     if channel:

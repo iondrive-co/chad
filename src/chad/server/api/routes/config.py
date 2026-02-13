@@ -351,6 +351,7 @@ async def get_slack_settings() -> SlackSettingsResponse:
         enabled=config_mgr.get_slack_enabled(),
         channel=config_mgr.get_slack_channel(),
         has_token=bool(config_mgr.get_slack_bot_token()),
+        has_signing_secret=bool(config_mgr.get_slack_signing_secret()),
     )
 
 
@@ -364,8 +365,11 @@ async def set_slack_settings(request: SlackSettingsUpdate) -> SlackSettingsRespo
         config_mgr.set_slack_channel(request.channel)
     if request.bot_token is not None:
         config_mgr.set_slack_bot_token(request.bot_token)
+    if request.signing_secret is not None:
+        config_mgr.set_slack_signing_secret(request.signing_secret)
     return SlackSettingsResponse(
         enabled=config_mgr.get_slack_enabled(),
         channel=config_mgr.get_slack_channel(),
         has_token=bool(config_mgr.get_slack_bot_token()),
+        has_signing_secret=bool(config_mgr.get_slack_signing_secret()),
     )
