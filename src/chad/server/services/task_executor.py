@@ -463,10 +463,10 @@ def build_agent_command(
             )
         elif phase == "continuation":
             # Agent exited early without completion - send continuation prompt
-            full_prompt = get_continuation_prompt(exploration_output or "")
+            full_prompt = get_continuation_prompt(task_description, exploration_output or "")
         elif phase == "revision":
             # Revision after verification failure - override_prompt already set above
-            full_prompt = get_continuation_prompt(exploration_output or "")
+            full_prompt = get_continuation_prompt(task_description, exploration_output or "")
 
     if provider == "anthropic":
         # Claude Code CLI
