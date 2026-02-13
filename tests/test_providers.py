@@ -2664,7 +2664,7 @@ class TestUsagePercentageCalculation:
 
     def _write_claude_creds(self, base_dir: Path, account: str) -> Path:
         """Helper to create Claude credential file in a temp home."""
-        cred_dir = base_dir / ".chad" / "claude_homes" / account / ".claude"
+        cred_dir = base_dir / ".chad" / "claude-configs" / account
         cred_dir.mkdir(parents=True, exist_ok=True)
         cred_path = cred_dir / ".credentials.json"
         cred_path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "test-token"}}))
