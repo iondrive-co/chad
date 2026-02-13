@@ -76,13 +76,11 @@ class SessionEventLoop:
         self._get_session_usage_fn = get_session_usage_fn
         self._get_weekly_usage_fn = get_weekly_usage_fn
         self._get_context_usage_fn = get_context_usage_fn
-        self._prev_session_pct: float | None = None
-        self._prev_weekly_pct: float | None = None
-        self._prev_context_pct: float | None = None
         self._usage_check_counter = 0
 
-        # Action settings
+        # Action settings — each rule tracks its own previous value
         self._action_settings = action_settings or []
+        self._prev_pct_per_rule: list[float | None] = [None] * len(self._action_settings)
         self._terminate_pty_fn = terminate_pty_fn
         self._get_account_info_fn = get_account_info_fn
         self._get_session_reset_eta_fn = get_session_reset_eta_fn
@@ -308,7 +306,10 @@ class SessionEventLoop:
 
     def _check_usage_thresholds(self) -> None:
         """Check provider usage metrics for threshold crossings based on action_settings."""
-        for setting in self._action_settings:
+        # Cache current values per event type so we only call each usage fn once
+        current_cache: dict[str, float | None] = {}
+
+        for idx, setting in enumerate(self._action_settings):
             event_type = setting.get("event")
             threshold = setting.get("threshold", 90)
             action = setting.get("action", "notify")
@@ -316,21 +317,25 @@ class SessionEventLoop:
             mapping = self._EVENT_USAGE_MAP.get(event_type)
             if not mapping:
                 continue
-            fn_attr, prev_attr, label = mapping
-            fn = getattr(self, fn_attr, None)
-            if fn is None:
-                continue
+            fn_attr, _unused, label = mapping
 
-            try:
-                current = fn()
-            except Exception:
-                continue
+            # Fetch current value (cached per event type)
+            if event_type not in current_cache:
+                fn = getattr(self, fn_attr, None)
+                if fn is None:
+                    current_cache[event_type] = None
+                else:
+                    try:
+                        current_cache[event_type] = fn()
+                    except Exception:
+                        current_cache[event_type] = None
+            current = current_cache[event_type]
             if current is None:
                 continue
 
-            prev = getattr(self, prev_attr)
+            prev = self._prev_pct_per_rule[idx]
             crossed = prev is not None and prev < threshold and current >= threshold
-            setattr(self, prev_attr, current)
+            self._prev_pct_per_rule[idx] = current
 
             if not crossed:
                 continue
