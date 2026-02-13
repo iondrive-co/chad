@@ -3155,7 +3155,7 @@ class TestRemainingUsage:
         mock_home.return_value = tmp_path
         vibe_dir = tmp_path / ".vibe"
         vibe_dir.mkdir()
-        (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"')
+        (vibe_dir / ".env").write_text("MISTRAL_API_KEY=test-key\n")
 
         result = web_ui._get_mistral_remaining_usage()
         assert result == 1.0  # Logged in, no sessions = full capacity
@@ -3284,7 +3284,7 @@ class TestRemainingUsage:
         mock_home.return_value = tmp_path
         vibe_dir = tmp_path / ".vibe"
         vibe_dir.mkdir()
-        (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"')
+        (vibe_dir / ".env").write_text("MISTRAL_API_KEY=test-key\n")
 
         session_dir = vibe_dir / "logs" / "session"
         session_dir.mkdir(parents=True)
@@ -3560,6 +3560,30 @@ class TestClaudeMultiAccount:
         logged_in, msg = web_ui.provider_ui._check_provider_login("opencode", "oc-test")
         assert logged_in is False
         assert "Not logged in" in msg
+
+    def test_mistral_login_check_requires_api_key(self, web_ui, monkeypatch, tmp_path):
+        """Mistral login should not pass with config.toml only."""
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        vibe_dir = tmp_path / ".vibe"
+        vibe_dir.mkdir(parents=True)
+        (vibe_dir / "config.toml").write_text("active_model = \"devstral-2\"\n")
+
+        logged_in, msg = web_ui.provider_ui._check_provider_login("mistral", "mistral-test")
+
+        assert logged_in is False
+        assert "Not logged in" in msg
+
+    def test_mistral_login_check_reads_env_file(self, web_ui, monkeypatch, tmp_path):
+        """Mistral login should pass when ~/.vibe/.env has MISTRAL_API_KEY."""
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        vibe_dir = tmp_path / ".vibe"
+        vibe_dir.mkdir(parents=True)
+        (vibe_dir / ".env").write_text("MISTRAL_API_KEY=test-key\n")
+
+        logged_in, msg = web_ui.provider_ui._check_provider_login("mistral", "mistral-test")
+
+        assert logged_in is True
+        assert "Logged in" in msg
 
     def test_kimi_add_provider_no_shutil_error(self, web_ui, mock_api_client):
         """Kimi add_provider should not raise UnboundLocalError for shutil."""
