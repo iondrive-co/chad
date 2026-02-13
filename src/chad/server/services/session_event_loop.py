@@ -157,6 +157,12 @@ class SessionEventLoop:
 
         self._emit_fn("milestone", milestone_type=milestone_type, title=title, summary=summary, details=details)
 
+        # Notify Slack (fire-and-forget)
+        from chad.server.services.slack_service import get_slack_service
+        get_slack_service().post_milestone_async(
+            self.session_id, milestone_type, title, summary,
+        )
+
     def _loop(self) -> None:
         """Background tick loop for milestone detection and message processing."""
         while self._running:

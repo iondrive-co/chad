@@ -7897,6 +7897,38 @@ class ChadWebUI:
                     precision=0,
                 )
 
+            # Slack integration settings
+            gr.Markdown("### Slack Integration")
+            try:
+                slack_init = init.get("slack_settings") if init else None
+                if not slack_init:
+                    slack_init = self.api_client.get_slack_settings()
+            except Exception:
+                slack_init = {"enabled": False, "channel": None, "has_token": False}
+
+            with gr.Row():
+                slack_enabled_checkbox = gr.Checkbox(
+                    label="Enable Slack notifications",
+                    value=slack_init.get("enabled", False),
+                    info="Post milestone notifications to a Slack channel",
+                )
+            with gr.Row():
+                slack_bot_token_input = gr.Textbox(
+                    label="Bot Token",
+                    value="" if not slack_init.get("has_token") else "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+                    type="password",
+                    placeholder="xoxb-...",
+                    info="Slack bot OAuth token",
+                )
+                slack_channel_input = gr.Textbox(
+                    label="Channel ID",
+                    value=slack_init.get("channel") or "",
+                    placeholder="C0123456789",
+                    info="Slack channel ID for notifications",
+                )
+            with gr.Row():
+                slack_test_btn = gr.Button("Test Slack Connection", size="sm")
+
         provider_outputs = [provider_feedback]
         for card in provider_cards:
             provider_outputs.extend(
@@ -8164,6 +8196,64 @@ class ChadWebUI:
             outputs=[config_status],
         )
 
+        def on_slack_enabled_change(enabled):
+            try:
+                self.api_client.set_slack_settings(enabled=enabled)
+                state = "enabled" if enabled else "disabled"
+                return f"\u2705 Slack notifications {state}"
+            except Exception as exc:
+                return f"\u274c {exc}"
+
+        slack_enabled_checkbox.change(
+            on_slack_enabled_change,
+            inputs=[slack_enabled_checkbox],
+            outputs=[config_status],
+        )
+
+        def on_slack_bot_token_change(token):
+            # Ignore the placeholder dots
+            if token and not all(c == "\u2022" for c in token):
+                try:
+                    self.api_client.set_slack_settings(bot_token=token)
+                    return "\u2705 Slack bot token saved"
+                except Exception as exc:
+                    return f"\u274c {exc}"
+            return ""
+
+        slack_bot_token_input.change(
+            on_slack_bot_token_change,
+            inputs=[slack_bot_token_input],
+            outputs=[config_status],
+        )
+
+        def on_slack_channel_change(channel):
+            try:
+                self.api_client.set_slack_settings(channel=channel)
+                return f"\u2705 Slack channel set to {channel}" if channel else "\u2705 Slack channel cleared"
+            except Exception as exc:
+                return f"\u274c {exc}"
+
+        slack_channel_input.change(
+            on_slack_channel_change,
+            inputs=[slack_channel_input],
+            outputs=[config_status],
+        )
+
+        def on_slack_test():
+            try:
+                result = self.api_client.test_slack_connection()
+                if result.get("ok"):
+                    return "\u2705 Test message sent to Slack"
+                return f"\u274c {result.get('error', 'Unknown error')}"
+            except Exception as exc:
+                return f"\u274c {exc}"
+
+        slack_test_btn.click(
+            on_slack_test,
+            inputs=[],
+            outputs=[config_status],
+        )
+
         for card in provider_cards:
 
             def make_delete_handler():
@@ -8252,6 +8342,10 @@ class ChadWebUI:
             max_verification_attempts = self.api_client.get_max_verification_attempts()
         except Exception:
             max_verification_attempts = 5
+        try:
+            slack_settings = self.api_client.get_slack_settings()
+        except Exception:
+            slack_settings = {"enabled": False, "channel": None, "has_token": False}
         return {
             "accounts": accounts,
             "verification_agent": verification_agent,
@@ -8260,6 +8354,7 @@ class ChadWebUI:
             "cleanup_settings": cleanup_settings,
             "action_settings": action_settings,
             "max_verification_attempts": max_verification_attempts,
+            "slack_settings": slack_settings,
         }
 
     def _startup_log(self, msg: str) -> None:

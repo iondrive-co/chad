@@ -46,6 +46,8 @@ from .config import (
     VerificationSettings,
     CleanupSettings,
     UserPreferences,
+    SlackSettingsResponse,
+    SlackSettingsUpdate,
 )
 from .streaming import (
     StreamMessage,
@@ -107,6 +109,8 @@ __all__ = [
     "VerificationSettings",
     "CleanupSettings",
     "UserPreferences",
+    "SlackSettingsResponse",
+    "SlackSettingsUpdate",
     # Streaming
     "StreamMessage",
     "StreamMessageType",
