@@ -512,6 +512,164 @@ class TestChadWebUI:
         bugs_file = session.worktree_path / "BUGS.md"
         assert bugs_file.exists(), "BUGS.md should be created by follow-up"
 
+    def test_followup_restarts_session_after_completion(self, web_ui, git_repo, monkeypatch):
+        """Follow-up after session completion should restart provider, not show 'Session expired'."""
+        session_id = "restart-test"
+        git_mgr = GitWorktreeManager(git_repo)
+        worktree_path, base_commit = git_mgr.create_worktree(session_id)
+
+        session = web_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = worktree_path
+        session.worktree_branch = git_mgr._branch_name(session_id)
+        session.worktree_base_commit = base_commit
+
+        # Simulate state after task completion / rate limit:
+        # - session.active = False (task ended)
+        # - session.provider = None (CLI exited)
+        # - session.coding_account set from previous task
+        session.active = False
+        session.provider = None
+        session.coding_account = "mock-claude"
+        session.config = None  # Cleared when session is inactive
+        session.chat_history = [{"role": "user", "content": "**Task**\n\nInitial task"}]
+
+        mock_account = MockAccount(name="mock-claude", provider="mock", role="CODING")
+        web_ui.api_client.list_accounts.return_value = [mock_account]
+        web_ui.api_client.get_account.return_value = mock_account
+
+        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
+
+        list(
+            web_ui.send_followup(
+                session_id,
+                "Continue after rate limit",
+                session.chat_history,
+                coding_agent="mock-claude",
+                verification_agent=web_ui.VERIFICATION_NONE,
+            )
+        )
+
+        all_messages = [msg.get("content", "") for msg in session.chat_history]
+        assert not any("Session expired" in msg for msg in all_messages), (
+            "Follow-up after completion should restart, not show 'Session expired'"
+        )
+        assert session.active or session.provider is not None, (
+            "Session should be reactivated after restart"
+        )
+
+    def test_followup_account_fallback_from_session(self, web_ui, git_repo, monkeypatch):
+        """When no agent is explicitly selected, reuse the session's previous coding_account."""
+        session_id = "fallback-test"
+        git_mgr = GitWorktreeManager(git_repo)
+        worktree_path, base_commit = git_mgr.create_worktree(session_id)
+
+        session = web_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = worktree_path
+        session.worktree_branch = git_mgr._branch_name(session_id)
+        session.worktree_base_commit = base_commit
+
+        session.active = False
+        session.provider = None
+        session.coding_account = "mock-claude"
+        session.config = None
+        session.chat_history = [{"role": "user", "content": "**Task**\n\nInitial task"}]
+
+        mock_account = MockAccount(name="mock-claude", provider="mock", role="CODING")
+        web_ui.api_client.list_accounts.return_value = [mock_account]
+        web_ui.api_client.get_account.return_value = mock_account
+
+        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
+
+        # Send follow-up with NO coding_agent (empty string / None) — should fall back
+        list(
+            web_ui.send_followup(
+                session_id,
+                "Continue with previous agent",
+                session.chat_history,
+                coding_agent="",
+                verification_agent=web_ui.VERIFICATION_NONE,
+            )
+        )
+
+        all_messages = [msg.get("content", "") for msg in session.chat_history]
+        assert not any("Session expired" in msg for msg in all_messages), (
+            "Should fall back to session's coding_account, not expire"
+        )
+
+    def test_followup_no_account_shows_expired(self, web_ui, git_repo):
+        """When no account is configured and no previous account exists, show 'Session expired'."""
+        session_id = "no-account-test"
+
+        session = web_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.active = False
+        session.provider = None
+        session.coding_account = None
+        session.config = None
+        session.chat_history = []
+
+        web_ui.api_client.list_accounts.return_value = []
+
+        list(
+            web_ui.send_followup(
+                session_id,
+                "Try to continue",
+                session.chat_history,
+                coding_agent="",
+                verification_agent=web_ui.VERIFICATION_NONE,
+            )
+        )
+
+        all_messages = [msg.get("content", "") for msg in session.chat_history]
+        assert any("Session expired" in msg for msg in all_messages), (
+            "Should show 'Session expired' when no account is available"
+        )
+
+    def test_followup_provider_change_after_completion(self, web_ui, git_repo, monkeypatch):
+        """Switching provider on follow-up after completion should show handoff message."""
+        session_id = "switch-test"
+        git_mgr = GitWorktreeManager(git_repo)
+        worktree_path, base_commit = git_mgr.create_worktree(session_id)
+
+        session = web_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = worktree_path
+        session.worktree_branch = git_mgr._branch_name(session_id)
+        session.worktree_base_commit = base_commit
+
+        session.active = False
+        session.provider = None
+        session.coding_account = "old-agent"
+        session.config = None
+        session.chat_history = [{"role": "user", "content": "**Task**\n\nInitial task"}]
+
+        mock_old = MockAccount(name="old-agent", provider="mock", role="CODING")
+        mock_new = MockAccount(name="new-agent", provider="mock", role="CODING")
+        web_ui.api_client.list_accounts.return_value = [mock_old, mock_new]
+        web_ui.api_client.get_account.return_value = mock_new
+
+        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
+
+        list(
+            web_ui.send_followup(
+                session_id,
+                "Continue with different agent",
+                session.chat_history,
+                coding_agent="new-agent",
+                verification_agent=web_ui.VERIFICATION_NONE,
+            )
+        )
+
+        all_messages = [msg.get("content", "") for msg in session.chat_history]
+        assert not any("Session expired" in msg for msg in all_messages), (
+            "Should not show 'Session expired' when switching provider"
+        )
+        assert any("PROVIDER HANDOFF" in msg for msg in all_messages), (
+            "Should show handoff message when switching provider after completion"
+        )
+
     def test_set_reasoning_success(self, web_ui, mock_api_client):
         """Test setting reasoning level for an account."""
         result = web_ui.set_reasoning("claude", "high")[0]

@@ -5022,6 +5022,11 @@ class ChadWebUI:
         accounts = {acc.name: acc.provider for acc in accounts_list}  # Map name -> provider
         has_account = bool(coding_agent and coding_agent in accounts)
 
+        # If no agent explicitly selected, reuse the session's previous agent
+        if not has_account and session.coding_account and session.coding_account in accounts:
+            coding_agent = session.coding_account
+            has_account = True
+
         def normalize_model_value(value: str | None) -> str:
             return value if value else "default"
 
@@ -5086,7 +5091,9 @@ class ChadWebUI:
 
         # Also need handoff if session is active but provider was released (API-based execution)
         provider_reconnect_needed = has_account and session.active and session.provider is None
-        handoff_needed = provider_changed or pref_changed or provider_reconnect_needed
+        # Need restart if session completed (e.g. rate limit, task done) and user sends follow-up
+        session_restart_needed = has_account and not session.active
+        handoff_needed = provider_changed or pref_changed or provider_reconnect_needed or session_restart_needed
 
         if handoff_needed:
             # Get new provider type first (needed for formatting handoff context)
