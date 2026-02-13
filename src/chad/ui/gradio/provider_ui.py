@@ -407,11 +407,11 @@ class ProviderUIManager:
         """
         from datetime import datetime, timezone
 
-        vibe_config = Path.home() / ".vibe" / "config.toml"
-        if not vibe_config.exists():
+        vibe_dir = Path.home() / ".vibe"
+        if not self._mistral_has_api_key(vibe_dir):
             return 0.0
 
-        sessions_dir = Path.home() / ".vibe" / "logs" / "session"
+        sessions_dir = vibe_dir / "logs" / "session"
         if not sessions_dir.exists():
             return 1.0  # Logged in, no usage yet
 
@@ -612,6 +612,34 @@ class ProviderUIManager:
     def _is_windows() -> bool:
         """Return True when running on Windows."""
         return os.name == "nt"
+
+    @staticmethod
+    def _mistral_has_api_key(vibe_dir: Path | None = None) -> bool:
+        """Return True when Mistral API key is available in env or ~/.vibe/.env."""
+        if os.environ.get("MISTRAL_API_KEY", "").strip():
+            return True
+
+        home_dir = vibe_dir if vibe_dir is not None else safe_home() / ".vibe"
+        env_file = home_dir / ".env"
+        if not env_file.exists():
+            return False
+
+        try:
+            for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export "):].strip()
+                if not line.startswith("MISTRAL_API_KEY"):
+                    continue
+                _, _, value = line.partition("=")
+                value = value.strip().strip('"').strip("'")
+                return bool(value)
+        except OSError:
+            return False
+
+        return False
 
     def _get_codex_usage(self, account_name: str) -> str:
         """Get usage info from Codex by parsing JWT token and session files."""
@@ -1050,11 +1078,11 @@ class ProviderUIManager:
         """Get usage info from Mistral Vibe by parsing session files."""
         from datetime import datetime, timezone
 
-        vibe_config = Path.home() / ".vibe" / "config.toml"
-        if not vibe_config.exists():
+        vibe_dir = Path.home() / ".vibe"
+        if not self._mistral_has_api_key(vibe_dir):
             return "❌ **Not logged in**\n\nRun `vibe --setup` in terminal to authenticate."
 
-        sessions_dir = Path.home() / ".vibe" / "logs" / "session"
+        sessions_dir = vibe_dir / "logs" / "session"
         if not sessions_dir.exists():
             return "✅ **Logged in**\n\n*No session data yet*"
 
@@ -1432,8 +1460,8 @@ class ProviderUIManager:
                 return False, "Not logged in"
 
             if provider_type == "mistral":
-                vibe_config = safe_home() / ".vibe" / "config.toml"
-                if vibe_config.exists():
+                vibe_dir = safe_home() / ".vibe"
+                if self._mistral_has_api_key(vibe_dir):
                     return True, "Logged in"
                 return False, "Not logged in"
 
@@ -2056,7 +2084,7 @@ class ProviderUIManager:
 
                 vibe_cli = cli_detail or "vibe"
                 is_windows = self._is_windows()
-                vibe_config = safe_home() / ".vibe" / "config.toml"
+                vibe_dir = safe_home() / ".vibe"
 
                 login_success, _ = self._check_provider_login(provider_type, account_name)
 
@@ -2072,7 +2100,7 @@ class ProviderUIManager:
                             start_time = time.time()
                             timeout_secs = 120
                             while time.time() - start_time < timeout_secs:
-                                if vibe_config.exists():
+                                if self._mistral_has_api_key(vibe_dir):
                                     login_success = True
                                     break
                                 time.sleep(2)
@@ -2102,7 +2130,7 @@ class ProviderUIManager:
                                 start_time = time.time()
                                 timeout_secs = 120
                                 while time.time() - start_time < timeout_secs:
-                                    if vibe_config.exists():
+                                    if self._mistral_has_api_key(vibe_dir):
                                         login_success = True
                                         break
 

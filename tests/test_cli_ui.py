@@ -154,7 +154,7 @@ class TestProviderOauthFlow:
             calls.append(cmd)
             vibe_dir = tmp_path / ".vibe"
             vibe_dir.mkdir(parents=True, exist_ok=True)
-            (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"\n')
+            (vibe_dir / ".env").write_text("MISTRAL_API_KEY=test-key\n")
             return Completed()
 
         monkeypatch.setattr("chad.ui.cli.app.subprocess.run", fake_run)

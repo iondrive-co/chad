@@ -46,6 +46,33 @@ def _write_kimi_default_config(config_file: Path) -> None:
     )
 
 
+def _has_mistral_api_key(vibe_dir: Path) -> bool:
+    """Return True when Mistral API key is available in env or ~/.vibe/.env."""
+    if os.environ.get("MISTRAL_API_KEY", "").strip():
+        return True
+
+    env_file = vibe_dir / ".env"
+    if not env_file.exists():
+        return False
+
+    try:
+        for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].strip()
+            if not line.startswith("MISTRAL_API_KEY"):
+                continue
+            _, _, value = line.partition("=")
+            value = value.strip().strip('"').strip("'")
+            return bool(value)
+    except OSError:
+        return False
+
+    return False
+
+
 def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
     """Run the OAuth flow for a provider.
 
@@ -169,8 +196,8 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
             return False, f"Login error: {e}"
 
     elif provider == "mistral":
-        vibe_config = Path.home() / ".vibe" / "config.toml"
-        if vibe_config.exists():
+        vibe_dir = Path.home() / ".vibe"
+        if _has_mistral_api_key(vibe_dir):
             return True, "Already logged in"
 
         print("Starting Vibe setup...")
@@ -180,7 +207,7 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
                 ["vibe", "--setup"],
                 timeout=120,
             )
-            if result.returncode == 0 and vibe_config.exists():
+            if result.returncode == 0 and _has_mistral_api_key(vibe_dir):
                 return True, "Login successful"
             return False, "Login failed or was cancelled"
         except FileNotFoundError:
