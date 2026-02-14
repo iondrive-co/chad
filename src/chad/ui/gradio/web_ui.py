@@ -7777,7 +7777,7 @@ class ChadWebUI:
             new_provider_api_key = gr.Textbox(
                 label="API Key",
                 type="password",
-                placeholder="Paste your OpenCode API key here",
+                placeholder="Paste your API key here",
                 visible=False,
             )
             add_btn = gr.Button("Add Provider", variant="primary", interactive=False)
@@ -8074,9 +8074,9 @@ class ChadWebUI:
             outputs=[add_btn],
         )
 
-        # Show API key field only for OpenCode
+        # Show API key field for providers that need direct key entry
         new_provider_type.change(
-            lambda ptype: gr.update(visible=(ptype == "opencode")),
+            lambda ptype: gr.update(visible=(ptype in ("opencode", "mistral"))),
             inputs=[new_provider_type],
             outputs=[new_provider_api_key],
         )

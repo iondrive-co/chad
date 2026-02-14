@@ -139,29 +139,34 @@ class TestProviderOauthFlow:
         config_text = (tmp_path / ".chad" / "kimi-homes" / "my-kimi" / ".kimi" / "config.toml").read_text()
         assert "[models." in config_text
 
-    def test_mistral_uses_vibe_setup_command(self, monkeypatch, tmp_path):
-        """Mistral auth should invoke `vibe --setup` when not yet configured."""
+    def test_mistral_prompts_for_api_key(self, monkeypatch, tmp_path):
+        """Mistral auth should prompt for an API key and write it to ~/.vibe/.env."""
         from chad.ui.cli.app import _run_provider_oauth
 
         monkeypatch.setattr("chad.ui.cli.app.Path.home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        monkeypatch.setattr("builtins.input", lambda _prompt: "sk-test-key-123")
 
-        calls = []
-
-        class Completed:
-            returncode = 0
-
-        def fake_run(cmd, timeout):
-            calls.append(cmd)
-            vibe_dir = tmp_path / ".vibe"
-            vibe_dir.mkdir(parents=True, exist_ok=True)
-            (vibe_dir / ".env").write_text("MISTRAL_API_KEY=test-key\n")
-            return Completed()
-
-        monkeypatch.setattr("chad.ui.cli.app.subprocess.run", fake_run)
-        success, _message = _run_provider_oauth("mistral", "my-vibe")
+        success, message = _run_provider_oauth("mistral", "my-vibe")
 
         assert success is True
-        assert calls == [["vibe", "--setup"]]
+        assert "Login successful" in message
+        env_file = tmp_path / ".vibe" / ".env"
+        assert env_file.exists()
+        assert "sk-test-key-123" in env_file.read_text()
+
+    def test_mistral_empty_api_key_fails(self, monkeypatch, tmp_path):
+        """Mistral auth should fail when user provides an empty API key."""
+        from chad.ui.cli.app import _run_provider_oauth
+
+        monkeypatch.setattr("chad.ui.cli.app.Path.home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        monkeypatch.setattr("builtins.input", lambda _prompt: "")
+
+        success, message = _run_provider_oauth("mistral", "my-vibe")
+
+        assert success is False
+        assert "No API key" in message
 
 
 class TestCLIStreamingMilestones:

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from chad.ui.client import APIClient
 from chad.ui.client.stream_client import SyncStreamClient, decode_terminal_data
-from chad.util.providers import has_mistral_api_key
+from chad.util.providers import is_mistral_configured
 
 
 def _get_codex_home(account_name: str) -> Path:
@@ -171,25 +171,20 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
 
     elif provider == "mistral":
         vibe_dir = Path.home() / ".vibe"
-        if has_mistral_api_key(vibe_dir):
+        if is_mistral_configured(vibe_dir):
             return True, "Already logged in"
 
-        print("Starting Vibe setup...")
+        print("Mistral requires an API key.")
+        print("Get yours from: https://console.mistral.ai/codestral/cli")
         print()
-        try:
-            result = subprocess.run(
-                ["vibe", "--setup"],
-                timeout=120,
-            )
-            if result.returncode == 0 and has_mistral_api_key(vibe_dir):
-                return True, "Login successful"
-            return False, "Login failed or was cancelled"
-        except FileNotFoundError:
-            return False, "Vibe CLI not found"
-        except subprocess.TimeoutExpired:
-            return False, "Login timed out"
-        except Exception as e:
-            return False, f"Login error: {e}"
+        api_key = input("Paste your MISTRAL_API_KEY: ").strip()
+        if not api_key:
+            return False, "No API key provided"
+
+        vibe_dir.mkdir(parents=True, exist_ok=True)
+        env_file = vibe_dir / ".env"
+        env_file.write_text(f"MISTRAL_API_KEY='{api_key}'\n", encoding="utf-8")
+        return True, "Login successful"
 
     elif provider == "opencode":
         # OpenCode stores credentials at ~/.local/share/opencode/auth.json
