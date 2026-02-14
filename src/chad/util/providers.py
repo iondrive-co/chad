@@ -1141,6 +1141,38 @@ def _get_qwen_usage_percentage(account_name: str) -> float | None:
     return min((today_requests / daily_limit) * 100, 100.0)
 
 
+def has_mistral_api_key(vibe_dir: Path | None = None) -> bool:
+    """Return True when a Mistral API key is available in env or ~/.vibe/.env.
+
+    Args:
+        vibe_dir: Path to the .vibe directory. Defaults to ~/.vibe.
+    """
+    if os.environ.get("MISTRAL_API_KEY", "").strip():
+        return True
+
+    home_dir = vibe_dir if vibe_dir is not None else Path(safe_home()) / ".vibe"
+    env_file = home_dir / ".env"
+    if not env_file.exists():
+        return False
+
+    try:
+        for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].strip()
+            if not line.startswith("MISTRAL_API_KEY"):
+                continue
+            _, _, value = line.partition("=")
+            value = value.strip().strip('"').strip("'")
+            return bool(value)
+    except OSError:
+        return False
+
+    return False
+
+
 def _get_mistral_usage_percentage(account_name: str) -> float | None:
     """Get Mistral usage percentage by counting today's requests.
 
@@ -1156,8 +1188,7 @@ def _get_mistral_usage_percentage(account_name: str) -> float | None:
     from datetime import datetime, timezone
 
     vibe_dir = Path(safe_home()) / ".vibe"
-    config_file = vibe_dir / "config.toml"
-    if not config_file.exists():
+    if not has_mistral_api_key(vibe_dir):
         return None
 
     sessions_dir = vibe_dir / "logs" / "session"
