@@ -164,6 +164,62 @@ class SessionEventLoop:
                 self.session_id, milestone_type, title, summary,
             )
 
+    def _extract_meaningful_error_summary(self, tail: str) -> str | None:
+        """Extract meaningful error summary from terminal output, filtering out JavaScript error objects.
+
+        JavaScript error objects like "[Symbol(gaxios-gaxios-error)]: '6.7.1'" or "[object Object]"
+        are not helpful to users. This method prioritizes actual error messages that explain
+        the issue in human-readable terms.
+
+        Args:
+            tail: Last ~500 chars of terminal output where quota exhaustion was detected.
+
+        Returns:
+            Meaningful error message string, or None if no suitable message found.
+        """
+        import re
+
+        # Patterns that indicate JavaScript error objects (not helpful to users)
+        js_error_patterns = [
+            r'^\[Symbol\([^)]+\)\]:',  # [Symbol(something)]:
+            r'^\[object\s+\w+\]',     # [object Object], [object Error]
+            r'^TypeError:.*undefined$',  # TypeErrors with undefined
+            r'^ReferenceError:',      # JavaScript reference errors
+            r'^SyntaxError:',         # JavaScript syntax errors
+        ]
+
+        # Collect all non-JS-error lines and categorize them
+        lines = tail.strip().splitlines()
+        priority_messages = []  # Lines with quota/limit keywords
+        other_candidates = []   # Other meaningful lines
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or len(stripped) <= 10:
+                continue
+
+            # Skip JavaScript error objects
+            is_js_error = any(re.search(pattern, stripped) for pattern in js_error_patterns)
+            if is_js_error:
+                continue
+
+            # Categorize by priority keywords (quota/limit terms get higher priority)
+            priority_keywords = ['quota', 'limit', 'exceeded', 'exhausted', 'insufficient']
+            has_priority_keyword = any(keyword in stripped.lower() for keyword in priority_keywords)
+
+            if has_priority_keyword:
+                priority_messages.append(stripped)
+            else:
+                other_candidates.append(stripped)
+
+        # Return the last (most recent) priority message, or last other candidate
+        if priority_messages:
+            return priority_messages[-1]
+        elif other_candidates:
+            return other_candidates[-1]
+        else:
+            return None
+
     def _loop(self) -> None:
         """Background tick loop for milestone detection and message processing."""
         while self._running:
@@ -256,10 +312,12 @@ class SessionEventLoop:
                             self._session_limit_detected = True
                             title = self._MILESTONE_TITLES.get(limit_type, "Limit Reached")
                             summary = f"{title} - quota exhausted"
-                            for line in tail.strip().splitlines():
-                                stripped = line.strip()
-                                if stripped and len(stripped) > 10:
-                                    summary = stripped
+
+                            # Extract meaningful error summary, filtering out JavaScript error objects
+                            meaningful_summary = self._extract_meaningful_error_summary(tail)
+                            if meaningful_summary:
+                                summary = meaningful_summary
+
                             self._session_limit_summary = summary
                             self._emit_milestone(limit_type, summary)
 

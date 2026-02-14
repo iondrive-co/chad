@@ -196,6 +196,185 @@ class TestSessionLimitDetection:
 
         assert not loop._session_limit_detected
 
+    def test_gaxios_error_with_quota_exhausted_extracts_meaningful_summary(self):
+        """JavaScript errors should be filtered out, meaningful quota errors should be shown.
+
+        When Gemini CLI outputs both quota exhaustion AND gaxios errors,
+        the meaningful quota error should be extracted as the session limit summary,
+        not the cryptic JavaScript error object.
+        """
+        # Use Gemini-style quota checker (base provider method)
+        def gemini_quota_checker(output_tail: str) -> str | None:
+            if is_quota_exhaustion_error(output_tail):
+                return "session_limit_reached"
+            return None
+
+        loop, event_log, emitted = self._make_loop(quota_checker=gemini_quota_checker)
+
+        # Simulate mixed output: quota exhaustion + gaxios error
+        loop.feed_output("Coding: gem (default Usage: 3%)\n")
+        loop.feed_output("quota exceeded for project\n")  # This should become the summary
+        loop.feed_output("[Symbol(gaxios-gaxios-error)]: '6.7.1'\n")  # This should be filtered out
+        loop._analyze_output()
+
+        # Should detect as session limit (due to "quota exceeded")
+        assert loop._session_limit_detected
+
+        # Should extract the meaningful error message, not the gaxios error
+        assert loop._session_limit_summary == "quota exceeded for project"
+
+        session_limit_emits = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "session_limit_reached"
+        ]
+        assert len(session_limit_emits) == 1
+        # The displayed message should be meaningful
+        assert session_limit_emits[0][1]["summary"] == "quota exceeded for project"
+
+    def test_various_javascript_error_formats_not_detected_as_limits(self):
+        """Various JavaScript error object formats should not trigger limit detection."""
+        # Use Gemini-style quota checker (base provider method)
+        def gemini_quota_checker(output_tail: str) -> str | None:
+            if is_quota_exhaustion_error(output_tail):
+                return "session_limit_reached"
+            return None
+
+        loop, event_log, emitted = self._make_loop(quota_checker=gemini_quota_checker)
+
+        # Test different variations of JavaScript error objects
+        test_errors = [
+            "[Symbol(gaxios-gaxios-error)]: '6.7.1'",
+            "[object Object]",
+            "[Symbol.for('error')]: 'auth failed'",
+            "TypeError: Cannot read property 'data' of undefined",
+            "Error: Request failed with status code 401",
+            "[object Error]: Network timeout",
+        ]
+
+        for error in test_errors:
+            # Reset state for each test
+            loop._session_limit_detected = False
+            loop._output_buffer = []
+            emitted.clear()
+
+            loop.feed_output(f"Some context output\n{error}\n")
+            loop._analyze_output()
+
+            assert not loop._session_limit_detected, f"Should not detect '{error}' as session limit"
+            session_limit_emits = [
+                e for e in emitted
+                if e[0] == "milestone" and e[1].get("milestone_type") == "session_limit_reached"
+            ]
+            assert len(session_limit_emits) == 0, f"Should not emit milestone for '{error}'"
+
+    def test_meaningful_error_summary_extraction_prioritizes_quota_messages(self):
+        """Test that meaningful error extraction prioritizes quota-related messages."""
+        # Use Gemini-style quota checker
+        def gemini_quota_checker(output_tail: str) -> str | None:
+            if is_quota_exhaustion_error(output_tail):
+                return "session_limit_reached"
+            return None
+
+        loop, event_log, emitted = self._make_loop(quota_checker=gemini_quota_checker)
+
+        # Multiple lines with a quota message that should be prioritized
+        loop.feed_output("Starting task execution\n")
+        loop.feed_output("Some other context\n")
+        loop.feed_output("insufficient credits available\n")  # Should be picked as summary
+        loop.feed_output("General error occurred\n")
+        loop.feed_output("[Symbol(error-object)]: some value\n")  # Should be ignored
+        loop._analyze_output()
+
+        assert loop._session_limit_detected
+        assert loop._session_limit_summary == "insufficient credits available"
+
+    def test_meaningful_error_summary_falls_back_to_non_js_errors(self):
+        """If no quota keywords found, should use non-JavaScript error."""
+        # Use Gemini-style quota checker
+        def gemini_quota_checker(output_tail: str) -> str | None:
+            if is_quota_exhaustion_error(output_tail):
+                return "session_limit_reached"
+            return None
+
+        loop, event_log, emitted = self._make_loop(quota_checker=gemini_quota_checker)
+
+        # Quota pattern triggers detection but only non-priority messages
+        loop.feed_output("rate_limit_exceeded\n")  # Triggers detection (has exceeded keyword)
+        loop.feed_output("Authentication failed\n")  # No priority keywords
+        loop.feed_output("Connection timeout\n")  # No priority keywords (should be picked - most recent)
+        loop.feed_output("[object Error]: network timeout\n")  # Should be ignored (JS error)
+        loop._analyze_output()
+
+        assert loop._session_limit_detected
+        # Should get the priority message since "rate_limit_exceeded" has priority keywords
+        assert loop._session_limit_summary == "rate_limit_exceeded"
+
+    def test_meaningful_error_summary_handles_all_js_errors(self):
+        """If only JavaScript errors after quota message, should use quota message."""
+        # Use Gemini-style quota checker
+        def gemini_quota_checker(output_tail: str) -> str | None:
+            if is_quota_exhaustion_error(output_tail):
+                return "session_limit_reached"
+            return None
+
+        loop, event_log, emitted = self._make_loop(quota_checker=gemini_quota_checker)
+
+        # Quota message followed by only JavaScript errors
+        loop.feed_output("quota exceeded\n")  # Triggers detection and should be the summary
+        loop.feed_output("[Symbol(gaxios-gaxios-error)]: '6.7.1'\n")
+        loop.feed_output("[object Object]\n")
+        loop.feed_output("TypeError: Cannot read property 'data' of undefined\n")
+        loop._analyze_output()
+
+        assert loop._session_limit_detected
+        # Should use the quota message since it has priority keywords
+        assert loop._session_limit_summary == "quota exceeded"
+
+    def test_meaningful_error_summary_fallback_to_default_when_only_js_errors(self):
+        """If only JavaScript errors present and no quota messages, should fall back to default."""
+        # Use Gemini-style quota checker
+        def gemini_quota_checker(output_tail: str) -> str | None:
+            if is_quota_exhaustion_error(output_tail):
+                return "session_limit_reached"
+            return None
+
+        loop, event_log, emitted = self._make_loop(quota_checker=gemini_quota_checker)
+
+        # Pattern that triggers detection but then only JS errors and short lines
+        loop.feed_output("too many requests\n")  # Triggers detection
+        loop.feed_output("short\n")  # Too short (< 10 chars)
+        loop.feed_output("[Symbol(gaxios-gaxios-error)]: '6.7.1'\n")
+        loop.feed_output("[object Object]\n")
+        loop.feed_output("TypeError: Cannot read property 'data' of undefined\n")
+        loop._analyze_output()
+
+        assert loop._session_limit_detected
+        # Should use the triggering message since it has priority keywords
+        assert loop._session_limit_summary == "too many requests"
+
+    def test_meaningful_error_summary_true_fallback_to_default(self):
+        """Test true fallback when only JS errors and no meaningful content."""
+        # Custom quota checker that always triggers but doesn't rely on specific text
+        def always_trigger_quota_checker(output_tail: str) -> str | None:
+            # Just check if there's any content to trigger
+            if output_tail.strip():
+                return "session_limit_reached"
+            return None
+
+        loop, event_log, emitted = self._make_loop(quota_checker=always_trigger_quota_checker)
+
+        # Only JS errors and short lines
+        loop.feed_output("short\n")  # Too short (< 10 chars)
+        loop.feed_output("\n")  # Empty
+        loop.feed_output("[Symbol(gaxios-gaxios-error)]: '6.7.1'\n")
+        loop.feed_output("[object Object]\n")
+        loop.feed_output("TypeError: Cannot read property 'data' of undefined\n")
+        loop._analyze_output()
+
+        assert loop._session_limit_detected
+        # Should fall back to default when no meaningful messages found
+        assert loop._session_limit_summary == "Session Limit - quota exhausted"
+
 
 class TestExplorationMilestoneDetection:
     """Tests for exploration marker detection in _analyze_output."""
