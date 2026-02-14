@@ -13,7 +13,6 @@ with mocked providers cannot:
 
 import json
 import time
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
