@@ -848,16 +848,50 @@ After fixing:
 ```
 """
 
+# Escalated revision prompt for attempt >= 3: forces the coding agent to
+# stop, audit everything it has done, and re-plan from scratch.
+ESCALATED_REVISION_PROMPT = """\
+Verification has failed {attempt} times. Previous fixes have not resolved the issues. \
+Before writing any code, you MUST complete the following audit:
 
-def get_revision_prompt(feedback: str) -> str:
+1. **Session history**: Summarise what you have tried so far in this session, in order.
+2. **Current disk state**: List every change currently on disk relative to the original code and describe what each \
+change does.
+3. **Git history**: Check git history for any previous attempts to solve this issue and describe what each one tried.
+4. **Assess**: Stop and compare your answers to steps 1-3. Note any inconsistencies, repeated mistakes, or directions \
+you have not yet explored.
+5. **New plan**: Based ONLY on your assessment in step 4, make a new plan to solve this issue and execute it.
+
+## Latest verification feedback:
+
+{feedback}
+
+After fixing:
+1. Run verification commands (lint and tests) and fix ALL failures.
+2. End with a JSON summary block:
+```json
+{{
+  "change_summary": "One sentence describing what was fixed",
+  "files_changed": ["src/file.py", "tests/test_file.py"],
+  "completion_status": "success"
+}}
+```
+"""
+
+
+def get_revision_prompt(feedback: str, attempt: int = 1) -> str:
     """Build a revision prompt with verification feedback.
 
     Args:
         feedback: The verification feedback describing issues to fix
+        attempt: The verification attempt number (1-indexed). On attempt >= 3,
+                 an escalated prompt forces the agent to audit and re-plan.
 
     Returns:
         Revision prompt to re-invoke the coding agent
     """
+    if attempt >= 3:
+        return ESCALATED_REVISION_PROMPT.format(feedback=feedback, attempt=attempt)
     return REVISION_PROMPT.format(feedback=feedback)
 
 
