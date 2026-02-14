@@ -2506,6 +2506,13 @@ class ProviderUIManager:
                 claude_config = self._get_claude_config_dir(account_name)
                 if claude_config.exists():
                     shutil.rmtree(claude_config, ignore_errors=True)
+            elif provider == "mistral":
+                env_file = safe_home() / ".vibe" / ".env"
+                if env_file.exists():
+                    try:
+                        env_file.unlink()
+                    except OSError:
+                        pass
 
             self.api_client.delete_account(account_name)
             return self.provider_action_response(f"✓ Provider '{account_name}' deleted", card_slots)

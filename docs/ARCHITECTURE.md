@@ -106,7 +106,7 @@ The fix (using markdown) was validated by running reproduction tests:
 - JSON progress: Codex exits immediately, no files created
 - Markdown progress: Codex completes full task
 
-**DO NOT reintroduce JSON format for progress updates** without testing against all providers, especially Codex. Future multi-step progress updates should also use markdown. See `tests/test_web_ui.py::TestProgressUpdateExtraction` for format examples.
+**DO NOT reintroduce JSON format for progress updates** without testing against all providers, especially Codex. Future multi-step progress updates should also use markdown. See `tests/test_gradio_ui.py::TestProgressUpdateExtraction` for format examples.
 
 Related files:
 - `chad.util.prompts.CODING_AGENT_PROMPT`: The prompt template
@@ -180,7 +180,7 @@ When switching providers (due to quota exhaustion or user preference), Chad pres
 - `chad.util.event_log.EventLog` manages sequences, artifacts, and typed events.
 
 ## UI Layers
-- Gradio UI (`src/chad/ui/gradio/web_ui.py`) drives tasks via the API/SSE using `SyncStreamClient`, renders terminal output with `TerminalEmulator`, and uses provider management components in `provider_ui.py` plus shared state in `ui_state.py`. Visual tooling lives in `ui/gradio/verification/`.
+- Gradio UI (`src/chad/ui/gradio/gradio_ui.py`) drives tasks via the API/SSE using `SyncStreamClient`, renders terminal output with `TerminalEmulator`, and uses provider management components in `provider_ui.py` plus shared state in `ui_state.py`. Visual tooling lives in `ui/gradio/verification/`.
 - CLI UI (`src/chad/ui/cli/app.py`) streams the same SSE feed via `SyncStreamClient`.
 - Shared clients: `src/chad/ui/client/api_client.py` (REST) and `stream_client.py` (SSE).
 - Terminal rendering: `src/chad/ui/terminal_emulator.py` shared by CLI and Gradio.
@@ -201,13 +201,18 @@ src/chad/
 │   ├── api/routes/ {health.py, sessions.py, providers.py, worktree.py, config.py, ws.py}
 │   └── services/ {task_executor.py, pty_stream.py, event_mux.py, session_manager.py}
 ├── ui/
-│   ├── gradio/ {web_ui.py, provider_ui.py, ui_state.py, verification/}
+│   ├── gradio/ {gradio_ui.py, provider_ui.py, ui_state.py, verification/}
 │   ├── cli/app.py
 │   ├── client/ {api_client.py, stream_client.py}
 │   └── terminal_emulator.py
 └── util/ {providers.py, git_worktree.py, event_log.py, project_setup.py, model_catalog.py,
            cleanup.py, process_registry.py, installer.py, prompts.py, config_manager.py}
 ```
+
+## TypeScript Client & Browser UI
+- `client/` — Zero-dependency TypeScript library (`chad-client`) wrapping Chad's REST, SSE, and WebSocket APIs. Uses native `fetch`, `EventSource`, and `WebSocket`. Built with Vite as an ES module library.
+- `ui/` — Vite + React browser UI that imports `chad-client`. Dev server proxies `/api` and `/ws` to Chad's backend. Components: ConnectBar, SessionList, ChatView, TaskForm, AccountPicker, SettingsPanel.
+- Both packages are independent of the Python codebase and communicate with Chad exclusively through its HTTP API.
 
 ## Session Event Logs
 Session logs are JSONL in `~/.chad/logs/{session_id}.jsonl`; artifacts for large outputs live in `~/.chad/logs/artifacts/{session_id}/`. Each event includes `event_id`, `ts`, `seq`, `session_id`, optional `turn_id`, and a type-specific payload. `CHAD_LOG_DIR` overrides the base directory.

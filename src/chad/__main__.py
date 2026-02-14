@@ -204,7 +204,7 @@ def run_unified(
         from chad.ui.cli import launch_cli_ui
         launch_cli_ui(api_base_url=api_base_url, password=main_password)
     else:
-        from chad.ui.gradio.web_ui import launch_web_ui
+        from chad.ui.gradio.gradio_ui import launch_web_ui
         launch_web_ui(api_base_url=api_base_url, port=ui_port, dev_mode=dev_mode)
 
 

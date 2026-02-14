@@ -518,7 +518,7 @@ class TestGradioStreamAlignment:
 
     def test_stream_task_output_left_aligned(self, client, git_repo):
         """stream_task_output HTML should not drift right across lines."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
         from chad.ui.client.stream_client import SyncStreamClient
 
         account_resp = client.post("/api/v1/accounts", json={"name": "gradio-mock", "provider": "mock"})
@@ -1154,7 +1154,7 @@ coding = mock-agent
         mock_api_client.base_url = "http://localhost:8000"
 
         # Import ChadWebUI
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         ui = ChadWebUI(mock_api_client)
 
@@ -1172,8 +1172,8 @@ coding = mock-agent
         # Import from CLI app
         from chad.ui.cli.app import SyncStreamClient as CLISyncStreamClient
 
-        # Import from Gradio web_ui
-        from chad.ui.gradio.web_ui import SyncStreamClient as GradioSyncStreamClient
+        # Import from Gradio gradio_ui
+        from chad.ui.gradio.gradio_ui import SyncStreamClient as GradioSyncStreamClient
 
         # Both should be the same class
         assert CLISyncStreamClient is GradioSyncStreamClient
@@ -1186,7 +1186,7 @@ coding = mock-agent
 
     def test_ansi_to_html_preserves_layout(self):
         """Test ANSI to HTML conversion preserves terminal layout."""
-        from chad.ui.gradio.web_ui import ansi_to_html
+        from chad.ui.gradio.gradio_ui import ansi_to_html
 
         # Test simple ANSI codes
         input_text = "\x1b[32mGreen\x1b[0m Normal \x1b[31mRed\x1b[0m"
@@ -1201,7 +1201,7 @@ coding = mock-agent
     def test_mock_provider_produces_parseable_output(self, tmp_path):
         """Mock provider output can be parsed by ANSI-to-HTML converter."""
         from chad.server.services.task_executor import _build_mock_agent_command
-        from chad.ui.gradio.web_ui import ansi_to_html
+        from chad.ui.gradio.gradio_ui import ansi_to_html
         import subprocess
 
         cmd = _build_mock_agent_command(tmp_path, "test task")
@@ -1224,7 +1224,7 @@ class TestPlainTextTerminalEvents:
     def test_gradio_run_task_handles_plain_text_terminal_events(self):
         """Gradio run_task_via_api streams plain text terminal output safely."""
         from chad.ui.client.stream_client import StreamEvent
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         terminal_text = "╭─ streamed log line"
 
