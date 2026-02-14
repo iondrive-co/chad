@@ -689,126 +689,50 @@ class TestChadWebUI:
         assert "Node missing" in result
         mock_api_client.create_account.assert_not_called()
 
-    @patch("pexpect.spawn")
-    def test_add_provider_mistral_runs_setup_before_account_creation(self, mock_spawn, web_ui, mock_api_client):
-        """Mistral add flow should run setup via PTY and then create the account."""
+    def test_add_provider_mistral_with_api_key_creates_account(self, web_ui, mock_api_client, monkeypatch, tmp_path):
+        """Mistral add flow should write API key to ~/.vibe/.env and create account."""
         mock_api_client.list_accounts.return_value = []
         web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/vibe"))
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
 
-        child = MagicMock()
-        child.isalive.side_effect = [True, False]
-        child.read_nonblocking.side_effect = pexpect.TIMEOUT("timeout")
-        mock_spawn.return_value = child
-
-        with (
-            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
-            patch.object(
-                web_ui.provider_ui,
-                "_check_provider_login",
-                side_effect=[(False, "Not logged in"), (True, "Logged in")],
-            ),
-        ):
-            result = web_ui.add_provider("mistral-1", "mistral")[0]
+        result = web_ui.add_provider("mistral-1", "mistral", api_key="sk-my-key")[0]
 
         assert "✅" in result
         assert "mistral-1" in result
-        mock_spawn.assert_called_once_with(
-            "/tmp/vibe",
-            ["--setup"],
-            timeout=ANY,
-            encoding="utf-8",
-            env=ANY,
-            dimensions=(50, 120),
-            cwd=ANY,
-        )
         mock_api_client.create_account.assert_called_once_with("mistral-1", "mistral")
+        env_file = tmp_path / ".vibe" / ".env"
+        assert env_file.exists()
+        assert "sk-my-key" in env_file.read_text()
 
-    @patch("pexpect.spawn")
-    def test_add_provider_mistral_setup_failure_blocks_account_creation(self, mock_spawn, web_ui, mock_api_client):
-        """Mistral add flow should fail cleanly when setup does not authenticate."""
+    def test_add_provider_mistral_no_key_shows_error(self, web_ui, mock_api_client, monkeypatch, tmp_path):
+        """Mistral add flow without API key should prompt user to provide one."""
         mock_api_client.list_accounts.return_value = []
         web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/vibe"))
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
 
-        child = MagicMock()
-        child.isalive.return_value = False
-        child.read_nonblocking.side_effect = pexpect.TIMEOUT("timeout")
-        mock_spawn.return_value = child
-
-        with (
-            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
-            patch.object(
-                web_ui.provider_ui,
-                "_check_provider_login",
-                side_effect=[(False, "Not logged in"), (False, "Not logged in")],
-            ),
-        ):
-            result = web_ui.add_provider("mistral-1", "mistral")[0]
+        result = web_ui.add_provider("mistral-1", "mistral")[0]
 
         assert "❌" in result
-        assert "Login failed" in result
-        mock_spawn.assert_called_once()
+        assert "requires an API key" in result
         mock_api_client.create_account.assert_not_called()
 
-    @patch("chad.ui.gradio.provider_ui.safe_home")
-    @patch("pexpect.spawn")
-    def test_add_provider_mistral_trust_prompt_is_auto_answered(self, mock_spawn, mock_safe_home, web_ui, mock_api_client, tmp_path):
-        """Trust prompts during setup should be acknowledged automatically so OAuth can continue."""
-
+    def test_add_provider_mistral_already_configured_skips_key(self, web_ui, mock_api_client, monkeypatch, tmp_path):
+        """Mistral add flow should skip key entry when already configured."""
         mock_api_client.list_accounts.return_value = []
         web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/vibe"))
-        mock_safe_home.return_value = tmp_path
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
 
-        # Simulate a trust prompt followed by process exit
-        class DummyChild:
-            def __init__(self):
-                self.sent = []
-                self._alive = True
-                self._chunks = [
-                    "Do you trust the folder /home/miles/chad? [y/N]",
-                    "Redirecting to browser...",
-                ]
-                self._idx = 0
+        # Pre-create .env with a key
+        vibe_dir = tmp_path / ".vibe"
+        vibe_dir.mkdir(parents=True)
+        (vibe_dir / ".env").write_text("MISTRAL_API_KEY=existing-key\n")
 
-            def isalive(self):
-                return self._alive
-
-            def read_nonblocking(self, size=1, timeout=0.1):
-                if self._idx < len(self._chunks):
-                    chunk = self._chunks[self._idx]
-                    self._idx += 1
-                    if self._idx >= len(self._chunks):
-                        # Next iteration will see EOF
-                        self._alive = False
-                    return chunk
-                raise pexpect.EOF("done")
-
-            def sendline(self, data):
-                self.sent.append(data)
-
-            def send(self, data):
-                self.sent.append(data)
-
-            def close(self, force=False):
-                self._alive = False
-
-        dummy_child = DummyChild()
-        mock_spawn.return_value = dummy_child
-
-        vibe_config = tmp_path / ".vibe" / "config.toml"
-        vibe_config.parent.mkdir(parents=True, exist_ok=True)
-
-        with (
-            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
-            patch.object(
-                web_ui.provider_ui,
-                "_check_provider_login",
-                side_effect=[(False, "Not logged in"), (True, "Logged in")],
-            ),
-        ):
-            result = web_ui.add_provider("mistral-1", "mistral")[0]
+        result = web_ui.add_provider("mistral-1", "mistral")[0]
 
         assert "✅" in result
-        assert any(ans.strip().lower() == "y" for ans in dummy_child.sent)
         mock_api_client.create_account.assert_called_once_with("mistral-1", "mistral")
 
     def test_add_provider_kimi_login_flow_failure(self, web_ui, mock_api_client):
@@ -3561,9 +3485,20 @@ class TestClaudeMultiAccount:
         assert logged_in is False
         assert "Not logged in" in msg
 
-    def test_mistral_login_check_requires_api_key(self, web_ui, monkeypatch, tmp_path):
-        """Mistral login should not pass with config.toml only."""
+    def test_mistral_login_check_no_vibe_dir(self, web_ui, monkeypatch, tmp_path):
+        """Mistral login should fail when ~/.vibe does not exist at all."""
         monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+
+        logged_in, msg = web_ui.provider_ui._check_provider_login("mistral", "mistral-test")
+
+        assert logged_in is False
+        assert "Not logged in" in msg
+
+    def test_mistral_login_check_config_toml_only_not_sufficient(self, web_ui, monkeypatch, tmp_path):
+        """Mistral login should fail when only config.toml exists (no API key)."""
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
         vibe_dir = tmp_path / ".vibe"
         vibe_dir.mkdir(parents=True)
         (vibe_dir / "config.toml").write_text("active_model = \"devstral-2\"\n")
@@ -3576,6 +3511,7 @@ class TestClaudeMultiAccount:
     def test_mistral_login_check_reads_env_file(self, web_ui, monkeypatch, tmp_path):
         """Mistral login should pass when ~/.vibe/.env has MISTRAL_API_KEY."""
         monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
         vibe_dir = tmp_path / ".vibe"
         vibe_dir.mkdir(parents=True)
         (vibe_dir / ".env").write_text("MISTRAL_API_KEY=test-key\n")
@@ -3584,6 +3520,41 @@ class TestClaudeMultiAccount:
 
         assert logged_in is True
         assert "Logged in" in msg
+
+    def test_mistral_add_provider_with_api_key(
+        self, web_ui, mock_api_client, monkeypatch, tmp_path,
+    ):
+        """Adding Mistral with an API key should write it to ~/.vibe/.env."""
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+
+        mock_api_client.list_accounts.return_value = []
+        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/usr/bin/vibe"))
+
+        result = web_ui.provider_ui.add_provider(
+            "mistral-test", "mistral", 3, api_key="sk-test-key-123",
+        )
+
+        flat = str(result)
+        assert "added and logged in" in flat, f"Expected success, got: {flat}"
+        env_file = tmp_path / ".vibe" / ".env"
+        assert env_file.exists()
+        assert "sk-test-key-123" in env_file.read_text()
+
+    def test_mistral_add_provider_without_api_key_shows_error(
+        self, web_ui, mock_api_client, monkeypatch, tmp_path,
+    ):
+        """Adding Mistral without an API key should prompt user to provide one."""
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+
+        mock_api_client.list_accounts.return_value = []
+        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/usr/bin/vibe"))
+
+        result = web_ui.provider_ui.add_provider("mistral-test", "mistral", 3)
+
+        flat = str(result)
+        assert "requires an API key" in flat, f"Expected API key prompt, got: {flat}"
 
     def test_kimi_add_provider_no_shutil_error(self, web_ui, mock_api_client):
         """Kimi add_provider should not raise UnboundLocalError for shutil."""

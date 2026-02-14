@@ -14,7 +14,7 @@ import gradio as gr
 from chad.util.utils import platform_path, safe_home
 from chad.util.model_catalog import ModelCatalog
 from chad.util.installer import AIToolInstaller
-from chad.util.providers import has_mistral_api_key
+from chad.util.providers import is_mistral_configured
 
 if TYPE_CHECKING:
     from chad.ui.client import APIClient
@@ -409,7 +409,7 @@ class ProviderUIManager:
         from datetime import datetime, timezone
 
         vibe_dir = Path.home() / ".vibe"
-        if not has_mistral_api_key(vibe_dir):
+        if not is_mistral_configured(vibe_dir):
             return 0.0
 
         sessions_dir = vibe_dir / "logs" / "session"
@@ -1052,7 +1052,7 @@ class ProviderUIManager:
         from datetime import datetime, timezone
 
         vibe_dir = Path.home() / ".vibe"
-        if not has_mistral_api_key(vibe_dir):
+        if not is_mistral_configured(vibe_dir):
             return "❌ **Not logged in**\n\nRun `vibe --setup` in terminal to authenticate."
 
         sessions_dir = vibe_dir / "logs" / "session"
@@ -1434,7 +1434,7 @@ class ProviderUIManager:
 
             if provider_type == "mistral":
                 vibe_dir = safe_home() / ".vibe"
-                if has_mistral_api_key(vibe_dir):
+                if is_mistral_configured(vibe_dir):
                     return True, "Logged in"
                 return False, "Not logged in"
 
@@ -2052,95 +2052,28 @@ class ProviderUIManager:
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
 
             elif provider_type == "mistral":
-                # Mistral uses interactive vibe setup to configure credentials.
-                import time
-
-                vibe_cli = cli_detail or "vibe"
-                is_windows = self._is_windows()
+                # Mistral requires a MISTRAL_API_KEY written to ~/.vibe/.env.
+                # Vibe's own onboarding is a Textual TUI that can't run inside
+                # Gradio, so we accept the key via the UI and write it directly.
                 vibe_dir = safe_home() / ".vibe"
 
                 login_success, _ = self._check_provider_login(provider_type, account_name)
 
                 if not login_success:
-                    try:
-                        if is_windows:
-                            CREATE_NEW_CONSOLE = 0x00000010
-                            process = subprocess.Popen(
-                                [vibe_cli, "--setup"],
-                                creationflags=CREATE_NEW_CONSOLE,
-                            )
-
-                            start_time = time.time()
-                            timeout_secs = 120
-                            while time.time() - start_time < timeout_secs:
-                                if has_mistral_api_key(vibe_dir):
-                                    login_success = True
-                                    break
-                                time.sleep(2)
-
-                            try:
-                                process.terminate()
-                            except Exception:
-                                pass
-                        else:
-                            import pexpect
-
-                            env = os.environ.copy()
-                            env["TERM"] = "xterm-256color"
-
-                            # Run setup in a PTY so we can auto-accept trust prompts
-                            child = pexpect.spawn(
-                                vibe_cli,
-                                ["--setup"],
-                                timeout=180,
-                                encoding="utf-8",
-                                env=env,
-                                dimensions=(50, 120),
-                                cwd=str(safe_home()),
-                            )
-
-                            try:
-                                start_time = time.time()
-                                timeout_secs = 120
-                                while time.time() - start_time < timeout_secs:
-                                    if has_mistral_api_key(vibe_dir):
-                                        login_success = True
-                                        break
-
-                                    if not child.isalive():
-                                        break
-
-                                    try:
-                                        chunk = child.read_nonblocking(size=4000, timeout=0.2)
-                                        if chunk:
-                                            lowered = chunk.lower()
-                                            # Mistral Vibe prompts for folder trust on first run.
-                                            if "trust" in lowered and ("[y/n" in lowered or "[y/n]" in lowered):
-                                                child.sendline("y")
-                                    except (pexpect.TIMEOUT, pexpect.EOF):
-                                        pass
-
-                                    time.sleep(0.3)
-
-                            finally:
-                                try:
-                                    child.close(force=True)
-                                except Exception:
-                                    pass
-
-                            # Re-check login after setup attempt
-                            login_success, _ = self._check_provider_login(provider_type, account_name)
-
-                    except FileNotFoundError:
+                    if not api_key or not api_key.strip():
                         result = (
-                            "❌ Mistral Vibe CLI not found.\n\n"
-                            "Please install Mistral Vibe first:\n"
-                            "```\npip install mistral-vibe\n```"
+                            "❌ Mistral requires an API key.\n\n"
+                            "Get your key from **console.mistral.ai/codestral/cli**, "
+                            "then paste it in the API Key field above and click Add Provider again."
                         )
                         base_response = self.provider_action_response(result, card_slots)
                         return (*base_response, name_field_value, add_btn_state, accordion_state)
-                    except Exception:
-                        pass
+
+                    # Write the key to ~/.vibe/.env (same location vibe's onboarding uses)
+                    vibe_dir.mkdir(parents=True, exist_ok=True)
+                    env_file = vibe_dir / ".env"
+                    env_file.write_text(f"MISTRAL_API_KEY='{api_key.strip()}'\n", encoding="utf-8")
+                    login_success = True
 
                 if login_success:
                     self.api_client.create_account(account_name, provider_type)
@@ -2149,13 +2082,7 @@ class ProviderUIManager:
                     add_btn_state = gr.update(interactive=False)
                     accordion_state = gr.update(open=False)
                 else:
-                    if is_windows:
-                        result = (
-                            f"❌ Login timed out for '{account_name}'.\n\n"
-                            "A Mistral Vibe CLI window should have opened. Please try again."
-                        )
-                    else:
-                        result = f"❌ Login failed for '{account_name}'. Please try again."
+                    result = f"❌ Login failed for '{account_name}'. Please try again."
                     base_response = self.provider_action_response(result, card_slots)
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
 

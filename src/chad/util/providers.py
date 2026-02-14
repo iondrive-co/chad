@@ -1141,8 +1141,16 @@ def _get_qwen_usage_percentage(account_name: str) -> float | None:
     return min((today_requests / daily_limit) * 100, 100.0)
 
 
-def has_mistral_api_key(vibe_dir: Path | None = None) -> bool:
-    """Return True when a Mistral API key is available in env or ~/.vibe/.env.
+def is_mistral_configured(vibe_dir: Path | None = None) -> bool:
+    """Return True when Mistral/Vibe has a usable API key.
+
+    Checks two locations in order:
+    1. ``MISTRAL_API_KEY`` environment variable
+    2. ``~/.vibe/.env`` file containing ``MISTRAL_API_KEY=...``
+
+    Note: ``~/.vibe/config.toml`` alone is NOT sufficient — vibe will launch
+    its interactive onboarding TUI at runtime if ``MISTRAL_API_KEY`` is
+    missing, which cannot work inside Chad.
 
     Args:
         vibe_dir: Path to the .vibe directory. Defaults to ~/.vibe.
@@ -1151,24 +1159,25 @@ def has_mistral_api_key(vibe_dir: Path | None = None) -> bool:
         return True
 
     home_dir = vibe_dir if vibe_dir is not None else Path(safe_home()) / ".vibe"
-    env_file = home_dir / ".env"
-    if not env_file.exists():
-        return False
 
-    try:
-        for raw_line in env_file.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[len("export "):].strip()
-            if not line.startswith("MISTRAL_API_KEY"):
-                continue
-            _, _, value = line.partition("=")
-            value = value.strip().strip('"').strip("'")
-            return bool(value)
-    except OSError:
-        return False
+    # Check .env file for explicit key
+    env_file = home_dir / ".env"
+    if env_file.exists():
+        try:
+            for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export "):].strip()
+                if not line.startswith("MISTRAL_API_KEY"):
+                    continue
+                _, _, value = line.partition("=")
+                value = value.strip().strip('"').strip("'")
+                if value:
+                    return True
+        except OSError:
+            pass
 
     return False
 
@@ -1188,7 +1197,7 @@ def _get_mistral_usage_percentage(account_name: str) -> float | None:
     from datetime import datetime, timezone
 
     vibe_dir = Path(safe_home()) / ".vibe"
-    if not has_mistral_api_key(vibe_dir):
+    if not is_mistral_configured(vibe_dir):
         return None
 
     sessions_dir = vibe_dir / "logs" / "session"
