@@ -5135,6 +5135,103 @@ class TestVerificationPrompt:
         assert len(sent_messages) == 2
 
 
+class TestElevatedVerificationCriteria:
+    """Test that verification prompts include elevated criteria on retry."""
+
+    def test_first_attempt_has_no_elevated_criteria(self):
+        """First verification attempt should not include elevated criteria."""
+        from chad.util.prompts import get_verification_exploration_prompt
+
+        prompt = get_verification_exploration_prompt("output", "task", attempt=1)
+        assert "Elevated Review" not in prompt
+        assert "Durability" not in prompt
+        assert "Root cause" not in prompt
+
+    def test_second_attempt_includes_elevated_criteria(self):
+        """Second verification attempt should include all four elevated criteria."""
+        from chad.util.prompts import get_verification_exploration_prompt
+
+        prompt = get_verification_exploration_prompt("output", "task", attempt=2)
+        assert "Elevated Review (Attempt 2)" in prompt
+        assert "Durability" in prompt
+        assert "Root cause" in prompt
+        assert "Structural improvement" in prompt
+        assert "Dead code" in prompt
+
+    def test_third_attempt_shows_correct_attempt_number(self):
+        """Third attempt should show attempt=3 in the elevated criteria."""
+        from chad.util.prompts import get_verification_exploration_prompt
+
+        prompt = get_verification_exploration_prompt("output", "task", attempt=3)
+        assert "Attempt 3" in prompt
+        assert "retry attempt 3" in prompt
+
+    def test_elevated_criteria_constant_has_all_questions(self):
+        """The ELEVATED_VERIFICATION_CRITERIA template should contain all four questions."""
+        from chad.util.prompts import ELEVATED_VERIFICATION_CRITERIA
+
+        text = ELEVATED_VERIFICATION_CRITERIA.format(attempt=2)
+        assert "Durability" in text
+        assert "Root cause" in text
+        assert "Structural improvement" in text
+        assert "Dead code" in text
+
+    def test_default_attempt_has_no_elevated_criteria(self):
+        """Calling without attempt parameter should default to attempt=1 (no elevated)."""
+        from chad.util.prompts import get_verification_exploration_prompt
+
+        prompt = get_verification_exploration_prompt("output", "task")
+        assert "Elevated Review" not in prompt
+
+    def test_verification_loop_increments_attempt(self, monkeypatch, tmp_path):
+        """The verification loop should pass increasing attempt numbers to run_verification."""
+        from chad.server.services.session_event_loop import SessionEventLoop
+        from chad.util.event_log import EventLog
+
+        attempts_seen = []
+
+        def fake_run_verification(**kwargs):
+            attempts_seen.append(kwargs.get("attempt"))
+            return False, "Issues found"
+
+        def fake_run_phase_fn(**kwargs):
+            return 0, "revision output"
+
+        def fake_emit(*args, **kwargs):
+            pass
+
+        event_log = EventLog(session_id="test", base_dir=tmp_path)
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=type("Task", (), {"cancel_requested": False, "stream_id": None})(),
+            run_phase_fn=fake_run_phase_fn,
+            emit_fn=fake_emit,
+            worktree_path="/tmp/test",
+            max_verification_attempts=3,
+        )
+        loop.accumulated_output = "some output"
+
+        monkeypatch.setattr(
+            "chad.server.services.verification.run_verification",
+            fake_run_verification,
+        )
+
+        loop._run_verification_loop(
+            session=None,
+            task_description="test task",
+            coding_account="test",
+            coding_provider="mock",
+            rows=80,
+            cols=200,
+            git_mgr=None,
+            verification_config={"verification_account": "test"},
+        )
+
+        assert attempts_seen == [1, 2, 3]
+
+
 class TestAnsiToHtml:
     """Test that ANSI escape codes are properly converted to HTML spans."""
 

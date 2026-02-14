@@ -315,6 +315,25 @@ class TestBuildAgentCommand:
         assert task_description in initial_input
         assert previous_output in initial_input
 
+    def test_continuation_phase_keeps_task_when_output_is_truncated(self, tmp_path):
+        """Continuation prompt should keep task context and recent output tail."""
+        task_description = "Refactor provider continuation handling"
+        previous_output = ("x" * 7000) + "TAIL_MARKER"
+
+        cmd, env, initial_input = build_agent_command(
+            "openai",
+            "test-account",
+            tmp_path,
+            task_description,
+            phase="continuation",
+            exploration_output=previous_output,
+        )
+
+        assert initial_input is not None
+        assert task_description in initial_input
+        assert "TAIL_MARKER" in initial_input
+        assert "truncated to last" in initial_input
+
     def test_implementation_phase_maps_to_combined_prompt(self, tmp_path):
         """Implementation phase now maps to the combined coding prompt."""
         cmd, env, initial_input = build_agent_command(

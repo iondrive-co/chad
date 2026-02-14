@@ -1033,12 +1033,21 @@ class TestCancelSession:
             time.sleep(0.05)
         assert second_status in ("completed", "failed", "cancelled")
 
-        events_resp = client.get(f"/api/v1/sessions/{session_id}/events")
-        assert events_resp.status_code == 200
-        payload = events_resp.json()
-        events = payload.get("events", [])
-        assert events
-        max_seq = max(event.get("seq", 0) for event in events)
+        payload = {}
+        events = []
+        max_seq = 0
+        # Wait for event stream bookkeeping to settle (session_ended may land just after terminal state).
+        for _ in range(40):
+            events_resp = client.get(f"/api/v1/sessions/{session_id}/events")
+            assert events_resp.status_code == 200
+            payload = events_resp.json()
+            events = payload.get("events", [])
+            assert events
+            max_seq = max(event.get("seq", 0) for event in events)
+            if payload.get("latest_seq", 0) == max_seq:
+                break
+            time.sleep(0.05)
+
         assert payload.get("latest_seq", 0) == max_seq
 
 
@@ -1499,15 +1508,40 @@ class TestEventLogAPI:
 class TestAgentHandover:
     """Tests for handover between agents using EventLog."""
 
+    @staticmethod
+    def _wait_for_task_terminal_status(
+        client: TestClient,
+        session_id: str,
+        task_id: str,
+        timeout: float = 15.0,
+        interval: float = 0.1,
+    ) -> str:
+        """Wait for task status to reach a terminal state."""
+        deadline = time.time() + timeout
+        terminal_states = {"completed", "failed", "cancelled"}
+
+        while time.time() < deadline:
+            resp = client.get(f"/api/v1/sessions/{session_id}/tasks/{task_id}")
+            if resp.status_code == 200:
+                status = resp.json().get("status")
+                if status in terminal_states:
+                    return status
+            time.sleep(interval)
+
+        pytest.fail(
+            f"Task {task_id} in session {session_id} did not reach terminal state within {timeout}s"
+        )
+
     def test_eventlog_contains_handover_info(self, client, git_repo, tmp_path, monkeypatch):
         """EventLog contains sufficient information for agent handover."""
         # Create session and run first task
         create_resp = client.post("/api/v1/sessions", json={"name": "Handover Test"})
         session_id = create_resp.json()["id"]
 
-        client.post("/api/v1/accounts", json={"name": "handover-mock", "provider": "mock"})
+        account_resp = client.post("/api/v1/accounts", json={"name": "handover-mock", "provider": "mock"})
+        assert account_resp.status_code == 201
 
-        client.post(
+        start_resp = client.post(
             f"/api/v1/sessions/{session_id}/tasks",
             json={
                 "project_path": str(git_repo),
@@ -1515,8 +1549,10 @@ class TestAgentHandover:
                 "coding_agent": "handover-mock",
             },
         )
+        assert start_resp.status_code == 201
+        task_id = start_resp.json()["task_id"]
 
-        time.sleep(1)
+        self._wait_for_task_terminal_status(client, session_id, task_id)
 
         # Get events
         response = client.get(f"/api/v1/sessions/{session_id}/events")
@@ -1550,9 +1586,10 @@ class TestAgentHandover:
         create_resp = client.post("/api/v1/sessions", json={"name": "Agent 1"})
         session1_id = create_resp.json()["id"]
 
-        client.post("/api/v1/accounts", json={"name": "agent1-mock", "provider": "mock"})
+        account1_resp = client.post("/api/v1/accounts", json={"name": "agent1-mock", "provider": "mock"})
+        assert account1_resp.status_code == 201
 
-        client.post(
+        agent1_start = client.post(
             f"/api/v1/sessions/{session1_id}/tasks",
             json={
                 "project_path": str(git_repo),
@@ -1560,8 +1597,10 @@ class TestAgentHandover:
                 "coding_agent": "agent1-mock",
             },
         )
+        assert agent1_start.status_code == 201
+        agent1_task_id = agent1_start.json()["task_id"]
 
-        time.sleep(1)
+        self._wait_for_task_terminal_status(client, session1_id, agent1_task_id)
 
         # Get Agent 1's events
         agent1_events = client.get(f"/api/v1/sessions/{session1_id}/events").json()["events"]
@@ -1583,7 +1622,8 @@ class TestAgentHandover:
         assert handover_context["task_description"] != ""
 
         # Agent 2 can now continue the work
-        client.post("/api/v1/accounts", json={"name": "agent2-mock", "provider": "mock"})
+        account2_resp = client.post("/api/v1/accounts", json={"name": "agent2-mock", "provider": "mock"})
+        assert account2_resp.status_code == 201
 
         agent2_start = client.post(
             f"/api/v1/sessions/{session2_id}/tasks",
@@ -1593,7 +1633,8 @@ class TestAgentHandover:
                 "coding_agent": "agent2-mock",
             },
         )
-        assert agent2_start.status_code == 201
+        assert agent2_start.status_code == 201, agent2_start.text
+        agent2_task_id = agent2_start.json()["task_id"]
 
         def _wait_for_events(session_id: str, timeout: float = 15.0, interval: float = 0.1):
             deadline = time.time() + timeout
@@ -1608,6 +1649,7 @@ class TestAgentHandover:
         # Agent 2 should have its own events (allow extra time under parallel load)
         agent2_events = _wait_for_events(session2_id)
         assert len(agent2_events) > 0
+        self._wait_for_task_terminal_status(client, session2_id, agent2_task_id)
 
         # Both logs should exist in the log directory
         log_files = list(log_dir.glob("*.jsonl"))

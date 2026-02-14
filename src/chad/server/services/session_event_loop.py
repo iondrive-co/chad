@@ -739,6 +739,7 @@ class SessionEventLoop:
                 cols=cols,
                 emit=self._emit_fn,
                 git_mgr=git_mgr,
+                attempt=attempt + 1,
             )
 
             if passed is True:
