@@ -82,6 +82,9 @@ dmypy.json
 *~
 .DS_Store
 
+# Node.js
+node_modules/
+
 # Project-specific
 dist/install-chad.sh
 /.chad-worktrees/

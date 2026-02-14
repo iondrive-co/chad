@@ -285,7 +285,7 @@ def get_mock_usage(account_name: str) -> str:
 
 LIVE_VIEW_CONTENT = """<div class="live-output-content">
 <span style="color: #56b6c2; font-weight: bold;">⏺ Agent working on task...</span>
-<span style="color: #e5c07b;">• Reading src/chad/web_ui.py</span>
+<span style="color: #e5c07b;">• Reading src/chad/gradio_ui.py</span>
 <span style="color: #5c6370;">  Lines 1-500 of 2500</span>
 <span style="color: #98c379;">• Edit: src/chad/provider_ui.py</span>
 <span style="color: #98c379;">+</span>     def get_remaining_capacity(self) -&gt; float:
@@ -321,7 +321,7 @@ CHAT_HISTORY = [
 
 **Files modified:**
 - `src/chad/provider_ui.py` - Core capacity calculation logic
-- `src/chad/web_ui.py` - UI display updates
+- `src/chad/gradio_ui.py` - UI display updates
 - `tests/test_provider_ui.py` - New unit tests
 
 **Verification:**

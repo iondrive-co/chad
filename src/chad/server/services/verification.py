@@ -1,7 +1,7 @@
 """Server-side verification service.
 
 Runs automated (flake8/tests) and LLM-based verification of coding agent work.
-Extracted from web_ui._run_verification to enable server-side orchestration.
+Extracted from gradio_ui._run_verification to enable server-side orchestration.
 """
 
 from typing import Any, Callable

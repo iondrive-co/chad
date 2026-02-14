@@ -17,7 +17,7 @@ import pyte
 
 # Terminal geometry constants - fallback values when client doesn't provide dimensions.
 # In the Gradio UI, terminal width is dynamically calculated from the container width
-# using JavaScript ResizeObserver (see web_ui.py). These defaults are used when
+# using JavaScript ResizeObserver (see gradio_ui.py). These defaults are used when
 # dynamic calculation is unavailable.
 TERMINAL_COLS = 120
 TERMINAL_ROWS = 40

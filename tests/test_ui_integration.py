@@ -1468,7 +1468,7 @@ class TestLiveStreamSearch:
 
     def _inject_with_header(self, page: Page):
         """Inject content with the search bar header into the live stream box."""
-        from chad.ui.gradio.web_ui import build_live_stream_html_from_pyte
+        from chad.ui.gradio.gradio_ui import build_live_stream_html_from_pyte
         full_html = build_live_stream_html_from_pyte(self.SEARCH_CONTENT, "TEST AI")
         page.evaluate(
             """
@@ -1562,7 +1562,7 @@ class TestLiveStreamSearch:
             lines.append(f'<p>Filler line {i} with nothing interesting.</p>')
         lines.append('<p>Another NEEDLE hidden way down at the bottom.</p>')
         tall_content = '\n'.join(lines)
-        from chad.ui.gradio.web_ui import build_live_stream_html_from_pyte
+        from chad.ui.gradio.gradio_ui import build_live_stream_html_from_pyte
         full_html = build_live_stream_html_from_pyte(tall_content, "TEST AI")
         page.evaluate(
             """
@@ -1778,7 +1778,7 @@ class TestMergeDiscardReset:
     - Discard is clicked: merge section should hide, task description preserved
     - Accept & Merge is clicked: merge section should hide, all cleared
 
-    Note: The handler logic is also verified via unit tests in test_web_ui.py.
+    Note: The handler logic is also verified via unit tests in test_gradio_ui.py.
     """
 
     def test_merge_section_initially_empty(self, page: Page):

@@ -43,11 +43,12 @@ def _isolate_session_logs(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("CHAD_SESSION_LOG_MAX_FILES", "200")
 
     # Prevent any test from sending real Slack notifications.
-    # SessionEventLoop._emit_milestone does a lazy import of get_slack_service
-    # from chad.server.services.slack_service, so we patch the canonical location.
     noop = _NoOpSlackService()
     monkeypatch.setattr(
         "chad.server.services.slack_service.get_slack_service", lambda: noop,
     )
+
+    # Prevent tests from opening real browser windows.
+    monkeypatch.setattr("webbrowser.open", lambda *a, **kw: None)
 
     yield

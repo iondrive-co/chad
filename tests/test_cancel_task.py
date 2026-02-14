@@ -6,7 +6,7 @@ import pytest
 from dataclasses import dataclass
 from unittest.mock import MagicMock, Mock, patch
 
-from chad.ui.gradio.web_ui import ChadWebUI, Session
+from chad.ui.gradio.gradio_ui import ChadWebUI, Session
 from chad.ui.client.api_client import Account
 
 
@@ -25,7 +25,7 @@ class TestCancelTask:
     """Test task cancellation and restart functionality."""
 
     @pytest.fixture
-    def web_ui(self, tmp_path):
+    def gradio_ui(self, tmp_path):
         """Create ChadWebUI instance."""
         api_client = MagicMock()
         api_client.list_accounts.return_value = [
@@ -35,7 +35,7 @@ class TestCancelTask:
         api_client.list_providers.return_value = ["anthropic"]
         return ChadWebUI(api_client)
 
-    def test_cancel_marks_session_inactive(self, web_ui):
+    def test_cancel_marks_session_inactive(self, gradio_ui):
         """Canceling a task should mark session as inactive and clear provider."""
         session = Session(
             id="test-session",
@@ -45,9 +45,9 @@ class TestCancelTask:
             provider=MagicMock(),
             config={"test": "config"}
         )
-        web_ui.sessions["test-session"] = session
+        gradio_ui.sessions["test-session"] = session
 
-        result = web_ui.cancel_task("test-session")
+        result = gradio_ui.cancel_task("test-session")
 
         # Result is a tuple, live_stream is at index 0
         assert isinstance(result, tuple), "cancel_task should return tuple of UI updates"
@@ -58,7 +58,7 @@ class TestCancelTask:
         assert session.provider is None
         assert session.config is None
 
-    def test_session_ready_for_restart_after_cancel(self, web_ui):
+    def test_session_ready_for_restart_after_cancel(self, gradio_ui):
         """After cancellation, session should be ready for a new task."""
         session = Session(
             id="test-session",
@@ -68,9 +68,9 @@ class TestCancelTask:
             provider=MagicMock(),
             config={"test": "config"}
         )
-        web_ui.sessions["test-session"] = session
+        gradio_ui.sessions["test-session"] = session
 
-        web_ui.cancel_task("test-session")
+        gradio_ui.cancel_task("test-session")
 
         # Session should be in a clean state ready for restart
         assert session.active is False
@@ -82,7 +82,7 @@ class TestCancelTask:
         session.active = True
         assert session.active is True
 
-    def test_cancel_returns_ui_updates(self, web_ui):
+    def test_cancel_returns_ui_updates(self, gradio_ui):
         """Canceling a task should return UI component updates to re-enable start button."""
         session = Session(
             id="test-session",
@@ -92,9 +92,9 @@ class TestCancelTask:
             provider=MagicMock(),
             config={"test": "config"}
         )
-        web_ui.sessions["test-session"] = session
+        gradio_ui.sessions["test-session"] = session
 
-        result = web_ui.cancel_task("test-session")
+        result = gradio_ui.cancel_task("test-session")
 
         # Should be a tuple of UI component updates, not just live_stream
         assert isinstance(result, tuple), "cancel_task should return tuple of UI updates"
@@ -135,7 +135,7 @@ class TestCancelTask:
         assert isinstance(merge_section_update, dict), "merge_section_group update should be a dict"
         assert merge_section_update.get("visible") is False, "merge_section_group should be hidden after cancel"
 
-    def test_cancel_requests_server_session_cancellation(self, web_ui):
+    def test_cancel_requests_server_session_cancellation(self, gradio_ui):
         """Cancel should propagate to the server when an API session is active."""
         session = Session(
             id="test-session",
@@ -146,15 +146,15 @@ class TestCancelTask:
             config={"test": "config"},
             server_session_id="server-session-1",
         )
-        web_ui.sessions["test-session"] = session
-        web_ui.api_client.get_session.return_value = Mock(active=False)
+        gradio_ui.sessions["test-session"] = session
+        gradio_ui.api_client.get_session.return_value = Mock(active=False)
 
-        web_ui.cancel_task("test-session")
+        gradio_ui.cancel_task("test-session")
 
-        web_ui.api_client.cancel_session.assert_called_once_with("server-session-1")
+        gradio_ui.api_client.cancel_session.assert_called_once_with("server-session-1")
 
-    @patch("chad.ui.gradio.web_ui.GitWorktreeManager")
-    def test_cancel_skips_worktree_delete_if_server_still_active(self, mock_git_mgr_class, web_ui, tmp_path):
+    @patch("chad.ui.gradio.gradio_ui.GitWorktreeManager")
+    def test_cancel_skips_worktree_delete_if_server_still_active(self, mock_git_mgr_class, gradio_ui, tmp_path):
         """Don't delete worktree while server cancellation is still in-flight."""
         session = Session(
             id="test-session",
@@ -167,16 +167,16 @@ class TestCancelTask:
             project_path=str(tmp_path),
             worktree_path=tmp_path / "worktree",
         )
-        web_ui.sessions["test-session"] = session
+        gradio_ui.sessions["test-session"] = session
 
-        web_ui._wait_for_server_session_inactive = MagicMock(return_value=False)
+        gradio_ui._wait_for_server_session_inactive = MagicMock(return_value=False)
 
-        web_ui.cancel_task("test-session")
+        gradio_ui.cancel_task("test-session")
         time.sleep(0.05)
 
         mock_git_mgr_class.return_value.delete_worktree.assert_not_called()
 
-    def test_cancel_returns_quickly_even_if_server_shutdown_is_slow(self, web_ui):
+    def test_cancel_returns_quickly_even_if_server_shutdown_is_slow(self, gradio_ui):
         """Cancel should return quickly and not block UI on server shutdown polling."""
         session = Session(
             id="test-session",
@@ -187,7 +187,7 @@ class TestCancelTask:
             config={"test": "config"},
             server_session_id="server-session-1",
         )
-        web_ui.sessions["test-session"] = session
+        gradio_ui.sessions["test-session"] = session
 
         started_wait = threading.Event()
 
@@ -196,11 +196,11 @@ class TestCancelTask:
             time.sleep(0.25)
             return False
 
-        web_ui.api_client.cancel_session = MagicMock()
-        web_ui._wait_for_server_session_inactive = slow_wait
+        gradio_ui.api_client.cancel_session = MagicMock()
+        gradio_ui._wait_for_server_session_inactive = slow_wait
 
         start = time.perf_counter()
-        result = web_ui.cancel_task("test-session")
+        result = gradio_ui.cancel_task("test-session")
         elapsed = time.perf_counter() - start
 
         assert elapsed < 0.1, f"cancel_task blocked for {elapsed:.3f}s"
@@ -208,7 +208,7 @@ class TestCancelTask:
         assert isinstance(result, tuple)
         assert result[5].get("interactive") is True
 
-    def test_final_yield_after_cancel_enables_start_button(self, web_ui, tmp_path, monkeypatch):
+    def test_final_yield_after_cancel_enables_start_button(self, gradio_ui, tmp_path, monkeypatch):
         """Final yield from start_chad_task should enable start button after cancel.
 
         This tests the race condition fix: when cancel_task() runs, it returns
@@ -233,9 +233,9 @@ class TestCancelTask:
             cancel_gate.wait(timeout=2.0)
             return False, "cancelled", "server-session"
 
-        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", fake_run_task_via_api)
 
-        session = web_ui.create_session("test")
+        session = gradio_ui.create_session("test")
         updates = []
 
         def trigger_cancel():
@@ -245,7 +245,7 @@ class TestCancelTask:
 
         threading.Thread(target=trigger_cancel, daemon=True).start()
 
-        for update in web_ui.start_chad_task(session.id, str(git_dir), "test task", "test-account"):
+        for update in gradio_ui.start_chad_task(session.id, str(git_dir), "test task", "test-account"):
             updates.append(update)
 
         # Check final yield has start button enabled (index 5)
@@ -263,7 +263,7 @@ class TestCancelTask:
             "followup_row should be visible=False in final yield after cancel"
         )
 
-    def test_final_yield_after_cancel_reenables_task_input(self, web_ui, tmp_path, monkeypatch):
+    def test_final_yield_after_cancel_reenables_task_input(self, gradio_ui, tmp_path, monkeypatch):
         """Final yield after cancel should re-enable task input for immediate restart."""
         git_dir = tmp_path / "repo"
         git_dir.mkdir()
@@ -282,9 +282,9 @@ class TestCancelTask:
             cancel_gate.wait(timeout=2.0)
             return False, "cancelled", "server-session", None
 
-        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", fake_run_task_via_api)
 
-        session = web_ui.create_session("test")
+        session = gradio_ui.create_session("test")
         updates = []
 
         def trigger_cancel():
@@ -294,7 +294,7 @@ class TestCancelTask:
 
         threading.Thread(target=trigger_cancel, daemon=True).start()
 
-        for update in web_ui.start_chad_task(session.id, str(git_dir), "test task", "test-account"):
+        for update in gradio_ui.start_chad_task(session.id, str(git_dir), "test task", "test-account"):
             updates.append(update)
 
         final_update = updates[-1]

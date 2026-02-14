@@ -18,7 +18,7 @@ Usage:
   python scripts/verify.py --unit    # Unit tests only
   python scripts/verify.py --ui      # UI integration tests only
   python scripts/verify.py --quick   # Lint + unit tests (no UI)
-  python scripts/verify.py --file tests/test_web_ui.py  # Specific test file
+  python scripts/verify.py --file tests/test_gradio_ui.py  # Specific test file
   python scripts/verify.py --match "test_cancel"  # Tests matching pattern
 """
 from __future__ import annotations

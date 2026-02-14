@@ -233,7 +233,7 @@ def greet(name):
     def test_actual_syntax_highlighting_applied(self, page: Page):
         """Test that Python code has actual syntax highlighting applied."""
         # Use the actual build_live_stream_html function
-        from chad.ui.gradio.web_ui import build_live_stream_html
+        from chad.ui.gradio.gradio_ui import build_live_stream_html
 
         # Test with plain text that would come from CLI
         plain_text = """<pre><code class="language-python">

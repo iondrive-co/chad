@@ -1053,7 +1053,7 @@ class TestConfigUIParity:
     1. Add getter/setter to ConfigManager
     2. Add API endpoint in routes/config.py
     3. Add APIClient method in api_client.py
-    4. Add UI element in web_ui.py (Gradio)
+    4. Add UI element in gradio_ui.py (Gradio)
     5. Add menu option in cli/app.py (CLI)
     6. Add the key to REQUIRED_UI_CONFIG_KEYS below (or INTERNAL_KEYS if not user-editable)
 
@@ -1136,11 +1136,11 @@ class TestConfigUIParity:
     }
 
     def test_gradio_ui_exposes_all_required_keys(self):
-        """Verify Gradio web_ui.py references all required config keys."""
+        """Verify Gradio gradio_ui.py references all required config keys."""
         import pathlib
         import re
 
-        web_ui_path = pathlib.Path(__file__).parent.parent / "src" / "chad" / "ui" / "gradio" / "web_ui.py"
+        web_ui_path = pathlib.Path(__file__).parent.parent / "src" / "chad" / "ui" / "gradio" / "gradio_ui.py"
         content = web_ui_path.read_text()
 
         all_gradio_keys = self.REQUIRED_UI_CONFIG_KEYS | self.GRADIO_ONLY_KEYS
@@ -1171,7 +1171,7 @@ class TestConfigUIParity:
                 missing_keys.append(key)
 
         assert not missing_keys, (
-            f"Gradio web_ui.py is missing UI elements for config keys: {missing_keys}. "
+            f"Gradio gradio_ui.py is missing UI elements for config keys: {missing_keys}. "
             f"Add UI elements (input fields, sliders, etc.) and change handlers for these keys."
         )
 

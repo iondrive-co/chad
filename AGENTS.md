@@ -268,7 +268,7 @@ When adding a new config option:
 2. Add getter/setter methods to `ConfigManager`
 3. Add API endpoint in `src/chad/server/api/routes/config.py`
 4. Add `APIClient` method in `src/chad/ui/client/api_client.py`
-5. Add UI element in `src/chad/ui/gradio/web_ui.py` (in the config panel)
+5. Add UI element in `src/chad/ui/gradio/gradio_ui.py` (in the config panel)
 6. Add menu option in `src/chad/ui/cli/app.py` (in `run_settings_menu`)
 7. Update `tests/test_config_manager.py`:
    - Add to `REQUIRED_UI_CONFIG_KEYS` if user-editable in both UIs
@@ -288,7 +288,7 @@ Tests are organized by module and marked for efficient targeting:
 | Test File | Tests | Description | Run Time |
 |-----------|-------|-------------|----------|
 | `test_providers.py` | 84 | Provider classes, CLI parsing | ~5s |
-| `test_web_ui.py` | 108 | Gradio UI logic (no browser) | ~8s |
+| `test_gradio_ui.py` | 108 | Gradio UI logic (no browser) | ~8s |
 | `test_unified_streaming.py` | 53 | PTY/SSE streaming, EventLog | ~25s |
 | `test_git_worktree.py` | 43 | Git operations | ~3s |
 | `test_config_manager.py` | 38 | Config persistence | ~4s |
@@ -305,7 +305,7 @@ Tests are organized by module and marked for efficient targeting:
 .venv/bin/python -m pytest tests/test_providers.py -q
 
 # Target specific class
-.venv/bin/python -m pytest tests/test_web_ui.py::TestChadWebUI -q
+.venv/bin/python -m pytest tests/test_gradio_ui.py::TestChadWebUI -q
 
 # Target specific test
 .venv/bin/python -m pytest tests/test_providers.py::TestCreateProvider::test_create_anthropic_provider -q

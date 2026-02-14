@@ -1004,7 +1004,7 @@ def inject_chatbot_message(page: "Page", messages: list[dict], container_selecto
     The content will be processed through make_chat_message for proper formatting.
     """
     # Import here to avoid circular deps
-    from chad.ui.gradio.web_ui import make_chat_message
+    from chad.ui.gradio.gradio_ui import make_chat_message
 
     # Convert messages to Gradio chatbot format
     formatted_messages = []

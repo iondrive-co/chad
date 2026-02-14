@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 
 from chad.ui.gradio.verification.ui_playwright_runner import SAMPLE_DIFF_HTML, SAMPLE_MERGE_CONFLICT_HTML
-from chad.ui.gradio.web_ui import PROVIDER_PANEL_CSS
+from chad.ui.gradio.gradio_ui import PROVIDER_PANEL_CSS
 
 
 MERGE_VIEWER_PAGE_HTML = f"""
