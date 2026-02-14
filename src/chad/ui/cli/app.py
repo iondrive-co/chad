@@ -174,8 +174,10 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
         if is_mistral_configured(vibe_dir):
             return True, "Already logged in"
 
+        import webbrowser
         print("Mistral requires an API key.")
-        print("Get yours from: https://console.mistral.ai/codestral/cli")
+        print("Opening https://console.mistral.ai/codestral/cli ...")
+        webbrowser.open("https://console.mistral.ai/codestral/cli")
         print()
         api_key = input("Paste your MISTRAL_API_KEY: ").strip()
         if not api_key:

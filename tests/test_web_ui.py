@@ -8,10 +8,8 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import ANY, Mock, patch, MagicMock
+from unittest.mock import Mock, patch, MagicMock
 import pytest
-
-import pexpect
 
 from chad.util.git_worktree import GitWorktreeManager
 from chad.util.providers import ModelConfig, MockProvider

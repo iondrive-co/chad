@@ -2061,10 +2061,12 @@ class ProviderUIManager:
 
                 if not login_success:
                     if not api_key or not api_key.strip():
+                        import webbrowser
+                        webbrowser.open("https://console.mistral.ai/codestral/cli")
                         result = (
                             "❌ Mistral requires an API key.\n\n"
-                            "Get your key from **console.mistral.ai/codestral/cli**, "
-                            "then paste it in the API Key field above and click Add Provider again."
+                            "A browser tab has been opened to **console.mistral.ai** — "
+                            "create a key there, then paste it in the API Key field above and click Add Provider again."
                         )
                         base_response = self.provider_action_response(result, card_slots)
                         return (*base_response, name_field_value, add_btn_state, accordion_state)

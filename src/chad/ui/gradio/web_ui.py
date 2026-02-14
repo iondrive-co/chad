@@ -8074,17 +8074,28 @@ class ChadWebUI:
             outputs=[add_btn],
         )
 
-        # Show API key field for providers that need direct key entry
+        # Show API key field only for OpenCode (Mistral shows it after first click)
         new_provider_type.change(
-            lambda ptype: gr.update(visible=(ptype in ("opencode", "mistral"))),
+            lambda ptype: gr.update(visible=(ptype == "opencode")),
             inputs=[new_provider_type],
             outputs=[new_provider_api_key],
         )
 
         def add_provider_handler(provider_name, provider_type, api_key):
             base = self.add_provider(provider_name, provider_type, api_key=api_key)
+            # base ends with (name_field_value, add_btn_state, accordion_state)
+            name_val = base[len(provider_outputs)]
+            is_error = name_val != ""  # on success name is cleared
+
+            if is_error:
+                # Keep accordion open, show API key field for providers that need one
+                needs_key = provider_type in ("opencode", "mistral")
+                return (
+                    *base,
+                    gr.update(visible=needs_key),
+                )
             return (
-                *base[: len(provider_outputs)],
+                *base[:len(provider_outputs)],
                 "",
                 gr.update(interactive=False),
                 gr.update(open=False),
