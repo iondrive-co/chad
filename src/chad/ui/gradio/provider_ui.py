@@ -14,6 +14,7 @@ import gradio as gr
 from chad.util.utils import platform_path, safe_home
 from chad.util.model_catalog import ModelCatalog
 from chad.util.installer import AIToolInstaller
+from chad.util.providers import has_mistral_api_key
 
 if TYPE_CHECKING:
     from chad.ui.client import APIClient
@@ -408,7 +409,7 @@ class ProviderUIManager:
         from datetime import datetime, timezone
 
         vibe_dir = Path.home() / ".vibe"
-        if not self._mistral_has_api_key(vibe_dir):
+        if not has_mistral_api_key(vibe_dir):
             return 0.0
 
         sessions_dir = vibe_dir / "logs" / "session"
@@ -612,34 +613,6 @@ class ProviderUIManager:
     def _is_windows() -> bool:
         """Return True when running on Windows."""
         return os.name == "nt"
-
-    @staticmethod
-    def _mistral_has_api_key(vibe_dir: Path | None = None) -> bool:
-        """Return True when Mistral API key is available in env or ~/.vibe/.env."""
-        if os.environ.get("MISTRAL_API_KEY", "").strip():
-            return True
-
-        home_dir = vibe_dir if vibe_dir is not None else safe_home() / ".vibe"
-        env_file = home_dir / ".env"
-        if not env_file.exists():
-            return False
-
-        try:
-            for raw_line in env_file.read_text(encoding="utf-8").splitlines():
-                line = raw_line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if line.startswith("export "):
-                    line = line[len("export "):].strip()
-                if not line.startswith("MISTRAL_API_KEY"):
-                    continue
-                _, _, value = line.partition("=")
-                value = value.strip().strip('"').strip("'")
-                return bool(value)
-        except OSError:
-            return False
-
-        return False
 
     def _get_codex_usage(self, account_name: str) -> str:
         """Get usage info from Codex by parsing JWT token and session files."""
@@ -1079,7 +1052,7 @@ class ProviderUIManager:
         from datetime import datetime, timezone
 
         vibe_dir = Path.home() / ".vibe"
-        if not self._mistral_has_api_key(vibe_dir):
+        if not has_mistral_api_key(vibe_dir):
             return "❌ **Not logged in**\n\nRun `vibe --setup` in terminal to authenticate."
 
         sessions_dir = vibe_dir / "logs" / "session"
@@ -1461,7 +1434,7 @@ class ProviderUIManager:
 
             if provider_type == "mistral":
                 vibe_dir = safe_home() / ".vibe"
-                if self._mistral_has_api_key(vibe_dir):
+                if has_mistral_api_key(vibe_dir):
                     return True, "Logged in"
                 return False, "Not logged in"
 
@@ -2100,7 +2073,7 @@ class ProviderUIManager:
                             start_time = time.time()
                             timeout_secs = 120
                             while time.time() - start_time < timeout_secs:
-                                if self._mistral_has_api_key(vibe_dir):
+                                if has_mistral_api_key(vibe_dir):
                                     login_success = True
                                     break
                                 time.sleep(2)
@@ -2130,7 +2103,7 @@ class ProviderUIManager:
                                 start_time = time.time()
                                 timeout_secs = 120
                                 while time.time() - start_time < timeout_secs:
-                                    if self._mistral_has_api_key(vibe_dir):
+                                    if has_mistral_api_key(vibe_dir):
                                         login_success = True
                                         break
 

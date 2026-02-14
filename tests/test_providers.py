@@ -2861,7 +2861,7 @@ class TestUsagePercentageCalculation:
 
         vibe_dir = tmp_path / ".vibe"
         vibe_dir.mkdir()
-        (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"')
+        (vibe_dir / ".env").write_text("MISTRAL_API_KEY=test-key\n")
 
         with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
             result = _get_mistral_usage_percentage("")
@@ -2874,7 +2874,7 @@ class TestUsagePercentageCalculation:
 
         vibe_dir = tmp_path / ".vibe"
         vibe_dir.mkdir()
-        (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"')
+        (vibe_dir / ".env").write_text("MISTRAL_API_KEY=test-key\n")
 
         # Create session directory
         session_dir = vibe_dir / "logs" / "session"

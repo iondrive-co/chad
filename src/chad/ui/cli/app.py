@@ -14,6 +14,7 @@ from pathlib import Path
 
 from chad.ui.client import APIClient
 from chad.ui.client.stream_client import SyncStreamClient, decode_terminal_data
+from chad.util.providers import has_mistral_api_key
 
 
 def _get_codex_home(account_name: str) -> Path:
@@ -44,33 +45,6 @@ def _write_kimi_default_config(config_file: Path) -> None:
         'key = "kimi-code"\n',
         encoding="utf-8",
     )
-
-
-def _has_mistral_api_key(vibe_dir: Path) -> bool:
-    """Return True when Mistral API key is available in env or ~/.vibe/.env."""
-    if os.environ.get("MISTRAL_API_KEY", "").strip():
-        return True
-
-    env_file = vibe_dir / ".env"
-    if not env_file.exists():
-        return False
-
-    try:
-        for raw_line in env_file.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[len("export "):].strip()
-            if not line.startswith("MISTRAL_API_KEY"):
-                continue
-            _, _, value = line.partition("=")
-            value = value.strip().strip('"').strip("'")
-            return bool(value)
-    except OSError:
-        return False
-
-    return False
 
 
 def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
@@ -197,7 +171,7 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
 
     elif provider == "mistral":
         vibe_dir = Path.home() / ".vibe"
-        if _has_mistral_api_key(vibe_dir):
+        if has_mistral_api_key(vibe_dir):
             return True, "Already logged in"
 
         print("Starting Vibe setup...")
@@ -207,7 +181,7 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
                 ["vibe", "--setup"],
                 timeout=120,
             )
-            if result.returncode == 0 and _has_mistral_api_key(vibe_dir):
+            if result.returncode == 0 and has_mistral_api_key(vibe_dir):
                 return True, "Login successful"
             return False, "Login failed or was cancelled"
         except FileNotFoundError:

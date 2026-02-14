@@ -157,3 +157,9 @@ def get_slack_service() -> SlackService:
     if _slack_service is None:
         _slack_service = SlackService()
     return _slack_service
+
+
+def reset_slack_service() -> None:
+    """Reset the global SlackService singleton (for testing)."""
+    global _slack_service
+    _slack_service = None
