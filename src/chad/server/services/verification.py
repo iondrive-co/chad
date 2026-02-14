@@ -124,6 +124,7 @@ def run_verification(
     cols: int = 200,
     emit: Callable | None = None,
     git_mgr: Any = None,
+    attempt: int = 1,
 ) -> tuple[bool | None, str]:
     """Run automated + LLM verification.
 
@@ -172,12 +173,15 @@ def run_verification(
             verification_model=verification_model,
             verification_reasoning=verification_reasoning,
             on_activity=on_activity,
+            attempt=attempt,
         )
 
     coding_summary = extract_coding_summary(coding_output)
     change_summary = coding_summary.change_summary if coding_summary else None
     trimmed_output = _truncate_verification_output(coding_output)
-    exploration_prompt = get_verification_exploration_prompt(trimmed_output, task_description, change_summary)
+    exploration_prompt = get_verification_exploration_prompt(
+        trimmed_output, task_description, change_summary, attempt=attempt,
+    )
     conclusion_prompt = get_verification_conclusion_prompt()
 
     # Run verification agent via PTY - two phase: explore then conclude
@@ -236,6 +240,7 @@ def _run_provider_verification(
     verification_model: str | None = None,
     verification_reasoning: str | None = None,
     on_activity: Callable | None = None,
+    attempt: int = 1,
 ) -> tuple[bool | None, str]:
     """Fallback: Run LLM verification using the AIProvider abstraction."""
     from chad.util.providers import ModelConfig, create_provider
@@ -258,7 +263,9 @@ def _run_provider_verification(
     coding_summary = extract_coding_summary(coding_output)
     change_summary = coding_summary.change_summary if coding_summary else None
     trimmed_output = _truncate_verification_output(coding_output)
-    exploration_prompt = get_verification_exploration_prompt(trimmed_output, task_description, change_summary)
+    exploration_prompt = get_verification_exploration_prompt(
+        trimmed_output, task_description, change_summary, attempt=attempt,
+    )
     conclusion_prompt = get_verification_conclusion_prompt()
 
     try:

@@ -93,6 +93,20 @@ output unless you have specific concerns about the implementation.
 Explore the codebase and provide your analysis. After you're done exploring, I'll ask you for your final verdict.
 """
 
+# Extra criteria appended on retry (attempt >= 2) to raise the verification bar
+ELEVATED_VERIFICATION_CRITERIA = """
+
+## Elevated Review (Attempt {attempt})
+
+This is retry attempt {attempt}. The previous verification failed and the coding agent revised its work. \
+Apply stricter scrutiny by also evaluating:
+
+5. **Durability**: Will this fix hold up under edge cases and future changes, or is it brittle/superficial?
+6. **Root cause**: Did the coding agent address the actual root cause, or just patch the symptom?
+7. **Structural improvement**: Are there structural improvements that would prevent this class of issue from recurring?
+8. **Dead code**: Did the failed attempt leave behind any dead code, unused imports, or orphaned test fixtures?
+"""
+
 # Phase 2: Conclusion - Request structured JSON output
 VERIFICATION_CONCLUSION_PROMPT = """\
 Based on your analysis, provide your final verdict.
@@ -318,6 +332,7 @@ def get_verification_exploration_prompt(
     coding_output: str,
     task: str = "",
     change_summary: str | None = None,
+    attempt: int = 1,
 ) -> str:
     """Build the exploration prompt for two-phase verification.
 
@@ -327,6 +342,8 @@ def get_verification_exploration_prompt(
         coding_output: The output from the coding agent
         task: The original task description
         change_summary: Optional extracted change summary to prepend
+        attempt: Verification attempt number (1-indexed). On attempt >= 2,
+                 elevated criteria are appended to raise the review bar.
 
     Returns:
         Exploration prompt for the verification agent
@@ -335,10 +352,15 @@ def get_verification_exploration_prompt(
     if change_summary:
         coding_block = f"Summary from coding agent: {change_summary}\n\nFull response:\n{coding_output}"
 
-    return VERIFICATION_EXPLORATION_PROMPT.format(
+    prompt = VERIFICATION_EXPLORATION_PROMPT.format(
         coding_output=coding_block,
         task=task or "(no task provided)",
     )
+
+    if attempt >= 2:
+        prompt += ELEVATED_VERIFICATION_CRITERIA.format(attempt=attempt)
+
+    return prompt
 
 
 def get_verification_conclusion_prompt() -> str:
