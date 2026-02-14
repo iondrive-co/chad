@@ -106,13 +106,7 @@ body {
   border-color: var(--accent);
 }
 
-/* ── Connect Bar ── */
-
-.connect-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
+/* ── Connection Status ── */
 
 .status-dot {
   width: 8px;
@@ -126,8 +120,9 @@ body {
   background: var(--success);
 }
 
-.connect-bar input {
-  width: 240px;
+.connect-status {
+  color: var(--text-muted);
+  font-size: 13px;
 }
 
 /* ── Forms & Inputs ── */

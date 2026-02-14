@@ -823,6 +823,7 @@ class SessionEventLoop:
                     git_mgr=git_mgr,
                     coding_model=coding_model,
                     coding_reasoning=coding_reasoning,
+                    attempt=attempt + 1,
                 )
 
     def _run_revision_phase(
@@ -837,11 +838,12 @@ class SessionEventLoop:
         git_mgr,
         coding_model: str | None = None,
         coding_reasoning: str | None = None,
+        attempt: int = 1,
     ) -> None:
         """Run a revision phase using verification feedback."""
         from chad.util.prompts import get_revision_prompt
 
-        revision_prompt = get_revision_prompt(feedback)
+        revision_prompt = get_revision_prompt(feedback, attempt=attempt)
 
         exit_code, output = self._run_phase_fn(
             task=self.task,

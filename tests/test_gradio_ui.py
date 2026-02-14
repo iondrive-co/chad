@@ -5200,6 +5200,116 @@ class TestElevatedVerificationCriteria:
 
         assert attempts_seen == [1, 2, 3]
 
+    def test_revision_prompt_normal_on_early_attempts(self):
+        """Revision prompt for attempts 1-2 should use the standard template."""
+        from chad.util.prompts import get_revision_prompt
+
+        prompt = get_revision_prompt("some feedback", attempt=1)
+        assert "Verification found issues" in prompt
+        assert "some feedback" in prompt
+        assert "Session history" not in prompt
+        assert "Current disk state" not in prompt
+
+        prompt2 = get_revision_prompt("feedback", attempt=2)
+        assert "Verification found issues" in prompt2
+        assert "Session history" not in prompt2
+
+    def test_revision_prompt_escalated_on_attempt_3(self):
+        """Revision prompt for attempt >= 3 should use the escalated audit template."""
+        from chad.util.prompts import get_revision_prompt
+
+        prompt = get_revision_prompt("still broken", attempt=3)
+        assert "failed 3 times" in prompt
+        assert "Session history" in prompt
+        assert "Current disk state" in prompt
+        assert "Git history" in prompt
+        assert "Assess" in prompt
+        assert "New plan" in prompt
+        assert "still broken" in prompt
+
+    def test_revision_prompt_escalated_on_attempt_4(self):
+        """Higher attempts should also get the escalated template with correct count."""
+        from chad.util.prompts import get_revision_prompt
+
+        prompt = get_revision_prompt("feedback", attempt=4)
+        assert "failed 4 times" in prompt
+        assert "Session history" in prompt
+
+    def test_revision_prompt_default_attempt_is_normal(self):
+        """Default attempt parameter should produce the standard revision prompt."""
+        from chad.util.prompts import get_revision_prompt
+
+        prompt = get_revision_prompt("feedback")
+        assert "Verification found issues" in prompt
+        assert "Session history" not in prompt
+
+    def test_escalated_revision_constant_has_all_steps(self):
+        """The ESCALATED_REVISION_PROMPT should contain all five audit steps."""
+        from chad.util.prompts import ESCALATED_REVISION_PROMPT
+
+        text = ESCALATED_REVISION_PROMPT.format(feedback="x", attempt=3)
+        assert "Session history" in text
+        assert "Current disk state" in text
+        assert "Git history" in text
+        assert "Assess" in text
+        assert "New plan" in text
+
+    def test_verification_loop_passes_attempt_to_revision(self, monkeypatch, tmp_path):
+        """The revision phase should receive the current attempt number."""
+        from chad.server.services.session_event_loop import SessionEventLoop
+        from chad.util.event_log import EventLog
+
+        revision_attempts_seen = []
+
+        def fake_run_verification(**kwargs):
+            return False, "Issues found"
+
+        def fake_run_phase_fn(**kwargs):
+            override = kwargs.get("override_prompt", "")
+            if kwargs.get("phase") == "revision" and override:
+                # Extract attempt info from the prompt
+                if "failed" in override and "times" in override:
+                    revision_attempts_seen.append("escalated")
+                else:
+                    revision_attempts_seen.append("normal")
+            return 0, "output"
+
+        def fake_emit(*args, **kwargs):
+            pass
+
+        event_log = EventLog(session_id="test", base_dir=tmp_path)
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=type("Task", (), {"cancel_requested": False, "stream_id": None})(),
+            run_phase_fn=fake_run_phase_fn,
+            emit_fn=fake_emit,
+            worktree_path="/tmp/test",
+            max_verification_attempts=4,
+        )
+        loop.accumulated_output = "some output"
+
+        monkeypatch.setattr(
+            "chad.server.services.verification.run_verification",
+            fake_run_verification,
+        )
+
+        loop._run_verification_loop(
+            session=None,
+            task_description="test task",
+            coding_account="test",
+            coding_provider="mock",
+            rows=80,
+            cols=200,
+            git_mgr=None,
+            verification_config={"verification_account": "test"},
+        )
+
+        # Attempts: 0,1,2,3 (0-indexed). Revision runs for 0,1,2 (not last).
+        # attempt+1 passed to revision: 1,2,3. Escalated at >=3.
+        assert revision_attempts_seen == ["normal", "normal", "escalated"]
+
 
 class TestAnsiToHtml:
     """Test that ANSI escape codes are properly converted to HTML spans."""
