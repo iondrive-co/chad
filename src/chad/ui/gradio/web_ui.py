@@ -8955,6 +8955,102 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                     setInterval(findAndSetupContainers, 500);
                     setTimeout(findAndSetupContainers, 100);
                   };
+
+                  const initializeMilestonesScrollTracking = () => {
+                    window._milestonesScrollState = window._milestonesScrollState || {
+                      userScrolledUp: false,
+                      savedScrollTop: 0,
+                      lastScrollHeight: 0,
+                      settingScroll: false
+                    };
+
+                    const attachMilestonesScrollListener = () => {
+                      const chatbot = document.querySelector('#agent-chatbot');
+                      if (!chatbot) return;
+                      
+                      const container = chatbot.querySelector('.gr-box') || chatbot;
+                      if (!container) return;
+
+                      const state = window._milestonesScrollState;
+
+                      container.addEventListener('scroll', () => {
+                        if (state.settingScroll) return;
+
+                        const scrollTop = container.scrollTop;
+                        const isAtBottom = scrollTop + container.clientHeight >= container.scrollHeight - 10;
+                        const scrolledDown = scrollTop > state.savedScrollTop;
+
+                        state.savedScrollTop = scrollTop;
+
+                        if (isAtBottom && scrolledDown) {
+                          state.userScrolledUp = false;
+                        } else if (!isAtBottom) {
+                          state.userScrolledUp = true;
+                        }
+                      });
+
+                      // Set initial state
+                      state.lastScrollHeight = container.scrollHeight;
+                      state.savedScrollTop = container.scrollTop;
+                    };
+
+                    const setupMilestonesObserver = () => {
+                      const chatbot = document.querySelector('#agent-chatbot');
+                      if (!chatbot) return;
+                      
+                      const container = chatbot.querySelector('.gr-box') || chatbot;
+                      if (!container) return;
+                      
+                      const state = window._milestonesScrollState;
+                      const observer = new MutationObserver(() => {
+                        if (state.settingScroll) return;
+
+                        requestAnimationFrame(() => {
+                          requestAnimationFrame(() => {
+                            const newScrollHeight = container.scrollHeight;
+                            const contentGrew = newScrollHeight > state.lastScrollHeight;
+
+                            // Check if user was at bottom BEFORE content grew (using old height)
+                            const wasAtBottomBeforeGrowth = state.savedScrollTop + container.clientHeight >= state.lastScrollHeight - 10;
+
+                            state.lastScrollHeight = newScrollHeight;
+                            state.settingScroll = true;
+
+                            if (contentGrew && wasAtBottomBeforeGrowth && !state.userScrolledUp) {
+                              // User was at bottom before content grew and hasn't scrolled up - auto-scroll
+                              container.scrollTop = newScrollHeight;
+                              state.savedScrollTop = newScrollHeight;
+                              state.userScrolledUp = false;
+                            } else if (state.userScrolledUp) {
+                              // User has scrolled up - preserve their scroll position
+                              container.scrollTop = state.savedScrollTop;
+                            }
+
+                            requestAnimationFrame(() => {
+                              state.settingScroll = false;
+                            });
+                          });
+                        });
+                      });
+
+                      observer.observe(container, {
+                        childList: true,
+                        subtree: true
+                      });
+                    };
+
+                    const findAndSetupMilestones = () => {
+                      const chatbot = document.querySelector('#agent-chatbot');
+                      if (chatbot) {
+                        attachMilestonesScrollListener();
+                        setupMilestonesObserver();
+                      }
+                    };
+
+                    setInterval(findAndSetupMilestones, 500);
+                    setTimeout(findAndSetupMilestones, 100);
+                  };
+
                   const ensureDiscardEditable = () => {
                     // Find status elements more broadly
                     const statuses = collectAll('.task-status-header, [id*=\"task-status\"], [class*=\"task-status\"], [class*=\"status\"]');
@@ -9298,6 +9394,7 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
 
                   initializeLiveDomPatching();
                   initializeLiveStreamScrollTracking();
+                  initializeMilestonesScrollTracking();
                   initializeLiveStreamSearch();
                   initializeTerminalColumnTracking();
                   const tickAll = () => {
