@@ -3,8 +3,9 @@ import { ChadAPI } from "chad-client";
 import { SessionList } from "./components/SessionList.tsx";
 import { ChatView } from "./components/ChatView.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
+import { ProvidersPanel } from "./components/ProvidersPanel.tsx";
 
-type Tab = "chat" | "settings";
+type Tab = "chat" | "providers" | "settings";
 
 export function App() {
   // Use same origin — Vite proxy forwards /api and /ws to Chad server
@@ -14,6 +15,7 @@ export function App() {
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("chat");
   const [sessionVersion, setSessionVersion] = useState(0);
+  const [defaultProjectPath, setDefaultProjectPath] = useState("");
 
   // Auto-connect on mount, retry until server is up
   useEffect(() => {
@@ -25,6 +27,12 @@ export function App() {
         if (!cancelled) {
           setConnected(true);
           setError(null);
+          // Load last project path
+          api.getPreferences().then((p) => {
+            if (!cancelled && p.last_project_path) {
+              setDefaultProjectPath(p.last_project_path);
+            }
+          }).catch(() => {});
         }
       } catch {
         if (!cancelled) {
@@ -61,23 +69,20 @@ export function App() {
         <h1>Chad</h1>
         <span className="status-dot connected" />
         <nav className="tabs">
-          <button
-            className={tab === "chat" ? "active" : ""}
-            onClick={() => setTab("chat")}
-          >
+          <button className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}>
             Chat
           </button>
-          <button
-            className={tab === "settings" ? "active" : ""}
-            onClick={() => setTab("settings")}
-          >
+          <button className={tab === "providers" ? "active" : ""} onClick={() => setTab("providers")}>
+            Providers
+          </button>
+          <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>
             Settings
           </button>
         </nav>
       </header>
 
       <div className="app-body">
-        {tab === "chat" ? (
+        {tab === "chat" && (
           <>
             <aside className="sidebar">
               <SessionList
@@ -95,6 +100,7 @@ export function App() {
                   serverUrl=""
                   sessionId={selectedSession}
                   onSessionChange={refreshSessions}
+                  defaultProjectPath={defaultProjectPath}
                 />
               ) : (
                 <div className="placeholder">
@@ -103,7 +109,13 @@ export function App() {
               )}
             </main>
           </>
-        ) : (
+        )}
+        {tab === "providers" && (
+          <main className="main full-width">
+            <ProvidersPanel api={api} />
+          </main>
+        )}
+        {tab === "settings" && (
           <main className="main full-width">
             <SettingsPanel api={api} />
           </main>

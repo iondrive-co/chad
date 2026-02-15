@@ -396,6 +396,196 @@ label {
   width: auto;
 }
 
+/* ── Action Rules ── */
+
+.action-rules {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.save-status {
+  font-size: 12px;
+  color: var(--success);
+}
+
+.action-rule-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.action-rule-row select {
+  width: auto;
+  min-width: 120px;
+}
+
+.threshold-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.threshold-group input[type="range"] {
+  width: 100px;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+.threshold-value {
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 32px;
+}
+
+.delete-rule-btn {
+  background: transparent;
+  color: var(--text-muted);
+  padding: 2px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+}
+
+.delete-rule-btn:hover {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.add-rule-btn {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--text-muted);
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
+.add-rule-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ── Providers Panel ── */
+
+.providers-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.providers-panel h2 {
+  font-size: 18px;
+}
+
+.providers-panel h3 {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.account-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.account-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.account-card.not-ready {
+  opacity: 0.6;
+}
+
+.account-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.account-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.account-provider {
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.account-status {
+  font-size: 11px;
+  margin-left: auto;
+  color: var(--error);
+}
+
+.account-status.ready {
+  color: var(--success);
+}
+
+.account-details {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.account-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.field-label {
+  color: var(--text-muted);
+}
+
+.account-field select {
+  width: auto;
+  min-width: 100px;
+}
+
+.link-btn {
+  background: transparent;
+  color: var(--accent);
+  padding: 0;
+  font-size: 13px;
+  text-decoration: underline;
+  border: none;
+}
+
+.add-provider-form {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
+.add-provider-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.add-provider-row input,
+.add-provider-row select {
+  width: auto;
+  min-width: 140px;
+}
+
 /* ── Utilities ── */
 
 .error-text {

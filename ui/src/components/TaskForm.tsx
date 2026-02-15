@@ -6,11 +6,12 @@ interface Props {
   api: ChadAPI;
   sessionId: string;
   onStart: () => void;
+  defaultProjectPath?: string;
 }
 
-export function TaskForm({ api, sessionId, onStart }: Props) {
+export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: Props) {
   const [description, setDescription] = useState("");
-  const [projectPath, setProjectPath] = useState("");
+  const [projectPath, setProjectPath] = useState(defaultProjectPath);
   const [account, setAccount] = useState<Account | null>(null);
   const [modelOverride, setModelOverride] = useState("");
   const [models, setModels] = useState<string[]>([]);

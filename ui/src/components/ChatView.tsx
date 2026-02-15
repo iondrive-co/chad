@@ -8,6 +8,7 @@ interface Props {
   serverUrl: string;
   sessionId: string;
   onSessionChange: () => void;
+  defaultProjectPath?: string;
 }
 
 /** Strip ANSI escape codes for plain-text display. */
@@ -20,6 +21,7 @@ export function ChatView({
   serverUrl,
   sessionId,
   onSessionChange,
+  defaultProjectPath = "",
 }: Props) {
   const [taskActive, setTaskActive] = useState(false);
   const [followupText, setFollowupText] = useState("");
@@ -99,6 +101,7 @@ export function ChatView({
           api={api}
           sessionId={sessionId}
           onStart={handleTaskStart}
+          defaultProjectPath={defaultProjectPath}
         />
       )}
 
