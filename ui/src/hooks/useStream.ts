@@ -11,7 +11,7 @@ export interface TerminalChunk {
  * Hook to manage an SSE stream for a Chad session.
  * Decodes base64 terminal output and collects structured events.
  */
-export function useStream(serverUrl: string, sessionId: string | null) {
+export function useStream(sessionId: string | null) {
   const streamRef = useRef<ChadStream | null>(null);
   const [terminalOutput, setTerminalOutput] = useState("");
   const [events, setEvents] = useState<StreamEvent[]>([]);
@@ -26,10 +26,10 @@ export function useStream(serverUrl: string, sessionId: string | null) {
   }, []);
 
   useEffect(() => {
-    if (!sessionId || !serverUrl) return;
+    if (!sessionId) return;
 
     reset();
-    const stream = new ChadStream(serverUrl);
+    const stream = new ChadStream("");
     streamRef.current = stream;
 
     stream.onTerminal((evt) => {
@@ -65,7 +65,7 @@ export function useStream(serverUrl: string, sessionId: string | null) {
       stream.disconnect();
       streamRef.current = null;
     };
-  }, [serverUrl, sessionId, reset]);
+  }, [sessionId, reset]);
 
   return { terminalOutput, events, completed, error, reset };
 }

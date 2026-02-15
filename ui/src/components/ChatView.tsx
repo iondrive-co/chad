@@ -5,7 +5,6 @@ import { TaskForm } from "./TaskForm.tsx";
 
 interface Props {
   api: ChadAPI;
-  serverUrl: string;
   sessionId: string;
   onSessionChange: () => void;
   defaultProjectPath?: string;
@@ -18,7 +17,6 @@ function stripAnsi(text: string): string {
 
 export function ChatView({
   api,
-  serverUrl,
   sessionId,
   onSessionChange,
   defaultProjectPath = "",
@@ -29,7 +27,6 @@ export function ChatView({
   const outputRef = useRef<HTMLPreElement>(null);
 
   const { terminalOutput, events, completed, error, reset } = useStream(
-    taskActive ? serverUrl : "",
     taskActive ? sessionId : null,
   );
 
