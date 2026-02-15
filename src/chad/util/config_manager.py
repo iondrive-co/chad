@@ -3,7 +3,9 @@
 import base64
 import getpass
 import json
+import shutil
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -37,6 +39,8 @@ CONFIG_BASE_KEYS: set[str] = {
 
 class ConfigManager:
     """Manages application configuration including accounts, preferences, and settings."""
+
+    BACKUP_MAX_AGE = timedelta(days=2)
 
     def __init__(self, config_path: Path | None = None):
         import os
@@ -76,6 +80,38 @@ class ConfigManager:
                 changed = True
         if changed:
             self.save_config(config)
+
+    def ensure_recent_backup(self) -> Path | None:
+        """Create a backup of the config file if none exists in the last two days.
+
+        Returns:
+            Path to the backup file if created or already present; None if no
+            backup was made (e.g., config file missing or error).
+        """
+        config_file = self.config_path
+        if not config_file.exists():
+            return None
+
+        backup_path = Path(f"{config_file}.bak")
+        now = datetime.now(timezone.utc)
+
+        if backup_path.exists():
+            backup_mtime = datetime.fromtimestamp(
+                backup_path.stat().st_mtime, tz=timezone.utc
+            )
+            if now - backup_mtime < self.BACKUP_MAX_AGE:
+                return backup_path
+
+        try:
+            shutil.copy2(config_file, backup_path)
+            try:
+                backup_path.chmod(config_file.stat().st_mode)
+            except OSError:
+                # On some platforms chmod may not be supported; continue anyway.
+                pass
+            return backup_path
+        except OSError:
+            return None
 
     def _derive_encryption_key(self, password: str, salt: bytes) -> bytes:
         """Derive an encryption key from password using PBKDF2."""
