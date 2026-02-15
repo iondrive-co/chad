@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from chad.util.git_worktree import MergeConflict
+from chad.util.config_manager import ConfigManager
 
 
 @dataclass
@@ -61,6 +62,7 @@ class SessionManager:
             Newly created Session object
         """
         with self._lock:
+            ConfigManager().ensure_recent_backup()
             session = Session(
                 project_path=project_path,
                 name=name or "New Session",
