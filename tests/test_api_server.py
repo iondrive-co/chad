@@ -279,3 +279,171 @@ class TestWorktreeEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["exists"] is False
+
+    def test_merge_request_accepts_commit_message(self, client, tmp_path, monkeypatch):
+        """Merge request should accept optional commit_message field."""
+        # Create a test git repo
+        import subprocess
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=project_dir, capture_output=True)
+        (project_dir / "file.txt").write_text("initial")
+        subprocess.run(["git", "add", "."], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=project_dir, capture_output=True)
+
+        # Create session with project path
+        create_resp = client.post(
+            "/api/v1/sessions",
+            json={"name": "Test", "project_path": str(project_dir)},
+        )
+        session_id = create_resp.json()["id"]
+
+        # Create worktree
+        wt_resp = client.post(f"/api/v1/sessions/{session_id}/worktree")
+        assert wt_resp.status_code == 201
+
+        # Merge request with commit message should be accepted
+        merge_resp = client.post(
+            f"/api/v1/sessions/{session_id}/worktree/merge",
+            json={"target_branch": None, "commit_message": "Custom merge commit"},
+        )
+        # Should not fail due to unknown field
+        assert merge_resp.status_code in [200, 400]  # 400 is ok if no changes
+
+    def test_get_branches_endpoint(self, client, tmp_path):
+        """GET /worktree/branches should return branch list."""
+        # Create a test git repo
+        import subprocess
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=project_dir, capture_output=True)
+        (project_dir / "file.txt").write_text("initial")
+        subprocess.run(["git", "add", "."], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=project_dir, capture_output=True)
+
+        # Create session with project path
+        create_resp = client.post(
+            "/api/v1/sessions",
+            json={"name": "Test", "project_path": str(project_dir)},
+        )
+        session_id = create_resp.json()["id"]
+
+        # Create worktree
+        client.post(f"/api/v1/sessions/{session_id}/worktree")
+
+        # Get branches
+        response = client.get(f"/api/v1/sessions/{session_id}/worktree/branches")
+        assert response.status_code == 200
+        data = response.json()
+        assert "branches" in data
+        assert "default" in data
+        assert isinstance(data["branches"], list)
+
+    def test_resolve_conflicts_endpoint(self, client, tmp_path):
+        """POST /worktree/resolve-conflicts should exist."""
+        # Create a test git repo
+        import subprocess
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=project_dir, capture_output=True)
+        (project_dir / "file.txt").write_text("initial")
+        subprocess.run(["git", "add", "."], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=project_dir, capture_output=True)
+
+        # Create session with project path
+        create_resp = client.post(
+            "/api/v1/sessions",
+            json={"name": "Test", "project_path": str(project_dir)},
+        )
+        session_id = create_resp.json()["id"]
+
+        # Create worktree
+        client.post(f"/api/v1/sessions/{session_id}/worktree")
+
+        # Test endpoint exists (even without actual conflicts it should respond)
+        response = client.post(
+            f"/api/v1/sessions/{session_id}/worktree/resolve-conflicts",
+            json={"use_incoming": True},
+        )
+        # Should return 200 or 400, not 404 (endpoint must exist)
+        assert response.status_code != 404
+
+    def test_abort_merge_endpoint(self, client, tmp_path):
+        """POST /worktree/abort-merge should exist."""
+        # Create a test git repo
+        import subprocess
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=project_dir, capture_output=True)
+        (project_dir / "file.txt").write_text("initial")
+        subprocess.run(["git", "add", "."], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=project_dir, capture_output=True)
+
+        # Create session with project path
+        create_resp = client.post(
+            "/api/v1/sessions",
+            json={"name": "Test", "project_path": str(project_dir)},
+        )
+        session_id = create_resp.json()["id"]
+
+        # Create worktree
+        client.post(f"/api/v1/sessions/{session_id}/worktree")
+
+        # Test endpoint exists
+        response = client.post(f"/api/v1/sessions/{session_id}/worktree/abort-merge")
+        # Should return 200 or 400, not 404 (endpoint must exist)
+        assert response.status_code != 404
+
+    def test_merge_cleans_up_session_state(self, client, tmp_path):
+        """Successful merge should clear session worktree state."""
+        import subprocess
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=project_dir, capture_output=True)
+        (project_dir / "file.txt").write_text("initial")
+        subprocess.run(["git", "add", "."], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=project_dir, capture_output=True)
+
+        # Create session with project path
+        create_resp = client.post(
+            "/api/v1/sessions",
+            json={"name": "Test", "project_path": str(project_dir)},
+        )
+        session_id = create_resp.json()["id"]
+
+        # Create worktree
+        wt_resp = client.post(f"/api/v1/sessions/{session_id}/worktree")
+        assert wt_resp.status_code == 201
+        wt_data = wt_resp.json()
+        worktree_path = wt_data["path"]
+
+        # Make a change in the worktree
+        import os
+        (tmp_path / "project" / ".chad-worktrees").mkdir(exist_ok=True)
+        if os.path.exists(worktree_path):
+            with open(os.path.join(worktree_path, "new_file.txt"), "w") as f:
+                f.write("new content")
+            subprocess.run(["git", "add", "."], cwd=worktree_path, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "change"], cwd=worktree_path, capture_output=True)
+
+        # Merge
+        merge_resp = client.post(
+            f"/api/v1/sessions/{session_id}/worktree/merge",
+            json={"target_branch": None},
+        )
+
+        # After successful merge, worktree should not exist
+        if merge_resp.status_code == 200 and merge_resp.json().get("success"):
+            wt_status = client.get(f"/api/v1/sessions/{session_id}/worktree")
+            assert wt_status.status_code == 200
+            assert wt_status.json()["exists"] is False

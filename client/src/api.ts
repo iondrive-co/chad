@@ -3,6 +3,7 @@ import type {
   AccountCreate,
   AccountList,
   AccountModels,
+  BranchesResponse,
   CleanupSettings,
   DiffFull,
   DiffSummary,
@@ -230,10 +231,29 @@ export class ChadAPI {
   mergeWorktree(
     sessionId: string,
     targetBranch?: string | null,
+    commitMessage?: string | null,
   ): Promise<MergeResult> {
     return this.post(`/api/v1/sessions/${sessionId}/worktree/merge`, {
       target_branch: targetBranch ?? null,
+      commit_message: commitMessage ?? null,
     });
+  }
+
+  getBranches(sessionId: string): Promise<BranchesResponse> {
+    return this.get(`/api/v1/sessions/${sessionId}/worktree/branches`);
+  }
+
+  resolveConflicts(
+    sessionId: string,
+    useIncoming: boolean,
+  ): Promise<MergeResult> {
+    return this.post(`/api/v1/sessions/${sessionId}/worktree/resolve-conflicts`, {
+      use_incoming: useIncoming,
+    });
+  }
+
+  abortMerge(sessionId: string): Promise<MergeResult> {
+    return this.post(`/api/v1/sessions/${sessionId}/worktree/abort-merge`);
   }
 
   resetWorktree(

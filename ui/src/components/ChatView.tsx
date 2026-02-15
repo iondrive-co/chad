@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import type { ChadAPI } from "chad-client";
 import { useStream } from "../hooks/useStream.ts";
 import { TaskForm } from "./TaskForm.tsx";
+import { MergePanel } from "./MergePanel.tsx";
 
 interface Props {
   api: ChadAPI;
@@ -24,6 +25,7 @@ export function ChatView({
   const [taskActive, setTaskActive] = useState(false);
   const [followupText, setFollowupText] = useState("");
   const [sending, setSending] = useState(false);
+  const [showMerge, setShowMerge] = useState(false);
   const outputRef = useRef<HTMLPreElement>(null);
 
   const { terminalOutput, events, completed, error, reset } = useStream(
@@ -37,18 +39,32 @@ export function ChatView({
     }
   }, [terminalOutput]);
 
-  // Mark task inactive when stream completes
+  // Mark task inactive when stream completes, check for worktree changes
   useEffect(() => {
     if (completed) {
       setTaskActive(false);
       onSessionChange();
+      // Check if there are worktree changes to merge
+      api.getWorktreeStatus(sessionId).then((status) => {
+        if (status.exists && status.has_changes) {
+          setShowMerge(true);
+        }
+      }).catch(() => {
+        // Ignore errors checking worktree status
+      });
     }
-  }, [completed, onSessionChange]);
+  }, [api, completed, sessionId, onSessionChange]);
 
   const handleTaskStart = useCallback(() => {
     reset();
     setTaskActive(true);
+    setShowMerge(false);
   }, [reset]);
+
+  const handleMergeDone = useCallback(() => {
+    setShowMerge(false);
+    onSessionChange();
+  }, [onSessionChange]);
 
   const handleCancel = useCallback(async () => {
     try {
@@ -133,6 +149,16 @@ export function ChatView({
             {stripAnsi(terminalOutput)}
           </pre>
         </div>
+      )}
+
+      {/* Merge panel - show when task completes with changes */}
+      {showMerge && !taskActive && (
+        <MergePanel
+          api={api}
+          sessionId={sessionId}
+          onMerged={handleMergeDone}
+          onDismiss={handleMergeDone}
+        />
       )}
 
       {/* Follow-up input */}
