@@ -35,13 +35,10 @@ def get_config_manager() -> ConfigManager:
 
 
 def get_model_catalog() -> ModelCatalog:
-    """Get the global ModelCatalog instance.
-
-    ModelCatalog uses ConfigManager as security_mgr for stored model lookup.
-    """
+    """Get the global ModelCatalog instance."""
     global _model_catalog
     if _model_catalog is None:
-        _model_catalog = ModelCatalog(security_mgr=get_config_manager())
+        _model_catalog = ModelCatalog(api_client=get_config_manager())
     return _model_catalog
 
 
