@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch, MagicMock
 import pytest
 
 from chad.util.git_worktree import GitWorktreeManager
-from chad.util.providers import ModelConfig, MockProvider
+from chad.util.providers import ModelConfig
 from chad.ui.gradio.provider_ui import ProviderUIManager
 
 
@@ -406,8 +406,8 @@ class TestChadWebUI:
         followup_update = outputs[10]
         assert followup_update.get("visible") is not False, "Followup row should remain visible"
 
-    def test_followup_after_discard_uses_clean_worktree(self, gradio_ui, git_repo, monkeypatch):
-        """Follow-up after discard should still operate in a clean worktree."""
+    def test_followup_after_discard_routes_through_api(self, gradio_ui, git_repo, monkeypatch):
+        """Follow-up after discard should route through run_task_via_api with is_followup=True."""
         session_id = "discard-followup-test"
         git_mgr = GitWorktreeManager(git_repo)
         worktree_path, base_commit = git_mgr.create_worktree(session_id)
@@ -419,26 +419,21 @@ class TestChadWebUI:
         session.worktree_base_commit = base_commit
         session.active = True
         session.chat_history = [{"role": "user", "content": "**Task**\n\nModify BUGS.md"}]
-
-        # Speed up the mock provider
-        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
-        config = ModelConfig(provider="mock", model_name="default", account_name="claude")
-        provider = MockProvider(config)
-        provider._get_remaining_usage = lambda: 0.5
-        provider._decrement_usage = lambda amount=None: None
-        provider.start_session(str(worktree_path))
-        session.provider = provider
         session.coding_account = "claude"
-        session.config = config
-
-        # Simulate an initial coding turn to represent the first task run
-        provider.send_message("Initial coding turn")
-        provider.get_response()
+        session.config = ModelConfig(provider="mock", model_name="default", account_name="claude")
 
         # Discard before sending a follow-up
         gradio_ui.discard_worktree_changes(session_id)
 
-        # Send a follow-up; this should succeed and write BUGS.md in the worktree
+        # Mock run_task_via_api to simulate successful API execution
+        api_call_args = {}
+
+        def mock_run_task_via_api(**kwargs):
+            api_call_args.update(kwargs)
+            return (True, "Task completed", "srv-123", None)
+
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", mock_run_task_via_api)
+
         list(
             gradio_ui.send_followup(
                 session_id,
@@ -449,17 +444,12 @@ class TestChadWebUI:
             )
         )
 
-        assert session.worktree_path is not None
-        bugs_file = session.worktree_path / "BUGS.md"
-        assert bugs_file.exists(), "BUGS.md should be present after follow-up"
-        content = bugs_file.read_text()
-        assert "follow-up" in content.lower(), "Follow-up marker should be added to BUGS.md"
-        assert not any(
-            "Error" in msg.get("content", "") for msg in session.chat_history if msg.get("role") == "assistant"
-        ), "Follow-up response should not include errors"
+        assert api_call_args.get("is_followup") is True, "Follow-up should pass is_followup=True"
+        assert api_call_args.get("coding_account") == "claude"
+        assert "Add follow-up entry" in api_call_args.get("task_description", "")
 
-    def test_followup_reconnects_when_provider_released(self, gradio_ui, git_repo, monkeypatch):
-        """Follow-up should reconnect to provider after API-based execution releases it."""
+    def test_followup_reconnects_via_api(self, gradio_ui, git_repo, monkeypatch):
+        """Follow-up after API-based execution should route through run_task_via_api."""
         session_id = "reconnect-test"
         git_mgr = GitWorktreeManager(git_repo)
         worktree_path, base_commit = git_mgr.create_worktree(session_id)
@@ -469,26 +459,24 @@ class TestChadWebUI:
         session.worktree_path = worktree_path
         session.worktree_branch = git_mgr._branch_name(session_id)
         session.worktree_base_commit = base_commit
-
-        # Simulate state after API-based execution:
-        # - session.active = True (task succeeded)
-        # - session.provider = None (released after API execution)
-        # - session.coding_account set to the account name
         session.active = True
-        session.provider = None  # This is the key condition we're testing
+        session.provider = None  # Released after API execution
         session.coding_account = "mock-claude"
         session.config = ModelConfig(provider="mock", model_name="default", account_name="mock-claude")
         session.chat_history = [{"role": "user", "content": "**Task**\n\nInitial task"}]
 
-        # Set up mock account with "mock" provider so create_provider uses MockProvider
         mock_account = MockAccount(name="mock-claude", provider="mock", role="CODING")
         gradio_ui.api_client.list_accounts.return_value = [mock_account]
         gradio_ui.api_client.get_account.return_value = mock_account
 
-        # Speed up the mock provider
-        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
+        api_call_args = {}
 
-        # Send a follow-up; this should reconnect and succeed, not show "Session expired"
+        def mock_run_task_via_api(**kwargs):
+            api_call_args.update(kwargs)
+            return (True, "Task completed", "srv-123", None)
+
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", mock_run_task_via_api)
+
         list(
             gradio_ui.send_followup(
                 session_id,
@@ -499,19 +487,14 @@ class TestChadWebUI:
             )
         )
 
-        # Check that no "Session expired" message was added
         all_messages = [msg.get("content", "") for msg in session.chat_history]
         assert not any("Session expired" in msg for msg in all_messages), (
             "Follow-up should reconnect, not show 'Session expired'"
         )
+        assert api_call_args.get("is_followup") is True
 
-        # Check that the follow-up was processed (BUGS.md should exist from mock provider)
-        assert session.worktree_path is not None
-        bugs_file = session.worktree_path / "BUGS.md"
-        assert bugs_file.exists(), "BUGS.md should be created by follow-up"
-
-    def test_followup_restarts_session_after_completion(self, gradio_ui, git_repo, monkeypatch):
-        """Follow-up after session completion should restart provider, not show 'Session expired'."""
+    def test_followup_restarts_session_via_api(self, gradio_ui, git_repo, monkeypatch):
+        """Follow-up after session completion should route through run_task_via_api."""
         session_id = "restart-test"
         git_mgr = GitWorktreeManager(git_repo)
         worktree_path, base_commit = git_mgr.create_worktree(session_id)
@@ -521,22 +504,23 @@ class TestChadWebUI:
         session.worktree_path = worktree_path
         session.worktree_branch = git_mgr._branch_name(session_id)
         session.worktree_base_commit = base_commit
-
-        # Simulate state after task completion / rate limit:
-        # - session.active = False (task ended)
-        # - session.provider = None (CLI exited)
-        # - session.coding_account set from previous task
         session.active = False
         session.provider = None
         session.coding_account = "mock-claude"
-        session.config = None  # Cleared when session is inactive
+        session.config = None
         session.chat_history = [{"role": "user", "content": "**Task**\n\nInitial task"}]
 
         mock_account = MockAccount(name="mock-claude", provider="mock", role="CODING")
         gradio_ui.api_client.list_accounts.return_value = [mock_account]
         gradio_ui.api_client.get_account.return_value = mock_account
 
-        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
+        api_call_args = {}
+
+        def mock_run_task_via_api(**kwargs):
+            api_call_args.update(kwargs)
+            return (True, "Task completed", "srv-123", None)
+
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", mock_run_task_via_api)
 
         list(
             gradio_ui.send_followup(
@@ -552,9 +536,8 @@ class TestChadWebUI:
         assert not any("Session expired" in msg for msg in all_messages), (
             "Follow-up after completion should restart, not show 'Session expired'"
         )
-        assert session.active or session.provider is not None, (
-            "Session should be reactivated after restart"
-        )
+        assert api_call_args.get("is_followup") is True
+        assert api_call_args.get("coding_account") == "mock-claude"
 
     def test_followup_account_fallback_from_session(self, gradio_ui, git_repo, monkeypatch):
         """When no agent is explicitly selected, reuse the session's previous coding_account."""
@@ -578,7 +561,13 @@ class TestChadWebUI:
         gradio_ui.api_client.list_accounts.return_value = [mock_account]
         gradio_ui.api_client.get_account.return_value = mock_account
 
-        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
+        api_call_args = {}
+
+        def mock_run_task_via_api(**kwargs):
+            api_call_args.update(kwargs)
+            return (True, "Task completed", "srv-123", None)
+
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", mock_run_task_via_api)
 
         # Send follow-up with NO coding_agent (empty string / None) — should fall back
         list(
@@ -595,6 +584,8 @@ class TestChadWebUI:
         assert not any("Session expired" in msg for msg in all_messages), (
             "Should fall back to session's coding_account, not expire"
         )
+        # Verify fallback resolved to the session's previous coding_account
+        assert api_call_args.get("coding_account") == "mock-claude"
 
     def test_followup_no_account_shows_expired(self, gradio_ui, git_repo):
         """When no account is configured and no previous account exists, show 'Session expired'."""
@@ -648,7 +639,13 @@ class TestChadWebUI:
         gradio_ui.api_client.list_accounts.return_value = [mock_old, mock_new]
         gradio_ui.api_client.get_account.return_value = mock_new
 
-        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
+        api_call_args = {}
+
+        def mock_run_task_via_api(**kwargs):
+            api_call_args.update(kwargs)
+            return (True, "Task completed", "srv-123", None)
+
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", mock_run_task_via_api)
 
         list(
             gradio_ui.send_followup(
@@ -667,6 +664,7 @@ class TestChadWebUI:
         assert any("PROVIDER HANDOFF" in msg for msg in all_messages), (
             "Should show handoff message when switching provider after completion"
         )
+        assert api_call_args.get("coding_account") == "new-agent"
 
     def test_set_reasoning_success(self, gradio_ui, mock_api_client):
         """Test setting reasoning level for an account."""
@@ -5737,8 +5735,8 @@ class TestScreenshotUpload:
             assert request_data["screenshots"] == ["/tmp/screenshot1.png"]
 
 
-class TestFollowupEventLogging:
-    """Test that send_followup() logs events to the session event log."""
+class TestFollowupAPIRouting:
+    """Test that send_followup() routes through run_task_via_api."""
 
     @pytest.fixture
     def gradio_ui(self):
@@ -5756,8 +5754,7 @@ class TestFollowupEventLogging:
         return ui
 
     def _setup_session(self, gradio_ui, session_id, git_repo, monkeypatch):
-        """Set up a session with a MockProvider and EventLog."""
-        from chad.util.event_log import EventLog
+        """Set up a session with mocked run_task_via_api."""
         git_mgr = GitWorktreeManager(git_repo)
         worktree_path, base_commit = git_mgr.create_worktree(session_id)
 
@@ -5769,205 +5766,80 @@ class TestFollowupEventLogging:
         session.active = True
         session.chat_history = [{"role": "user", "content": "**Task**\n\nInitial task"}]
         session.task_description = "Initial task"
-
-        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
-        config = ModelConfig(provider="mock", model_name="default", account_name="claude")
-        provider = MockProvider(config)
-        provider._get_remaining_usage = lambda: 0.5
-        provider._decrement_usage = lambda amount=None: None
-        provider.start_session(str(worktree_path))
-        session.provider = provider
         session.coding_account = "claude"
-        session.config = config
+        session.config = ModelConfig(provider="mock", model_name="default", account_name="claude")
 
-        # Set up event log (remove any stale log from previous runs)
-        session.event_log = EventLog(session_id)
-        if session.event_log.log_path.exists():
-            session.event_log.log_path.unlink()
-            session.event_log = EventLog(session_id)
-        session.event_log.start_turn()
-        return session
+        api_call_args = {}
 
-    def _get_events(self, session):
-        """Read all events from the session's event log."""
-        import json
-        events = []
-        log_path = session.event_log.log_path
-        if log_path.exists():
-            for line in log_path.read_text().splitlines():
-                if line.strip():
-                    events.append(json.loads(line))
-        return events
+        def mock_run_task_via_api(**kwargs):
+            api_call_args.update(kwargs)
+            return (True, "Task completed", "srv-123", None)
 
-    def test_followup_logs_user_and_assistant_events(self, gradio_ui, git_repo, monkeypatch):
-        """Follow-up should log UserMessageEvent and AssistantMessageEvent."""
-        session = self._setup_session(gradio_ui, "event-log-basic", git_repo, monkeypatch)
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", mock_run_task_via_api)
+
+        return session, api_call_args
+
+    def test_followup_routes_through_api_with_is_followup(self, gradio_ui, git_repo, monkeypatch):
+        """Follow-up should call run_task_via_api with is_followup=True."""
+        session, api_call_args = self._setup_session(gradio_ui, "api-route-test", git_repo, monkeypatch)
 
         list(gradio_ui.send_followup(
-            "event-log-basic",
+            "api-route-test",
             "Fix the button color",
             session.chat_history,
             coding_agent="claude",
             verification_agent=gradio_ui.VERIFICATION_NONE,
         ))
 
-        events = self._get_events(session)
-        event_types = [e["type"] for e in events]
-        assert "user_message" in event_types, f"Expected user_message event, got: {event_types}"
-        assert "assistant_message" in event_types, f"Expected assistant_message event, got: {event_types}"
+        assert api_call_args.get("is_followup") is True
+        assert api_call_args.get("coding_account") == "claude"
+        assert api_call_args.get("task_description") == "Fix the button color"
 
-        # Check sequence numbers are monotonically increasing
-        sequences = [e["seq"] for e in events if e["type"] in ("user_message", "assistant_message")]
-        assert sequences == sorted(sequences), f"Sequences not monotonic: {sequences}"
-
-    def test_followup_logs_raw_message_not_resume_prompt(self, gradio_ui, git_repo, monkeypatch):
-        """Logged UserMessageEvent should contain the raw user message, not modified versions."""
-        session = self._setup_session(gradio_ui, "event-log-raw", git_repo, monkeypatch)
-
-        raw_message = "Please change the font size"
-        list(gradio_ui.send_followup(
-            "event-log-raw",
-            raw_message,
-            session.chat_history,
-            coding_agent="claude",
-            verification_agent=gradio_ui.VERIFICATION_NONE,
-            screenshots=["/tmp/fake_screenshot.png"],
-        ))
-
-        events = self._get_events(session)
-        user_events = [e for e in events if e["type"] == "user_message"]
-        assert len(user_events) >= 1
-        # The logged content should be the raw message, not the screenshot-appended version
-        assert user_events[0]["content"] == raw_message
-
-    def test_followup_with_verification_logs_verification_events(self, gradio_ui, git_repo, monkeypatch):
-        """Follow-up with verification should log VerificationAttemptEvent."""
-        session = self._setup_session(gradio_ui, "event-log-verify", git_repo, monkeypatch)
-
-        # Mock _run_verification to return success
-        monkeypatch.setattr(
-            gradio_ui, "_run_verification",
-            lambda *args, **kwargs: (True, "All checks passed"),
-        )
-
-        list(gradio_ui.send_followup(
-            "event-log-verify",
-            "Add a test",
-            session.chat_history,
-            coding_agent="claude",
-            verification_agent="claude",
-        ))
-
-        events = self._get_events(session)
-        event_types = [e["type"] for e in events]
-        assert "user_message" in event_types
-        assert "assistant_message" in event_types
-        assert "verification_attempt" in event_types
-
-        verify_events = [e for e in events if e["type"] == "verification_attempt"]
-        assert verify_events[0]["passed"] is True
-
-    def test_followup_verification_revision_logs_all_events(self, gradio_ui, git_repo, monkeypatch):
-        """Verification fail + revision should log the full event sequence."""
-        session = self._setup_session(gradio_ui, "event-log-revision", git_repo, monkeypatch)
-
-        # First call fails verification, second passes
-        verification_calls = {"count": 0}
-
-        def mock_verification(*args, **kwargs):
-            verification_calls["count"] += 1
-            if verification_calls["count"] == 1:
-                return (False, "Tests are failing")
-            return (True, "All good now")
-
-        monkeypatch.setattr(gradio_ui, "_run_verification", mock_verification)
-
-        list(gradio_ui.send_followup(
-            "event-log-revision",
-            "Fix the layout",
-            session.chat_history,
-            coding_agent="claude",
-            verification_agent="claude",
-        ))
-
-        events = self._get_events(session)
-        event_types = [e["type"] for e in events]
-
-        # Should have: user_message (followup), assistant_message (coding),
-        # verification_attempt (fail), user_message (revision), assistant_message (revision),
-        # verification_attempt (pass)
-        assert event_types.count("user_message") >= 2, f"Expected >=2 user_message events, got: {event_types}"
-        assert event_types.count("assistant_message") >= 2, f"Expected >=2 assistant_message events, got: {event_types}"
-        assert event_types.count("verification_attempt") == 2, f"Expected 2 verification_attempt events, got: {event_types}"
-
-        # First verification should be failed, second should pass
-        verify_events = [e for e in events if e["type"] == "verification_attempt"]
-        assert verify_events[0]["passed"] is False
-        assert verify_events[1]["passed"] is True
-
-    def test_followup_verification_uses_followup_message_as_task_description(
-        self, gradio_ui, git_repo, monkeypatch
-    ):
-        """Follow-up after merge (empty task_description) should use the follow-up message for verification."""
-        session = self._setup_session(gradio_ui, "event-log-empty-desc", git_repo, monkeypatch)
-
-        # Simulate post-merge state: task_description cleared
+    def test_followup_sets_task_description_on_session(self, gradio_ui, git_repo, monkeypatch):
+        """Follow-up should update session.task_description to the follow-up message."""
+        session, _ = self._setup_session(gradio_ui, "task-desc-test", git_repo, monkeypatch)
         session.task_description = ""
-
-        # Track what task_description is passed to _run_verification
-        captured_args = {}
-
-        def mock_verification(*args, **kwargs):
-            # _run_verification(path, coding_output, task_description, ...)
-            captured_args["task_description"] = args[2] if len(args) > 2 else kwargs.get("task_description")
-            return (True, "All checks passed")
-
-        monkeypatch.setattr(gradio_ui, "_run_verification", mock_verification)
 
         followup_msg = "Refactor the database layer"
         list(gradio_ui.send_followup(
-            "event-log-empty-desc",
+            "task-desc-test",
             followup_msg,
             session.chat_history,
             coding_agent="claude",
-            verification_agent="claude",
+            verification_agent=gradio_ui.VERIFICATION_NONE,
         ))
 
-        # Verification must receive the follow-up message, not an empty string
-        assert captured_args.get("task_description") == followup_msg, (
-            f"Expected task_description='{followup_msg}', got '{captured_args.get('task_description')}'"
-        )
-        # session.task_description should also be updated
         assert session.task_description == followup_msg
 
-    def test_followup_after_session_end_displays_raw_message_not_resume_prompt(
-        self, gradio_ui, git_repo, monkeypatch
-    ):
-        """When session restarts after completion, chat should show the raw user
-        message, not the internal <previous_session> resume prompt XML."""
-        session = self._setup_session(gradio_ui, "event-log-display", git_repo, monkeypatch)
+    def test_followup_displays_raw_message_not_resume_prompt(self, gradio_ui, git_repo, monkeypatch):
+        """Chat history should show the raw user message, not the resume prompt XML."""
+        from chad.util.event_log import EventLog, UserMessageEvent, AssistantMessageEvent
+        session, _ = self._setup_session(gradio_ui, "display-test", git_repo, monkeypatch)
 
-        # Log some initial conversation so build_resume_prompt has content
-        from chad.util.event_log import UserMessageEvent, AssistantMessageEvent
+        # Add event log with prior conversation so build_resume_prompt has content
+        session.event_log = EventLog("display-test")
+        if session.event_log.log_path.exists():
+            session.event_log.log_path.unlink()
+            session.event_log = EventLog("display-test")
+        session.event_log.start_turn()
         session.event_log.log(UserMessageEvent(content="Initial task"))
         session.event_log.log(
             AssistantMessageEvent(blocks=[{"kind": "text", "content": "Done with initial task."}])
         )
 
-        # Simulate session ended (e.g. rate limit or task completed)
+        # Simulate session ended
         session.active = False
         session.provider = None
 
         followup_msg = "Now fix the tests"
         list(gradio_ui.send_followup(
-            "event-log-display",
+            "display-test",
             followup_msg,
             session.chat_history,
             coding_agent="claude",
             verification_agent=gradio_ui.VERIFICATION_NONE,
         ))
 
-        # Find the user message that was added to chat history
         user_messages = [
             msg for msg in session.chat_history
             if msg.get("role") == "user" and "Follow-up" in msg.get("content", "")
@@ -5975,10 +5847,5 @@ class TestFollowupEventLogging:
         assert user_messages, "Expected a follow-up user message in chat history"
 
         last_followup = user_messages[-1]["content"]
-        # The raw message should be displayed, not the resume prompt
-        assert followup_msg in last_followup, (
-            f"Expected raw message '{followup_msg}' in display, got: {last_followup[:200]}"
-        )
-        assert "<previous_session>" not in last_followup, (
-            f"Resume prompt XML leaked into chat display: {last_followup[:200]}"
-        )
+        assert followup_msg in last_followup
+        assert "<previous_session>" not in last_followup

@@ -5206,6 +5206,12 @@ class ChadWebUI:
         session_restart_needed = has_account and not session.active
         handoff_needed = provider_changed or pref_changed or provider_reconnect_needed or session_restart_needed
 
+        if not has_account:
+            chat_history.append({"role": "assistant", "content": "Session expired — no coding agent available."})
+            session.chat_history = chat_history
+            yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
+            return
+
         if handoff_needed:
             coding_provider_type = accounts[coding_agent]
 
