@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import type { ChadAPI, Account } from "chad-client";
 
 interface Props {
@@ -9,20 +9,24 @@ interface Props {
 
 export function AccountPicker({ api, selected, onSelect }: Props) {
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const didAutoSelect = useRef(false);
 
+  // Fetch accounts once on mount
   useEffect(() => {
     api
       .listAccounts()
       .then((r) => {
         setAccounts(r.accounts);
-        // Auto-select first ready account if nothing selected
-        if (!selected && r.accounts.length > 0) {
-          const ready = r.accounts.find((a) => a.ready);
+        // Auto-select: prefer CODING role, then first ready account
+        if (!didAutoSelect.current && r.accounts.length > 0) {
+          didAutoSelect.current = true;
+          const coding = r.accounts.find((a) => a.ready && a.role === "CODING");
+          const ready = coding ?? r.accounts.find((a) => a.ready);
           if (ready) onSelect(ready);
         }
       })
       .catch(() => setAccounts([]));
-  }, [api, selected, onSelect]);
+  }, [api]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <select

@@ -263,4 +263,5 @@ export interface ServerStatus {
   status: string;
   version: string;
   uptime_seconds: number;
+  cwd: string;
 }

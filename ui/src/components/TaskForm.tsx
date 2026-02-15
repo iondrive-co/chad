@@ -18,6 +18,13 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Sync project path when default arrives from preferences (async)
+  useEffect(() => {
+    if (defaultProjectPath && !projectPath) {
+      setProjectPath(defaultProjectPath);
+    }
+  }, [defaultProjectPath]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Fetch available models when account changes
   useEffect(() => {
     if (!account) {
@@ -30,15 +37,26 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
       .catch(() => setModels([]));
   }, [api, account]);
 
+  const missingFields: string[] = [];
+  if (!projectPath.trim()) missingFields.push("project path");
+  if (!description.trim()) missingFields.push("task description");
+  if (!account) missingFields.push("coding agent");
+  const canStart = missingFields.length === 0 && !starting;
+  const disabledReason = starting
+    ? "Starting..."
+    : missingFields.length > 0
+      ? `Missing: ${missingFields.join(", ")}`
+      : "";
+
   const handleStart = useCallback(async () => {
-    if (!description.trim() || !account || !projectPath.trim()) return;
+    if (!canStart) return;
     setStarting(true);
     setError(null);
     try {
       await api.startTask(sessionId, {
         project_path: projectPath.trim(),
         task_description: description.trim(),
-        coding_agent: account.name,
+        coding_agent: account!.name,
         coding_model: modelOverride || undefined,
       });
       onStart();
@@ -47,7 +65,7 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
     } finally {
       setStarting(false);
     }
-  }, [api, sessionId, description, projectPath, account, modelOverride, onStart]);
+  }, [api, sessionId, description, projectPath, account, modelOverride, onStart, canStart]);
 
   return (
     <div className="task-form">
@@ -100,7 +118,8 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
       <button
         className="start-btn"
         onClick={handleStart}
-        disabled={starting || !description.trim() || !account || !projectPath.trim()}
+        disabled={!canStart}
+        title={disabledReason}
       >
         {starting ? "Starting..." : "Start Task"}
       </button>
