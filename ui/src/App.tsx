@@ -95,7 +95,6 @@ export function App() {
               {selectedSession ? (
                 <ChatView
                   api={api}
-                  serverUrl=""
                   sessionId={selectedSession}
                   onSessionChange={refreshSessions}
                   defaultProjectPath={defaultProjectPath}
