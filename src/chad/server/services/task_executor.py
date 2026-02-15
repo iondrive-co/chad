@@ -730,6 +730,7 @@ class TaskExecutor:
         verification_account: str | None = None,
         verification_model: str | None = None,
         verification_reasoning: str | None = None,
+        is_followup: bool = False,
         # Legacy kwargs for backwards compatibility
         override_exploration_prompt: str | None = None,
         override_implementation_prompt: str | None = None,
@@ -828,6 +829,7 @@ class TaskExecutor:
                 screenshots,
                 override_prompt,
                 verification_config,
+                is_followup,
             ),
             daemon=True,
         )
@@ -1200,6 +1202,7 @@ class TaskExecutor:
         screenshots: list[str] | None,
         override_prompt: str | None = None,
         verification_config: dict | None = None,
+        is_followup: bool = False,
     ):
         """Execute the task in a background thread using PTY.
 
@@ -1243,22 +1246,27 @@ class TaskExecutor:
                     pass
 
         try:
-            # Create worktree
-            emit("status", status="Creating worktree...")
-            try:
-                worktree_path, base_commit = git_mgr.create_worktree(task.session_id)
-                session.worktree_path = worktree_path
-                session.worktree_branch = git_mgr._branch_name(task.session_id)
-                session.worktree_base_commit = base_commit
+            # Create or reuse worktree
+            if is_followup and session.worktree_path and Path(session.worktree_path).exists():
+                emit("status", status="Reusing existing worktree...")
+                worktree_path = Path(session.worktree_path)
                 session.project_path = str(project_path)
-            except Exception as e:
-                emit("error", error=f"Failed to create worktree: {e}")
-                task.state = TaskState.FAILED
-                task.error = str(e)
-                task.completed_at = datetime.now(timezone.utc)
-                return
+            else:
+                emit("status", status="Creating worktree...")
+                try:
+                    worktree_path, base_commit = git_mgr.create_worktree(task.session_id)
+                    session.worktree_path = worktree_path
+                    session.worktree_branch = git_mgr._branch_name(task.session_id)
+                    session.worktree_base_commit = base_commit
+                    session.project_path = str(project_path)
+                except Exception as e:
+                    emit("error", error=f"Failed to create worktree: {e}")
+                    task.state = TaskState.FAILED
+                    task.error = str(e)
+                    task.completed_at = datetime.now(timezone.utc)
+                    return
 
-            worktree_path = Path(worktree_path)
+                worktree_path = Path(worktree_path)
 
             # Log session start
             if task.event_log:

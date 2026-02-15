@@ -36,6 +36,7 @@ def _session_to_response(session: Session) -> SessionResponse:
         active=session.active,
         has_worktree=session.worktree_path is not None,
         has_changes=session.has_worktree_changes,
+        coding_account=getattr(session, "coding_account", None),
         created_at=session.created_at,
         last_activity=session.last_activity,
     )
@@ -178,6 +179,7 @@ async def start_task(session_id: str, request: TaskCreate) -> TaskStatusResponse
             verification_account=request.verification_agent,
             verification_model=request.verification_model,
             verification_reasoning=request.verification_reasoning,
+            is_followup=request.is_followup,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

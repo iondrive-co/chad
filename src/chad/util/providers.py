@@ -3551,6 +3551,16 @@ I modified BUGS.md to add a test marker.
     def supports_multi_turn(self) -> bool:
         return True
 
+    def supports_usage_reporting(self) -> bool:
+        return True
+
+    def get_session_usage_percentage(self) -> float | None:
+        remaining = self._get_remaining_usage()
+        return (1.0 - remaining) * 100.0
+
+    def get_context_usage_percentage(self) -> float | None:
+        return self.get_session_usage_percentage()
+
 
 def create_provider(config: ModelConfig) -> AIProvider:
     """Factory function to create the appropriate provider.

@@ -1505,6 +1505,114 @@ class TestEventLogAPI:
             assert event["type"] == "terminal_output"
 
 
+class TestFollowupTaskRouting:
+    """Tests that follow-up tasks route through TaskExecutor with is_followup=True."""
+
+    @staticmethod
+    def _wait_task_done(client, session_id, task_id, timeout=15.0):
+        deadline = time.time() + timeout
+        terminal = {"completed", "failed", "cancelled"}
+        while time.time() < deadline:
+            resp = client.get(f"/api/v1/sessions/{session_id}/tasks/{task_id}")
+            if resp.status_code == 200 and resp.json().get("status") in terminal:
+                return resp.json()["status"]
+            time.sleep(0.2)
+        return None
+
+    def test_followup_reuses_worktree(self, client, git_repo):
+        """Start task, complete, start follow-up with is_followup=True — worktree path reused."""
+        # Create mock account
+        client.post("/api/v1/accounts", json={"name": "fu-mock", "provider": "mock"})
+
+        # Create session and run first task
+        session_resp = client.post("/api/v1/sessions", json={"name": "followup-wt"})
+        session_id = session_resp.json()["id"]
+
+        task_resp = client.post(f"/api/v1/sessions/{session_id}/tasks", json={
+            "project_path": str(git_repo),
+            "task_description": "Initial task",
+            "coding_agent": "fu-mock",
+        })
+        assert task_resp.status_code == 201
+        task_id = task_resp.json()["task_id"]
+
+        status = self._wait_task_done(client, session_id, task_id)
+        assert status in ("completed", "failed")
+
+        # Get worktree path after first task
+        wt_resp = client.get(f"/api/v1/sessions/{session_id}/worktree")
+        assert wt_resp.status_code == 200
+        first_wt_path = wt_resp.json().get("path")
+        assert first_wt_path is not None
+
+        # Start follow-up task with is_followup=True
+        followup_resp = client.post(f"/api/v1/sessions/{session_id}/tasks", json={
+            "project_path": str(git_repo),
+            "task_description": "Follow-up changes",
+            "coding_agent": "fu-mock",
+            "is_followup": True,
+        })
+        assert followup_resp.status_code == 201
+        followup_task_id = followup_resp.json()["task_id"]
+
+        followup_status = self._wait_task_done(client, session_id, followup_task_id)
+        assert followup_status in ("completed", "failed")
+
+        # Worktree path should be the same
+        wt_resp2 = client.get(f"/api/v1/sessions/{session_id}/worktree")
+        assert wt_resp2.json().get("path") == first_wt_path
+
+    def test_followup_creates_session_event_loop(self, client, git_repo):
+        """Follow-up task should have a _session_event_loop attribute set."""
+        from chad.server.services.task_executor import get_task_executor
+
+        client.post("/api/v1/accounts", json={"name": "sel-mock", "provider": "mock"})
+        session_resp = client.post("/api/v1/sessions", json={"name": "sel-test"})
+        session_id = session_resp.json()["id"]
+
+        # Run initial task
+        task_resp = client.post(f"/api/v1/sessions/{session_id}/tasks", json={
+            "project_path": str(git_repo),
+            "task_description": "First task",
+            "coding_agent": "sel-mock",
+        })
+        task_id = task_resp.json()["task_id"]
+        self._wait_task_done(client, session_id, task_id)
+
+        # Run follow-up
+        fu_resp = client.post(f"/api/v1/sessions/{session_id}/tasks", json={
+            "project_path": str(git_repo),
+            "task_description": "Follow-up task",
+            "coding_agent": "sel-mock",
+            "is_followup": True,
+        })
+        fu_task_id = fu_resp.json()["task_id"]
+
+        # While running or after completion, the task should have _session_event_loop
+        self._wait_task_done(client, session_id, fu_task_id)
+        executor = get_task_executor()
+        task = executor.get_task(fu_task_id)
+        assert task is not None
+        assert task._session_event_loop is not None
+
+    def test_coding_account_in_session_response(self, client, git_repo):
+        """Session response should include coding_account after a task runs."""
+        client.post("/api/v1/accounts", json={"name": "ca-mock", "provider": "mock"})
+        session_resp = client.post("/api/v1/sessions", json={"name": "ca-test"})
+        session_id = session_resp.json()["id"]
+
+        task_resp = client.post(f"/api/v1/sessions/{session_id}/tasks", json={
+            "project_path": str(git_repo),
+            "task_description": "Test coding account",
+            "coding_agent": "ca-mock",
+        })
+        task_id = task_resp.json()["task_id"]
+        self._wait_task_done(client, session_id, task_id)
+
+        session = client.get(f"/api/v1/sessions/{session_id}").json()
+        assert session.get("coding_account") == "ca-mock"
+
+
 class TestAgentHandover:
     """Tests for handover between agents using EventLog."""
 

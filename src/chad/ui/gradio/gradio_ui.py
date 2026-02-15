@@ -33,13 +33,9 @@ from chad.util.event_log import (
     UserMessageEvent,
     AssistantMessageEvent,
     VerificationAttemptEvent,
-    ProviderSwitchedEvent,
 )
 from chad.util.handoff import (
-    log_handoff_checkpoint,
     build_resume_prompt,
-    is_quota_exhaustion_error,
-    get_quota_error_reason,
 )
 from chad.util.providers import ModelConfig, parse_codex_output, create_provider
 from chad.util.model_catalog import ModelCatalog
@@ -2313,6 +2309,7 @@ class ChadWebUI:
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
         override_prompt: str | None = None,
+        is_followup: bool = False,
     ) -> tuple[bool, str, str | None, dict | None]:
         """Run a task via the API and post events to the message queue.
 
@@ -2401,6 +2398,7 @@ class ChadWebUI:
                 terminal_cols=effective_cols,
                 screenshots=screenshots,
                 override_prompt=override_prompt,
+                is_followup=is_followup,
             )
         except Exception as e:
             message_queue.put(("status", f"❌ Failed to start task: {e}"))
@@ -5080,7 +5078,6 @@ class ChadWebUI:
         chat_history = (
             current_history if len(current_history) >= len(session.chat_history) else session.chat_history.copy()
         )
-        verification_log: list[dict[str, object]] = []
 
         # Stable live_id for DOM patching across the session
         live_stream_id = f"live-{session.id}"
@@ -5121,9 +5118,7 @@ class ChadWebUI:
         # Capture raw message before screenshot/resume-prompt modifications
         raw_followup_message = followup_message
 
-        # The follow-up message IS the new task — use it as the task description
-        # for verification (session.task_description may be empty after merge/discard)
-        task_description = raw_followup_message
+        # The follow-up message IS the new task description
         session.task_description = raw_followup_message
 
         # Append screenshot paths to message if provided
@@ -5212,48 +5207,9 @@ class ChadWebUI:
         handoff_needed = provider_changed or pref_changed or provider_reconnect_needed or session_restart_needed
 
         if handoff_needed:
-            # Get new provider type first (needed for formatting handoff context)
             coding_provider_type = accounts[coding_agent]
 
-            # Log handoff checkpoint to event log before stopping old provider
-            old_provider_type = ""
-            old_model = ""
-            if session.event_log and session.provider:
-                provider_session_id = None
-                if hasattr(session.provider, "get_session_id"):
-                    provider_session_id = session.provider.get_session_id()
-
-                log_handoff_checkpoint(
-                    session.event_log,
-                    session.task_description or "",
-                    provider_session_id,
-                    target_provider=coding_provider_type,
-                )
-
-                # Track old provider info for ProviderSwitchedEvent
-                if session.config:
-                    old_provider_type = getattr(session.config, "provider", "")
-                    old_model = getattr(session.config, "model_name", "") or ""
-
-            # Stop old session if active
-            if session.provider:
-                try:
-                    session.provider.stop_session()
-                except Exception:
-                    pass
-                session.provider = None
-                session.active = False
-
-            # Start new provider
-            coding_config = ModelConfig(
-                provider=coding_provider_type,
-                model_name=requested_model,
-                account_name=coding_agent,
-                reasoning_effort=None if requested_reasoning == "default" else requested_reasoning,
-            )
-
             # Only show handoff message if actually changing provider or preferences
-            # Skip message for silent reconnects (when provider was released after API-based execution)
             if provider_changed or pref_changed:
                 handoff_detail = f"{coding_agent} ({coding_provider_type}"
                 if requested_model and requested_model != "default":
@@ -5265,66 +5221,7 @@ class ChadWebUI:
                 handoff_title = "PROVIDER HANDOFF" if provider_changed else "PREFERENCE UPDATE"
                 handoff_msg = f"───────────── → {handoff_title} ─────────────\n\n" f"*Switching to {handoff_detail}*"
                 chat_history.append({"role": "user", "content": handoff_msg})
-            yield make_followup_yield(chat_history, "→ Reconnecting...", working=True, merge_updates=merge_no_change)
-
-            new_provider = create_provider(coding_config)
-            # Use worktree path if available, otherwise fall back to project path
-            if session.worktree_path:
-                working_dir = str(session.worktree_path)
-            else:
-                working_dir = session.project_path or str(Path.cwd())
-
-            if not new_provider.start_session(working_dir, None):
-                chat_history.append(
-                    {
-                        "role": "assistant",
-                        "content": f"**CODING AI**\n\n❌ *Failed to start {coding_agent} session*",
-                    }
-                )
-                session.config = None
-                yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
-                return
-
-            # Track the switch for UI indication
-            old_account = session.coding_account
-            session.switched_from = old_account if old_account else None
-
-            session.provider = new_provider
-            session.coding_account = coding_agent
-            session.active = True
-            session.config = coding_config
-
-            # Log provider switched event
-            if session.event_log:
-                session.event_log.log(ProviderSwitchedEvent(
-                    from_provider=old_provider_type,
-                    to_provider=coding_provider_type,
-                    from_model=old_model,
-                    to_model=requested_model or "",
-                    reason="user_requested" if provider_changed else "preference_update",
-                ))
-
-            # Build resume prompt from event log if available
-            if session.event_log:
-                followup_message = build_resume_prompt(
-                    session.event_log, followup_message, target_provider=coding_provider_type
-                )
-            else:
-                # Fallback to old method
-                context_summary = self._build_handoff_context(chat_history)
-                followup_message = f"{context_summary}\n\n# Follow-up Request\n\n{followup_message}"
-
-        if not session.active or not session.provider:
-            chat_history.append({"role": "user", "content": f"**Follow-up**\n\n{followup_message}"})
-            chat_history.append(
-                {
-                    "role": "assistant",
-                    "content": "**CODING AI**\n\n❌ *Session expired. Please start a new task.*",
-                }
-            )
-            session.active = False
-            yield make_followup_yield(chat_history, "", show_followup=False, merge_updates=merge_no_change)
-            return
+            yield make_followup_yield(chat_history, "→ Starting follow-up task...", working=True, merge_updates=merge_no_change)
 
         # Add user's follow-up message to history
         # Always use raw_followup_message for display — followup_message may contain
@@ -5333,62 +5230,91 @@ class ChadWebUI:
         user_content = f"{display_prefix}\n\n{raw_followup_message}"
         chat_history.append({"role": "user", "content": user_content})
 
-        # Log follow-up user message to event log
-        if session.event_log:
-            session.event_log.start_turn()
-            session.event_log.log(UserMessageEvent(content=raw_followup_message))
-
         # Insert coding phase milestone for follow-up
         chat_history.append(
             self._make_phase_milestone("Coding", coding_agent, requested_model)
         )
 
-        # Track where the final message will be inserted
-        # Don't add a placeholder - use only the dedicated live stream panel
-        pending_idx = len(chat_history)
-
         yield make_followup_yield(chat_history, "⏳ Processing follow-up...", working=True, merge_updates=merge_no_change)
 
-        # Set up activity callback
-        def on_activity(activity_type: str, detail: str):
-            if activity_type == "stream":
-                message_queue.put(("stream", detail))
-            elif activity_type == "tool":
-                message_queue.put(("activity", f"● {detail}"))
-            elif activity_type == "text" and detail:
-                message_queue.put(("activity", f"  ⎿ {detail[:80]}"))
+        # Build override prompt for follow-up: use resume prompt for handoff, or
+        # the raw follow-up message for same-provider continuations
+        override_prompt = None
+        if handoff_needed and session.event_log:
+            coding_provider_type = accounts.get(coding_agent, "generic")
+            override_prompt = build_resume_prompt(
+                session.event_log, raw_followup_message, target_provider=coding_provider_type
+            )
+        else:
+            override_prompt = followup_message
 
-        coding_provider = session.provider
-        coding_provider.set_activity_callback(on_activity)
-
-        # Send message and wait for response in background
-        relay_complete = threading.Event()
-        response_holder = [None]
-        error_holder = [None]
-
-        def relay_loop():
+        # Stop old provider if active — the API task will spawn a new PTY
+        if session.provider:
             try:
-                coding_provider.send_message(followup_message)
-                response = coding_provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
-                response_holder[0] = response
-            except Exception as e:
-                error_holder[0] = str(e)
-            finally:
-                relay_complete.set()
+                session.provider.stop_session()
+            except Exception:
+                pass
+            session.provider = None
 
-        relay_thread = threading.Thread(target=relay_loop, daemon=True)
-        relay_thread.start()
+        # Determine verification config
+        verification_enabled = verification_agent != self.VERIFICATION_NONE
+        verification_account_for_run = actual_verification_account if verification_enabled else None
 
-        # Stream updates while waiting
+        # Run the follow-up task via the API (same path as start_chad_task)
+        relay_complete = threading.Event()
+        task_success = [False]
+
         import time as time_module
 
-        full_history = []  # List of (ai_name, content, timestamp) tuples
+        full_history = []
         current_ai = "CODING AI"
         display_buffer = LiveStreamDisplayBuffer()
         last_yield_time = 0.0
         min_yield_interval = 0.05
-
         live_stream = ""
+
+        def api_followup_loop():
+            try:
+                success, output, srv_session_id, work_done = self.run_task_via_api(
+                    session_id=session_id,
+                    project_path=session.project_path or str(Path.cwd()),
+                    task_description=raw_followup_message,
+                    coding_account=coding_agent,
+                    message_queue=message_queue,
+                    coding_model=requested_model if requested_model != "default" else None,
+                    coding_reasoning=requested_reasoning if requested_reasoning != "default" else None,
+                    verification_account=verification_account_for_run if verification_enabled else None,
+                    verification_model=resolved_verification_model if verification_enabled else None,
+                    verification_reasoning=resolved_verification_reasoning if verification_enabled else None,
+                    server_session_id=session.server_session_id,
+                    screenshots=screenshots,
+                    override_prompt=override_prompt,
+                    is_followup=True,
+                )
+                task_success[0] = success
+                if srv_session_id:
+                    session.server_session_id = srv_session_id
+                    try:
+                        wt_status = self.api_client.get_worktree_status(srv_session_id)
+                        if wt_status and wt_status.exists:
+                            session.worktree_path = Path(wt_status.path) if wt_status.path else None
+                            session.worktree_branch = wt_status.branch
+                            session.worktree_base_commit = wt_status.base_commit
+                            session.has_worktree_changes = wt_status.has_changes
+                    except Exception:
+                        pass
+            except Exception as exc:
+                message_queue.put(("status", f"❌ Error: {exc}"))
+            finally:
+                session.active = task_success[0]
+                session.provider = None
+                session.coding_account = coding_agent
+                relay_complete.set()
+
+        relay_thread = threading.Thread(target=api_followup_loop, daemon=True)
+        relay_thread.start()
+
+        # Stream events from message_queue while the API task runs
         while not relay_complete.is_set() and not session.cancel_requested:
             try:
                 msg = message_queue.get(timeout=0.02)
@@ -5400,7 +5326,6 @@ class ChadWebUI:
                     if chunk.strip():
                         full_history.append(_history_entry(current_ai, chunk))
                         display_buffer.append(chunk)
-                    # Use HTML chunk from API if available, otherwise render from text
                     if html_chunk:
                         live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai, live_stream_id)
                     elif chunk.strip():
@@ -5410,10 +5335,7 @@ class ChadWebUI:
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
                             yield make_followup_yield(
-                                chat_history,
-                                live_stream,
-                                working=True,
-                                merge_updates=merge_no_change,
+                                chat_history, live_stream, working=True, merge_updates=merge_no_change,
                             )
                             last_yield_time = now
 
@@ -5428,438 +5350,45 @@ class ChadWebUI:
                         "content": f"**{milestone_title}:** {milestone_summary}",
                     })
                     yield make_followup_yield(
-                        chat_history, live_stream,
-                        working=True, merge_updates=merge_no_change,
+                        chat_history, live_stream, working=True, merge_updates=merge_no_change,
                     )
                     last_yield_time = time_module.time()
+
+                elif msg_type == "ai_switch":
+                    current_ai = msg[1]
+                    display_buffer = LiveStreamDisplayBuffer()
+                    session.has_initial_live_render = False
 
                 elif msg_type == "activity":
                     now = time_module.time()
                     if now - last_yield_time >= min_yield_interval:
                         display_content = display_buffer.content
-                        if display_content:
-                            content = display_content + f"\n\n{msg[1]}"
-                        else:
-                            content = msg[1]
-                        # Update only the dedicated live stream panel
+                        content = display_content + f"\n\n{msg[1]}" if display_content else msg[1]
                         live_stream = build_live_stream_html(content, current_ai, live_stream_id)
                         yield make_followup_yield(
-                            chat_history,
-                            live_stream,
-                            working=True,
-                            merge_updates=merge_no_change,
+                            chat_history, live_stream, working=True, merge_updates=merge_no_change,
                         )
                         last_yield_time = now
+
+                elif msg_type == "status":
+                    pass  # Status events handled by milestones
 
             except queue.Empty:
                 now = time_module.time()
                 if now - last_yield_time >= 0.3:
                     display_content = display_buffer.content
                     if display_content:
-                        # Update only the dedicated live stream panel
                         live_stream = build_live_stream_html(display_content, current_ai, live_stream_id)
                         yield make_followup_yield(
-                            chat_history,
-                            live_stream,
-                            working=True,
-                            merge_updates=merge_no_change,
+                            chat_history, live_stream, working=True, merge_updates=merge_no_change,
                         )
                         last_yield_time = now
 
         relay_thread.join(timeout=1)
 
-        # Insert final response into chat history
-        if error_holder[0]:
-            # Try auto-switch on quota exhaustion
-            switched, new_account = self._try_auto_switch_provider(session, error_holder[0])
-            if switched and new_account:
-                # Show switch notification in chat
-                switch_msg = (
-                    f"───────────── → AUTO-SWITCH ─────────────\n\n"
-                    f"*Quota/rate limit reached on {session.switched_from}. "
-                    f"Switching to {new_account}...*"
-                )
-                chat_history.append({"role": "user", "content": switch_msg})
-                yield make_followup_yield(chat_history, "→ Retrying with fallback provider...", working=True, merge_updates=merge_no_change)
-
-                # Build resume prompt and retry
-                new_provider_type = session.config.provider if session.config else "generic"
-                if session.event_log:
-                    retry_message = build_resume_prompt(
-                        session.event_log, followup_message, target_provider=new_provider_type
-                    )
-                else:
-                    retry_message = followup_message
-
-                # Retry with new provider
-                retry_response_holder = [None]
-                retry_error_holder = [None]
-                retry_complete = threading.Event()
-
-                def retry_relay():
-                    try:
-                        session.provider.send_message(retry_message)
-                        response = session.provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
-                        retry_response_holder[0] = response
-                    except Exception as e:
-                        retry_error_holder[0] = str(e)
-                    finally:
-                        retry_complete.set()
-
-                retry_thread = threading.Thread(target=retry_relay, daemon=True)
-                retry_thread.start()
-
-                # Wait for retry with streaming
-                retry_live_stream = ""
-                while not retry_complete.is_set() and not session.cancel_requested:
-                    try:
-                        msg = message_queue.get(timeout=0.1)
-                        if msg[0] == "stream":
-                            chunk = msg[1]
-                            html_chunk = msg[2] if len(msg) > 2 else None
-                            if chunk.strip():
-                                full_history.append(_history_entry(current_ai, chunk))
-                                display_buffer.append(chunk)
-                            if html_chunk:
-                                retry_live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai, live_stream_id)
-                            elif chunk.strip():
-                                retry_live_stream = build_live_stream_html(display_buffer.content, current_ai, live_stream_id)
-                            if retry_live_stream:
-                                session.last_live_stream = retry_live_stream
-                                yield make_followup_yield(chat_history, retry_live_stream, working=True, merge_updates=merge_no_change)
-                    except queue.Empty:
-                        pass
-
-                # Final yield to ensure content is shown
-                if retry_live_stream:
-                    yield make_followup_yield(chat_history, retry_live_stream, working=True, merge_updates=merge_no_change)
-
-                retry_thread.join(timeout=1)
-
-                if retry_error_holder[0]:
-                    # Retry also failed
-                    chat_history.insert(pending_idx, {
-                        "role": "assistant",
-                        "content": f"**CODING AI**\n\n❌ *Error after auto-switch: {retry_error_holder[0]}*",
-                    })
-                    session.active = False
-                    session.provider = None
-                    session.config = None
-                    self._update_session_log(session, chat_history, full_history)
-                    yield make_followup_yield(chat_history, "", show_followup=False, merge_updates=merge_no_change)
-                    return
-
-                if retry_response_holder[0]:
-                    # Update response holder with retry result
-                    response_holder[0] = retry_response_holder[0]
-                    error_holder[0] = None
-            else:
-                # No auto-switch available, show original error
-                chat_history.insert(pending_idx, {
-                    "role": "assistant",
-                    "content": f"**CODING AI**\n\n❌ *Error: {error_holder[0]}*",
-                })
-                session.active = False
-                session.provider = None
-                session.config = None
-                self._update_session_log(session, chat_history, full_history)
-                yield make_followup_yield(chat_history, "", show_followup=False, merge_updates=merge_no_change)
-                return
-
-        if not response_holder[0]:
-            chat_history.insert(pending_idx, {
-                "role": "assistant",
-                "content": "**CODING AI**\n\n❌ *No response received*",
-            })
-            self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
-            yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
-            return
-
-        parsed = parse_codex_output(response_holder[0])
-        chat_history.insert(pending_idx, make_chat_message("CODING AI", parsed))
-        last_coding_output = parsed
-
-        # Log assistant response to event log
-        if session.event_log and parsed:
-            session.event_log.log(AssistantMessageEvent(
-                blocks=[{"kind": "text", "content": parsed[:1000]}]
-            ))
-
-        # Update stored history
+        # Always update stored history after follow-up completes
         session.chat_history = chat_history
-        self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
-
-        yield make_followup_yield(chat_history, "", show_followup=True, working=True, merge_updates=merge_no_change)
-
-        # Run verification on follow-up
-        verification_enabled = verification_agent != self.VERIFICATION_NONE
-        verification_account_for_run = actual_verification_account if verification_enabled else None
-
-        if verification_account_for_run and verification_account_for_run in accounts:
-            # Verification loop (like start_chad_task)
-            max_verification_attempts = self.api_client.get_max_verification_attempts()
-            verification_attempt = 0
-            verified = False
-
-            while not verified and verification_attempt < max_verification_attempts and not session.cancel_requested:
-                verification_attempt += 1
-                chat_history.append(
-                    self._make_phase_milestone(
-                        "Verification", verification_account_for_run, resolved_verification_model
-                    )
-                )
-                chat_history.append(
-                    {
-                        "role": "user",
-                        "content": f"───────────── 🔍 VERIFICATION (Attempt {verification_attempt}) ─────────────",
-                    }
-                )
-                self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
-
-                verify_placeholder = build_live_stream_html(
-                    "🔍 Starting verification...", "VERIFICATION AI", live_stream_id
-                )
-                # Reset live render flag so verification gets a full render, not a patch
-                session.has_initial_live_render = False
-                yield make_followup_yield(chat_history, verify_placeholder, working=True, merge_updates=merge_no_change)
-
-                def verification_activity(activity_type: str, detail: str):
-                    content = detail if activity_type == "stream" else f"[{activity_type}] {detail}\n"
-                    message_queue.put(("verify_stream", content))
-
-                # Run verification in worktree so it can see the changes
-                verification_path = str(session.worktree_path or session.project_path or Path.cwd())
-                verification_result: list = [None, None]  # [verified, feedback]
-                verification_complete = threading.Event()
-
-                def run_verification_thread():
-                    try:
-                        v, f = self._run_verification(
-                            verification_path,
-                            last_coding_output,
-                            task_description,
-                            verification_account_for_run,
-                            on_activity=verification_activity,
-                            verification_model=resolved_verification_model,
-                            verification_reasoning=resolved_verification_reasoning,
-                        )
-                        verification_result[0] = v
-                        verification_result[1] = f
-                    except Exception as exc:
-                        verification_result[0] = None
-                        verification_result[1] = f"Verification error: {exc}"
-                    finally:
-                        verification_complete.set()
-
-                verification_thread = threading.Thread(target=run_verification_thread, daemon=True)
-                verification_thread.start()
-
-                # Poll message queue while verification runs and stream to live view
-                verify_display_buffer = LiveStreamDisplayBuffer()
-                verify_display_buffer.append("🔍 Starting verification...\n")
-                verify_last_yield = 0.0
-                verify_live_stream = ""
-                while not verification_complete.is_set() and not session.cancel_requested:
-                    try:
-                        msg = message_queue.get(timeout=0.05)
-                        if msg[0] == "verify_stream":
-                            chunk = msg[1]
-                            if chunk.strip():
-                                verify_display_buffer.append(chunk)
-                                verify_live_stream = build_live_stream_html(
-                                    verify_display_buffer.content, "VERIFICATION AI", live_stream_id
-                                )
-                                if verify_live_stream:
-                                    session.last_live_stream = verify_live_stream
-                                now = time_module.time()
-                                if now - verify_last_yield >= min_yield_interval:
-                                    yield make_followup_yield(chat_history, verify_live_stream, working=True, merge_updates=merge_no_change)
-                                    verify_last_yield = now
-                    except queue.Empty:
-                        pass
-
-                # Final yield to ensure content is shown even if loop exited quickly
-                if verify_live_stream:
-                    yield make_followup_yield(chat_history, verify_live_stream, working=True, merge_updates=merge_no_change)
-
-                verification_thread.join(timeout=1.0)
-                verified, verification_feedback = verification_result[0], verification_result[1]
-
-                status_label = "error" if verified is None else ("passed" if verified else "failed")
-                verification_log.append(
-                    {
-                        "attempt": verification_attempt,
-                        "status": status_label,
-                        "feedback": verification_feedback,
-                        "account": verification_account_for_run,
-                    }
-                )
-
-                if verified is None:
-                    # Verification error - stop
-                    chat_history.append(
-                        {
-                            "role": "assistant",
-                            "content": f"**VERIFICATION AI**\n\n❌ {verification_feedback}",
-                        }
-                    )
-                    chat_history.append(
-                        {
-                            "role": "user",
-                            "content": "───────────── ❌ VERIFICATION ERROR ─────────────",
-                        }
-                    )
-                    if session.event_log:
-                        session.event_log.log(VerificationAttemptEvent(
-                            attempt_number=verification_attempt,
-                            passed=False,
-                            summary="Verification error",
-                        ))
-                    self._update_session_log(
-                        session, chat_history, full_history, verification_attempts=verification_log
-                    )
-                    break
-                elif verified:
-                    chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
-                    chat_history.append(
-                        {
-                            "role": "user",
-                            "content": "───────────── ✅ VERIFICATION PASSED ─────────────",
-                        }
-                    )
-                    if session.event_log:
-                        session.event_log.log(VerificationAttemptEvent(
-                            attempt_number=verification_attempt,
-                            passed=True,
-                            summary=verification_feedback[:500] if verification_feedback else "",
-                        ))
-                    self._update_session_log(
-                        session, chat_history, full_history, verification_attempts=verification_log
-                    )
-                else:
-                    chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
-                    if session.event_log:
-                        session.event_log.log(VerificationAttemptEvent(
-                            attempt_number=verification_attempt,
-                            passed=False,
-                            summary=verification_feedback[:500] if verification_feedback else "",
-                        ))
-                    self._update_session_log(
-                        session, chat_history, full_history, verification_attempts=verification_log
-                    )
-
-                    # Check if we can revise
-                    can_revise = (
-                        session.active
-                        and coding_provider.is_alive()
-                        and verification_attempt < max_verification_attempts
-                    )
-                    if can_revise:
-                        chat_history.append(
-                            self._make_phase_milestone("Re-coding", coding_agent, requested_model)
-                        )
-                        chat_history.append(
-                            {
-                                "role": "user",
-                                "content": "───────────── → REVISION REQUESTED ─────────────",
-                            }
-                        )
-                        chat_history.append(
-                            {
-                                "role": "assistant",
-                                "content": "**CODING AI**\n\n⏳ *Working on revisions...*",
-                            }
-                        )
-                        revision_idx = len(chat_history) - 1
-                        self._update_session_log(
-                            session, chat_history, full_history, verification_attempts=verification_log
-                        )
-                        # Show live stream placeholder during revision
-                        revision_placeholder = build_live_stream_html("→ Revision in progress...", "CODING AI", live_stream_id)
-                        # Reset live render flag so revision gets a full render, not a patch
-                        session.has_initial_live_render = False
-                        yield make_followup_yield(chat_history, revision_placeholder, working=True, merge_updates=merge_no_change)
-
-                        revision_request = (
-                            "The verification agent found issues with your work. "
-                            "Please address them:\n\n"
-                            f"{verification_feedback}\n\n"
-                            "Please fix these issues and confirm when done."
-                        )
-                        if session.event_log:
-                            session.event_log.log(UserMessageEvent(content="Revision requested"))
-                        try:
-                            coding_provider.send_message(revision_request)
-                            revision_response = coding_provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
-                        except Exception as exc:
-                            chat_history[revision_idx] = {
-                                "role": "assistant",
-                                "content": f"**CODING AI**\n\n❌ *Error: {exc}*",
-                            }
-                            session.active = False
-                            session.provider = None
-                            session.config = None
-                            self._update_session_log(
-                                session, chat_history, full_history, verification_attempts=verification_log
-                            )
-                            break
-
-                        if revision_response:
-                            parsed_revision = parse_codex_output(revision_response)
-                            chat_history[revision_idx] = make_chat_message("CODING AI", parsed_revision)
-                            last_coding_output = parsed_revision
-                            if session.event_log and parsed_revision:
-                                session.event_log.log(AssistantMessageEvent(
-                                    blocks=[{"kind": "text", "content": parsed_revision[:1000]}]
-                                ))
-                            self._update_session_log(
-                                session, chat_history, full_history, verification_attempts=verification_log
-                            )
-                        else:
-                            chat_history[revision_idx] = {
-                                "role": "assistant",
-                                "content": "**CODING AI**\n\n❌ *No response to revision request*",
-                            }
-                            self._update_session_log(
-                                session, chat_history, full_history, verification_attempts=verification_log
-                            )
-                            break
-
-                        chat_history.append(
-                            self._make_phase_milestone(
-                                "Re-verification", verification_account_for_run, resolved_verification_model
-                            )
-                        )
-                        reverify_placeholder = build_live_stream_html(
-                            "✓ Revision complete, re-verifying...", "VERIFICATION AI", live_stream_id
-                        )
-                        yield make_followup_yield(
-                            chat_history,
-                            reverify_placeholder,
-                            working=True,
-                            merge_updates=merge_no_change,
-                        )
-                    else:
-                        # Can't continue - add failure message
-                        chat_history.append(
-                            {
-                                "role": "user",
-                                "content": "───────────── ❌ VERIFICATION FAILED ─────────────",
-                            }
-                        )
-                        self._update_session_log(
-                            session, chat_history, full_history, verification_attempts=verification_log
-                        )
-                        break
-
-                # Incremental session log update after each verification attempt
-                self._update_session_log(
-                    session, chat_history, full_history, verification_attempts=verification_log
-                )
-
-        # Always update stored history and session log after follow-up completes
-        session.chat_history = chat_history
-        self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
+        self._update_session_log(session, chat_history, full_history)
 
         def build_merge_updates():
             if not session.project_path:
@@ -6342,159 +5871,6 @@ class ChadWebUI:
             "",                                          # merge_section_header
             "",                                          # diff_content
         )
-
-    def _build_handoff_context(self, chat_history: list) -> str:
-        """Build a context summary for provider handoff.
-
-        Args:
-            chat_history: The current chat history
-
-        Returns:
-            A summary of the conversation for the new provider
-        """
-        # Extract key messages from history
-        context_parts = ["# Previous Conversation Summary\n"]
-
-        for msg in chat_history:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-
-            # Skip dividers and status messages
-            if "─────" in content:
-                continue
-
-            if role == "user" and content.startswith("**Task**"):
-                context_parts.append(f"**Original Task:**\n{content.replace('**Task**', '').strip()}\n")
-            elif role == "assistant" and "CODING AI" in content:
-                # Summarize the response (first 500 chars)
-                summary = content.replace("**CODING AI**", "").strip()[:500]
-                if len(summary) == 500:
-                    summary += "..."
-                context_parts.append(f"**Previous Response (summary):**\n{summary}\n")
-
-        return "\n".join(context_parts)
-
-    def _try_auto_switch_provider(
-        self,
-        session: Session,
-        error_message: str,
-    ) -> tuple[bool, str | None]:
-        """Attempt to auto-switch to a fallback provider on quota exhaustion.
-
-        Args:
-            session: The current session
-            error_message: The error message from the failed provider
-
-        Returns:
-            Tuple of (switched: bool, new_account: str | None)
-            switched is True if we successfully switched to a new provider
-            new_account is the name of the new account, or None if no switch occurred
-        """
-        if not is_quota_exhaustion_error(error_message):
-            return False, None
-
-        current_account = session.coding_account
-        if not current_account:
-            return False, None
-
-        # Get switch target from action_settings
-        next_account = None
-        try:
-            for s in self.api_client.get_action_settings():
-                if s.get("action") == "switch_provider" and s.get("target_account"):
-                    next_account = s["target_account"]
-                    break
-        except Exception:
-            return False, None
-
-        if not next_account:
-            return False, None
-
-        # Get the new account's provider type
-        try:
-            accounts = {acc.name: acc.provider for acc in self.api_client.list_accounts()}
-            if next_account not in accounts:
-                return False, None
-            next_provider_type = accounts[next_account]
-        except Exception:
-            return False, None
-
-        # Log handoff checkpoint before stopping old provider
-        if session.event_log and session.provider:
-            provider_session_id = None
-            if hasattr(session.provider, "get_session_id"):
-                provider_session_id = session.provider.get_session_id()
-
-            log_handoff_checkpoint(
-                session.event_log,
-                session.task_description or "",
-                provider_session_id,
-                target_provider=next_provider_type,
-            )
-
-        # Track old provider info
-        old_provider_type = ""
-        old_model = ""
-        if session.config:
-            old_provider_type = getattr(session.config, "provider", "")
-            old_model = getattr(session.config, "model_name", "") or ""
-
-        # Stop old provider
-        if session.provider:
-            try:
-                session.provider.stop_session()
-            except Exception:
-                pass
-            session.provider = None
-            session.active = False
-
-        # Get new account info for model/reasoning
-        try:
-            next_acc = self.api_client.get_account(next_account)
-            next_model = next_acc.model or "default"
-            next_reasoning = next_acc.reasoning or "default"
-        except Exception:
-            next_model = "default"
-            next_reasoning = "default"
-
-        # Create new provider
-        new_config = ModelConfig(
-            provider=next_provider_type,
-            model_name=next_model,
-            account_name=next_account,
-            reasoning_effort=None if next_reasoning == "default" else next_reasoning,
-        )
-
-        new_provider = create_provider(new_config)
-
-        # Use worktree path if available
-        if session.worktree_path:
-            working_dir = str(session.worktree_path)
-        else:
-            working_dir = session.project_path or "."
-
-        if not new_provider.start_session(working_dir, None):
-            return False, None
-
-        # Track the switch
-        session.switched_from = current_account
-        session.provider = new_provider
-        session.coding_account = next_account
-        session.active = True
-        session.config = new_config
-
-        # Log provider switched event
-        reason = get_quota_error_reason(error_message) or "quota_exhaustion"
-        if session.event_log:
-            session.event_log.log(ProviderSwitchedEvent(
-                from_provider=old_provider_type,
-                to_provider=next_provider_type,
-                from_model=old_model,
-                to_model=next_model,
-                reason=f"auto_switch_{reason}",
-            ))
-
-        return True, next_account
 
     def _last_event_info(self, session: Session) -> dict | None:
         """Return the last event snapshot from the provider if available."""

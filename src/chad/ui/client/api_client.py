@@ -17,6 +17,7 @@ class Session:
     active: bool
     has_worktree: bool
     has_changes: bool
+    coding_account: str | None
     created_at: datetime
     last_activity: datetime
 
@@ -205,6 +206,7 @@ class APIClient:
             active=data.get("active", False),
             has_worktree=data.get("has_worktree", False),
             has_changes=data.get("has_changes", False),
+            coding_account=data.get("coding_account"),
             created_at=self._parse_datetime(data["created_at"]),
             last_activity=self._parse_datetime(data["last_activity"]),
         )
@@ -351,6 +353,7 @@ class APIClient:
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
         override_prompt: str | None = None,
+        is_followup: bool = False,
         # Legacy kwargs
         override_exploration_prompt: str | None = None,
         override_implementation_prompt: str | None = None,
@@ -389,6 +392,8 @@ class APIClient:
         effective_prompt = override_prompt or override_exploration_prompt
         if effective_prompt:
             data["override_prompt"] = effective_prompt
+        if is_followup:
+            data["is_followup"] = True
 
         resp = self._client.post(
             self._url(f"/sessions/{session_id}/tasks"),

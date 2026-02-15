@@ -3284,3 +3284,39 @@ class TestMockProviderQuotaSimulation:
         # Should use default 0.5 usage and work normally
         response = provider.get_response()
         assert response
+
+
+class TestMockProviderUsageReporting:
+    """Tests for MockProvider's usage reporting (supports_usage_reporting, get_*_usage_percentage)."""
+
+    def test_mock_provider_reports_usage(self, tmp_path):
+        """MockProvider.supports_usage_reporting() returns True and usage percentages are correct."""
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-usage",
+        )
+        provider = MockProvider(model_config)
+        provider._get_remaining_usage = lambda: 0.55
+
+        assert provider.supports_usage_reporting() is True
+        # Usage = (1.0 - 0.55) * 100 = 45.0
+        assert provider.get_session_usage_percentage() == 45.0
+        assert provider.get_context_usage_percentage() == 45.0
+
+    def test_mock_provider_usage_at_boundaries(self, tmp_path):
+        """MockProvider usage reporting at 0% and 100%."""
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-bounds",
+        )
+        provider = MockProvider(model_config)
+
+        # Full capacity remaining → 0% used
+        provider._get_remaining_usage = lambda: 1.0
+        assert provider.get_session_usage_percentage() == 0.0
+
+        # No capacity remaining → 100% used
+        provider._get_remaining_usage = lambda: 0.0
+        assert provider.get_session_usage_percentage() == 100.0
