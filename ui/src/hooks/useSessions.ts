@@ -28,10 +28,11 @@ export function useSessions(api: ChadAPI | null, version: number) {
   }, [refresh, version]);
 
   const createSession = useCallback(
-    async (projectPath?: string) => {
+    async (projectPath?: string, name?: string) => {
       if (!api) return null;
       const session = await api.createSession({
         project_path: projectPath,
+        name: name,
       });
       await refresh();
       return session;

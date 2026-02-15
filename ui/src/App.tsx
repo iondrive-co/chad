@@ -31,6 +31,20 @@ export function App() {
           if (status.cwd) {
             setDefaultProjectPath(status.cwd);
           }
+          // Auto-create "Task 1" session on first connect if none selected
+          const sessionsData = await api.listSessions();
+          if (sessionsData.sessions.length === 0) {
+            // No sessions - create first one
+            const newSession = await api.createSession({
+              name: "Task 1",
+              project_path: status.cwd || null,
+            });
+            setSelectedSession(newSession.id);
+            setSessionVersion((v) => v + 1);
+          } else if (!sessionsData.sessions.some((s) => s.active)) {
+            // No active sessions - select the most recent one
+            setSelectedSession(sessionsData.sessions[0].id);
+          }
         }
       } catch {
         if (!cancelled) {
@@ -94,6 +108,7 @@ export function App() {
             <main className="main">
               {selectedSession ? (
                 <ChatView
+                  key={selectedSession}
                   api={api}
                   sessionId={selectedSession}
                   onSessionChange={refreshSessions}

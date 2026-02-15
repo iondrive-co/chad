@@ -27,7 +27,17 @@ export function SessionList({
   const handleCreate = useCallback(async () => {
     setCreating(true);
     try {
-      const session = await createSession(projectPath || undefined);
+      // Compute next task number from existing sessions
+      const taskNumbers = sessions
+        .map((s) => {
+          const match = s.name.match(/^Task (\d+)$/);
+          return match ? parseInt(match[1], 10) : 0;
+        })
+        .filter((n) => n > 0);
+      const nextNumber = taskNumbers.length > 0 ? Math.max(...taskNumbers) + 1 : 1;
+      const taskName = `Task ${nextNumber}`;
+
+      const session = await createSession(projectPath || undefined, taskName);
       if (session) {
         onSelect(session.id);
         onRefresh();
@@ -35,7 +45,7 @@ export function SessionList({
     } finally {
       setCreating(false);
     }
-  }, [createSession, projectPath, onSelect, onRefresh]);
+  }, [createSession, projectPath, sessions, onSelect, onRefresh]);
 
   const handleDelete = useCallback(
     async (e: React.MouseEvent, id: string) => {
@@ -72,7 +82,8 @@ export function SessionList({
             onClick={() => onSelect(s.id)}
           >
             <span className="session-name">{s.name}</span>
-            {s.active && <span className="badge">running</span>}
+            {s.active && <span className="badge running-badge">running</span>}
+            {s.has_changes && !s.active && <span className="badge changes-badge">changes</span>}
             <button
               className="delete-btn"
               onClick={(e) => handleDelete(e, s.id)}

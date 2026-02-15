@@ -225,6 +225,11 @@ export interface MergeResult {
   conflicts: MergeConflict[] | null;
 }
 
+export interface BranchesResponse {
+  branches: string[];
+  default: string;
+}
+
 // ── Streaming types ──
 
 export type StreamEventType =

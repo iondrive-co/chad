@@ -41,6 +41,8 @@ from .worktree import (
     MergeResponse,
     WorktreeResetResponse,
     WorktreeDeleteResponse,
+    ResolveConflictsRequest,
+    BranchesResponse,
 )
 from .config import (
     VerificationSettings,
@@ -105,6 +107,8 @@ __all__ = [
     "MergeResponse",
     "WorktreeResetResponse",
     "WorktreeDeleteResponse",
+    "ResolveConflictsRequest",
+    "BranchesResponse",
     # Config
     "VerificationSettings",
     "CleanupSettings",

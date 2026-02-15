@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import type { ChadAPI, Account } from "chad-client";
+import type { ChadAPI, Account, ProviderInfo } from "chad-client";
 import { AccountPicker } from "./AccountPicker.tsx";
 
 interface Props {
@@ -8,6 +8,8 @@ interface Props {
   onStart: () => void;
   defaultProjectPath?: string;
 }
+
+const REASONING_OPTIONS = ["", "low", "medium", "high"];
 
 export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: Props) {
   const [description, setDescription] = useState("");
@@ -18,6 +20,32 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Provider info for reasoning support
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [codingReasoning, setCodingReasoning] = useState("");
+
+  // Verification agent fields
+  const [useVerification, setUseVerification] = useState(false);
+  const [verificationAccount, setVerificationAccount] = useState<Account | null>(null);
+  const [verificationModel, setVerificationModel] = useState("");
+  const [verificationModels, setVerificationModels] = useState<string[]>([]);
+  const [verificationReasoning, setVerificationReasoning] = useState("");
+
+  // Fetch provider info once
+  useEffect(() => {
+    api.listProviders()
+      .then((r) => setProviders(r.providers))
+      .catch(() => setProviders([]));
+  }, [api]);
+
+  // Check if current coding account's provider supports reasoning
+  const codingProvider = providers.find((p) => p.type === account?.provider);
+  const codingSupportsReasoning = codingProvider?.supports_reasoning ?? false;
+
+  // Check if verification account's provider supports reasoning
+  const verificationProvider = providers.find((p) => p.type === verificationAccount?.provider);
+  const verificationSupportsReasoning = verificationProvider?.supports_reasoning ?? false;
+
   // Sync project path when default arrives from preferences (async)
   useEffect(() => {
     if (defaultProjectPath && !projectPath) {
@@ -25,7 +53,7 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
     }
   }, [defaultProjectPath]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Fetch available models when account changes
+  // Fetch available models when coding account changes
   useEffect(() => {
     if (!account) {
       setModels([]);
@@ -36,6 +64,18 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
       .then((r) => setModels(r.models))
       .catch(() => setModels([]));
   }, [api, account]);
+
+  // Fetch available models when verification account changes
+  useEffect(() => {
+    if (!verificationAccount) {
+      setVerificationModels([]);
+      return;
+    }
+    api
+      .getAccountModels(verificationAccount.name)
+      .then((r) => setVerificationModels(r.models))
+      .catch(() => setVerificationModels([]));
+  }, [api, verificationAccount]);
 
   const missingFields: string[] = [];
   if (!projectPath.trim()) missingFields.push("project path");
@@ -58,6 +98,10 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
         task_description: description.trim(),
         coding_agent: account!.name,
         coding_model: modelOverride || undefined,
+        coding_reasoning: codingReasoning || undefined,
+        verification_agent: useVerification && verificationAccount ? verificationAccount.name : undefined,
+        verification_model: useVerification && verificationModel ? verificationModel : undefined,
+        verification_reasoning: useVerification && verificationReasoning ? verificationReasoning : undefined,
       });
       onStart();
     } catch (e) {
@@ -65,7 +109,11 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
     } finally {
       setStarting(false);
     }
-  }, [api, sessionId, description, projectPath, account, modelOverride, onStart, canStart]);
+  }, [
+    api, sessionId, description, projectPath, account, modelOverride,
+    codingReasoning, useVerification, verificationAccount, verificationModel,
+    verificationReasoning, onStart, canStart,
+  ]);
 
   return (
     <div className="task-form">
@@ -112,6 +160,80 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
           </select>
         </label>
       )}
+
+      {codingSupportsReasoning && (
+        <label>
+          Coding Reasoning (optional)
+          <select
+            value={codingReasoning}
+            onChange={(e) => setCodingReasoning(e.target.value)}
+          >
+            {REASONING_OPTIONS.map((r) => (
+              <option key={r} value={r}>
+                {r || "Default"}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+
+      {/* Verification Agent Section */}
+      <div className="verification-section">
+        <label className="toggle-label">
+          <input
+            type="checkbox"
+            checked={useVerification}
+            onChange={(e) => setUseVerification(e.target.checked)}
+          />
+          Use separate verification agent
+        </label>
+
+        {useVerification && (
+          <>
+            <label>
+              Verification Agent
+              <AccountPicker
+                api={api}
+                selected={verificationAccount}
+                onSelect={setVerificationAccount}
+              />
+            </label>
+
+            {verificationModels.length > 0 && (
+              <label>
+                Verification Model (optional)
+                <select
+                  value={verificationModel}
+                  onChange={(e) => setVerificationModel(e.target.value)}
+                >
+                  <option value="">Default ({verificationAccount?.model ?? "auto"})</option>
+                  {verificationModels.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+
+            {verificationSupportsReasoning && (
+              <label>
+                Verification Reasoning (optional)
+                <select
+                  value={verificationReasoning}
+                  onChange={(e) => setVerificationReasoning(e.target.value)}
+                >
+                  {REASONING_OPTIONS.map((r) => (
+                    <option key={r} value={r}>
+                      {r || "Default"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </>
+        )}
+      </div>
 
       {error && <div className="error-text">{error}</div>}
 

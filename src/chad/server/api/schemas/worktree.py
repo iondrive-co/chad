@@ -79,6 +79,7 @@ class MergeRequest(BaseModel):
     """Request model for merging worktree changes."""
 
     target_branch: str | None = Field(default=None, description="Target branch for merge")
+    commit_message: str | None = Field(default=None, description="Custom commit message for merge")
 
 
 class MergeResponse(BaseModel):
@@ -103,3 +104,16 @@ class WorktreeDeleteResponse(BaseModel):
     session_id: str
     deleted: bool = True
     message: str = "Worktree deleted successfully"
+
+
+class ResolveConflictsRequest(BaseModel):
+    """Request model for resolving merge conflicts."""
+
+    use_incoming: bool = Field(description="If true, accept all incoming changes; if false, keep original")
+
+
+class BranchesResponse(BaseModel):
+    """Response model for listing branches."""
+
+    branches: list[str] = Field(description="List of branch names")
+    default: str = Field(description="Name of the default/main branch")
