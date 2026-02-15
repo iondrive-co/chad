@@ -3301,8 +3301,8 @@ class TestMockProviderUsageReporting:
 
         assert provider.supports_usage_reporting() is True
         # Usage = (1.0 - 0.55) * 100 = 45.0
-        assert provider.get_session_usage_percentage() == 45.0
-        assert provider.get_context_usage_percentage() == 45.0
+        assert abs(provider.get_session_usage_percentage() - 45.0) < 0.01
+        assert abs(provider.get_context_usage_percentage() - 45.0) < 0.01
 
     def test_mock_provider_usage_at_boundaries(self, tmp_path):
         """MockProvider usage reporting at 0% and 100%."""

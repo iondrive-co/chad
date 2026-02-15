@@ -17,9 +17,9 @@ class Session:
     active: bool
     has_worktree: bool
     has_changes: bool
-    coding_account: str | None
     created_at: datetime
     last_activity: datetime
+    coding_account: str | None = None
 
 
 @dataclass
