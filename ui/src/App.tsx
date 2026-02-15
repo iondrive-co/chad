@@ -23,16 +23,14 @@ export function App() {
     let timer: ReturnType<typeof setTimeout>;
     const tryConnect = async () => {
       try {
-        await api.getStatus();
+        const status = await api.getStatus();
         if (!cancelled) {
           setConnected(true);
           setError(null);
-          // Load last project path
-          api.getPreferences().then((p) => {
-            if (!cancelled && p.last_project_path) {
-              setDefaultProjectPath(p.last_project_path);
-            }
-          }).catch(() => {});
+          // Use server cwd as default project path
+          if (status.cwd) {
+            setDefaultProjectPath(status.cwd);
+          }
         }
       } catch {
         if (!cancelled) {
