@@ -27,6 +27,8 @@ class TaskCreate(BaseModel):
     screenshots: list[str] | None = Field(default=None, description="List of screenshot file paths")
     # User-edited prompt override (used instead of auto-generated prompt)
     override_prompt: str | None = Field(default=None, description="Override for the coding prompt")
+    # Follow-up mode: reuse existing worktree instead of creating a new one
+    is_followup: bool = Field(default=False, description="Whether this is a follow-up task reusing an existing worktree")
     # Legacy fields for backwards compatibility
     override_exploration_prompt: str | None = Field(default=None, description="Legacy: alias for override_prompt")
     override_implementation_prompt: str | None = Field(default=None, description="Legacy: ignored")

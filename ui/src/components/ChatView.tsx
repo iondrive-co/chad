@@ -26,6 +26,7 @@ export function ChatView({
   const [followupText, setFollowupText] = useState("");
   const [sending, setSending] = useState(false);
   const [showMerge, setShowMerge] = useState(false);
+  const [lastCodingAgent, setLastCodingAgent] = useState<string | null>(null);
   const outputRef = useRef<HTMLPreElement>(null);
 
   const { terminalOutput, events, completed, error, reset } = useStream(
@@ -55,10 +56,11 @@ export function ChatView({
     }
   }, [api, completed, sessionId, onSessionChange]);
 
-  const handleTaskStart = useCallback(() => {
+  const handleTaskStart = useCallback((codingAgent: string) => {
     reset();
     setTaskActive(true);
     setShowMerge(false);
+    setLastCodingAgent(codingAgent);
   }, [reset]);
 
   const handleMergeDone = useCallback(() => {
@@ -78,7 +80,23 @@ export function ChatView({
     if (!followupText.trim()) return;
     setSending(true);
     try {
-      await api.sendMessage(sessionId, followupText.trim());
+      // Resolve the coding agent: prefer lastCodingAgent, fall back to session's coding_account
+      let codingAgent = lastCodingAgent;
+      if (!codingAgent) {
+        const session = await api.getSession(sessionId);
+        codingAgent = session.coding_account ?? null;
+      }
+      if (!codingAgent) {
+        setSending(false);
+        return;
+      }
+      const session = await api.getSession(sessionId);
+      await api.startTask(sessionId, {
+        project_path: session.project_path || defaultProjectPath,
+        task_description: followupText.trim(),
+        coding_agent: codingAgent,
+        is_followup: true,
+      });
       setFollowupText("");
       reset();
       setTaskActive(true);
@@ -87,7 +105,7 @@ export function ChatView({
     } finally {
       setSending(false);
     }
-  }, [api, sessionId, followupText, reset]);
+  }, [api, sessionId, followupText, reset, lastCodingAgent, defaultProjectPath]);
 
   const handleFollowupKeyDown = useCallback(
     (e: React.KeyboardEvent) => {

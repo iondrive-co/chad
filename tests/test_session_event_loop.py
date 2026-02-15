@@ -1040,3 +1040,51 @@ class TestMessageForwarding:
 
         assert service.sent == [('stream-live', b'hold this\n', False)]
         assert loop._message_queue.empty()
+
+
+class TestFollowupThresholdFires:
+    """Tests that follow-up tasks create a SessionEventLoop with threshold monitoring."""
+
+    def test_followup_threshold_fires_switch_provider(self):
+        """Configure action_settings with switch_provider at 45% context_usage.
+
+        MockProvider's usage reporting returns (1.0 - remaining) * 100.
+        With remaining=0.55, usage=45%. Verify _pending_action is set when threshold crossed.
+        """
+        event_log = FakeEventLog()
+        emitted = []
+        terminated = []
+
+        pct = [40.0]  # Start below threshold
+        loop = SessionEventLoop(
+            session_id="followup-test",
+            event_log=event_log,
+            task=None,
+            run_phase_fn=None,
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            get_context_usage_fn=lambda: pct[0],
+            action_settings=[
+                {
+                    "event": "context_usage",
+                    "threshold": 45,
+                    "action": "switch_provider",
+                    "target_account": "codex-home",
+                },
+            ],
+            terminate_pty_fn=lambda: terminated.append(True),
+        )
+
+        # Seed below threshold
+        loop._check_usage_thresholds()
+        assert loop._pending_action is None
+
+        # Cross threshold — simulates what happens when MockProvider's
+        # mock_remaining_usage is 0.55 → usage = 45%
+        pct[0] = 46.0
+        loop._check_usage_thresholds()
+
+        assert loop._pending_action is not None
+        assert loop._pending_action["action"] == "switch_provider"
+        assert loop._pending_action["target_account"] == "codex-home"
+        assert len(terminated) == 1

@@ -7,6 +7,7 @@ export interface Session {
   active: boolean;
   has_worktree: boolean;
   has_changes: boolean;
+  coding_account: string | null;
   created_at: string;
   last_activity: string;
 }
@@ -50,6 +51,7 @@ export interface TaskCreate {
   terminal_cols?: number | null;
   screenshots?: string[] | null;
   override_prompt?: string | null;
+  is_followup?: boolean;
 }
 
 export interface TaskStatus {
