@@ -231,6 +231,30 @@ class TestConfigEndpoints:
         get_data = get_response.json()
         assert get_data["account_name"] is None
 
+    def test_update_verification_settings_partial(self, client):
+        """Can partially update verification settings and disable verification."""
+        # Disable verification only
+        resp = client.put("/api/v1/config/verification", json={"enabled": False})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["enabled"] is False
+        # auto_run should remain default True
+        assert data["auto_run"] is True
+
+        # Disable auto_run while enabled already false
+        resp2 = client.put("/api/v1/config/verification", json={"auto_run": False})
+        assert resp2.status_code == 200
+        data2 = resp2.json()
+        assert data2["enabled"] is False
+        assert data2["auto_run"] is False
+
+        # GET should reflect latest values
+        resp3 = client.get("/api/v1/config/verification")
+        assert resp3.status_code == 200
+        data3 = resp3.json()
+        assert data3["enabled"] is False
+        assert data3["auto_run"] is False
+
     def test_set_action_settings_invalid_account_returns_400(self, client):
         """Action settings with invalid switch target should return 400."""
         response = client.put(

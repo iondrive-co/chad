@@ -56,8 +56,18 @@ class AccountUsage(BaseModel):
 
     account_name: str
     provider: ProviderType
-    usage_text: str = Field(description="Formatted usage text for display")
-    remaining_capacity: float = Field(ge=0.0, le=1.0, description="Remaining capacity as fraction (0.0-1.0)")
+    session_usage_pct: float | None = Field(
+        default=None, description="Session usage percentage (0-100), None if unavailable"
+    )
+    weekly_usage_pct: float | None = Field(
+        default=None, description="Weekly usage percentage (0-100), None if unavailable"
+    )
+    session_reset_eta: str | None = Field(
+        default=None, description="Human-readable time until session reset"
+    )
+    weekly_reset_eta: str | None = Field(
+        default=None, description="Human-readable time until weekly reset"
+    )
 
 
 class AccountModelUpdate(BaseModel):

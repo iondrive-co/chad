@@ -17,6 +17,26 @@ export function useStream(sessionId: string | null) {
   const [events, setEvents] = useState<StreamEvent[]>([]);
   const [completed, setCompleted] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const utf8Decoder = useRef<TextDecoder | null>(null);
+
+  const decodeTerminal = useCallback((data: string, isText: boolean): string => {
+    const normalize = (text: string) => text.replace(/(?<!\r)\n/g, "\r\n");
+
+    if (isText) {
+      return normalize(data);
+    }
+
+    try {
+      // Decode base64 → UTF-8 string
+      const binary = atob(data);
+      const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+      if (!utf8Decoder.current) utf8Decoder.current = new TextDecoder("utf-8");
+      return normalize(utf8Decoder.current.decode(bytes));
+    } catch {
+      // Fallback: treat as plain text
+      return normalize(data);
+    }
+  }, []);
 
   const reset = useCallback(() => {
     setTerminalOutput("");
@@ -33,16 +53,12 @@ export function useStream(sessionId: string | null) {
     streamRef.current = stream;
 
     stream.onTerminal((evt) => {
-      const b64 = evt.data.data as string | undefined;
-      if (b64) {
-        try {
-          const text = atob(b64);
-          setTerminalOutput((prev) => prev + text);
-        } catch {
-          // not valid base64 — treat as raw text
-          setTerminalOutput((prev) => prev + b64);
-        }
-      }
+      const payload = evt.data as Record<string, unknown>;
+      const raw = payload.data as string | undefined;
+      const isText = Boolean(payload.text);
+      if (!raw) return;
+      const decoded = decodeTerminal(raw, isText);
+      setTerminalOutput((prev) => prev + decoded);
     });
 
     stream.onEvent((evt) => {

@@ -46,10 +46,12 @@ export function SettingsPanel({ api }: Props) {
     if (!verification) return;
     setSaving(true);
     try {
-      const updated = await api.setVerificationSettings({ [field]: !verification[field] });
+      const updated = await api.setVerificationSettings({
+        [field]: !verification[field],
+      });
       setVerification(updated);
       flash("Saved");
-    } finally {
+    } catch { /* ignore */ } finally {
       setSaving(false);
     }
   }, [api, verification, flash]);

@@ -801,14 +801,32 @@ class TaskExecutor:
         # Get provider info
         coding_provider = accounts[coding_account]
 
-        # Build verification config if account specified
+        # Build verification config gated by runtime verification settings
         verification_config = None
-        if verification_account:
-            verification_config = {
-                "verification_account": verification_account,
-                "verification_model": verification_model,
-                "verification_reasoning": verification_reasoning,
-            }
+        ver_enabled, ver_auto_run = self.config_manager.get_runtime_verification_settings()
+
+        if ver_enabled:
+            if verification_account:
+                verification_config = {
+                    "verification_account": verification_account,
+                    "verification_model": verification_model,
+                    "verification_reasoning": verification_reasoning,
+                }
+            elif ver_auto_run:
+                # Auto-run verification when enabled+auto_run, using configured verification agent
+                try:
+                    auto_account = self.config_manager.get_verification_agent()
+                except Exception:
+                    auto_account = None
+                if auto_account and auto_account != self.config_manager.VERIFICATION_NONE:
+                    verification_config = {
+                        "verification_account": auto_account,
+                        "verification_model": verification_model,
+                        "verification_reasoning": verification_reasoning,
+                    }
+        else:
+            # Runtime verification disabled – ignore any requested verification
+            verification_config = None
 
         # Start execution thread
         thread = threading.Thread(

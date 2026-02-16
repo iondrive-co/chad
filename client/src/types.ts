@@ -127,8 +127,10 @@ export interface AccountModels {
 export interface AccountUsage {
   account_name: string;
   provider: ProviderType;
-  usage_text: string;
-  remaining_capacity: number;
+  session_usage_pct: number | null;
+  weekly_usage_pct: number | null;
+  session_reset_eta: string | null;
+  weekly_reset_eta: string | null;
 }
 
 // ── Config types ──

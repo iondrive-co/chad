@@ -560,6 +560,26 @@ label {
   min-width: 100px;
 }
 
+.account-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+
+.usage-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.usage-bar {
+  font-family: var(--font-mono);
+  letter-spacing: 1px;
+  color: var(--text);
+}
+
 .link-btn {
   background: transparent;
   color: var(--accent);
