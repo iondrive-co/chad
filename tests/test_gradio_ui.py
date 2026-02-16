@@ -2506,17 +2506,30 @@ class TestPortResolution:
         assert "visibility:" not in box_block
 
 
-def test_live_stream_display_buffer_keeps_all_content():
-    """Live stream display buffer should keep all content for infinite history."""
+def test_live_stream_display_buffer_keeps_small_content():
+    """Live stream display buffer should keep content that fits within MAX_SIZE."""
     from chad.ui.gradio.gradio_ui import LiveStreamDisplayBuffer
 
     buffer = LiveStreamDisplayBuffer()
     buffer.append("a" * 60)
     buffer.append("b" * 60)
 
-    # Should keep all content without truncation
+    # Should keep all content when below MAX_SIZE
     assert len(buffer.content) == 120
     assert buffer.content == ("a" * 60) + ("b" * 60)
+
+
+def test_live_stream_display_buffer_caps_size():
+    """Live stream display buffer should truncate old content when exceeding MAX_SIZE."""
+    from chad.ui.gradio.gradio_ui import LiveStreamDisplayBuffer
+
+    buffer = LiveStreamDisplayBuffer()
+    # Append more than MAX_SIZE chars
+    for i in range(6):
+        buffer.append("x" * 10000 + "\n")
+
+    # Should be bounded at or below MAX_SIZE
+    assert len(buffer.content) <= LiveStreamDisplayBuffer.MAX_SIZE
 
 
 def test_live_stream_render_state_resets_for_rerender():
