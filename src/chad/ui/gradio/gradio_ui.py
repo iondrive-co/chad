@@ -1768,7 +1768,9 @@ def normalize_live_stream_spacing(content: str) -> str:
 
 
 class LiveStreamDisplayBuffer:
-    """Buffer for live stream display content with infinite history."""
+    """Buffer for live stream display content with bounded size."""
+
+    MAX_SIZE = 50000
 
     def __init__(self) -> None:
         self.content = ""
@@ -1777,6 +1779,11 @@ class LiveStreamDisplayBuffer:
         if not chunk:
             return
         self.content += chunk
+        if len(self.content) > self.MAX_SIZE:
+            # Keep last MAX_SIZE chars, break at a newline boundary
+            cut = self.content[-self.MAX_SIZE:]
+            nl = cut.find("\n")
+            self.content = cut[nl + 1:] if nl >= 0 else cut
 
 
 class LiveStreamRenderState:
@@ -2583,7 +2590,10 @@ class ChadWebUI:
                                     _record_output_chunk(text_chunk)
                                 readable_text = "\n".join(text_chunks) + "\n"
                                 all_text = "\n".join(full_output_chunks)
-                                html_output = html.escape(all_text)
+                                # Cap HTML to last 30000 chars to prevent browser freeze on long sessions
+                                MAX_LIVE_HTML = 30000
+                                display_text = all_text[-MAX_LIVE_HTML:] if len(all_text) > MAX_LIVE_HTML else all_text
+                                html_output = html.escape(display_text)
                                 message_queue.put(("stream", readable_text, html_output))
                         else:
                             decoded = raw_bytes.decode("utf-8", errors="replace")

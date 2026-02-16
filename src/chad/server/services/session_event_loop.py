@@ -99,6 +99,10 @@ class SessionEventLoop:
         "context_usage": ("_get_context_usage_fn", "context"),
     }
 
+    def update_quota_checker(self, fn) -> None:
+        """Update the quota exhaustion checker after a provider switch."""
+        self._is_quota_exhausted_fn = fn
+
     def feed_output(self, text: str) -> None:
         """Called by _run_phase's PTY callback with parsed text."""
         with self._output_lock:
@@ -231,6 +235,17 @@ class SessionEventLoop:
                 self._check_usage_thresholds()
             time.sleep(0.5)
 
+    _CODE_INDENT_PREFIXES = ("    ", "\t")
+    _CODE_CONTENT_PREFIXES = ('f"', '"', "'", "raise ", "#", ">>>")
+
+    @staticmethod
+    def _looks_like_code(line: str) -> bool:
+        """Return True if the line looks like source code rather than CLI output."""
+        if any(line.startswith(p) for p in SessionEventLoop._CODE_INDENT_PREFIXES):
+            return True
+        stripped = line.lstrip()
+        return any(stripped.startswith(p) for p in SessionEventLoop._CODE_CONTENT_PREFIXES)
+
     # ---- Exploration marker detection ----
     _EXPLORATION_LINE_RE = re.compile(r"^\s*EXPLORATION_RESULT:\s*(?P<summary>.+?)\s*$")
     _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -299,13 +314,19 @@ class SessionEventLoop:
 
         self._scan_exploration_markers("".join(new_chunks), finalize=finalize)
 
-        # Scan for session/quota limit messages in the tail of output
-        # (only check the last ~500 chars to avoid false positives from code edits)
-        # Lock prevents duplicate detection from background tick + main thread
+        # Scan for session/quota limit messages in the tail of output.
+        # Only check the last few lines to avoid matching quota patterns in
+        # code the agent is editing (e.g. "Quota exceeded" in source files).
+        # Lock prevents duplicate detection from background tick + main thread.
         if not self._session_limit_detected:
             with self._session_limit_lock:
                 if not self._session_limit_detected:
-                    tail = joined[-500:] if len(joined) > 500 else joined
+                    tail_lines = joined.rstrip().split("\n")
+                    # Take last 5 non-empty lines
+                    recent = [ln for ln in tail_lines[-10:] if ln.strip()][-5:]
+                    # Skip lines that look like code (indented, string literals, comments)
+                    cli_lines = [ln for ln in recent if not self._looks_like_code(ln)]
+                    tail = "\n".join(cli_lines) if cli_lines else "\n".join(recent)
                     if self._is_quota_exhausted_fn:
                         limit_type = self._is_quota_exhausted_fn(tail)
                         if limit_type:
@@ -646,6 +667,18 @@ class SessionEventLoop:
                 to_model=new_model or "",
                 reason=f"{label} threshold reached",
             ))
+
+        # Update quota checker to use new provider after switch
+        try:
+            from chad.util.providers import create_provider, ModelConfig
+            new_check_provider = create_provider(ModelConfig(
+                provider=new_provider,
+                model_name=new_model or "default",
+                account_name=target_account,
+            ))
+            self.update_quota_checker(new_check_provider.is_quota_exhausted)
+        except Exception:
+            pass
 
         self._emit_fn("status", status=f"Continuing with {target_account}...")
         exit_code, cont_output = self._run_phase_fn(

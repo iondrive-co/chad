@@ -1088,3 +1088,115 @@ class TestFollowupThresholdFires:
         assert loop._pending_action["action"] == "switch_provider"
         assert loop._pending_action["target_account"] == "codex-home"
         assert len(terminated) == 1
+
+
+class TestQuotaCheckerAfterSwitch:
+    """Tests that quota checker is updated after provider switch."""
+
+    def test_quota_checker_updated_after_provider_switch(self, monkeypatch):
+        """After _handle_switch_provider, _is_quota_exhausted_fn should be the new provider's."""
+        event_log = FakeEventLog()
+        emitted = []
+        original_checker = lambda output_tail: None  # noqa: E731
+
+        phases_run = []
+
+        def fake_run_phase(**kwargs):
+            phases_run.append(kwargs.get("coding_provider"))
+            return 0, "done"
+
+        def fake_get_account_info(name):
+            return {"provider": "openai", "model": "gpt-5.1-codex"}
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=None,
+            run_phase_fn=fake_run_phase,
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            is_quota_exhausted_fn=original_checker,
+            get_account_info_fn=fake_get_account_info,
+        )
+
+        # Monkeypatch create_provider to return a mock with a known is_quota_exhausted
+        new_checker_sentinel = lambda output_tail: "session_limit_reached"  # noqa: E731
+
+        class FakeProvider:
+            is_quota_exhausted = new_checker_sentinel
+
+        monkeypatch.setattr(
+            "chad.util.providers.create_provider",
+            lambda config: FakeProvider(),
+        )
+        monkeypatch.setattr(
+            "chad.util.handoff.log_handoff_checkpoint",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            "chad.util.handoff.build_resume_prompt",
+            lambda *args, **kwargs: "resume",
+        )
+
+        assert loop._is_quota_exhausted_fn is original_checker
+
+        loop._handle_switch_provider(
+            action={"target_account": "codex-home", "label": "session"},
+            session=None,
+            task_description="test task",
+            previous_output="",
+            screenshots=None,
+            rows=24, cols=80,
+            git_mgr=None,
+            old_account="claude-2",
+            old_provider="anthropic",
+            old_model=None,
+            old_reasoning=None,
+        )
+
+        assert loop._is_quota_exhausted_fn is not original_checker
+
+    def test_code_output_not_detected_as_quota_error(self):
+        """Indented code containing quota patterns should not trigger session limit."""
+        event_log = FakeEventLog()
+        emitted = []
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=None,
+            run_phase_fn=None,
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            is_quota_exhausted_fn=_default_quota_checker,
+        )
+
+        # Agent is editing code that contains quota error strings
+        loop.feed_output("Reading file src/chad/util/providers.py\n")
+        loop.feed_output('    if "Quota exceeded for mock provider account" in msg:\n')
+        loop.feed_output('        raise QuotaExhaustedError("quota exceeded")\n')
+        loop.feed_output("File saved successfully\n")
+        loop._analyze_output()
+
+        assert not loop._session_limit_detected
+
+    def test_real_quota_error_still_detected(self):
+        """A real quota error at the end of output should still be detected."""
+        event_log = FakeEventLog()
+        emitted = []
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=None,
+            run_phase_fn=None,
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            is_quota_exhausted_fn=_default_quota_checker,
+        )
+
+        loop.feed_output("Working on implementation...\n")
+        loop.feed_output("you exceeded your current quota\n")
+        loop._analyze_output()
+
+        assert loop._session_limit_detected
