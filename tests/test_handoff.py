@@ -12,6 +12,8 @@ from chad.util.event_log import (
     ContextCondensedEvent,
     UserMessageEvent,
     AssistantMessageEvent,
+    MilestoneEvent,
+    TerminalOutputEvent,
 )
 from chad.util.handoff import (
     extract_progress_from_events,
@@ -231,6 +233,69 @@ class TestBuildHandoffSummary:
         assert "<thinking>" in summary
         assert "<response>" in summary
 
+    def test_summary_includes_exploration_milestones(self, event_log):
+        """Test that exploration milestones appear as Discoveries section."""
+        event_log.log(MilestoneEvent(
+            milestone_type="exploration",
+            summary="Found auth module at src/auth.py with JWT implementation",
+        ))
+        event_log.log(MilestoneEvent(
+            milestone_type="exploration",
+            summary="Database uses SQLAlchemy ORM with async sessions",
+        ))
+        # Non-exploration milestone should be excluded
+        event_log.log(MilestoneEvent(
+            milestone_type="coding_complete",
+            summary="Finished writing code",
+        ))
+
+        summary = build_handoff_summary("Fix auth bug", event_log)
+
+        assert "## Discoveries" in summary
+        assert "- Found auth module at src/auth.py with JWT implementation" in summary
+        assert "- Database uses SQLAlchemy ORM with async sessions" in summary
+        assert "Finished writing code" not in summary
+
+    def test_summary_includes_terminal_output_when_no_assistant_messages(self, event_log):
+        """Test that terminal output is included when no assistant_message events exist."""
+        event_log.log(UserMessageEvent(content="Fix the bug"))
+        event_log.log(TerminalOutputEvent(data="Reading src/main.py..."))
+        event_log.log(TerminalOutputEvent(data="Found issue on line 42"))
+
+        summary = build_handoff_summary("Fix the bug", event_log)
+
+        assert "## Agent Work Log" in summary
+        assert "Reading src/main.py..." in summary
+        assert "Found issue on line 42" in summary
+
+    def test_summary_terminal_output_truncated(self, event_log):
+        """Test that terminal output exceeding 8000 chars is truncated."""
+        event_log.log(UserMessageEvent(content="Explore"))
+        # Generate terminal output exceeding 8000 chars
+        event_log.log(TerminalOutputEvent(data="X" * 10000))
+
+        summary = build_handoff_summary("Explore", event_log)
+
+        assert "## Agent Work Log" in summary
+        assert "(truncated)" in summary
+        # Full 10000-char string should NOT appear (it was truncated)
+        assert "X" * 10000 not in summary
+        # But the last 8000 chars should be present
+        assert "X" * 8000 in summary
+
+    def test_summary_skips_terminal_when_assistant_messages_exist(self, event_log):
+        """Test that terminal output is NOT included when assistant messages exist."""
+        event_log.log(UserMessageEvent(content="Do something"))
+        event_log.log(AssistantMessageEvent(
+            blocks=[{"kind": "text", "content": "I'll help with that."}]
+        ))
+        event_log.log(TerminalOutputEvent(data="Some terminal output"))
+
+        summary = build_handoff_summary("Do something", event_log)
+
+        assert "## Conversation History" in summary
+        assert "## Agent Work Log" not in summary
+
 
 class TestLogHandoffCheckpoint:
     """Tests for log_handoff_checkpoint function."""
@@ -368,6 +433,43 @@ class TestBuildResumePrompt:
         assert "First response" in prompt
         assert "Second request" in prompt
         assert "Second response" in prompt
+
+    def test_resume_prompt_with_terminal_only_session(self, temp_log_dir):
+        """Test resume prompt for stream-json provider sessions (no assistant_message).
+
+        Mimics a Claude/Qwen session that only produces terminal_output and
+        milestone events, never assistant_message events.
+        """
+        log = EventLog("terminal-only-test", base_dir=temp_log_dir)
+        log.log(SessionStartedEvent(task_description="Fix 3 bugs in auth module"))
+        log.log(UserMessageEvent(content="Fix 3 bugs in auth module"))
+        log.log(TerminalOutputEvent(data="Reading src/auth.py..."))
+        log.log(TerminalOutputEvent(data="Found null check missing on line 55"))
+        log.log(MilestoneEvent(
+            milestone_type="exploration",
+            summary="Auth module missing null check on user.token at line 55",
+        ))
+        log.log(TerminalOutputEvent(data="Checking session expiry logic..."))
+        log.log(MilestoneEvent(
+            milestone_type="exploration",
+            summary="Session TTL defaults to 0 instead of 3600",
+        ))
+
+        prompt = build_resume_prompt(log, "Continue fixing", target_provider="openai")
+
+        # Should include discoveries from milestones
+        assert "## Discoveries" in prompt
+        assert "Auth module missing null check" in prompt
+        assert "Session TTL defaults to 0" in prompt
+
+        # Should include terminal work log (no assistant messages)
+        assert "## Agent Work Log" in prompt
+        assert "Reading src/auth.py..." in prompt
+        assert "Found null check missing" in prompt
+
+        # Should include original task and continuation
+        assert "Fix 3 bugs in auth module" in prompt
+        assert "Continue with: Continue fixing" in prompt
 
 
 class TestGetLastCheckpointProviderSessionId:
