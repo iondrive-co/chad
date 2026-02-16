@@ -225,19 +225,20 @@ def build_handoff_summary(
 
     # When no structured assistant messages exist (stream-json providers),
     # include terminal output as a work log so the new provider sees what
-    # the previous agent was doing.
+    # the previous agent was doing. Terminal output events are cumulative
+    # screen snapshots, so we use only the last event to avoid duplication.
     if not has_assistant_turns:
         terminal_events = event_log.get_events(
             since_seq=since_seq,
             event_types=["terminal_output"],
         )
         if terminal_events:
-            all_terminal = "\n".join(e.get("data", "") for e in terminal_events)
+            terminal_text = terminal_events[-1].get("data", "")
             MAX_TERMINAL_CONTEXT = 8000
-            if len(all_terminal) > MAX_TERMINAL_CONTEXT:
-                all_terminal = "(truncated)\n" + all_terminal[-MAX_TERMINAL_CONTEXT:]
+            if len(terminal_text) > MAX_TERMINAL_CONTEXT:
+                terminal_text = "(truncated)\n" + terminal_text[-MAX_TERMINAL_CONTEXT:]
             parts.append("## Agent Work Log")
-            parts.append(all_terminal)
+            parts.append(terminal_text)
             parts.append("")
 
     if progress["files_changed"] or progress["files_created"]:
