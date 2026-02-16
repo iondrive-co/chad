@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import type { ChadAPI, Account, ProviderInfo } from "chad-client";
+import type { ChadAPI, Account, ProviderInfo, AccountUsage } from "chad-client";
 
 interface Props {
   api: ChadAPI;
@@ -8,6 +8,7 @@ interface Props {
 export function ProvidersPanel({ api }: Props) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [usageData, setUsageData] = useState<Record<string, AccountUsage>>({});
   const [newName, setNewName] = useState("");
   const [newType, setNewType] = useState("anthropic");
   const [newApiKey, setNewApiKey] = useState("");
@@ -21,13 +22,34 @@ export function ProvidersPanel({ api }: Props) {
     setTimeout(() => setStatus(null), 3000);
   }, []);
 
+  const refreshUsage = useCallback(async (accountNames: string[]) => {
+    const usagePromises = accountNames.map(async (name) => {
+      try {
+        const usage = await api.getAccountUsage(name);
+        return { name, usage };
+      } catch {
+        return null;
+      }
+    });
+    const results = await Promise.all(usagePromises);
+    const newUsageData: Record<string, AccountUsage> = {};
+    for (const result of results) {
+      if (result) {
+        newUsageData[result.name] = result.usage;
+      }
+    }
+    setUsageData(newUsageData);
+  }, [api]);
+
   const refresh = useCallback(async () => {
     try {
       const [a, p] = await Promise.all([api.listAccounts(), api.listProviders()]);
       setAccounts(a.accounts);
       setProviders(p.providers);
+      // Refresh usage for all accounts
+      refreshUsage(a.accounts.map((acc) => acc.name));
     } catch { /* */ }
-  }, [api]);
+  }, [api, refreshUsage]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -99,6 +121,16 @@ export function ProvidersPanel({ api }: Props) {
     } catch { /* */ }
   }, [api, refresh, flash]);
 
+  const formatUsage = (pct: number | null, eta: string | null): string => {
+    if (pct === null) return "—";
+    const bar = Math.round(pct / 10);
+    const filled = "█".repeat(bar);
+    const empty = "░".repeat(10 - bar);
+    let text = `${filled}${empty} ${pct.toFixed(0)}%`;
+    if (eta) text += ` (resets ${eta})`;
+    return text;
+  };
+
   return (
     <div className="providers-panel">
       <div className="section-header">
@@ -108,64 +140,85 @@ export function ProvidersPanel({ api }: Props) {
 
       {/* Account list */}
       <div className="account-list">
-        {accounts.map((a) => (
-          <div key={a.name} className={`account-card ${a.ready ? "" : "not-ready"}`}>
-            <div className="account-header">
-              <span className="account-name">{a.name}</span>
-              <span className="account-provider">{a.provider}</span>
-              <span className={`account-status ${a.ready ? "ready" : ""}`}>
-                {a.ready ? "Ready" : "Not ready"}
-              </span>
-              <button className="delete-rule-btn" onClick={() => handleDelete(a.name)}>x</button>
-            </div>
-
-            <div className="account-details">
-              <div className="account-field">
-                <span className="field-label">Model:</span>
-                <button className="link-btn" onClick={() => handleModelClick(a.name)}>
-                  {a.model ?? "default"}
-                </button>
-                {editingModel === a.name && (
-                  <select
-                    value={a.model ?? ""}
-                    onChange={(e) => handleSetModel(a.name, e.target.value)}
-                  >
-                    {modelChoices.map((m) => (
-                      <option key={m} value={m}>{m}</option>
-                    ))}
-                  </select>
-                )}
+        {accounts.map((a) => {
+          const usage = usageData[a.name];
+          return (
+            <div key={a.name} className={`account-card ${a.ready ? "" : "not-ready"}`}>
+              <div className="account-header">
+                <span className="account-name">{a.name}</span>
+                <span className="account-provider">{a.provider}</span>
+                <span className={`account-status ${a.ready ? "ready" : ""}`}>
+                  {a.ready ? "Ready" : "Not ready"}
+                </span>
+                <button className="delete-rule-btn" onClick={() => handleDelete(a.name)}>x</button>
               </div>
 
-              <div className="account-field">
-                <span className="field-label">Role:</span>
-                <select
-                  value={a.role ?? ""}
-                  onChange={(e) => handleSetRole(a.name, e.target.value)}
-                >
-                  <option value="">None</option>
-                  <option value="CODING">Coding</option>
-                  <option value="VERIFICATION">Verification</option>
-                </select>
-              </div>
-
-              {providers.find((p) => p.type === a.provider)?.supports_reasoning && (
+              <div className="account-details">
                 <div className="account-field">
-                  <span className="field-label">Reasoning:</span>
+                  <span className="field-label">Model:</span>
+                  <button className="link-btn" onClick={() => handleModelClick(a.name)}>
+                    {a.model ?? "default"}
+                  </button>
+                  {editingModel === a.name && (
+                    <select
+                      value={a.model ?? ""}
+                      onChange={(e) => handleSetModel(a.name, e.target.value)}
+                    >
+                      {modelChoices.map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+
+                <div className="account-field">
+                  <span className="field-label">Role:</span>
                   <select
-                    value={a.reasoning ?? ""}
-                    onChange={(e) => handleSetReasoning(a.name, e.target.value)}
+                    value={a.role ?? ""}
+                    onChange={(e) => handleSetRole(a.name, e.target.value)}
                   >
-                    <option value="">Default</option>
-                    <option value="low">Low</option>
-                    <option value="medium">Medium</option>
-                    <option value="high">High</option>
+                    <option value="">None</option>
+                    <option value="CODING">Coding</option>
+                    <option value="VERIFICATION">Verification</option>
                   </select>
                 </div>
-              )}
+
+                {providers.find((p) => p.type === a.provider)?.supports_reasoning && (
+                  <div className="account-field">
+                    <span className="field-label">Reasoning:</span>
+                    <select
+                      value={a.reasoning ?? ""}
+                      onChange={(e) => handleSetReasoning(a.name, e.target.value)}
+                    >
+                      <option value="">Default</option>
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                    </select>
+                  </div>
+                )}
+
+                {/* Usage display */}
+                {usage && (usage.session_usage_pct !== null || usage.weekly_usage_pct !== null) && (
+                  <div className="account-usage">
+                    {usage.session_usage_pct !== null && (
+                      <div className="usage-row">
+                        <span className="field-label">Session:</span>
+                        <span className="usage-bar">{formatUsage(usage.session_usage_pct, usage.session_reset_eta)}</span>
+                      </div>
+                    )}
+                    {usage.weekly_usage_pct !== null && (
+                      <div className="usage-row">
+                        <span className="field-label">Weekly:</span>
+                        <span className="usage-bar">{formatUsage(usage.weekly_usage_pct, usage.weekly_reset_eta)}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Add provider form */}

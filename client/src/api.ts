@@ -3,6 +3,7 @@ import type {
   AccountCreate,
   AccountList,
   AccountModels,
+  AccountUsage,
   BranchesResponse,
   CleanupSettings,
   DiffFull,
@@ -201,6 +202,12 @@ export class ChadAPI {
   getAccountModels(name: string): Promise<AccountModels> {
     return this.get(
       `/api/v1/accounts/${encodeURIComponent(name)}/models`,
+    );
+  }
+
+  getAccountUsage(name: string): Promise<AccountUsage> {
+    return this.get(
+      `/api/v1/accounts/${encodeURIComponent(name)}/usage`,
     );
   }
 

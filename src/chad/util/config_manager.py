@@ -54,6 +54,10 @@ class ConfigManager:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate_legacy_config()
 
+        # Runtime-only verification flags (not persisted). Default: enabled + auto-run.
+        self._verification_enabled: bool = True
+        self._verification_auto_run: bool = True
+
     def _migrate_legacy_config(self) -> None:
         """One-time migration from legacy config keys to current format."""
         if not self.config_path.exists():
@@ -578,6 +582,32 @@ class ConfigManager:
         """
         config = self.load_config()
         return config.get("preferences")
+
+    # ── Runtime verification settings (in-memory only) ──
+
+    def get_runtime_verification_settings(self) -> tuple[bool, bool]:
+        """Return the current runtime verification flags (enabled, auto_run)."""
+        return self._verification_enabled, self._verification_auto_run
+
+    def set_runtime_verification_settings(
+        self,
+        enabled: bool | None = None,
+        auto_run: bool | None = None,
+    ) -> tuple[bool, bool]:
+        """Update runtime verification flags (not persisted to disk).
+
+        Args:
+            enabled: Optional new value for verification enabled
+            auto_run: Optional new value for auto-run verification
+
+        Returns:
+            Tuple of (enabled, auto_run) after applying updates
+        """
+        if enabled is not None:
+            self._verification_enabled = bool(enabled)
+        if auto_run is not None:
+            self._verification_auto_run = bool(auto_run)
+        return self._verification_enabled, self._verification_auto_run
 
     # Special marker value indicating verification is disabled
     VERIFICATION_NONE = "__verification_none__"

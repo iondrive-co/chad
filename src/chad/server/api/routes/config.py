@@ -15,6 +15,13 @@ from chad.server.state import get_config_manager
 router = APIRouter()
 
 
+class VerificationSettingsUpdate(BaseModel):
+    """Partial update model for verification settings."""
+
+    enabled: bool | None = Field(default=None, description="Whether verification is enabled")
+    auto_run: bool | None = Field(default=None, description="Whether to auto-run verification after coding")
+
+
 class VerificationAgentResponse(BaseModel):
     """Response for verification agent endpoint."""
 
@@ -98,26 +105,29 @@ class MockRunDurationUpdate(BaseModel):
 
 @router.get("/verification", response_model=VerificationSettings)
 async def get_verification_settings() -> VerificationSettings:
-    """Get verification agent settings."""
-    # Verification is always enabled; the actual account is set via role assignment
-    # auto_run defaults to True (the UI controls this behavior)
-    return VerificationSettings(
-        enabled=True,
-        auto_run=True,
-    )
+    """Get verification agent settings.
+
+    The values are stored in-memory (not persisted); this endpoint reflects the last
+    values set during runtime. Defaults are enabled=True, auto_run=True.
+    """
+    config_mgr = get_config_manager()
+    enabled, auto_run = config_mgr.get_runtime_verification_settings()
+    return VerificationSettings(enabled=enabled, auto_run=auto_run)
 
 
 @router.put("/verification", response_model=VerificationSettings)
-async def update_verification_settings(request: VerificationSettings) -> VerificationSettings:
-    """Update verification agent settings.
+async def update_verification_settings(request: VerificationSettingsUpdate) -> VerificationSettings:
+    """Update verification runtime flags.
 
-    Note: The account used for verification is set via the account role
-    assignment, not through this endpoint.
+    Supports partial updates; unspecified fields keep their previous values.
+    The verification agent account is configured separately via /verification-agent.
     """
-    # VerificationSettings contains enabled/auto_run which are runtime flags
-    # The actual verification agent account is set via role assignment
-    # For now, just return the request as acknowledgement
-    return request
+    config_mgr = get_config_manager()
+    enabled, auto_run = config_mgr.set_runtime_verification_settings(
+        enabled=request.enabled,
+        auto_run=request.auto_run,
+    )
+    return VerificationSettings(enabled=enabled, auto_run=auto_run)
 
 
 @router.get("/cleanup", response_model=CleanupSettings)

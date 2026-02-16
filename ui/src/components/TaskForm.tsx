@@ -1,5 +1,5 @@
-import { useState, useCallback, useEffect } from "react";
-import type { ChadAPI, Account, ProviderInfo } from "chad-client";
+import { useState, useCallback, useEffect, useRef } from "react";
+import type { ChadAPI, Account, ProviderInfo, VerificationSettings } from "chad-client";
 import { AccountPicker } from "./AccountPicker.tsx";
 
 interface Props {
@@ -30,12 +30,53 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
   const [verificationModel, setVerificationModel] = useState("");
   const [verificationModels, setVerificationModels] = useState<string[]>([]);
   const [verificationReasoning, setVerificationReasoning] = useState("");
+  const [verificationSettings, setVerificationSettings] = useState<VerificationSettings | null>(null);
+  const verificationDefaultsApplied = useRef(false);
 
   // Fetch provider info once
   useEffect(() => {
     api.listProviders()
       .then((r) => setProviders(r.providers))
       .catch(() => setProviders([]));
+  }, [api]);
+
+  // Load verification settings + default verification agent
+  useEffect(() => {
+    let cancelled = false;
+
+    api.getVerificationSettings()
+      .then((settings) => {
+        if (cancelled) return;
+        setVerificationSettings(settings);
+        // On first load, align toggle with auto_run; if disabled, force off.
+        if (!settings.enabled) {
+          setUseVerification(false);
+          setVerificationAccount(null);
+        } else if (!verificationDefaultsApplied.current) {
+          setUseVerification(settings.auto_run);
+          verificationDefaultsApplied.current = true;
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setVerificationSettings({ enabled: true, auto_run: true });
+        }
+      });
+
+    api.getVerificationAgent()
+      .then((r) => {
+        if (cancelled) return;
+        const name = r.account_name;
+        if (!name || name === "__verification_none__") return;
+        api.getAccount(name)
+          .then((acct) => {
+            if (!cancelled) setVerificationAccount(acct);
+          })
+          .catch(() => { /* ignore missing account */ });
+      })
+      .catch(() => {});
+
+    return () => { cancelled = true; };
   }, [api]);
 
   // Check if current coding account's provider supports reasoning
@@ -93,15 +134,16 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
     setStarting(true);
     setError(null);
     try {
+      const verificationAllowed = verificationSettings?.enabled && useVerification;
       await api.startTask(sessionId, {
         project_path: projectPath.trim(),
         task_description: description.trim(),
         coding_agent: account!.name,
         coding_model: modelOverride || undefined,
         coding_reasoning: codingReasoning || undefined,
-        verification_agent: useVerification && verificationAccount ? verificationAccount.name : undefined,
-        verification_model: useVerification && verificationModel ? verificationModel : undefined,
-        verification_reasoning: useVerification && verificationReasoning ? verificationReasoning : undefined,
+        verification_agent: verificationAllowed && verificationAccount ? verificationAccount.name : undefined,
+        verification_model: verificationAllowed && verificationModel ? verificationModel : undefined,
+        verification_reasoning: verificationAllowed && verificationReasoning ? verificationReasoning : undefined,
       });
       onStart(account!.name);
     } catch (e) {
@@ -112,7 +154,7 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
   }, [
     api, sessionId, description, projectPath, account, modelOverride,
     codingReasoning, useVerification, verificationAccount, verificationModel,
-    verificationReasoning, onStart, canStart,
+    verificationReasoning, verificationSettings, onStart, canStart,
   ]);
 
   return (
@@ -184,11 +226,16 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
             type="checkbox"
             checked={useVerification}
             onChange={(e) => setUseVerification(e.target.checked)}
+            disabled={verificationSettings?.enabled === false}
           />
           Use separate verification agent
         </label>
 
-        {useVerification && (
+        {verificationSettings?.enabled === false && (
+          <div className="field-label">Verification disabled in settings</div>
+        )}
+
+        {useVerification && verificationSettings?.enabled !== false && (
           <>
             <label>
               Verification Agent
