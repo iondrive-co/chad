@@ -257,15 +257,19 @@ class TestBuildHandoffSummary:
         assert "Finished writing code" not in summary
 
     def test_summary_includes_terminal_output_when_no_assistant_messages(self, event_log):
-        """Test that terminal output is included when no assistant_message events exist."""
+        """Test that terminal output is included when no assistant_message events exist.
+
+        Terminal output events are cumulative screen snapshots, so only the
+        last event is used (it contains the most recent screen state).
+        """
         event_log.log(UserMessageEvent(content="Fix the bug"))
         event_log.log(TerminalOutputEvent(data="Reading src/main.py..."))
-        event_log.log(TerminalOutputEvent(data="Found issue on line 42"))
+        event_log.log(TerminalOutputEvent(data="Reading src/main.py...\nFound issue on line 42"))
 
         summary = build_handoff_summary("Fix the bug", event_log)
 
         assert "## Agent Work Log" in summary
-        assert "Reading src/main.py..." in summary
+        # Only the last (cumulative) snapshot is used
         assert "Found issue on line 42" in summary
 
     def test_summary_terminal_output_truncated(self, event_log):
@@ -438,18 +442,23 @@ class TestBuildResumePrompt:
         """Test resume prompt for stream-json provider sessions (no assistant_message).
 
         Mimics a Claude/Qwen session that only produces terminal_output and
-        milestone events, never assistant_message events.
+        milestone events, never assistant_message events. Terminal events are
+        cumulative screen snapshots, so each contains all prior content.
         """
         log = EventLog("terminal-only-test", base_dir=temp_log_dir)
         log.log(SessionStartedEvent(task_description="Fix 3 bugs in auth module"))
         log.log(UserMessageEvent(content="Fix 3 bugs in auth module"))
         log.log(TerminalOutputEvent(data="Reading src/auth.py..."))
-        log.log(TerminalOutputEvent(data="Found null check missing on line 55"))
+        log.log(TerminalOutputEvent(
+            data="Reading src/auth.py...\nFound null check missing on line 55",
+        ))
         log.log(MilestoneEvent(
             milestone_type="exploration",
             summary="Auth module missing null check on user.token at line 55",
         ))
-        log.log(TerminalOutputEvent(data="Checking session expiry logic..."))
+        log.log(TerminalOutputEvent(
+            data="Reading src/auth.py...\nFound null check missing on line 55\nChecking session expiry logic...",
+        ))
         log.log(MilestoneEvent(
             milestone_type="exploration",
             summary="Session TTL defaults to 0 instead of 3600",
@@ -462,10 +471,11 @@ class TestBuildResumePrompt:
         assert "Auth module missing null check" in prompt
         assert "Session TTL defaults to 0" in prompt
 
-        # Should include terminal work log (no assistant messages)
+        # Should include terminal work log from last snapshot (no assistant messages)
         assert "## Agent Work Log" in prompt
         assert "Reading src/auth.py..." in prompt
         assert "Found null check missing" in prompt
+        assert "Checking session expiry logic..." in prompt
 
         # Should include original task and continuation
         assert "Fix 3 bugs in auth module" in prompt
