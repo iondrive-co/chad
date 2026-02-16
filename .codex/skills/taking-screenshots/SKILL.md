@@ -7,11 +7,29 @@ metadata:
 
 # Taking Screenshots
 
-This skill covers screenshots for BOTH the Gradio web UI AND the CLI terminal interface.
+This skill covers screenshots for the React UI, the Gradio web UI, **and** the CLI terminal interface.
 
 **IMPORTANT**: ALWAYS use the project's screenshot scripts (`screenshot_ui.py` for Gradio, `screenshot_cli.py` for CLI).
 DO NOT write custom screenshot code using PIL, Pillow, pyautogui, or any other library. The project scripts handle all
 the complexity including headless browser automation, proper rendering, and terminal emulation.
+
+## React UI Screenshots (Vite app in `ui/`)
+
+```bash
+# Default chat tab
+./.venv/bin/python scripts/screenshot_react_ui.py --headless
+
+# Providers or Settings tab
+./.venv/bin/python scripts/screenshot_react_ui.py --tab providers --output /tmp/chad/react-providers.png
+./.venv/bin/python scripts/screenshot_react_ui.py --tab settings --output /tmp/chad/react-settings.png
+
+# Open after capture
+./.venv/bin/python scripts/screenshot_react_ui.py --tab chat --open
+```
+
+- Starts the Chad API server and the React Vite dev server automatically, waits for readiness, then uses Playwright to capture.
+- Options: `--tab chat|providers|settings`, `--width/--height`, `--output`, `--open`.
+- Requires `playwright` and browser deps (`pip install playwright && playwright install chromium`) and Node deps (`npm install` already committed in `ui/`).
 
 ## Gradio UI Screenshots
 
