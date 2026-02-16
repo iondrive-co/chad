@@ -1005,11 +1005,21 @@ class TaskExecutor:
                     text_chunks = json_parser.feed(chunk_bytes)
                     if text_chunks:
                         readable_text = "\n".join(text_chunks)
+                        # Replace PTY payload with human-readable text for subscribers
+                        event.data = readable_text
+                        event.has_ansi = False
+                        event.text = True
+
                         encoded = base64.b64encode(readable_text.encode()).decode()
                         emit("stream", chunk=encoded)
                         with terminal_lock:
                             terminal_buffer.extend(readable_text.encode())
                         _feed_captured(readable_text)
+                    else:
+                        # Suppress raw stream-json chunks from reaching subscribers
+                        event.data = ""
+                        event.has_ansi = False
+                        event.text = True
                 else:
                     # Non-anthropic (Codex): filter out prompt echo
                     # Codex output structure:
@@ -1183,6 +1193,12 @@ class TaskExecutor:
         if json_parser:
             remaining = json_parser.flush()
             if remaining:
+                readable_text = "\n".join(remaining)
+                # Emit final parsed output to stream and logs
+                emit("stream", chunk=base64.b64encode(readable_text.encode()).decode())
+                with terminal_lock:
+                    terminal_buffer.extend(readable_text.encode())
+                _feed_captured(readable_text)
                 captured_output.extend(remaining)
 
         flush_terminal_buffer()
