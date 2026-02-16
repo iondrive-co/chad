@@ -200,11 +200,44 @@ def build_handoff_summary(
 
     # Extract and format conversation history
     turns = extract_conversation_from_events(event_log, since_seq)
+    has_assistant_turns = any(t.role == "assistant" for t in turns)
     if turns:
         conversation_text = format_for_provider(turns, target_provider)
         if conversation_text:
             parts.append("## Conversation History")
             parts.append(conversation_text)
+            parts.append("")
+
+    # Include exploration milestones as condensed discoveries
+    milestone_events = event_log.get_events(
+        since_seq=since_seq,
+        event_types=["milestone"],
+    )
+    discoveries = [
+        e["summary"] for e in milestone_events
+        if e.get("milestone_type") == "exploration" and e.get("summary")
+    ]
+    if discoveries:
+        parts.append("## Discoveries")
+        for d in discoveries:
+            parts.append(f"- {d}")
+        parts.append("")
+
+    # When no structured assistant messages exist (stream-json providers),
+    # include terminal output as a work log so the new provider sees what
+    # the previous agent was doing.
+    if not has_assistant_turns:
+        terminal_events = event_log.get_events(
+            since_seq=since_seq,
+            event_types=["terminal_output"],
+        )
+        if terminal_events:
+            all_terminal = "\n".join(e.get("data", "") for e in terminal_events)
+            MAX_TERMINAL_CONTEXT = 8000
+            if len(all_terminal) > MAX_TERMINAL_CONTEXT:
+                all_terminal = "(truncated)\n" + all_terminal[-MAX_TERMINAL_CONTEXT:]
+            parts.append("## Agent Work Log")
+            parts.append(all_terminal)
             parts.append("")
 
     if progress["files_changed"] or progress["files_created"]:
