@@ -12,6 +12,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Rebuild client library so the UI always picks up latest API methods
+echo "Building chad-client..."
+cd "$DIR/client"
+npm run build
+
+# Clear Vite's dependency pre-bundle cache to pick up the fresh client build
+rm -rf "$DIR/ui/node_modules/.vite"
+
 # Start Chad API server in background
 "$DIR/.venv/bin/python" -m chad --mode server --api-port "$API_PORT" &
 API_PID=$!
