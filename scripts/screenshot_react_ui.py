@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Screenshot utility for the React UI.
 
-Starts the Chad API server, starts the Vite dev server, waits for both,
-then takes a Playwright screenshot.
+Starts the Chad API server with mock fixture data (via create_temp_env),
+starts the Vite dev server, waits for both, then takes a Playwright screenshot.
 
 Usage:
     .venv/bin/python scripts/screenshot_react_ui.py
@@ -49,17 +49,32 @@ def main():
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
 
+    # Create temp environment with mock fixture data
+    from chad.ui.gradio.verification.ui_playwright_runner import create_temp_env
+    env = create_temp_env(screenshot_mode=True)
+
     procs = []
 
     try:
-        # Start API server
-        print("Starting Chad API server...")
+        # Build environment for the API server subprocess
+        server_env = {
+            **os.environ,
+            "CHAD_CONFIG": str(env.config_path),
+            "CHAD_PASSWORD": env.password,
+            "CHAD_PROJECT_PATH": str(env.project_dir),
+            "PYTHONPATH": str(PROJECT_ROOT / "src"),
+        }
+        server_env.update(env.env_vars)
+
+        # Start API server with mock data
+        print("Starting Chad API server (screenshot mode)...")
         api_proc = subprocess.Popen(
             [str(PROJECT_ROOT / ".venv" / "bin" / "python"), "-m", "chad",
              "--mode", "server", "--api-port", "8000"],
             cwd=str(PROJECT_ROOT),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=server_env,
         )
         procs.append(api_proc)
 
@@ -107,7 +122,7 @@ def main():
             # Click tab if not chat
             if args.tab != "chat":
                 page.click(f"button:text('{args.tab.title()}')")
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(1000)
 
             page.screenshot(path=args.output, full_page=False)
             browser.close()
@@ -127,6 +142,7 @@ def main():
                 proc.wait(timeout=5)
             except Exception:
                 proc.kill()
+        env.cleanup()
 
 
 if __name__ == "__main__":

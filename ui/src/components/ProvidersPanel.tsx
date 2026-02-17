@@ -38,7 +38,7 @@ export function ProvidersPanel({ api }: Props) {
         newUsageData[result.name] = result.usage;
       }
     }
-    setUsageData(newUsageData);
+    setUsageData(prev => ({...prev, ...newUsageData}));
   }, [api]);
 
   const refresh = useCallback(async () => {
@@ -47,7 +47,7 @@ export function ProvidersPanel({ api }: Props) {
       setAccounts(a.accounts);
       setProviders(p.providers);
       // Refresh usage for all accounts
-      refreshUsage(a.accounts.map((acc) => acc.name));
+      await refreshUsage(a.accounts.map((acc) => acc.name));
     } catch { /* */ }
   }, [api, refreshUsage]);
 
