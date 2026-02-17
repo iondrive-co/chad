@@ -471,3 +471,116 @@ class TestWorktreeEndpoints:
             wt_status = client.get(f"/api/v1/sessions/{session_id}/worktree")
             assert wt_status.status_code == 200
             assert wt_status.json()["exists"] is False
+
+
+class TestMockAccountUsage:
+    """Tests for get_mock_account_usage() fixture function."""
+
+    def test_openai_account_returns_session_and_weekly(self):
+        """OpenAI accounts map primary→session, secondary→weekly."""
+        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
+        result = get_mock_account_usage("codex-work")
+        assert result["account_name"] == "codex-work"
+        assert result["provider"] == "openai"
+        assert result["session_usage_pct"] == 15.0
+        assert result["weekly_usage_pct"] == 42.0
+        assert result["session_reset_eta"] is not None
+        assert result["weekly_reset_eta"] is not None
+
+    def test_openai_free_no_weekly(self):
+        """OpenAI free plan has no secondary usage → weekly is None."""
+        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
+        result = get_mock_account_usage("codex-free")
+        assert result["session_usage_pct"] == 95.0
+        assert result["weekly_usage_pct"] is None
+        assert result["weekly_reset_eta"] is None
+
+    def test_anthropic_account_returns_session_and_weekly(self):
+        """Anthropic accounts map five_hour→session, seven_day→weekly."""
+        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
+        result = get_mock_account_usage("claude-pro")
+        assert result["provider"] == "anthropic"
+        assert result["session_usage_pct"] == 23.0
+        assert result["weekly_usage_pct"] == 55.0
+
+    def test_gemini_account_returns_session_only(self):
+        """Gemini maps request count to session pct, no weekly."""
+        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
+        result = get_mock_account_usage("gemini-advanced")
+        assert result["provider"] == "gemini"
+        assert result["session_usage_pct"] is not None
+        assert result["session_usage_pct"] > 0
+        assert result["weekly_usage_pct"] is None
+
+    def test_mistral_account_returns_session_only(self):
+        """Mistral maps token count to session pct, no weekly."""
+        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
+        result = get_mock_account_usage("vibe-pro")
+        assert result["provider"] == "mistral"
+        assert result["session_usage_pct"] is not None
+        assert result["session_usage_pct"] > 0
+        assert result["weekly_usage_pct"] is None
+
+    def test_unknown_account_returns_all_none(self):
+        """Unknown accounts return all-None usage fields."""
+        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
+        result = get_mock_account_usage("nonexistent-account")
+        assert result["account_name"] == "nonexistent-account"
+        assert result["session_usage_pct"] is None
+        assert result["weekly_usage_pct"] is None
+        assert result["session_reset_eta"] is None
+        assert result["weekly_reset_eta"] is None
+
+
+class TestScreenshotModeUsageEndpoint:
+    """Tests for usage endpoint with CHAD_SCREENSHOT_MODE=1."""
+
+    @staticmethod
+    def _init_config_with_accounts(config_mgr):
+        """Initialize config with encryption salt and register mock accounts."""
+        import base64
+        import bcrypt
+        from chad.ui.gradio.verification.screenshot_fixtures import setup_mock_accounts
+        password = ""
+        password_hash = config_mgr.hash_password(password)
+        encryption_salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
+        config_mgr.save_config({
+            "password_hash": password_hash,
+            "encryption_salt": encryption_salt,
+            "accounts": {},
+        })
+        setup_mock_accounts(config_mgr, password)
+
+    def test_usage_returns_mock_data_in_screenshot_mode(self, client, monkeypatch):
+        """Usage endpoint returns fixture data when CHAD_SCREENSHOT_MODE=1."""
+        monkeypatch.setenv("CHAD_SCREENSHOT_MODE", "1")
+
+        config_mgr = get_config_manager()
+        self._init_config_with_accounts(config_mgr)
+
+        response = client.get("/api/v1/accounts/claude-pro/usage")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["account_name"] == "claude-pro"
+        assert data["provider"] == "anthropic"
+        assert data["session_usage_pct"] == 23.0
+        assert data["weekly_usage_pct"] == 55.0
+
+    def test_usage_returns_mock_for_openai_in_screenshot_mode(self, client, monkeypatch):
+        """OpenAI usage endpoint returns fixture data in screenshot mode."""
+        monkeypatch.setenv("CHAD_SCREENSHOT_MODE", "1")
+
+        config_mgr = get_config_manager()
+        self._init_config_with_accounts(config_mgr)
+
+        response = client.get("/api/v1/accounts/codex-work/usage")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["session_usage_pct"] == 15.0
+        assert data["weekly_usage_pct"] == 42.0
+
+    def test_usage_404_for_nonexistent_account_in_screenshot_mode(self, client, monkeypatch):
+        """Non-existent accounts still return 404 in screenshot mode."""
+        monkeypatch.setenv("CHAD_SCREENSHOT_MODE", "1")
+        response = client.get("/api/v1/accounts/nonexistent/usage")
+        assert response.status_code == 404

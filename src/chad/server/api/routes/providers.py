@@ -1,5 +1,7 @@
 """Provider and account management endpoints."""
 
+import os
+
 from fastapi import APIRouter, HTTPException
 
 from chad.server.api.schemas import (
@@ -233,6 +235,12 @@ async def get_account_usage(name: str) -> AccountUsage:
 
     if not config_mgr.has_account(name):
         raise HTTPException(status_code=404, detail=f"Account '{name}' not found")
+
+    # In screenshot mode, return synthetic fixture data
+    if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
+        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
+        mock = get_mock_account_usage(name)
+        return AccountUsage(**mock)
 
     accounts_dict = config_mgr.list_accounts()
     provider_type = accounts_dict.get(name)

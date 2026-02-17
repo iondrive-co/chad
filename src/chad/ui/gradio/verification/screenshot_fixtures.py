@@ -279,6 +279,89 @@ def get_mock_usage(account_name: str) -> str:
     return "⚠️ Unknown provider type"
 
 
+def _format_hours_eta(hours: float) -> str:
+    """Format hours as a human-readable ETA string."""
+    reset_time = (datetime.now() + timedelta(hours=hours)).strftime("%I:%M%p")
+    return f"at {reset_time}"
+
+
+def _format_days_eta(days: float) -> str:
+    """Format days as a human-readable ETA string."""
+    reset_date = (datetime.now() + timedelta(days=days)).strftime("%b %d")
+    return reset_date
+
+
+def get_mock_account_usage(account_name: str) -> dict:
+    """Get mock usage data in AccountUsage schema format.
+
+    Returns a dict with keys: account_name, provider, session_usage_pct,
+    weekly_usage_pct, session_reset_eta, weekly_reset_eta.
+
+    Used by the server API endpoint when CHAD_SCREENSHOT_MODE=1.
+    """
+    account = MOCK_ACCOUNTS.get(account_name)
+    if not account:
+        return {
+            "account_name": account_name,
+            "provider": "mock",
+            "session_usage_pct": None,
+            "weekly_usage_pct": None,
+            "session_reset_eta": None,
+            "weekly_reset_eta": None,
+        }
+
+    provider = account.get("provider")
+    usage = account.get("usage", {})
+
+    session_pct = None
+    weekly_pct = None
+    session_eta = None
+    weekly_eta = None
+
+    if provider == "openai":
+        primary = usage.get("primary", {})
+        if primary:
+            session_pct = float(primary["used_percent"])
+            session_eta = _format_hours_eta(primary["resets_hours"])
+        secondary = usage.get("secondary")
+        if secondary:
+            weekly_pct = float(secondary["used_percent"])
+            weekly_eta = _format_days_eta(secondary["resets_days"])
+
+    elif provider == "anthropic":
+        five_hour = usage.get("five_hour", {})
+        if five_hour:
+            session_pct = float(five_hour["utilization"])
+            session_eta = _format_hours_eta(five_hour["resets_hours"])
+        seven_day = usage.get("seven_day")
+        if seven_day:
+            weekly_pct = float(seven_day["utilization"])
+            weekly_eta = _format_days_eta(seven_day["resets_days"])
+
+    elif provider == "gemini":
+        models = usage.get("models", {})
+        total_requests = sum(m.get("requests", 0) for m in models.values())
+        daily_limit = 500  # Gemini Advanced daily request limit
+        session_pct = min(100.0, (total_requests / daily_limit) * 100) if daily_limit > 0 else None
+        session_eta = _format_hours_eta(24 - datetime.now().hour)
+
+    elif provider == "mistral":
+        input_tok = usage.get("input_tokens", 0)
+        output_tok = usage.get("output_tokens", 0)
+        total = input_tok + output_tok
+        token_budget = 1_000_000  # Approximate daily budget
+        session_pct = min(100.0, (total / token_budget) * 100) if token_budget > 0 else None
+
+    return {
+        "account_name": account_name,
+        "provider": provider,
+        "session_usage_pct": session_pct,
+        "weekly_usage_pct": weekly_pct,
+        "session_reset_eta": session_eta,
+        "weekly_reset_eta": weekly_eta,
+    }
+
+
 # =============================================================================
 # Live View Content
 # =============================================================================
