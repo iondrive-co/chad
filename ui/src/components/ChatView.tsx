@@ -33,6 +33,19 @@ export function ChatView({
     taskActive ? sessionId : null,
   );
 
+  // On mount, check if this session already has an active task and reconnect
+  useEffect(() => {
+    let cancelled = false;
+    api.getSession(sessionId).then((session) => {
+      if (!cancelled && session.active) {
+        setTaskActive(true);
+      }
+    }).catch(() => {
+      // Ignore - session may not exist yet
+    });
+    return () => { cancelled = true; };
+  }, [api, sessionId]);
+
   // Auto-scroll terminal output
   useEffect(() => {
     if (outputRef.current) {
