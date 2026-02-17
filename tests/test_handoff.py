@@ -252,6 +252,8 @@ class TestBuildHandoffSummary:
         summary = build_handoff_summary("Fix auth bug", event_log)
 
         assert "## Discoveries" in summary
+        assert "Do not re-verify" in summary
+        assert "build on them" in summary
         assert "- Found auth module at src/auth.py with JWT implementation" in summary
         assert "- Database uses SQLAlchemy ORM with async sessions" in summary
         assert "Finished writing code" not in summary
@@ -286,6 +288,25 @@ class TestBuildHandoffSummary:
         assert "X" * 10000 not in summary
         # But the last 8000 chars should be present
         assert "X" * 8000 in summary
+
+    def test_summary_skips_terminal_when_discoveries_exist(self, event_log):
+        """Test that terminal output is NOT included when discoveries exist.
+
+        Discoveries are higher-quality deduplicated summaries of what the
+        agent found. The raw terminal work log would be redundant noise.
+        """
+        event_log.log(UserMessageEvent(content="Explore codebase"))
+        event_log.log(MilestoneEvent(
+            milestone_type="exploration",
+            summary="Found the auth module uses JWT tokens",
+        ))
+        event_log.log(TerminalOutputEvent(data="Reading auth.py...\nFound JWT stuff"))
+
+        summary = build_handoff_summary("Explore codebase", event_log)
+
+        assert "## Discoveries" in summary
+        assert "Found the auth module uses JWT tokens" in summary
+        assert "## Agent Work Log" not in summary
 
     def test_summary_skips_terminal_when_assistant_messages_exist(self, event_log):
         """Test that terminal output is NOT included when assistant messages exist."""
@@ -471,11 +492,8 @@ class TestBuildResumePrompt:
         assert "Auth module missing null check" in prompt
         assert "Session TTL defaults to 0" in prompt
 
-        # Should include terminal work log from last snapshot (no assistant messages)
-        assert "## Agent Work Log" in prompt
-        assert "Reading src/auth.py..." in prompt
-        assert "Found null check missing" in prompt
-        assert "Checking session expiry logic..." in prompt
+        # Discoveries present, so work log should be suppressed (redundant)
+        assert "## Agent Work Log" not in prompt
 
         # Should include original task and continuation
         assert "Fix 3 bugs in auth module" in prompt

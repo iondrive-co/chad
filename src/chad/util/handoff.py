@@ -218,16 +218,22 @@ def build_handoff_summary(
         if e.get("milestone_type") == "exploration" and e.get("summary")
     ]
     if discoveries:
-        parts.append("## Discoveries")
+        parts.append(
+            "## Discoveries\n"
+            "The previous agent established these facts. "
+            "Do not re-verify them — build on them:"
+        )
         for d in discoveries:
             parts.append(f"- {d}")
         parts.append("")
 
-    # When no structured assistant messages exist (stream-json providers),
-    # include terminal output as a work log so the new provider sees what
-    # the previous agent was doing. Terminal output events are cumulative
-    # screen snapshots, so we use only the last event to avoid duplication.
-    if not has_assistant_turns:
+    # When no structured assistant messages or discoveries exist (stream-json
+    # providers with no milestones), include terminal output as a work log so
+    # the new provider sees what the agent was doing. Skip when discoveries
+    # exist since they are higher-quality deduplicated summaries of the same
+    # content. Terminal output events are cumulative screen snapshots, so we
+    # use only the last event to avoid duplication.
+    if not has_assistant_turns and not discoveries:
         terminal_events = event_log.get_events(
             since_seq=since_seq,
             event_types=["terminal_output"],
