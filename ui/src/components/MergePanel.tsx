@@ -37,6 +37,18 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
         setInsertions(summaryData.insertions);
         setDeletions(summaryData.deletions);
 
+        // No actual file changes — dismiss instead of showing empty merge panel.
+        // This happens when old commits exist on the branch from a previous task
+        // but the current task made no changes.
+        if (
+          summaryData.files_changed === 0 &&
+          summaryData.insertions === 0 &&
+          summaryData.deletions === 0
+        ) {
+          onDismiss();
+          return;
+        }
+
         // Get branches
         const branchData = await api.getBranches(sessionId);
         setBranches(branchData.branches);

@@ -10,14 +10,23 @@ export interface TerminalChunk {
 /**
  * Hook to manage an SSE stream for a Chad session.
  * Decodes base64 terminal output and collects structured events.
+ *
+ * @param sessionId - Session to stream from (null = disconnected)
+ * @param sinceSeq  - Skip events before this sequence number.
+ *                    Use this when reusing a session for a new task
+ *                    so old milestones/events are not replayed.
  */
-export function useStream(sessionId: string | null) {
+export function useStream(sessionId: string | null, sinceSeq?: number) {
   const streamRef = useRef<ChadStream | null>(null);
   const [terminalOutput, setTerminalOutput] = useState("");
   const [events, setEvents] = useState<StreamEvent[]>([]);
   const [completed, setCompleted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const utf8Decoder = useRef<TextDecoder | null>(null);
+  // Capture sinceSeq in a ref so it's available in the useEffect without
+  // triggering reconnections when the value changes.
+  const sinceSeqRef = useRef(sinceSeq);
+  sinceSeqRef.current = sinceSeq;
 
   const decodeTerminal = useCallback((data: string, isText: boolean): string => {
     const normalize = (text: string) => text.replace(/(?<!\r)\n/g, "\r\n");
@@ -75,7 +84,7 @@ export function useStream(sessionId: string | null) {
       );
     });
 
-    stream.connect(sessionId);
+    stream.connect(sessionId, { sinceSeq: sinceSeqRef.current });
 
     return () => {
       stream.disconnect();

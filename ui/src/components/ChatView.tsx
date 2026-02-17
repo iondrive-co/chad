@@ -29,16 +29,28 @@ export function ChatView({
   const [lastCodingAgent, setLastCodingAgent] = useState<string | null>(null);
   const outputRef = useRef<HTMLPreElement>(null);
 
+  // Track the event log position at which the current task started, so the
+  // stream skips old milestones/events from previous tasks in the same session.
+  const streamSinceSeqRef = useRef<number | undefined>(undefined);
+
   const { terminalOutput, events, completed, error, reset } = useStream(
     taskActive ? sessionId : null,
+    streamSinceSeqRef.current,
   );
 
-  // On mount, check if this session already has an active task and reconnect
+  // On mount, check if this session already has an active task and reconnect.
+  // Capture the current event log position so the stream skips old events.
   useEffect(() => {
     let cancelled = false;
-    api.getSession(sessionId).then((session) => {
+    api.getSession(sessionId).then(async (session) => {
       if (!cancelled && session.active) {
-        setTaskActive(true);
+        try {
+          const data = await api.getEvents(sessionId, 0, "session_started");
+          streamSinceSeqRef.current = data.latest_seq;
+        } catch {
+          // Fall back to streaming all events
+        }
+        if (!cancelled) setTaskActive(true);
       }
     }).catch(() => {
       // Ignore - session may not exist yet
@@ -69,12 +81,20 @@ export function ChatView({
     }
   }, [api, completed, sessionId, onSessionChange]);
 
-  const handleTaskStart = useCallback((codingAgent: string) => {
+  const handleTaskStart = useCallback(async (codingAgent: string) => {
+    // Capture the current event log position before the task starts, so the
+    // stream only shows events from this task (not old milestones/output).
+    try {
+      const data = await api.getEvents(sessionId, 0, "session_started");
+      streamSinceSeqRef.current = data.latest_seq;
+    } catch {
+      streamSinceSeqRef.current = undefined;
+    }
     reset();
     setTaskActive(true);
     setShowMerge(false);
     setLastCodingAgent(codingAgent);
-  }, [reset]);
+  }, [api, sessionId, reset]);
 
   const handleMergeDone = useCallback(() => {
     setShowMerge(false);
@@ -104,6 +124,13 @@ export function ChatView({
         return;
       }
       const session = await api.getSession(sessionId);
+      // Capture event log position before follow-up starts
+      try {
+        const data = await api.getEvents(sessionId, 0, "session_started");
+        streamSinceSeqRef.current = data.latest_seq;
+      } catch {
+        streamSinceSeqRef.current = undefined;
+      }
       await api.startTask(sessionId, {
         project_path: session.project_path || defaultProjectPath,
         task_description: followupText.trim(),
