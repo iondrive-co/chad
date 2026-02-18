@@ -584,3 +584,83 @@ class TestScreenshotModeUsageEndpoint:
         monkeypatch.setenv("CHAD_SCREENSHOT_MODE", "1")
         response = client.get("/api/v1/accounts/nonexistent/usage")
         assert response.status_code == 404
+
+
+class TestProjectSettingsEndpoints:
+    """Tests for project settings API endpoints."""
+
+    def test_get_project_settings_no_project(self, client):
+        """Returns 400 when no project path provided."""
+        response = client.get("/api/v1/config/project")
+        assert response.status_code == 400
+
+    def test_get_project_settings_nonexistent(self, client, tmp_path):
+        """Returns default settings for new project."""
+        project_path = str(tmp_path / "new-project")
+        response = client.get(f"/api/v1/config/project?project_path={project_path}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["project_path"] == project_path
+        assert data["lint_command"] is None
+        assert data["test_command"] is None
+
+    def test_set_project_settings(self, client, tmp_path):
+        """Can save project settings."""
+        project_dir = tmp_path / "test-project"
+        project_dir.mkdir()
+        project_path = str(project_dir)
+
+        response = client.put(
+            "/api/v1/config/project",
+            json={
+                "project_path": project_path,
+                "lint_command": "flake8 .",
+                "test_command": "pytest tests/",
+                "instructions_path": "AGENTS.md",
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["lint_command"] == "flake8 ."
+        assert data["test_command"] == "pytest tests/"
+        assert data["instructions_path"] == "AGENTS.md"
+
+    def test_get_project_settings_after_save(self, client, tmp_path):
+        """Saved project settings are returned on GET."""
+        project_dir = tmp_path / "test-project2"
+        project_dir.mkdir()
+        project_path = str(project_dir)
+
+        # Save settings
+        client.put(
+            "/api/v1/config/project",
+            json={
+                "project_path": project_path,
+                "lint_command": "npm run lint",
+                "test_command": "npm test",
+            },
+        )
+
+        # Retrieve settings
+        response = client.get(f"/api/v1/config/project?project_path={project_path}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["lint_command"] == "npm run lint"
+        assert data["test_command"] == "npm test"
+
+    def test_get_session_log_path(self, client):
+        """Can get session log file path."""
+        # Create a session
+        create_resp = client.post("/api/v1/sessions", json={"name": "Test"})
+        session_id = create_resp.json()["id"]
+
+        response = client.get(f"/api/v1/sessions/{session_id}/log")
+        assert response.status_code == 200
+        data = response.json()
+        assert "log_path" in data
+        assert "log_exists" in data
+        assert data["session_id"] == session_id
+        # Log file may not exist until a task is started
+        # If log_path is set, it should contain the session id
+        if data["log_path"]:
+            assert session_id in data["log_path"]

@@ -431,3 +431,26 @@ async def get_session_events(
         "latest_seq": latest_seq,
         "session_id": session_id,
     }
+
+
+@router.get("/{session_id}/log")
+async def get_session_log(session_id: str) -> dict:
+    """Get the session event log file path.
+
+    The log file contains all structured events from the session in JSONL format.
+    This endpoint returns the path so the client can display it or offer download.
+    """
+    manager = get_session_manager()
+    session = manager.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+    # Get the log path from EventLog
+    log = EventLog(session_id)
+    log_path = log.log_path
+
+    return {
+        "session_id": session_id,
+        "log_path": str(log_path) if log_path and log_path.exists() else None,
+        "log_exists": log_path is not None and log_path.exists(),
+    }

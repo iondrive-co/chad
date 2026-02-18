@@ -382,3 +382,92 @@ async def set_slack_settings(request: SlackSettingsUpdate) -> SlackSettingsRespo
         has_token=bool(config_mgr.get_slack_bot_token()),
         has_signing_secret=bool(config_mgr.get_slack_signing_secret()),
     )
+
+
+class ProjectSettingsResponse(BaseModel):
+    """Response for project settings endpoint."""
+
+    project_path: str = Field(description="Path to the project")
+    project_type: str | None = Field(description="Detected project type")
+    lint_command: str | None = Field(description="Lint command for the project")
+    test_command: str | None = Field(description="Test command for the project")
+    instructions_path: str | None = Field(description="Path to agent instructions file")
+    architecture_path: str | None = Field(description="Path to architecture docs")
+
+
+class ProjectSettingsUpdate(BaseModel):
+    """Request to update project settings."""
+
+    project_path: str = Field(description="Path to the project")
+    lint_command: str | None = Field(default=None, description="Lint command")
+    test_command: str | None = Field(default=None, description="Test command")
+    instructions_path: str | None = Field(default=None, description="Agent instructions path")
+    architecture_path: str | None = Field(default=None, description="Architecture docs path")
+
+
+@router.get("/project", response_model=ProjectSettingsResponse)
+async def get_project_settings(
+    project_path: str | None = None,
+) -> ProjectSettingsResponse:
+    """Get project settings for a specific project path.
+
+    Project settings include lint/test commands and documentation paths.
+    If no settings exist, returns defaults (possibly with auto-detected values).
+    """
+    if not project_path:
+        raise HTTPException(status_code=400, detail="project_path parameter required")
+
+    from pathlib import Path
+    from chad.util.project_setup import load_project_config, detect_project_type
+
+    path = Path(project_path).expanduser().resolve()
+    config = load_project_config(path)
+
+    if config:
+        return ProjectSettingsResponse(
+            project_path=str(path),
+            project_type=config.project_type,
+            lint_command=config.verification.lint_command,
+            test_command=config.verification.test_command,
+            instructions_path=config.docs.instructions_path if config.docs else None,
+            architecture_path=config.docs.architecture_path if config.docs else None,
+        )
+
+    # Return defaults for new project
+    project_type = detect_project_type(path) if path.exists() else None
+    return ProjectSettingsResponse(
+        project_path=str(path),
+        project_type=project_type,
+        lint_command=None,
+        test_command=None,
+        instructions_path=None,
+        architecture_path=None,
+    )
+
+
+@router.put("/project", response_model=ProjectSettingsResponse)
+async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSettingsResponse:
+    """Update project settings.
+
+    Saves lint/test commands and documentation paths for a project.
+    """
+    from pathlib import Path
+    from chad.util.project_setup import save_project_settings
+
+    path = Path(request.project_path).expanduser().resolve()
+    config = save_project_settings(
+        path,
+        lint_command=request.lint_command,
+        test_command=request.test_command,
+        instructions_path=request.instructions_path,
+        architecture_path=request.architecture_path,
+    )
+
+    return ProjectSettingsResponse(
+        project_path=str(path),
+        project_type=config.project_type,
+        lint_command=config.verification.lint_command,
+        test_command=config.verification.test_command,
+        instructions_path=config.docs.instructions_path if config.docs else None,
+        architecture_path=config.docs.architecture_path if config.docs else None,
+    )

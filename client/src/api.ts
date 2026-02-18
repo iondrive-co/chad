@@ -381,4 +381,52 @@ export class ChadAPI {
   }> {
     return this.put("/api/v1/config/slack", settings);
   }
+
+  // ── Config: Project Settings ──
+
+  getProjectSettings(
+    projectPath: string,
+  ): Promise<{
+    project_path: string;
+    project_type: string | null;
+    lint_command: string | null;
+    test_command: string | null;
+    instructions_path: string | null;
+    architecture_path: string | null;
+  }> {
+    return this.get(
+      `/api/v1/config/project?project_path=${encodeURIComponent(projectPath)}`,
+    );
+  }
+
+  setProjectSettings(
+    settings: {
+      project_path: string;
+      lint_command?: string | null;
+      test_command?: string | null;
+      instructions_path?: string | null;
+      architecture_path?: string | null;
+    },
+  ): Promise<{
+    project_path: string;
+    project_type: string | null;
+    lint_command: string | null;
+    test_command: string | null;
+    instructions_path: string | null;
+    architecture_path: string | null;
+  }> {
+    return this.put("/api/v1/config/project", settings);
+  }
+
+  // ── Session Log ──
+
+  getSessionLog(
+    sessionId: string,
+  ): Promise<{
+    session_id: string;
+    log_path: string | null;
+    log_exists: boolean;
+  }> {
+    return this.get(`/api/v1/sessions/${sessionId}/log`);
+  }
 }

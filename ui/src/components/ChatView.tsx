@@ -3,6 +3,9 @@ import type { ChadAPI } from "chad-client";
 import { useStream } from "../hooks/useStream.ts";
 import { TaskForm } from "./TaskForm.tsx";
 import { MergePanel } from "./MergePanel.tsx";
+import { WorktreeInfo } from "./WorktreeInfo.tsx";
+import { SessionLog } from "./SessionLog.tsx";
+import { ProjectSettings } from "./ProjectSettings.tsx";
 
 interface Props {
   api: ChadAPI;
@@ -164,8 +167,45 @@ export function ChatView({
       e.data.type === "milestone",
   );
 
+  // Track current project path for settings
+  const [currentProjectPath, setCurrentProjectPath] = useState(defaultProjectPath);
+  const [worktreeRefresh, setWorktreeRefresh] = useState(0);
+
+  // Fetch session to get project path
+  useEffect(() => {
+    api.getSession(sessionId).then((session) => {
+      if (session.project_path) {
+        setCurrentProjectPath(session.project_path);
+      }
+    }).catch(() => {
+      // Ignore
+    });
+  }, [api, sessionId]);
+
+  // Refresh worktree info when task completes
+  useEffect(() => {
+    if (completed) {
+      setWorktreeRefresh((v) => v + 1);
+    }
+  }, [completed]);
+
   return (
     <div className="chat-view">
+      {/* Worktree and session info bar */}
+      <div className="session-info-bar">
+        <WorktreeInfo
+          api={api}
+          sessionId={sessionId}
+          refreshTrigger={worktreeRefresh}
+        />
+        <SessionLog api={api} sessionId={sessionId} />
+      </div>
+
+      {/* Project settings (collapsible) */}
+      {currentProjectPath && (
+        <ProjectSettings api={api} projectPath={currentProjectPath} />
+      )}
+
       {/* Task form or streaming output */}
       {!taskActive && !terminalOutput && (
         <TaskForm
