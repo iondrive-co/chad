@@ -107,8 +107,7 @@ class MockRunDurationUpdate(BaseModel):
 async def get_verification_settings() -> VerificationSettings:
     """Get verification agent settings.
 
-    The values are stored in-memory (not persisted); this endpoint reflects the last
-    values set during runtime. Defaults are enabled=True, auto_run=True.
+    Defaults are enabled=True, auto_run=True.
     """
     config_mgr = get_config_manager()
     enabled, auto_run = config_mgr.get_runtime_verification_settings()
@@ -117,7 +116,7 @@ async def get_verification_settings() -> VerificationSettings:
 
 @router.put("/verification", response_model=VerificationSettings)
 async def update_verification_settings(request: VerificationSettingsUpdate) -> VerificationSettings:
-    """Update verification runtime flags.
+    """Update verification flags (persisted across restarts).
 
     Supports partial updates; unspecified fields keep their previous values.
     The verification agent account is configured separately via /verification-agent.

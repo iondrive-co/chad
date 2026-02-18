@@ -709,14 +709,14 @@ def _find_claude_credentials(account_name: str) -> Path | None:
     return None
 
 
-def _get_claude_usage_percentage(account_name: str) -> float | None:
-    """Get Claude usage percentage from Anthropic API.
+def _fetch_claude_usage_data(account_name: str) -> dict | None:
+    """Fetch all Claude usage data from Anthropic API in a single request.
 
     Args:
         account_name: The account name to check usage for
 
     Returns:
-        Usage percentage (0-100), or None if unavailable
+        Parsed JSON response dict, or None if unavailable.
     """
     import requests
 
@@ -747,66 +747,40 @@ def _get_claude_usage_percentage(account_name: str) -> float | None:
         if response.status_code != 200:
             return None
 
-        usage_data = response.json()
-        five_hour = usage_data.get("five_hour", {})
-        util = five_hour.get("utilization")
-        pct = _normalize_usage_percentage(util)
-        if pct is not None:
-            return pct
-
-        return None
+        return response.json()
 
     except Exception:
         return None
 
 
+def _get_claude_usage_percentage(account_name: str) -> float | None:
+    """Get Claude session (5-hour) usage percentage from Anthropic API."""
+    data = _fetch_claude_usage_data(account_name)
+    if data is None:
+        return None
+    return _normalize_usage_percentage((data.get("five_hour") or {}).get("utilization"))
+
+
 def _get_claude_weekly_usage_percentage(account_name: str) -> float | None:
-    """Get Claude weekly (7-day) usage percentage from Anthropic API.
-
-    Args:
-        account_name: The account name to check usage for
-
-    Returns:
-        Usage percentage (0-100), or None if unavailable
-    """
-    import requests
-
-    creds_file = _find_claude_credentials(account_name)
-    if not creds_file:
+    """Get Claude weekly (7-day) usage percentage from Anthropic API."""
+    data = _fetch_claude_usage_data(account_name)
+    if data is None:
         return None
+    return _normalize_usage_percentage((data.get("seven_day") or {}).get("utilization"))
 
+
+def _parse_reset_eta(resets_at: str) -> str | None:
+    """Parse an ISO 8601 reset timestamp into a human-readable ETA string."""
+    from datetime import datetime, timezone
     try:
-        with open(creds_file, encoding="utf-8") as f:
-            creds = json.load(f)
-
-        oauth_data = creds.get("claudeAiOauth", {})
-        access_token = oauth_data.get("accessToken", "")
-        if not access_token:
-            return None
-
-        response = requests.get(
-            "https://api.anthropic.com/api/oauth/usage",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "anthropic-beta": "oauth-2025-04-20",
-                "User-Agent": "claude-code/2.0.32",
-                "Content-Type": "application/json",
-            },
-            timeout=10,
-        )
-
-        if response.status_code != 200:
-            return None
-
-        usage_data = response.json()
-        seven_day = usage_data.get("seven_day", {})
-        util = seven_day.get("utilization")
-        pct = _normalize_usage_percentage(util)
-        if pct is not None:
-            return pct
-
-        return None
-
+        reset_dt = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        total_seconds = max(0, int((reset_dt - now).total_seconds()))
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        if hours > 0:
+            return f"{hours}h {minutes}m"
+        return f"{minutes}m"
     except Exception:
         return None
 
@@ -821,54 +795,13 @@ def _get_claude_reset_eta(account_name: str, period_key: str) -> str | None:
     Returns:
         Human-readable ETA like ``"2h 15m"``, or ``None`` if unavailable.
     """
-    import requests
-    from datetime import datetime, timezone
-
-    creds_file = _find_claude_credentials(account_name)
-    if not creds_file:
+    data = _fetch_claude_usage_data(account_name)
+    if data is None:
         return None
-
-    try:
-        with open(creds_file, encoding="utf-8") as f:
-            creds = json.load(f)
-
-        oauth_data = creds.get("claudeAiOauth", {})
-        access_token = oauth_data.get("accessToken", "")
-        if not access_token:
-            return None
-
-        response = requests.get(
-            "https://api.anthropic.com/api/oauth/usage",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "anthropic-beta": "oauth-2025-04-20",
-                "User-Agent": "claude-code/2.0.32",
-                "Content-Type": "application/json",
-            },
-            timeout=10,
-        )
-
-        if response.status_code != 200:
-            return None
-
-        usage_data = response.json()
-        period = usage_data.get(period_key, {})
-        resets_at = period.get("resets_at")
-        if not resets_at:
-            return None
-
-        reset_dt = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
-        now = datetime.now(timezone.utc)
-        delta = reset_dt - now
-        total_seconds = max(0, int(delta.total_seconds()))
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
-        if hours > 0:
-            return f"{hours}h {minutes}m"
-        return f"{minutes}m"
-
-    except Exception:
+    resets_at = (data.get(period_key) or {}).get("resets_at")
+    if not resets_at:
         return None
+    return _parse_reset_eta(resets_at)
 
 
 def _get_codex_weekly_usage_percentage(account_name: str) -> float | None:
@@ -1505,6 +1438,14 @@ class ClaudeCodeProvider(AIProvider):
         self.process: object | None = None
         self.project_path: str | None = None
         self.accumulated_text: list[str] = []
+        # Cached usage API response; False = not yet fetched, None = fetch failed
+        self._usage_data_cache: dict | None | bool = False
+
+    def _get_usage_data(self) -> dict | None:
+        """Return cached Anthropic usage data, fetching once on first call."""
+        if self._usage_data_cache is False:
+            self._usage_data_cache = _fetch_claude_usage_data(self.config.account_name)
+        return self._usage_data_cache  # type: ignore[return-value]
 
     def _get_claude_config_dir(self) -> str:
         """Get the isolated CLAUDE_CONFIG_DIR for this account."""
@@ -1717,19 +1658,33 @@ class ClaudeCodeProvider(AIProvider):
 
     def get_session_usage_percentage(self) -> float | None:
         """Get Claude session (5-hour) usage percentage from Anthropic API."""
-        return _get_claude_usage_percentage(self.config.account_name)
+        data = self._get_usage_data()
+        if data is None:
+            return None
+        return _normalize_usage_percentage((data.get("five_hour") or {}).get("utilization"))
 
     def get_weekly_usage_percentage(self) -> float | None:
         """Get Claude weekly (7-day) usage percentage from Anthropic API."""
-        return _get_claude_weekly_usage_percentage(self.config.account_name)
+        data = self._get_usage_data()
+        if data is None:
+            return None
+        return _normalize_usage_percentage((data.get("seven_day") or {}).get("utilization"))
 
     def get_session_reset_eta(self) -> str | None:
         """Get estimated time until Claude session (5-hour) usage resets."""
-        return _get_claude_reset_eta(self.config.account_name, "five_hour")
+        data = self._get_usage_data()
+        if data is None:
+            return None
+        resets_at = (data.get("five_hour") or {}).get("resets_at")
+        return _parse_reset_eta(resets_at) if resets_at else None
 
     def get_weekly_reset_eta(self) -> str | None:
         """Get estimated time until Claude weekly (7-day) usage resets."""
-        return _get_claude_reset_eta(self.config.account_name, "seven_day")
+        data = self._get_usage_data()
+        if data is None:
+            return None
+        resets_at = (data.get("seven_day") or {}).get("resets_at")
+        return _parse_reset_eta(resets_at) if resets_at else None
 
     def is_quota_exhausted(self, output_tail: str) -> str | None:
         """Check if output indicates Claude quota exhaustion.
@@ -1748,7 +1703,7 @@ class ClaudeCodeProvider(AIProvider):
             return None
 
         # Distinguish session vs weekly by checking weekly utilization
-        weekly_pct = _get_claude_weekly_usage_percentage(self.config.account_name)
+        weekly_pct = self.get_weekly_usage_percentage()
         if weekly_pct is not None and weekly_pct >= 95:
             return "weekly_limit_reached"
         return "session_limit_reached"
