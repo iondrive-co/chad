@@ -341,6 +341,7 @@ class SessionEventLoop:
 
                             self._session_limit_summary = summary
                             self._emit_milestone(limit_type, summary)
+                            self._check_session_limit_action()
 
         # Scan for coding completion JSON
         if not self._coding_complete_detected:
@@ -437,6 +438,42 @@ class SessionEventLoop:
                 )
                 if self._terminate_pty_fn:
                     self._terminate_pty_fn()
+
+    def _check_session_limit_action(self) -> None:
+        """Bridge session limit detection into the action system.
+
+        When _analyze_output detects quota exhaustion via terminal text, check
+        if any action_settings rule for session_usage has an await_reset or
+        switch_provider action.  If so, set _pending_action and terminate the
+        PTY — the same path taken by _check_usage_thresholds on a crossing.
+
+        This handles the case where a session starts already at quota limit
+        (so the threshold-crossing logic never fires) but the CLI outputs a
+        quota error message and exits quickly.
+        """
+        with self._pending_action_lock:
+            if self._pending_action is not None:
+                return  # Already have a pending action, don't overwrite
+
+        for setting in self._action_settings:
+            if setting.get("event") != "session_usage":
+                continue
+            action = setting.get("action", "notify")
+            if action not in ("await_reset", "switch_provider"):
+                continue
+
+            with self._pending_action_lock:
+                if self._pending_action is not None:
+                    return
+                self._pending_action = {
+                    **setting,
+                    "current_pct": 100.0,
+                    "label": "session",
+                }
+
+            if self._terminate_pty_fn:
+                self._terminate_pty_fn()
+            return
 
     def run(
         self,

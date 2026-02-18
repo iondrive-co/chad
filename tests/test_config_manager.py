@@ -1073,6 +1073,7 @@ class TestConfigUIParity:
         "projects",           # Per-project settings, not global config
         "mock_remaining_usage",    # Testing only - per-account mock via provider cards
         "mock_run_duration_seconds",  # Testing only - per-account mock via provider cards
+        "mock_session_reset_time",  # Testing only - per-account mock reset time
     }
 
     # Config keys that MUST be editable in both Gradio and CLI UIs

@@ -1200,3 +1200,270 @@ class TestQuotaCheckerAfterSwitch:
         loop._analyze_output()
 
         assert loop._session_limit_detected
+
+
+class TestSessionLimitActionBridge:
+    """Tests that session limit detection bridges into the action system."""
+
+    def _make_loop(self, action_settings, terminate_pty_fn=None, quota_checker=_default_quota_checker):
+        event_log = FakeEventLog()
+        emitted = []
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=None,
+            run_phase_fn=None,
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            is_quota_exhausted_fn=quota_checker,
+            action_settings=action_settings,
+            terminate_pty_fn=terminate_pty_fn,
+        )
+        return loop, event_log, emitted
+
+    def test_session_limit_triggers_await_reset(self):
+        """Quota output triggers _pending_action=await_reset and terminates PTY."""
+        terminated = []
+        loop, event_log, emitted = self._make_loop(
+            action_settings=[
+                {"event": "session_usage", "threshold": 100, "action": "await_reset"},
+            ],
+            terminate_pty_fn=lambda: terminated.append(True),
+        )
+
+        loop.feed_output("You've hit your limit\n")
+        loop._analyze_output()
+
+        assert loop._session_limit_detected
+        assert loop._pending_action is not None
+        assert loop._pending_action["action"] == "await_reset"
+        assert loop._pending_action["current_pct"] == 100.0
+        assert len(terminated) == 1
+
+    def test_session_limit_triggers_switch_provider(self):
+        """Quota output triggers _pending_action=switch_provider and terminates PTY."""
+        terminated = []
+        loop, event_log, emitted = self._make_loop(
+            action_settings=[
+                {"event": "session_usage", "threshold": 90, "action": "switch_provider",
+                 "target_account": "backup"},
+            ],
+            terminate_pty_fn=lambda: terminated.append(True),
+        )
+
+        loop.feed_output("Error: insufficient credits\n")
+        loop._analyze_output()
+
+        assert loop._session_limit_detected
+        assert loop._pending_action is not None
+        assert loop._pending_action["action"] == "switch_provider"
+        assert loop._pending_action["target_account"] == "backup"
+        assert len(terminated) == 1
+
+    def test_session_limit_no_action_when_notify_only(self):
+        """Quota output with only notify rules does not set _pending_action."""
+        loop, event_log, emitted = self._make_loop(
+            action_settings=[
+                {"event": "session_usage", "threshold": 90, "action": "notify"},
+            ],
+        )
+
+        loop.feed_output("You've hit your limit\n")
+        loop._analyze_output()
+
+        assert loop._session_limit_detected
+        assert loop._pending_action is None
+
+    def test_session_limit_no_duplicate_action(self):
+        """Pre-existing _pending_action is not overwritten by quota detection."""
+        existing = {"event": "weekly_usage", "action": "await_reset", "label": "weekly"}
+        loop, event_log, emitted = self._make_loop(
+            action_settings=[
+                {"event": "session_usage", "threshold": 100, "action": "await_reset"},
+            ],
+        )
+        loop._pending_action = existing
+
+        loop.feed_output("You've hit your limit\n")
+        loop._analyze_output()
+
+        assert loop._session_limit_detected
+        # Should keep the existing action, not overwrite
+        assert loop._pending_action is existing
+
+    def test_session_limit_ignores_non_session_usage_rules(self):
+        """Only session_usage rules trigger the bridge, not weekly or context."""
+        loop, event_log, emitted = self._make_loop(
+            action_settings=[
+                {"event": "weekly_usage", "threshold": 90, "action": "await_reset"},
+                {"event": "context_usage", "threshold": 90, "action": "switch_provider",
+                 "target_account": "backup"},
+            ],
+        )
+
+        loop.feed_output("You've hit your limit\n")
+        loop._analyze_output()
+
+        assert loop._session_limit_detected
+        assert loop._pending_action is None
+
+
+class TestAwaitResetPollingLoop:
+    """Tests for the _handle_await_reset polling loop."""
+
+    def test_await_reset_polls_and_resumes(self, monkeypatch):
+        """Polling loop waits for usage to drop then calls _run_phase_fn."""
+        event_log = FakeEventLog()
+        emitted = []
+        phases_run = []
+        call_count = [0]
+
+        def usage_fn():
+            call_count[0] += 1
+            # Return 100% for first 2 calls, then drop below threshold
+            if call_count[0] <= 2:
+                return 100.0
+            return 50.0
+
+        def fake_run_phase(**kwargs):
+            phases_run.append(kwargs.get("phase"))
+            return 0, "done"
+
+        # Patch time.sleep to not actually sleep
+        sleeps = []
+        monkeypatch.setattr("chad.server.services.session_event_loop.time.sleep", lambda s: sleeps.append(s))
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=type("Task", (), {"cancel_requested": False})(),
+            run_phase_fn=fake_run_phase,
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            get_session_usage_fn=usage_fn,
+            action_settings=[
+                {"event": "session_usage", "threshold": 100, "action": "await_reset"},
+            ],
+        )
+        loop._running = True
+
+        action = {"event": "session_usage", "threshold": 100, "action": "await_reset", "label": "session"}
+        loop._handle_await_reset(
+            action=action,
+            session=None,
+            task_description="test task",
+            previous_output="",
+            screenshots=None,
+            rows=24, cols=80,
+            git_mgr=None,
+            coding_account="mock-1",
+            coding_provider="mock",
+            coding_model=None,
+            coding_reasoning=None,
+        )
+
+        # Verify milestones
+        milestone_summaries = [
+            e[1]["summary"] for e in emitted if e[0] == "milestone"
+        ]
+        assert any("Paused" in s for s in milestone_summaries)
+        assert any("reset detected" in s for s in milestone_summaries)
+
+        # Verify continuation phase was called
+        assert len(phases_run) == 1
+        assert phases_run[0] == "continuation"
+
+        # Verify we actually polled (slept at least twice at 10s each)
+        assert len(sleeps) >= 2
+
+    def test_await_reset_with_eta(self, monkeypatch):
+        """ETA from provider is included in the paused milestone."""
+        event_log = FakeEventLog()
+        emitted = []
+        call_count = [0]
+
+        def usage_fn():
+            call_count[0] += 1
+            if call_count[0] <= 1:
+                return 100.0
+            return 50.0
+
+        monkeypatch.setattr("chad.server.services.session_event_loop.time.sleep", lambda s: None)
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=type("Task", (), {"cancel_requested": False})(),
+            run_phase_fn=lambda **kw: (0, "done"),
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            get_session_usage_fn=usage_fn,
+            get_session_reset_eta_fn=lambda: "2h 15m",
+            action_settings=[
+                {"event": "session_usage", "threshold": 100, "action": "await_reset"},
+            ],
+        )
+        loop._running = True
+
+        action = {"event": "session_usage", "threshold": 100, "action": "await_reset", "label": "session"}
+        loop._handle_await_reset(
+            action=action, session=None, task_description="test",
+            previous_output="", screenshots=None, rows=24, cols=80,
+            git_mgr=None, coding_account="a", coding_provider="mock",
+            coding_model=None, coding_reasoning=None,
+        )
+
+        milestone_summaries = [
+            e[1]["summary"] for e in emitted if e[0] == "milestone"
+        ]
+        assert any("ETA: 2h 15m" in s for s in milestone_summaries)
+
+
+class TestAwaitResetWithMockResetTime:
+    """Tests that MockProvider reset time logic works with await_reset polling."""
+
+    def test_await_reset_with_mock_reset_time(self, tmp_path, monkeypatch):
+        """Mock provider detects usage drop when configured reset time passes."""
+        import json
+        from datetime import datetime, timezone, timedelta
+        from chad.util.providers import MockProvider, ModelConfig
+        from chad.util.config_manager import ConfigManager
+
+        config_path = tmp_path / ".chad.conf"
+        monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+        account = "mock-reset-test"
+
+        # Phase 1: Reset time in the future — usage stays at 100%, ETA is non-None
+        reset_time_future = datetime.now(timezone.utc) + timedelta(minutes=5)
+        config = {
+            "password_hash": "test",
+            "encryption_salt": "dGVzdA==",
+            "accounts": {account: {"provider": "mock", "key": "test", "model": "default", "reasoning": "default"}},
+            "mock_remaining_usage": {account: 0.0},
+            "mock_session_reset_time": {account: reset_time_future.isoformat()},
+        }
+        config_path.write_text(json.dumps(config))
+
+        provider = MockProvider(ModelConfig(provider="mock", model_name="default", account_name=account))
+
+        usage = provider.get_session_usage_percentage()
+        assert usage == 100.0
+
+        eta = provider.get_session_reset_eta()
+        assert eta is not None
+        assert "m" in eta  # Should contain minutes
+
+        # Phase 2: Move reset time to the past — usage drops to 0%
+        reset_time_past = datetime.now(timezone.utc) - timedelta(seconds=5)
+        cm = ConfigManager()
+        cm.set_mock_remaining_usage(account, 0.0)
+        cm.set_mock_session_reset_time(account, reset_time_past.isoformat())
+
+        usage = provider.get_session_usage_percentage()
+        assert usage == 0.0
+
+        eta = provider.get_session_reset_eta()
+        assert eta is None  # Already past
+
+        # Verify remaining was restored in config
+        assert cm.get_mock_remaining_usage(account) == 1.0
