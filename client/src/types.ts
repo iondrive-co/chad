@@ -274,3 +274,30 @@ export interface ServerStatus {
   uptime_seconds: number;
   cwd: string;
 }
+
+// ── Project settings ──
+
+export interface ProjectSettings {
+  project_path: string;
+  project_type: string | null;
+  lint_command: string | null;
+  test_command: string | null;
+  instructions_path: string | null;
+  architecture_path: string | null;
+}
+
+export interface ProjectSettingsUpdate {
+  project_path: string;
+  lint_command?: string | null;
+  test_command?: string | null;
+  instructions_path?: string | null;
+  architecture_path?: string | null;
+}
+
+// ── Session log ──
+
+export interface SessionLog {
+  session_id: string;
+  log_path: string | null;
+  log_exists: boolean;
+}

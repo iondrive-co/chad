@@ -965,3 +965,246 @@ label {
   word-break: break-all;
   color: var(--text);
 }
+
+/* ── Session Info Bar ── */
+
+.session-info-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+
+/* ── Worktree Info ── */
+
+.worktree-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+}
+
+.worktree-label {
+  font-weight: 500;
+  color: var(--text);
+}
+
+.worktree-path {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worktree-branch {
+  color: var(--accent);
+}
+
+.worktree-changes {
+  color: var(--warning, #f59e0b);
+  font-weight: bold;
+}
+
+/* ── Session Log ── */
+
+.session-log {
+  flex: 1;
+}
+
+.session-log-toggle {
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+}
+
+.session-log-toggle:hover {
+  color: var(--accent);
+}
+
+.log-file-name {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.session-log-content {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-top: 4px;
+  max-height: 400px;
+  overflow-y: auto;
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.session-log-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.session-log-header button {
+  padding: 4px 12px;
+  font-size: 0.8rem;
+}
+
+.log-path {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-log-events {
+  padding: 8px;
+}
+
+.no-events {
+  color: var(--text-muted);
+  text-align: center;
+  padding: 16px;
+}
+
+.session-event {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+.session-event:hover {
+  background: var(--bg-tertiary);
+}
+
+.event-seq {
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  min-width: 40px;
+}
+
+.event-type {
+  font-family: var(--font-mono);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  min-width: 100px;
+  text-align: center;
+}
+
+.event-type-session_started { background: var(--success); color: #000; }
+.event-type-session_ended { background: var(--text-muted); color: #000; }
+.event-type-user_message { background: var(--accent); color: #fff; }
+.event-type-assistant_message { background: var(--running); color: #fff; }
+.event-type-tool_call_started { background: var(--bg-tertiary); color: var(--text); }
+.event-type-tool_call_finished { background: var(--bg-tertiary); color: var(--text); }
+.event-type-milestone { background: #8b5cf6; color: #fff; }
+
+.event-time {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  min-width: 70px;
+}
+
+.event-summary {
+  color: var(--text);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Project Settings ── */
+
+.project-settings {
+  border-bottom: 1px solid var(--border);
+}
+
+.project-settings-toggle {
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  text-align: left;
+}
+
+.project-settings-toggle:hover {
+  background: var(--bg-secondary);
+}
+
+.project-type {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.project-settings-content {
+  padding: 12px;
+  background: var(--bg-secondary);
+}
+
+.project-settings-row {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.project-settings-row label {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.project-settings-row input {
+  padding: 6px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+
+.project-settings-row input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.project-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.project-settings-actions button {
+  padding: 6px 16px;
+  font-size: 0.85rem;
+}
