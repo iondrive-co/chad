@@ -4,6 +4,8 @@
 Starts the Chad API server with mock fixture data (via create_temp_env),
 starts the Vite dev server, waits for both, then takes a Playwright screenshot.
 
+Uses ephemeral ports to avoid conflicting with the dev launcher on 8000/5173.
+
 Usage:
     .venv/bin/python scripts/screenshot_react_ui.py
     .venv/bin/python scripts/screenshot_react_ui.py --output /tmp/react-ui.png
@@ -14,6 +16,7 @@ Usage:
 import argparse
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -23,6 +26,13 @@ sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def find_free_port() -> int:
+    """Find a free TCP port by binding to port 0."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
 
 
 def wait_for_url(url: str, timeout: float = 30) -> bool:
@@ -49,6 +59,26 @@ def main():
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
 
+    # Rebuild chad-client so Vite picks up latest API methods
+    print("Building chad-client...")
+    subprocess.run(
+        ["npm", "run", "build"],
+        cwd=str(PROJECT_ROOT / "client"),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
+
+    # Clear Vite dep cache to pick up fresh client build
+    import shutil
+    vite_cache = PROJECT_ROOT / "ui" / "node_modules" / ".vite"
+    if vite_cache.exists():
+        shutil.rmtree(vite_cache)
+
+    # Use ephemeral ports so we never collide with the dev launcher
+    api_port = find_free_port()
+    vite_port = find_free_port()
+
     # Create temp environment with mock fixture data
     from chad.ui.gradio.verification.ui_playwright_runner import create_temp_env
     env = create_temp_env(screenshot_mode=True)
@@ -66,35 +96,39 @@ def main():
         }
         server_env.update(env.env_vars)
 
-        # Start API server with mock data
-        print("Starting Chad API server (screenshot mode)...")
+        # Start API server with mock data on ephemeral port
+        print(f"Starting Chad API server (screenshot mode) on port {api_port}...")
         api_proc = subprocess.Popen(
             [str(PROJECT_ROOT / ".venv" / "bin" / "python"), "-m", "chad",
-             "--mode", "server", "--api-port", "8000"],
+             "--mode", "server", "--api-port", str(api_port)],
             cwd=str(PROJECT_ROOT),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             env=server_env,
+            start_new_session=True,
         )
         procs.append(api_proc)
 
-        if not wait_for_url("http://localhost:8000/status", timeout=15):
+        if not wait_for_url(f"http://localhost:{api_port}/status", timeout=15):
             print("ERROR: API server did not start")
             return 1
 
         print("API server ready")
 
-        # Start Vite dev server
-        print("Starting Vite dev server...")
+        # Start Vite dev server on ephemeral port, proxying to our API port
+        vite_env = {**os.environ, "CHAD_API_PORT": str(api_port)}
+        print(f"Starting Vite dev server on port {vite_port}...")
         vite_proc = subprocess.Popen(
-            ["npx", "vite", "--port", "5173"],
+            ["npx", "vite", "--port", str(vite_port)],
             cwd=str(PROJECT_ROOT / "ui"),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=vite_env,
+            start_new_session=True,
         )
         procs.append(vite_proc)
 
-        if not wait_for_url("http://localhost:5173", timeout=15):
+        if not wait_for_url(f"http://localhost:{vite_port}", timeout=15):
             print("ERROR: Vite dev server did not start")
             return 1
 
@@ -114,7 +148,7 @@ def main():
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page(viewport={"width": args.width, "height": args.height})
-            page.goto("http://localhost:5173")
+            page.goto(f"http://localhost:{vite_port}")
 
             # Wait for connection
             page.wait_for_selector(".status-dot.connected", timeout=10000)
@@ -122,7 +156,7 @@ def main():
             # Click tab if not chat
             if args.tab != "chat":
                 page.click(f"button:text('{args.tab.title()}')")
-                page.wait_for_timeout(1000)
+                page.wait_for_timeout(3000)
 
             page.screenshot(path=args.output, full_page=False)
             browser.close()
@@ -138,10 +172,14 @@ def main():
     finally:
         for proc in procs:
             try:
-                proc.send_signal(signal.SIGTERM)
+                # Kill the entire process group so child processes are cleaned up
+                os.killpg(proc.pid, signal.SIGTERM)
                 proc.wait(timeout=5)
             except Exception:
-                proc.kill()
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    pass
         env.cleanup()
 
 

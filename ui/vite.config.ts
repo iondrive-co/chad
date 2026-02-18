@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+const apiPort = process.env.CHAD_API_PORT || "8000";
+
 export default defineConfig({
   plugins: [react()],
   server: {
@@ -8,15 +10,15 @@ export default defineConfig({
     open: true,
     proxy: {
       "/api": {
-        target: "http://localhost:8000",
+        target: `http://localhost:${apiPort}`,
         changeOrigin: true,
       },
       "/status": {
-        target: "http://localhost:8000",
+        target: `http://localhost:${apiPort}`,
         changeOrigin: true,
       },
       "/ws": {
-        target: "ws://localhost:8000",
+        target: `ws://localhost:${apiPort}`,
         ws: true,
       },
     },

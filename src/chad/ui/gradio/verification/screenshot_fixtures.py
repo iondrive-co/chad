@@ -446,6 +446,16 @@ def setup_mock_accounts(security_mgr, password: str) -> None:
     # Assign first Claude account as default coding agent
     security_mgr.assign_role("claude-pro", "CODING")
 
+    # Pre-populate action rules for realistic Settings tab screenshots
+    security_mgr.set_action_settings([
+        {"event": "session_usage", "threshold": 80, "action": "notify"},
+        {"event": "session_usage", "threshold": 95,
+         "action": "switch_provider", "target_account": "claude-max"},
+        {"event": "weekly_usage", "threshold": 90, "action": "await_reset"},
+        {"event": "context_usage", "threshold": 85,
+         "action": "switch_provider", "target_account": "codex-work"},
+    ])
+
 
 def create_mock_codex_auth(home_dir: Path, account_data: dict) -> None:
     """Create mock Codex auth.json with JWT-like token."""
