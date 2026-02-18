@@ -2721,6 +2721,83 @@ class TestUsagePercentageCalculation:
 
         assert pct == pytest.approx(50.0)
 
+    def test_claude_provider_makes_single_http_call_for_all_usage_methods(self, tmp_path):
+        """All four usage methods on ClaudeCodeProvider share a single HTTP request."""
+        from chad.util.providers import ClaudeCodeProvider, ModelConfig
+
+        account = "claude-cached"
+        self._write_claude_creds(tmp_path, account)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "five_hour": {"utilization": 0.45, "resets_at": "2099-01-01T12:00:00Z"},
+            "seven_day": {"utilization": 0.7, "resets_at": "2099-01-08T00:00:00Z"},
+        }
+
+        provider = ClaudeCodeProvider(ModelConfig(provider="anthropic", model_name="default", account_name=account))
+        with patch("chad.util.providers.safe_home", return_value=tmp_path), \
+                patch("requests.get", return_value=mock_response) as mock_get:
+            session_pct = provider.get_session_usage_percentage()
+            weekly_pct = provider.get_weekly_usage_percentage()
+            session_eta = provider.get_session_reset_eta()
+            weekly_eta = provider.get_weekly_reset_eta()
+
+        assert mock_get.call_count == 1, "Expected exactly 1 HTTP request for all usage methods"
+        assert session_pct == pytest.approx(45.0)
+        assert weekly_pct == pytest.approx(70.0)
+        assert session_eta is not None
+        assert weekly_eta is not None
+
+    def test_claude_provider_usage_reset_eta_format(self, tmp_path):
+        """Reset ETA is formatted correctly for hours and minutes."""
+        from datetime import datetime, timezone, timedelta
+        from chad.util.providers import ClaudeCodeProvider, ModelConfig
+
+        account = "claude-eta"
+        self._write_claude_creds(tmp_path, account)
+
+        future = datetime.now(timezone.utc) + timedelta(hours=2, minutes=15)
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "five_hour": {"utilization": 0.5, "resets_at": future.isoformat()},
+            "seven_day": {"utilization": 0.5},
+        }
+
+        provider = ClaudeCodeProvider(ModelConfig(provider="anthropic", model_name="default", account_name=account))
+        with patch("chad.util.providers.safe_home", return_value=tmp_path), \
+                patch("requests.get", return_value=mock_response):
+            eta = provider.get_session_reset_eta()
+
+        assert eta is not None
+        assert "h" in eta  # e.g. "2h 15m"
+
+    def test_claude_provider_handles_null_period_fields(self, tmp_path):
+        """API response with null period values (e.g. seven_day: null) returns None safely."""
+        from chad.util.providers import ClaudeCodeProvider, ModelConfig
+
+        account = "claude-null-fields"
+        self._write_claude_creds(tmp_path, account)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "five_hour": {"utilization": 0.5, "resets_at": "2099-01-01T12:00:00Z"},
+            "seven_day": None,  # explicitly null - must not raise AttributeError
+        }
+
+        provider = ClaudeCodeProvider(ModelConfig(provider="anthropic", model_name="default", account_name=account))
+        with patch("chad.util.providers.safe_home", return_value=tmp_path), \
+                patch("requests.get", return_value=mock_response):
+            session_pct = provider.get_session_usage_percentage()
+            weekly_pct = provider.get_weekly_usage_percentage()
+            weekly_eta = provider.get_weekly_reset_eta()
+
+        assert session_pct == pytest.approx(50.0)
+        assert weekly_pct is None  # null value → None, not an error
+        assert weekly_eta is None
+
     def test_gemini_usage_not_logged_in(self, tmp_path):
         """Gemini returns None when oauth credentials don't exist."""
         from chad.util.providers import _get_gemini_usage_percentage

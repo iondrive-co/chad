@@ -31,6 +31,8 @@ CONFIG_BASE_KEYS: set[str] = {
     "mock_run_duration_seconds",  # Dict of account_name -> 0-3600 mock run duration for handover testing
     "mock_session_reset_time",  # Dict of account_name -> ISO 8601 datetime for mock session reset
     "max_verification_attempts",  # Maximum verification attempts before giving up (default 5)
+    "verification_enabled",  # Whether verification is enabled (default True)
+    "verification_auto_run",  # Whether to auto-run verification after coding (default True)
     "slack_enabled",       # Whether Slack integration is active
     "slack_bot_token",     # Encrypted Slack bot token (xoxb-...)
     "slack_channel",       # Slack channel ID to post milestones to
@@ -54,10 +56,6 @@ class ConfigManager:
             self.config_path = config_path or Path.home() / ".chad.conf"
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate_legacy_config()
-
-        # Runtime-only verification flags (not persisted). Default: enabled + auto-run.
-        self._verification_enabled: bool = True
-        self._verification_auto_run: bool = True
 
     def _migrate_legacy_config(self) -> None:
         """One-time migration from legacy config keys to current format."""
@@ -584,18 +582,21 @@ class ConfigManager:
         config = self.load_config()
         return config.get("preferences")
 
-    # ── Runtime verification settings (in-memory only) ──
+    # ── Verification settings ──
 
     def get_runtime_verification_settings(self) -> tuple[bool, bool]:
-        """Return the current runtime verification flags (enabled, auto_run)."""
-        return self._verification_enabled, self._verification_auto_run
+        """Return the persisted verification flags (enabled, auto_run)."""
+        config = self.load_config()
+        enabled = config.get("verification_enabled", True)
+        auto_run = config.get("verification_auto_run", True)
+        return bool(enabled), bool(auto_run)
 
     def set_runtime_verification_settings(
         self,
         enabled: bool | None = None,
         auto_run: bool | None = None,
     ) -> tuple[bool, bool]:
-        """Update runtime verification flags (not persisted to disk).
+        """Update and persist verification flags.
 
         Args:
             enabled: Optional new value for verification enabled
@@ -604,11 +605,13 @@ class ConfigManager:
         Returns:
             Tuple of (enabled, auto_run) after applying updates
         """
+        config = self.load_config()
         if enabled is not None:
-            self._verification_enabled = bool(enabled)
+            config["verification_enabled"] = bool(enabled)
         if auto_run is not None:
-            self._verification_auto_run = bool(auto_run)
-        return self._verification_enabled, self._verification_auto_run
+            config["verification_auto_run"] = bool(auto_run)
+        self.save_config(config)
+        return bool(config.get("verification_enabled", True)), bool(config.get("verification_auto_run", True))
 
     # Special marker value indicating verification is disabled
     VERIFICATION_NONE = "__verification_none__"
