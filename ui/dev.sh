@@ -20,6 +20,14 @@ npm run build
 # Clear Vite's dependency pre-bundle cache to pick up the fresh client build
 rm -rf "$DIR/ui/node_modules/.vite"
 
+# Kill any stale process on the API port (e.g. leftover screenshot session)
+STALE_PID=$(lsof -ti:"$API_PORT" 2>/dev/null || true)
+if [ -n "$STALE_PID" ]; then
+    echo "Killing stale process on port $API_PORT (PID $STALE_PID)..."
+    kill $STALE_PID 2>/dev/null || true
+    sleep 1
+fi
+
 # Start Chad API server in background
 "$DIR/.venv/bin/python" -m chad --mode server --api-port "$API_PORT" &
 API_PID=$!

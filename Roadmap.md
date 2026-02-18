@@ -13,6 +13,8 @@ v0.12 Agent Ick
 Using token-based pairing: Chad registers a short-lived pairing code (e.g., "TIGER-42") mapped to the tunnel URL, and 
 the browser UI resolves the code to connect. This enables accessing Chad from any device by entering a code on the 
 hosted UI page, with no relay server—Cloudflare proxies traffic directly to the user's machine through the tunnel.
+- Allow it to be a QR code rather than just a code
+- Remove gradio ui
 
 v0.13 Intentionality Reduction
 

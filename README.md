@@ -33,11 +33,11 @@ and runs multiple tasks in parallel with result merging from their worktrees:
 #### Select coding and verification agents for a task
 <img src="docs/screenshot-task-input.png" width="800" alt="Task input panel">
 
-#### Monitor multiple provider accounts with usage tracking
-<img src="docs/screenshot-providers.png" width="800" alt="Providers tab">
+#### Monitor provider accounts with usage tracking
+<img src="docs/screenshot-providers.png" width="800" alt="Providers tab with usage">
 
-#### Resolve merge conflicts
-<img src="docs/screenshot-merge-conflicts.png" width="800" alt="Merge conflict resolution">
+#### Configure rules to switch providers or wait for usage resets
+<img src="docs/screenshot-settings.png" width="800" alt="Action rules configuration">
 
 </details>
 
