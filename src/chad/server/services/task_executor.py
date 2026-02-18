@@ -564,6 +564,7 @@ def build_agent_command(
         cmd = _build_mock_agent_command(
             project_path,
             task_description,
+            account_name=account_name,
             phase=phase,
             run_duration_seconds=mock_run_duration_seconds,
         )
@@ -580,18 +581,39 @@ def build_agent_command(
 def _build_mock_agent_command(
     project_path: Path,
     task_description: str | None,
+    account_name: str = "",
     phase: str = "exploration",
     run_duration_seconds: int = 0,
 ) -> list[str]:
     """Build mock agent command that simulates a real agent CLI."""
     duration = max(0, int(run_duration_seconds or 0))
+    # Escape the account name for embedding in the script string
+    safe_account = (account_name or "").replace("'", "\\'").replace('"', '\\"')
     # Python script that outputs ANSI-formatted text like a real agent
     # Uses minimal delays to keep tests fast while still demonstrating ANSI output
     script = f'''
 import sys
 import os
+import json
 import time
 import random
+
+# Check mock quota before doing any work
+_account = "{safe_account}"
+if _account:
+    _conf_path = os.path.join(os.path.expanduser("~"), ".chad.conf")
+    _env_conf = os.environ.get("CHAD_CONFIG")
+    if _env_conf:
+        _conf_path = _env_conf
+    try:
+        with open(_conf_path, "r") as _f:
+            _cfg = json.load(_f)
+        _remaining = _cfg.get("mock_remaining_usage", {{}}).get(_account, 0.5)
+        if _remaining <= 0.0:
+            print("Error: insufficient credits remaining. Quota exceeded.", flush=True)
+            sys.exit(1)
+    except Exception:
+        pass
 
 # ANSI colors
 BLUE = "\\033[1;34m"

@@ -29,6 +29,7 @@ CONFIG_BASE_KEYS: set[str] = {
     "action_settings",  # List of {event, threshold, action, target_account?} for usage actions
     "mock_remaining_usage",  # Dict of account_name -> 0.0-1.0 for mock provider testing
     "mock_run_duration_seconds",  # Dict of account_name -> 0-3600 mock run duration for handover testing
+    "mock_session_reset_time",  # Dict of account_name -> ISO 8601 datetime for mock session reset
     "max_verification_attempts",  # Maximum verification attempts before giving up (default 5)
     "slack_enabled",       # Whether Slack integration is active
     "slack_bot_token",     # Encrypted Slack bot token (xoxb-...)
@@ -916,6 +917,35 @@ class ConfigManager:
         if "mock_run_duration_seconds" not in config:
             config["mock_run_duration_seconds"] = {}
         config["mock_run_duration_seconds"][account_name] = seconds_int
+        self.save_config(config)
+
+    def get_mock_session_reset_time(self, account_name: str) -> str | None:
+        """Get the mock session reset time for a mock provider account.
+
+        Args:
+            account_name: The mock account name
+
+        Returns:
+            ISO 8601 datetime string, or None if not set
+        """
+        config = self.load_config()
+        reset_dict = config.get("mock_session_reset_time", {})
+        return reset_dict.get(account_name)
+
+    def set_mock_session_reset_time(self, account_name: str, iso_str: str | None) -> None:
+        """Set the mock session reset time for a mock provider account.
+
+        Args:
+            account_name: The mock account name
+            iso_str: ISO 8601 datetime string, or None to clear
+        """
+        config = self.load_config()
+        if "mock_session_reset_time" not in config:
+            config["mock_session_reset_time"] = {}
+        if iso_str is None:
+            config["mock_session_reset_time"].pop(account_name, None)
+        else:
+            config["mock_session_reset_time"][account_name] = iso_str
         self.save_config(config)
 
     def get_max_verification_attempts(self) -> int:

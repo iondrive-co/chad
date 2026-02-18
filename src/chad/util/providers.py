@@ -3556,7 +3556,53 @@ I modified BUGS.md to add a test marker.
 
     def get_session_usage_percentage(self) -> float | None:
         remaining = self._get_remaining_usage()
+
+        # If usage is exhausted and a reset time is configured, check if
+        # the reset time has passed and simulate the quota reset.
+        if remaining <= 0.0 and self.config.account_name:
+            from .config_manager import ConfigManager
+            config_mgr = ConfigManager()
+            reset_iso = config_mgr.get_mock_session_reset_time(self.config.account_name)
+            if reset_iso:
+                try:
+                    from datetime import datetime, timezone
+                    reset_dt = datetime.fromisoformat(reset_iso)
+                    if datetime.now(timezone.utc) >= reset_dt:
+                        config_mgr.set_mock_remaining_usage(self.config.account_name, 1.0)
+                        return 0.0
+                except Exception:
+                    pass
+
         return (1.0 - remaining) * 100.0
+
+    def get_session_reset_eta(self) -> str | None:
+        """Return human-readable ETA until mock session reset."""
+        from .config_manager import ConfigManager
+
+        account_name = self.config.account_name
+        if not account_name:
+            return None
+
+        config_mgr = ConfigManager()
+        reset_iso = config_mgr.get_mock_session_reset_time(account_name)
+        if not reset_iso:
+            return None
+
+        try:
+            from datetime import datetime, timezone
+            reset_dt = datetime.fromisoformat(reset_iso)
+            now = datetime.now(timezone.utc)
+            delta = reset_dt - now
+            total_seconds = int(delta.total_seconds())
+            if total_seconds <= 0:
+                return None  # Already past
+            hours, remainder = divmod(total_seconds, 3600)
+            minutes = remainder // 60
+            if hours > 0:
+                return f"{hours}h {minutes}m"
+            return f"{minutes}m"
+        except Exception:
+            return None
 
     def get_context_usage_percentage(self) -> float | None:
         return self.get_session_usage_percentage()

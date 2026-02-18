@@ -89,3 +89,4 @@ node_modules/
 dist/install-chad.sh
 /.chad-worktrees/
 /.chad/tools/
+/client/.chad-worktrees/
