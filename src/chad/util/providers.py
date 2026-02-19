@@ -1505,19 +1505,27 @@ class ClaudeCodeProvider(AIProvider):
     Each account gets an isolated CLAUDE_CONFIG_DIR to support multiple accounts.
     """
 
+    # Cache TTL: must be <= the threshold-check interval (10s) so the checker
+    # always gets fresh data, but multiple methods called in the same tick share
+    # one HTTP request.
+    _USAGE_CACHE_TTL: float = 10.0
+
     def __init__(self, config: ModelConfig):
         super().__init__(config)
         self.process: object | None = None
         self.project_path: str | None = None
         self.accumulated_text: list[str] = []
-        # Cached usage API response; False = not yet fetched, None = fetch failed
-        self._usage_data_cache: dict | None | bool = False
+        self._usage_data_cache: dict | None = None
+        self._usage_data_fetched_at: float = 0.0
 
     def _get_usage_data(self) -> dict | None:
-        """Return cached Anthropic usage data, fetching once on first call."""
-        if self._usage_data_cache is False:
+        """Return Anthropic usage data, refreshing after the cache TTL."""
+        import time
+        now = time.monotonic()
+        if now - self._usage_data_fetched_at >= self._USAGE_CACHE_TTL:
             self._usage_data_cache = _fetch_claude_usage_data(self.config.account_name)
-        return self._usage_data_cache  # type: ignore[return-value]
+            self._usage_data_fetched_at = now
+        return self._usage_data_cache
 
     def _get_claude_config_dir(self) -> str:
         """Get the isolated CLAUDE_CONFIG_DIR for this account."""
