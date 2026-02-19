@@ -172,7 +172,7 @@ class TestConfigEndpoints:
         response = client.get("/api/v1/config/preferences")
         assert response.status_code == 200
         data = response.json()
-        assert "dark_mode" in data
+        assert "ui_mode" in data
 
     def test_get_verification_settings(self, client):
         """Can get verification settings."""

@@ -82,7 +82,6 @@ class Preferences:
     """User preferences from API."""
 
     last_project_path: str | None
-    dark_mode: bool
     ui_mode: str
 
 
@@ -554,22 +553,18 @@ class APIClient:
         data = resp.json()
         return Preferences(
             last_project_path=data.get("last_project_path"),
-            dark_mode=data.get("dark_mode", True),
             ui_mode=data.get("ui_mode", "gradio"),
         )
 
     def set_preferences(
         self,
         last_project_path: str | None = None,
-        dark_mode: bool | None = None,
         ui_mode: str | None = None,
     ) -> "Preferences":
         """Update user preferences."""
         data = {}
         if last_project_path is not None:
             data["last_project_path"] = last_project_path
-        if dark_mode is not None:
-            data["dark_mode"] = dark_mode
         if ui_mode is not None:
             data["ui_mode"] = ui_mode
 
@@ -578,7 +573,6 @@ class APIClient:
         result = resp.json()
         return Preferences(
             last_project_path=result.get("last_project_path"),
-            dark_mode=result.get("dark_mode", True),
             ui_mode=result.get("ui_mode", "gradio"),
         )
 

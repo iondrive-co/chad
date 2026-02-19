@@ -163,7 +163,6 @@ async def get_preferences() -> UserPreferences:
 
     return UserPreferences(
         last_project_path=prefs.get("project_path") if prefs else None,
-        dark_mode=True,  # Default, not persisted in ConfigManager
         ui_mode=config_mgr.get_ui_mode(),
     )
 
@@ -184,7 +183,6 @@ async def update_preferences(request: UserPreferences) -> UserPreferences:
 
     return UserPreferences(
         last_project_path=prefs.get("project_path") if prefs else None,
-        dark_mode=request.dark_mode,
         ui_mode=config_mgr.get_ui_mode(),
     )
 

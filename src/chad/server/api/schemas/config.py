@@ -21,7 +21,6 @@ class UserPreferences(BaseModel):
     """User preferences."""
 
     last_project_path: str | None = Field(default=None, description="Last used project path")
-    dark_mode: bool = Field(default=True, description="Whether dark mode is enabled")
     ui_mode: str = Field(default="gradio", description="UI mode: gradio or cli")
 
 

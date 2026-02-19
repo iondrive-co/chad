@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import type { ChadAPI, VerificationSettings, UserPreferences, Account } from "chad-client";
+import type { ChadAPI, VerificationSettings, Account } from "chad-client";
 import { ActionRules } from "./ActionRules.tsx";
 
 interface Props {
@@ -8,7 +8,6 @@ interface Props {
 
 export function SettingsPanel({ api }: Props) {
   const [verification, setVerification] = useState<VerificationSettings | null>(null);
-  const [preferences, setPreferences] = useState<UserPreferences | null>(null);
   const [maxAttempts, setMaxAttempts] = useState<number>(3);
   const [verificationAgent, setVerificationAgent] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -27,7 +26,6 @@ export function SettingsPanel({ api }: Props) {
 
   useEffect(() => {
     api.getVerificationSettings().then(setVerification).catch(() => {});
-    api.getPreferences().then(setPreferences).catch(() => {});
     api.getMaxVerificationAttempts().then((r) => setMaxAttempts(r.attempts)).catch(() => {});
     api.getVerificationAgent().then((r) => setVerificationAgent(r.account_name)).catch(() => {});
     api.listAccounts().then((r) => setAccounts(r.accounts)).catch(() => {});
@@ -72,20 +70,6 @@ export function SettingsPanel({ api }: Props) {
       flash("Saved");
     } catch { /* */ }
   }, [api, flash]);
-
-  // ── Preferences ──
-
-  const toggleDarkMode = useCallback(async () => {
-    if (!preferences) return;
-    setSaving(true);
-    try {
-      const updated = await api.setPreferences({ dark_mode: !preferences.dark_mode });
-      setPreferences(updated);
-      flash("Saved");
-    } finally {
-      setSaving(false);
-    }
-  }, [api, preferences, flash]);
 
   // ── Cleanup ──
 
@@ -154,18 +138,6 @@ export function SettingsPanel({ api }: Props) {
 
       {/* ── Action Rules ── */}
       <ActionRules api={api} />
-
-      {/* ── Preferences ── */}
-      <section>
-        <h3>Preferences</h3>
-        {preferences && (
-          <label className="toggle-label">
-            <input type="checkbox" checked={preferences.dark_mode}
-              onChange={toggleDarkMode} disabled={saving} />
-            Dark mode
-          </label>
-        )}
-      </section>
 
       {/* ── Cleanup ── */}
       <section>
