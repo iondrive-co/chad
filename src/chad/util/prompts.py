@@ -16,104 +16,13 @@ from pathlib import Path
 # - {task} replaced with the user's task description
 
 # =============================================================================
-# PHASE 1: EXPLORATION PROMPT
+# CODING AGENT PROMPT
 # =============================================================================
-# The exploration phase does initial codebase exploration and outputs a progress
-# update. This phase ends after outputting the progress JSON.
-
-EXPLORATION_PROMPT = """\
-{project_docs}
-
-{verification_instructions}
-
-You need to complete the following task:
----
-# Task
-
-{task}
----
-
-## Phase 1: Exploration
-
-CRITICAL: This phase MUST complete within 60 seconds. Read only 2-3 key files to understand the area - do not spend excessive time exploring.
-If the project instructions include a Class Map, use it first to choose your initial files before running broad searches.
-
-When you have completed your quick exploration, IMMEDIATELY output a progress update using this JSON format:
-```json
-{{"type": "progress", "summary": "Adding retry logic to handle API rate limits", "location": "src/api/client.py:45", "next_step": "Writing tests to verify the retry behavior"}}
-```
-
-This marks the end of the exploration phase. The implementation phase will continue from here.
-"""
-
-# =============================================================================
-# PHASE 2: IMPLEMENTATION PROMPT
-# =============================================================================
-# The implementation phase receives the exploration output and continues with
-# writing tests, making changes, and running verification.
-
-IMPLEMENTATION_PROMPT = """\
-{project_docs}
-
-{verification_instructions}
-
-You need to complete the following task:
----
-# Task
-
-{task}
----
-
-## Previous Exploration
-
-The exploration phase found:
-{exploration_output}
-
-## Phase 2: Implementation
-
-Continue from the exploration above. Complete the following steps:
-
-1. Write test(s) that should fail until the fix/feature is implemented (you can explore more code if needed)
-2. Make the changes, adjusting tests and exploring more code as needed. If no changes are required, skip to step 5.
-3. Once you believe your changes will complete the task, run verification commands (lint and tests) as described above.
-4. Fix ALL failures and retest if required.
-5. End your response with a JSON summary block like this:
-```json
-{{
-  "change_summary": "One sentence describing what was changed",
-  "files_changed": ["src/auth.py", "tests/test_auth.py"],
-  "completion_status": "success",
-  "hypothesis": "Brief root cause explanation (include if investigating a bug)"
-}}
-```
-Required fields:
-- change_summary: One sentence describing what was done
-- files_changed: Array of file paths that were modified, or "info_only" if this was just an information request with no file changes
-- completion_status: One of "success", "partial" (hit context/token limit), "blocked" (needs user input), or "error"
-Optional fields:
-- hypothesis: Include only when investigating a bug
-"""
-
-# =============================================================================
-# COMBINED CODING PROMPT (for providers that support continuous execution)
-# =============================================================================
-# This combines both phases for providers that can execute without interruption.
-# Used as fallback or for testing.
+# Single prompt that combines exploration and implementation. The agent emits
+# EXPLORATION_RESULT: markers as it discovers things, then outputs a completion
+# JSON when done.
 
 CODING_AGENT_PROMPT = """\
-## URGENT: PROGRESS UPDATE REQUIRED
-
-STOP! Before doing anything else, you MUST:
-1. Spend AT MOST 30 seconds reading 1-2 key files
-2. IMMEDIATELY output a progress update in this exact JSON format:
-```json
-{{"type": "progress", "summary": "Brief description of what you found", "location": "file:line", "next_step": "What you will do next"}}
-```
-
-This progress update tells the user you are working. Output it NOW, within 30 seconds of starting.
-
----
-
 {project_docs}
 
 {verification_instructions}
@@ -124,12 +33,18 @@ This progress update tells the user you are working. Output it NOW, within 30 se
 
 ---
 
-## After your progress update, continue with:
+## Instructions
 
-3. Write test(s) that should fail until the fix/feature is implemented
-4. Make the changes, adjusting tests as needed. If no changes are required, skip to step 6.
-5. Run verification commands (lint and tests) and fix ALL failures.
-6. End your response with a JSON summary:
+As you explore the codebase, each time you discover something relevant, output a line starting with \
+`EXPLORATION_RESULT:` followed by a brief description of what you found. For example:
+`EXPLORATION_RESULT: The authentication logic is in src/auth.py, using JWT tokens with a 24h expiry`
+
+Then complete these steps:
+
+1. Write test(s) that should fail until the fix/feature is implemented
+2. Make the changes, adjusting tests as needed. If no changes are required, skip to step 4.
+3. Run verification commands (lint and tests) and fix ALL failures.
+4. End your response with a JSON summary:
 ```json
 {{
   "change_summary": "One sentence describing what was changed",
@@ -176,6 +91,20 @@ If the coding agent already ran tests and they passed, you do NOT need to re-run
 output unless you have specific concerns about the implementation.
 
 Explore the codebase and provide your analysis. After you're done exploring, I'll ask you for your final verdict.
+"""
+
+# Extra criteria appended on retry (attempt >= 2) to raise the verification bar
+ELEVATED_VERIFICATION_CRITERIA = """
+
+## Elevated Review (Attempt {attempt})
+
+This is retry attempt {attempt}. The previous verification failed and the coding agent revised its work. \
+Apply stricter scrutiny by also evaluating:
+
+5. **Durability**: Will this fix hold up under edge cases and future changes, or is it brittle/superficial?
+6. **Root cause**: Did the coding agent address the actual root cause, or just patch the symptom?
+7. **Structural improvement**: Are there structural improvements that would prevent this class of issue from recurring?
+8. **Dead code**: Did the failed attempt leave behind any dead code, unused imports, or orphaned test fixtures?
 """
 
 # Phase 2: Conclusion - Request structured JSON output
@@ -251,9 +180,17 @@ Output ONLY the JSON block, no other text.
 class PromptPreviews:
     """Pre-filled prompt templates with project docs but task placeholders."""
 
-    exploration: str
-    implementation: str
+    coding: str
     verification: str
+    # Legacy aliases for backwards compatibility in tests
+    exploration: str = ""
+    implementation: str = ""
+
+    def __post_init__(self):
+        if not self.exploration:
+            self.exploration = self.coding
+        if not self.implementation:
+            self.implementation = self.coding
 
 
 def build_prompt_previews(project_path: str | Path | None) -> PromptPreviews:
@@ -266,7 +203,7 @@ def build_prompt_previews(project_path: str | Path | None) -> PromptPreviews:
         project_path: Path to the project directory
 
     Returns:
-        PromptPreviews with all three prompts partially filled
+        PromptPreviews with coding and verification prompts partially filled
     """
     from chad.util.project_setup import build_doc_reference_text
 
@@ -276,16 +213,10 @@ def build_prompt_previews(project_path: str | Path | None) -> PromptPreviews:
 
     docs_section, verification_section = _build_docs_and_verification(project_docs, project_path)
 
-    exploration = EXPLORATION_PROMPT.format(
+    coding = CODING_AGENT_PROMPT.format(
         project_docs=docs_section,
         verification_instructions=verification_section,
         task="{task}",
-    )
-    implementation = IMPLEMENTATION_PROMPT.format(
-        project_docs=docs_section,
-        verification_instructions=verification_section,
-        task="{task}",
-        exploration_output="{exploration_output}",
     )
     verification = VERIFICATION_EXPLORATION_PROMPT.format(
         task="{task}",
@@ -293,8 +224,7 @@ def build_prompt_previews(project_path: str | Path | None) -> PromptPreviews:
     )
 
     return PromptPreviews(
-        exploration=exploration,
-        implementation=implementation,
+        coding=coding,
         verification=verification,
     )
 
@@ -327,77 +257,15 @@ def _build_docs_and_verification(
     return docs_section, verification_section
 
 
-def build_exploration_prompt(
+def build_prompt(
     task: str,
     project_docs: str | None = None,
     project_path: str | Path | None = None,
     screenshots: list[str] | None = None,
 ) -> str:
-    """Build the exploration phase prompt for the coding agent.
+    """Build the prompt for the coding agent.
 
-    This is Phase 1 of the 3-phase execution. The agent explores the codebase
-    and outputs a progress JSON when done.
-
-    Args:
-        task: The user's task description
-        project_docs: Optional project documentation references (paths to read)
-        project_path: Optional project path for detecting verification commands
-        screenshots: Optional list of screenshot file paths to include
-
-    Returns:
-        Exploration prompt for Phase 1
-    """
-    docs_section, verification_section = _build_docs_and_verification(project_docs, project_path)
-    task_with_screenshots = _build_task_with_screenshots(task, screenshots)
-
-    return EXPLORATION_PROMPT.format(
-        project_docs=docs_section,
-        verification_instructions=verification_section,
-        task=task_with_screenshots,
-    )
-
-
-def build_implementation_prompt(
-    task: str,
-    exploration_output: str,
-    project_docs: str | None = None,
-    project_path: str | Path | None = None,
-) -> str:
-    """Build the implementation phase prompt for the coding agent.
-
-    This is Phase 2 of the 3-phase execution. The agent receives the exploration
-    output and continues with writing tests, making changes, and verification.
-
-    Args:
-        task: The user's task description
-        exploration_output: Output from the exploration phase
-        project_docs: Optional project documentation references (paths to read)
-        project_path: Optional project path for detecting verification commands
-
-    Returns:
-        Implementation prompt for Phase 2
-    """
-    docs_section, verification_section = _build_docs_and_verification(project_docs, project_path)
-
-    return IMPLEMENTATION_PROMPT.format(
-        project_docs=docs_section,
-        verification_instructions=verification_section,
-        task=task,
-        exploration_output=exploration_output,
-    )
-
-
-def build_coding_prompt(
-    task: str,
-    project_docs: str | None = None,
-    project_path: str | Path | None = None,
-    screenshots: list[str] | None = None,
-) -> str:
-    """Build the complete prompt for the coding agent (combined phases).
-
-    This is the legacy single-prompt approach for providers that support
-    continuous execution without interruption. For 3-phase execution,
-    use build_exploration_prompt() and build_implementation_prompt().
+    Single combined prompt that handles exploration and implementation.
 
     Args:
         task: The user's task description
@@ -416,6 +284,30 @@ def build_coding_prompt(
         verification_instructions=verification_section,
         task=task_with_screenshots,
     )
+
+
+# Legacy aliases for backwards compatibility
+build_coding_prompt = build_prompt
+
+
+def build_exploration_prompt(
+    task: str,
+    project_docs: str | None = None,
+    project_path: str | Path | None = None,
+    screenshots: list[str] | None = None,
+) -> str:
+    """Legacy alias for build_prompt."""
+    return build_prompt(task, project_docs, project_path, screenshots)
+
+
+def build_implementation_prompt(
+    task: str,
+    exploration_output: str = "",
+    project_docs: str | None = None,
+    project_path: str | Path | None = None,
+) -> str:
+    """Legacy alias for build_prompt (exploration_output ignored)."""
+    return build_prompt(task, project_docs, project_path)
 
 
 def get_verification_prompt(coding_output: str, task: str = "", change_summary: str | None = None) -> str:
@@ -440,6 +332,7 @@ def get_verification_exploration_prompt(
     coding_output: str,
     task: str = "",
     change_summary: str | None = None,
+    attempt: int = 1,
 ) -> str:
     """Build the exploration prompt for two-phase verification.
 
@@ -449,6 +342,8 @@ def get_verification_exploration_prompt(
         coding_output: The output from the coding agent
         task: The original task description
         change_summary: Optional extracted change summary to prepend
+        attempt: Verification attempt number (1-indexed). On attempt >= 2,
+                 elevated criteria are appended to raise the review bar.
 
     Returns:
         Exploration prompt for the verification agent
@@ -457,10 +352,15 @@ def get_verification_exploration_prompt(
     if change_summary:
         coding_block = f"Summary from coding agent: {change_summary}\n\nFull response:\n{coding_output}"
 
-    return VERIFICATION_EXPLORATION_PROMPT.format(
+    prompt = VERIFICATION_EXPLORATION_PROMPT.format(
         coding_output=coding_block,
         task=task or "(no task provided)",
     )
+
+    if attempt >= 2:
+        prompt += ELEVATED_VERIFICATION_CRITERIA.format(attempt=attempt)
+
+    return prompt
 
 
 def get_verification_conclusion_prompt() -> str:
@@ -509,11 +409,11 @@ class ProgressUpdate:
 
 # Error patterns that indicate a provider failure rather than a parse issue
 _PROVIDER_ERROR_PATTERNS = [
-    (r"Error:\s*.*execution stalled", "Verification agent stalled (no output)"),
-    (r"Error:\s*.*execution timed out", "Verification agent timed out"),
-    (r"Failed to run.*command not found", "Verification agent CLI not installed"),
-    (r"No response from", "Verification agent returned no response"),
-    (r"Failed to run.*:", "Verification agent execution error"),
+    (r"error:\s*.+execution stalled(?:\s*\([^)]*\))?", "Verification agent stalled (no output)"),
+    (r"error:\s*.+execution timed out(?:\s*\([^)]*\))?", "Verification agent timed out"),
+    (r"failed to run.+command not found(?:\s+install with:.+)?", "Verification agent CLI not installed"),
+    (r"no response from.+", "Verification agent returned no response"),
+    (r"failed to run.+:.+", "Verification agent execution error"),
 ]
 
 
@@ -531,12 +431,6 @@ def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
     """
     import json
     import re
-
-    # Check for known provider error patterns before parsing
-    # These indicate execution failures that should fail verification gracefully
-    for pattern, error_msg in _PROVIDER_ERROR_PATTERNS:
-        if re.search(pattern, response, re.IGNORECASE):
-            return False, error_msg, [response.strip()[:500]]
 
     # Strip thinking/reasoning prefixes that some models add before JSON
     # e.g., "*Thinking: **Ensuring valid JSON output***\n\n{..."
@@ -597,9 +491,6 @@ def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
             seen.add(normalized)
             candidates.append(normalized)
 
-    if not candidates:
-        raise VerificationParseError(f"No JSON found in response: {response[:200]}")
-
     # If multiple JSON objects exist, prefer one that includes `passed`.
     prioritized = sorted(candidates, key=lambda text: '"passed"' not in text)
     data = None
@@ -622,6 +513,22 @@ def parse_verification_response(response: str) -> tuple[bool, str, list[str]]:
         missing_passed_seen = True
 
     if data is None:
+        # Fall back to provider-error matching only when the whole response
+        # looks like an execution error payload. This avoids false positives
+        # from snippets like: response = "Error: ... timed out ...".
+        ansi_stripped = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", cleaned).strip()
+        fence_match = re.fullmatch(r"```(?:\w+)?\s*(.*?)\s*```", ansi_stripped, re.DOTALL)
+        if fence_match:
+            ansi_stripped = fence_match.group(1).strip()
+        error_candidate_lines = [line.strip() for line in ansi_stripped.splitlines() if line.strip()]
+        if error_candidate_lines and len(error_candidate_lines) <= 4:
+            error_candidate = "\n".join(error_candidate_lines)
+            for pattern, error_msg in _PROVIDER_ERROR_PATTERNS:
+                if re.fullmatch(pattern, error_candidate, re.IGNORECASE | re.DOTALL):
+                    return False, error_msg, [error_candidate[:500]]
+
+        if not candidates:
+            raise VerificationParseError(f"No JSON found in response: {response[:200]}")
         if missing_passed_seen:
             raise VerificationParseError("Missing required field 'passed' in JSON response")
         if parse_error is not None:
@@ -857,8 +764,19 @@ def check_verification_mentioned(response: str) -> bool:
 # Used when agent exits without completing (only progress update, no completion JSON)
 
 CONTINUATION_PROMPT = """\
-Your previous response ended with a progress update but you did not complete the task. \
-Continue from where you left off:
+Your previous response ended with a progress update but you did not complete the task.
+
+Continue the SAME task below. Do not start a different task or rediscover scope from repo history.
+
+Original task:
+---
+{task}
+---
+
+Most recent output from your previous attempt:
+---
+{previous_output}
+---
 
 1. Write test(s) that should fail until the fix/feature is implemented
 2. Make the changes, adjusting tests as needed
@@ -877,16 +795,104 @@ Do NOT output another progress update - continue directly with implementation.
 """
 
 
-def get_continuation_prompt(previous_output: str) -> str:
+MAX_CONTINUATION_OUTPUT_CHARS = 6000
+
+
+def _compact_continuation_output(previous_output: str) -> str:
+    """Keep continuation context bounded while preserving recent details."""
+    text = previous_output.strip()
+    if not text:
+        return "(no previous output captured)"
+    if len(text) <= MAX_CONTINUATION_OUTPUT_CHARS:
+        return text
+    return (
+        f"(truncated to last {MAX_CONTINUATION_OUTPUT_CHARS} chars)\n"
+        + text[-MAX_CONTINUATION_OUTPUT_CHARS:]
+    )
+
+
+def get_continuation_prompt(task: str, previous_output: str) -> str:
     """Build a continuation prompt when agent exits early (progress but no completion).
 
     Args:
+        task: Original task description that must be preserved across retries
         previous_output: The output from the previous run (included for context)
 
     Returns:
         Continuation prompt to re-invoke the agent
     """
-    return CONTINUATION_PROMPT
+    task_text = task.strip() or "(no task provided)"
+    output_text = _compact_continuation_output(previous_output)
+    return CONTINUATION_PROMPT.format(task=task_text, previous_output=output_text)
+
+
+# =============================================================================
+# REVISION PROMPT
+# =============================================================================
+# Used when verification fails and the coding agent needs to fix issues.
+
+REVISION_PROMPT = """\
+Verification found issues with your changes. Please fix the following problems:
+
+{feedback}
+
+After fixing:
+1. Run verification commands (lint and tests) and fix ALL failures.
+2. End with a JSON summary block:
+```json
+{{
+  "change_summary": "One sentence describing what was fixed",
+  "files_changed": ["src/file.py", "tests/test_file.py"],
+  "completion_status": "success"
+}}
+```
+"""
+
+# Escalated revision prompt for attempt >= 3: forces the coding agent to
+# stop, audit everything it has done, and re-plan from scratch.
+ESCALATED_REVISION_PROMPT = """\
+Verification has failed {attempt} times. Previous fixes have not resolved the issues. \
+Before writing any code, you MUST complete the following audit:
+
+1. **Session history**: Summarise what you have tried so far in this session, in order.
+2. **Current disk state**: List every change currently on disk relative to the original code and describe what each \
+change does.
+3. **Git history**: Check git history for any previous attempts to solve this issue and describe what each one tried.
+4. **Assess**: Stop and compare your answers to steps 1-3. Note any inconsistencies, repeated mistakes, or directions \
+you have not yet explored.
+5. **New plan**: Based ONLY on your assessment in step 4, make a new plan to solve this issue and execute it.
+
+## Latest verification feedback:
+
+{feedback}
+
+After fixing:
+1. Run verification commands (lint and tests) and fix ALL failures.
+2. End with a JSON summary block:
+```json
+{{
+  "change_summary": "One sentence describing what was fixed",
+  "files_changed": ["src/file.py", "tests/test_file.py"],
+  "completion_status": "success"
+}}
+```
+"""
+
+
+def get_revision_prompt(feedback: str, attempt: int = 1) -> str:
+    """Build a revision prompt with verification feedback.
+
+    Args:
+        feedback: The verification feedback describing issues to fix
+        attempt: The verification attempt number (1-indexed). On attempt >= 3,
+                 an escalated prompt forces the agent to audit and re-plan.
+
+    Returns:
+        Revision prompt to re-invoke the coding agent
+    """
+    if attempt >= 3:
+        return ESCALATED_REVISION_PROMPT.format(feedback=feedback, attempt=attempt)
+    return REVISION_PROMPT.format(feedback=feedback)
 
 
 # =============================================================================

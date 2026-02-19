@@ -24,6 +24,7 @@ class SessionResponse(BaseModel):
     active: bool = Field(default=False, description="Whether a task is currently running")
     has_worktree: bool = Field(default=False, description="Whether a git worktree exists")
     has_changes: bool = Field(default=False, description="Whether there are uncommitted changes")
+    coding_account: str | None = Field(default=None, description="Account used for the last coding task")
     created_at: datetime = Field(description="When the session was created")
     last_activity: datetime = Field(description="When the session was last active")
 

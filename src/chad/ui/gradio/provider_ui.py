@@ -14,6 +14,7 @@ import gradio as gr
 from chad.util.utils import platform_path, safe_home
 from chad.util.model_catalog import ModelCatalog
 from chad.util.installer import AIToolInstaller
+from chad.util.providers import is_mistral_configured
 
 if TYPE_CHECKING:
     from chad.ui.client import APIClient
@@ -182,6 +183,22 @@ class ProviderUIManager:
 
         return max(0.0, min(100.0, pct))
 
+    @staticmethod
+    def _normalize_usage_utilization(value: float | int | None) -> float:
+        """Normalize usage utilization where APIs may return 0-1 fractions."""
+        try:
+            pct = float(0.0 if value is None else value)
+        except (TypeError, ValueError):
+            return 0.0
+
+        if math.isnan(pct) or math.isinf(pct):
+            return 0.0
+
+        if 0.0 <= pct <= 1.0:
+            pct *= 100.0
+
+        return max(0.0, min(100.0, pct))
+
     def _progress_bar(self, utilization_pct: float | int | None, width: int = 20) -> str:
         """Create a text progress bar for usage displays."""
         pct = self._normalize_pct(utilization_pct)
@@ -235,6 +252,31 @@ class ProviderUIManager:
 
         return 0.3  # Unknown provider, bias low
 
+    def get_weekly_remaining_usage(self, account_name: str) -> float | None:
+        """Get weekly remaining usage as 0.0-1.0, or None if unavailable.
+
+        Only providers with weekly limits (Claude, Codex) return a value.
+        """
+        try:
+            account = self.api_client.get_account(account_name)
+            provider = account.provider
+        except Exception:
+            return None
+
+        if provider == "anthropic":
+            from chad.util.providers import _get_claude_weekly_usage_percentage
+            pct = _get_claude_weekly_usage_percentage(account_name)
+            if pct is not None:
+                return max(0.0, min(1.0, 1.0 - (pct / 100.0)))
+            return None
+        if provider == "openai":
+            from chad.util.providers import _get_codex_weekly_usage_percentage
+            pct = _get_codex_weekly_usage_percentage(account_name)
+            if pct is not None:
+                return max(0.0, min(1.0, 1.0 - (pct / 100.0)))
+            return None
+        return None
+
     def _get_claude_remaining_usage(self, account_name: str) -> float:
         """Get Claude remaining usage from API (0.0-1.0)."""
         import requests
@@ -269,7 +311,7 @@ class ProviderUIManager:
 
             usage_data = response.json()
             five_hour = usage_data.get("five_hour", {})
-            util = self._normalize_pct(five_hour.get("utilization"))
+            util = self._normalize_usage_utilization(five_hour.get("utilization"))
             return max(0.0, min(1.0, 1.0 - (util / 100.0)))
 
         except Exception:
@@ -366,11 +408,11 @@ class ProviderUIManager:
         """
         from datetime import datetime, timezone
 
-        vibe_config = Path.home() / ".vibe" / "config.toml"
-        if not vibe_config.exists():
+        vibe_dir = Path.home() / ".vibe"
+        if not is_mistral_configured(vibe_dir):
             return 0.0
 
-        sessions_dir = Path.home() / ".vibe" / "logs" / "session"
+        sessions_dir = vibe_dir / "logs" / "session"
         if not sessions_dir.exists():
             return 1.0  # Logged in, no usage yet
 
@@ -866,7 +908,7 @@ class ProviderUIManager:
 
             five_hour = usage_data.get("five_hour", {})
             if five_hour:
-                util = self._normalize_pct(five_hour.get("utilization"))
+                util = self._normalize_usage_utilization(five_hour.get("utilization"))
                 reset_at = five_hour.get("resets_at", "")
                 bar = self._progress_bar(util)
 
@@ -887,7 +929,7 @@ class ProviderUIManager:
 
             seven_day = usage_data.get("seven_day")
             if seven_day:
-                util = self._normalize_pct(seven_day.get("utilization"))
+                util = self._normalize_usage_utilization(seven_day.get("utilization"))
                 reset_at = seven_day.get("resets_at", "")
                 bar = self._progress_bar(util)
 
@@ -910,7 +952,7 @@ class ProviderUIManager:
             if extra and extra.get("is_enabled"):
                 used = extra.get("used_credits", 0)
                 limit = extra.get("monthly_limit", 0)
-                util = self._normalize_pct(extra.get("utilization"))
+                util = self._normalize_usage_utilization(extra.get("utilization"))
                 bar = self._progress_bar(util)
                 result += "**Extra credits**\n"
                 result += (
@@ -1009,11 +1051,11 @@ class ProviderUIManager:
         """Get usage info from Mistral Vibe by parsing session files."""
         from datetime import datetime, timezone
 
-        vibe_config = Path.home() / ".vibe" / "config.toml"
-        if not vibe_config.exists():
+        vibe_dir = Path.home() / ".vibe"
+        if not is_mistral_configured(vibe_dir):
             return "❌ **Not logged in**\n\nRun `vibe --setup` in terminal to authenticate."
 
-        sessions_dir = Path.home() / ".vibe" / "logs" / "session"
+        sessions_dir = vibe_dir / "logs" / "session"
         if not sessions_dir.exists():
             return "✅ **Logged in**\n\n*No session data yet*"
 
@@ -1391,8 +1433,8 @@ class ProviderUIManager:
                 return False, "Not logged in"
 
             if provider_type == "mistral":
-                vibe_config = safe_home() / ".vibe" / "config.toml"
-                if vibe_config.exists():
+                vibe_dir = safe_home() / ".vibe"
+                if is_mistral_configured(vibe_dir):
                     return True, "Logged in"
                 return False, "Not logged in"
 
@@ -2009,6 +2051,43 @@ class ProviderUIManager:
                     base_response = self.provider_action_response(result, card_slots)
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
 
+            elif provider_type == "mistral":
+                # Mistral requires a MISTRAL_API_KEY written to ~/.vibe/.env.
+                # Vibe's own onboarding is a Textual TUI that can't run inside
+                # Gradio, so we accept the key via the UI and write it directly.
+                vibe_dir = safe_home() / ".vibe"
+
+                login_success, _ = self._check_provider_login(provider_type, account_name)
+
+                if not login_success:
+                    if not api_key or not api_key.strip():
+                        import webbrowser
+                        webbrowser.open("https://console.mistral.ai/codestral/cli")
+                        result = (
+                            "❌ Mistral requires an API key.\n\n"
+                            "A browser tab has been opened to **console.mistral.ai** — "
+                            "create a key there, then paste it in the API Key field above and click Add Provider again."
+                        )
+                        base_response = self.provider_action_response(result, card_slots)
+                        return (*base_response, name_field_value, add_btn_state, accordion_state)
+
+                    # Write the key to ~/.vibe/.env (same location vibe's onboarding uses)
+                    vibe_dir.mkdir(parents=True, exist_ok=True)
+                    env_file = vibe_dir / ".env"
+                    env_file.write_text(f"MISTRAL_API_KEY='{api_key.strip()}'\n", encoding="utf-8")
+                    login_success = True
+
+                if login_success:
+                    self.api_client.create_account(account_name, provider_type)
+                    result = f"✅ Provider '{account_name}' added and logged in!"
+                    name_field_value = ""
+                    add_btn_state = gr.update(interactive=False)
+                    accordion_state = gr.update(open=False)
+                else:
+                    result = f"❌ Login failed for '{account_name}'. Please try again."
+                    base_response = self.provider_action_response(result, card_slots)
+                    return (*base_response, name_field_value, add_btn_state, accordion_state)
+
             elif provider_type == "kimi":
                 # Kimi login via `kimi login --json` which emits structured JSON events.
                 # The CLI itself opens the browser — we must NOT open it again.
@@ -2032,7 +2111,7 @@ class ProviderUIManager:
                         result = (
                             "❌ Kimi CLI not found.\n\n"
                             "Please install Kimi Code first:\n"
-                            "```\nnpm install -g @anthropic-ai/kimi-code\n```"
+                            "```\npip install kimi-cli\n```"
                         )
                         base_response = self.provider_action_response(result, card_slots)
                         return (*base_response, name_field_value, add_btn_state, accordion_state)
@@ -2079,7 +2158,7 @@ class ProviderUIManager:
                             except Exception:
                                 pass
                     except FileNotFoundError:
-                        result = "❌ Kimi CLI not found."
+                        result = "❌ Kimi CLI not found.\n\nInstall with: `pip install kimi-cli`"
                         base_response = self.provider_action_response(result, card_slots)
                         return (*base_response, name_field_value, add_btn_state, accordion_state)
 
@@ -2139,32 +2218,16 @@ class ProviderUIManager:
                     return (*base_response, name_field_value, add_btn_state, accordion_state)
 
             else:
-                # Generic flow for mistral and other providers
+                # Generic flow for providers without dedicated login steps
                 login_success, login_msg = self._check_provider_login(provider_type, account_name)
-                auth_info = {
-                    "mistral": ("vibe --setup", "Set up your Mistral API key"),
-                }
-
-                # Gate account creation for providers that require up-front CLI auth.
-                if provider_type in auth_info and not login_success:
-                    auth_cmd, auth_desc = auth_info[provider_type]
-                    result = (
-                        f"❌ {provider_type.capitalize()} is not logged in yet.\n\n"
-                        f"Run `{auth_cmd}` in terminal ({auth_desc}), then add this provider again."
-                    )
-                    base_response = self.provider_action_response(result, card_slots)
-                    return (*base_response, name_field_value, add_btn_state, accordion_state)
 
                 self.api_client.create_account(account_name, provider_type)
                 result = f"✓ Provider '{account_name}' ({provider_type}) added."
 
                 if login_success:
                     result += f" ✅ {login_msg}"
-                else:
+                elif login_msg:
                     result += f" ⚠️ {login_msg}"
-                    auth_cmd, auth_desc = auth_info.get(provider_type, ("unknown", ""))
-                    if auth_cmd != "unknown":
-                        result += f" — manual login: run `{auth_cmd}` ({auth_desc})"
 
                 name_field_value = ""
                 add_btn_state = gr.update(interactive=False)
@@ -2199,7 +2262,13 @@ class ProviderUIManager:
             usage_remaining = self.get_remaining_usage(account_name)
             # Use floor for remaining so any usage reduces from 100%
             usage_pct = int(usage_remaining * 100)
-            return f"[Usage: {usage_pct}%]"
+            result = f"[session usage: {usage_pct}%]"
+
+            weekly_remaining = self.get_weekly_remaining_usage(account_name)
+            if weekly_remaining is not None:
+                weekly_pct = int(weekly_remaining * 100)
+                result += f", weekly usage: {weekly_pct}%"
+            return result
         except Exception:
             return ""
 
@@ -2437,6 +2506,13 @@ class ProviderUIManager:
                 claude_config = self._get_claude_config_dir(account_name)
                 if claude_config.exists():
                     shutil.rmtree(claude_config, ignore_errors=True)
+            elif provider == "mistral":
+                env_file = safe_home() / ".vibe" / ".env"
+                if env_file.exists():
+                    try:
+                        env_file.unlink()
+                    except OSError:
+                        pass
 
             self.api_client.delete_account(account_name)
             return self.provider_action_response(f"✓ Provider '{account_name}' deleted", card_slots)

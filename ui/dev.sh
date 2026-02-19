@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -e
+
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+API_PORT=8000
+
+cleanup() {
+    if [ -n "$API_PID" ]; then
+        kill "$API_PID" 2>/dev/null
+        wait "$API_PID" 2>/dev/null
+    fi
+}
+trap cleanup EXIT
+
+# Rebuild client library so the UI always picks up latest API methods
+echo "Building chad-client..."
+cd "$DIR/client"
+npm run build
+
+# Clear Vite's dependency pre-bundle cache to pick up the fresh client build
+rm -rf "$DIR/ui/node_modules/.vite"
+
+# Kill any stale process on the API port (e.g. leftover screenshot session)
+STALE_PID=$(lsof -ti:"$API_PORT" 2>/dev/null || true)
+if [ -n "$STALE_PID" ]; then
+    echo "Killing stale process on port $API_PORT (PID $STALE_PID)..."
+    kill $STALE_PID 2>/dev/null || true
+    sleep 1
+fi
+
+# Start Chad API server in background
+"$DIR/.venv/bin/python" -m chad --mode server --api-port "$API_PORT" &
+API_PID=$!
+
+# Wait until the API is reachable
+echo "Waiting for Chad API on port $API_PORT..."
+until curl -sf "http://localhost:$API_PORT/status" >/dev/null 2>&1; do
+    if ! kill -0 "$API_PID" 2>/dev/null; then
+        echo "API server exited unexpectedly"
+        exit 1
+    fi
+    sleep 0.3
+done
+echo "Chad API ready"
+
+# Start Vite dev server (foreground)
+cd "$DIR/ui"
+exec npx vite --open

@@ -283,7 +283,7 @@ class TestTerminalLayoutForDisplay:
         """Default TERMINAL_COLS should be a reasonable fallback.
 
         The actual terminal width is dynamically calculated from the container
-        width using JavaScript in web_ui.py. This constant is just a fallback
+        width using JavaScript in gradio_ui.py. This constant is just a fallback
         when dynamic calculation is unavailable. 120 columns is safe for most screens.
         """
         from chad.ui.terminal_emulator import TERMINAL_COLS

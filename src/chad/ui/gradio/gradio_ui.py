@@ -33,19 +33,14 @@ from chad.util.event_log import (
     UserMessageEvent,
     AssistantMessageEvent,
     VerificationAttemptEvent,
-    ProviderSwitchedEvent,
 )
 from chad.util.handoff import (
-    log_handoff_checkpoint,
     build_resume_prompt,
-    is_quota_exhaustion_error,
-    get_quota_error_reason,
 )
 from chad.util.providers import ModelConfig, parse_codex_output, create_provider
 from chad.util.model_catalog import ModelCatalog
 from chad.util.prompts import (
-    build_exploration_prompt,
-    build_implementation_prompt,
+    build_prompt,
     build_prompt_previews,
     extract_coding_summary,
     extract_progress_update,
@@ -93,13 +88,14 @@ class Session:
     has_worktree_changes: bool = False
     merge_conflicts: list[MergeConflict] | None = None
     # Prompt tracking for display
-    last_exploration_prompt: str | None = None
-    last_implementation_prompt: str | None = None
+    last_coding_prompt: str | None = None
     last_verification_prompt: str | None = None
     # Live stream DOM patching support - track if initial render is done
     has_initial_live_render: bool = False
     # Persistent live stream content for tab switch restoration
     last_live_stream: str = ""
+    # Session limit tracking
+    session_limit_summary: str | None = None
     # Track file modifications from last coding run (for revision context)
     last_work_done: dict | None = None
 
@@ -132,6 +128,17 @@ def _history_contents(history: list[tuple]) -> list[str]:
 @dataclass
 class VerificationDropdownState:
     """Resolved state for verification model/reasoning dropdowns."""
+
+    model_choices: list[str]
+    model_value: str
+    reasoning_choices: list[str]
+    reasoning_value: str
+    interactive: bool
+
+
+@dataclass
+class CodingDropdownState:
+    """Resolved state for coding model/reasoning dropdowns."""
 
     model_choices: list[str]
     model_value: str
@@ -342,6 +349,10 @@ body, .gradio-container, .gradio-container * {
   min-height: 34px !important;
   width: 80px !important;
   padding: 8px 14px !important;
+}
+
+.project-save-row {
+  justify-content: flex-end !important;
 }
 
 .start-task-btn,
@@ -1020,7 +1031,7 @@ mark.live-search-match.current {
 #role-status-row-container,
 .role-status-row-container {
   display: flex;
-  justify-content: flex-end;
+  justify-content: flex-start;
   width: 100%;
   margin-top: -4px !important;
   margin-bottom: 0 !important;
@@ -1029,13 +1040,14 @@ mark.live-search-match.current {
 /* Action row: compact inline controls */
 #role-status-row,
 .role-status-row {
-  display: inline-flex !important;
+  display: flex !important;
   align-items: center;
+  justify-content: flex-start;
   gap: 4px;
   flex-wrap: nowrap;
-  width: auto !important;
-  flex: 0 0 auto;
-  max-width: 100%;
+  width: 100% !important;
+  flex: 1 1 auto;
+  min-width: 0 !important;
   background: transparent !important;
 }
 
@@ -1065,7 +1077,7 @@ mark.live-search-match.current {
   margin: 0 !important;
   min-width: 0 !important;
   width: auto !important;
-  flex-grow: 1 !important;
+  flex: 1 1 auto !important;
   max-width: 100% !important;
   overflow: visible !important;
 }
@@ -1756,7 +1768,9 @@ def normalize_live_stream_spacing(content: str) -> str:
 
 
 class LiveStreamDisplayBuffer:
-    """Buffer for live stream display content with infinite history."""
+    """Buffer for live stream display content with bounded size."""
+
+    MAX_SIZE = 50000
 
     def __init__(self) -> None:
         self.content = ""
@@ -1765,6 +1779,11 @@ class LiveStreamDisplayBuffer:
         if not chunk:
             return
         self.content += chunk
+        if len(self.content) > self.MAX_SIZE:
+            # Keep last MAX_SIZE chars, break at a newline boundary
+            cut = self.content[-self.MAX_SIZE:]
+            nl = cut.find("\n")
+            self.content = cut[nl + 1:] if nl >= 0 else cut
 
 
 class LiveStreamRenderState:
@@ -2151,14 +2170,16 @@ def make_progress_message(progress: ProgressUpdate) -> dict:
 
 
 def make_phase_milestone(phase_name: str, account_name: str, model_name: str,
-                         usage_pct: int | None = None) -> dict:
+                         usage_pct: int | None = None,
+                         weekly_usage_pct: int | None = None) -> dict:
     """Create a chatbot message marking a phase transition with provider info.
 
     Args:
         phase_name: Phase name (e.g., "Exploration", "Coding", "Verification").
         account_name: Provider account name.
         model_name: Model identifier.
-        usage_pct: Usage used percentage (0-100), or None if unavailable.
+        usage_pct: Session usage percentage (0-100), or None if unavailable.
+        weekly_usage_pct: Weekly usage percentage (0-100), or None if unavailable.
 
     Returns:
         Chat message dict with role="user" for display in the milestones panel.
@@ -2166,6 +2187,8 @@ def make_phase_milestone(phase_name: str, account_name: str, model_name: str,
     metrics = ""
     if usage_pct is not None:
         metrics = f" Usage: {usage_pct}%"
+    if weekly_usage_pct is not None:
+        metrics += f" Weekly: {weekly_usage_pct}%"
     content = f"**{phase_name}:** {account_name} ({model_name}{metrics})"
     return {"role": "user", "content": content}
 
@@ -2286,11 +2309,14 @@ class ChadWebUI:
         message_queue: "queue.Queue",
         coding_model: str | None = None,
         coding_reasoning: str | None = None,
+        verification_account: str | None = None,
+        verification_model: str | None = None,
+        verification_reasoning: str | None = None,
         server_session_id: str | None = None,
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
-        override_exploration_prompt: str | None = None,
-        override_implementation_prompt: str | None = None,
+        override_prompt: str | None = None,
+        is_followup: bool = False,
     ) -> tuple[bool, str, str | None, dict | None]:
         """Run a task via the API and post events to the message queue.
 
@@ -2305,8 +2331,12 @@ class ChadWebUI:
             message_queue: Queue to post events to (for UI integration)
             coding_model: Optional model override
             coding_reasoning: Optional reasoning level
+            verification_account: Optional verification account override
+            verification_model: Optional verification model override
+            verification_reasoning: Optional verification reasoning override
             terminal_cols: Terminal width in columns (calculated from panel width)
             screenshots: Optional list of screenshot file paths for agent reference
+            override_prompt: Optional user-edited coding prompt
 
         Returns:
             Tuple of (success, final_output_text, server_session_id, work_done)
@@ -2347,6 +2377,18 @@ class ChadWebUI:
         # Use provided terminal_cols or fall back to default
         effective_cols = terminal_cols if terminal_cols else TERMINAL_COLS
 
+        accounts = []
+        provider_by_account: dict[str, str] = {}
+        try:
+            accounts = self.api_client.list_accounts()
+            provider_by_account = {
+                str(acc.name): str(acc.provider)
+                for acc in accounts
+                if getattr(acc, "name", None) and getattr(acc, "provider", None)
+            }
+        except Exception:
+            pass
+
         # Start the task via API using the server session ID
         try:
             self.api_client.start_task(
@@ -2356,11 +2398,14 @@ class ChadWebUI:
                 coding_agent=coding_account,
                 coding_model=coding_model,
                 coding_reasoning=coding_reasoning,
+                verification_agent=verification_account,
+                verification_model=verification_model,
+                verification_reasoning=verification_reasoning,
                 terminal_rows=TERMINAL_ROWS,
                 terminal_cols=effective_cols,
                 screenshots=screenshots,
-                override_exploration_prompt=override_exploration_prompt,
-                override_implementation_prompt=override_implementation_prompt,
+                override_prompt=override_prompt,
+                is_followup=is_followup,
             )
         except Exception as e:
             message_queue.put(("status", f"❌ Failed to start task: {e}"))
@@ -2370,28 +2415,78 @@ class ChadWebUI:
         message_queue.put(("ai_switch", "CODING AI"))
         message_queue.put(("message_start", "CODING AI"))
 
+        # Milestones must come from the dedicated milestones endpoint, not SSE events.
+        milestone_since_seq = 0
+        milestone_poll_stop = threading.Event()
+        milestone_poll_thread: threading.Thread | None = None
+        stream_mode_lock = threading.Lock()
+
+        def poll_milestones_once() -> None:
+            nonlocal milestone_since_seq
+            if not server_session_id:
+                return
+
+            get_milestones = getattr(self.api_client, "get_milestones", None)
+            if not callable(get_milestones):
+                return
+
+            try:
+                milestones = get_milestones(server_session_id, since_seq=milestone_since_seq)
+            except Exception:
+                return
+
+            if not isinstance(milestones, list):
+                return
+
+            max_seq = milestone_since_seq
+            for milestone in milestones:
+                if not isinstance(milestone, dict):
+                    continue
+
+                seq = milestone.get("seq", 0)
+                try:
+                    seq_int = int(seq)
+                except (TypeError, ValueError):
+                    seq_int = 0
+                if seq_int > max_seq:
+                    max_seq = seq_int
+
+                summary = str(milestone.get("summary", "")).strip()
+                if not summary:
+                    continue
+
+                milestone_type = str(milestone.get("milestone_type", ""))
+                if milestone_type == "verification_started":
+                    _switch_stream_mode(
+                        verification_account or coding_account,
+                        "VERIFICATION AI",
+                    )
+                elif milestone_type == "revision_started":
+                    _switch_stream_mode(coding_account, "CODING AI")
+
+                message_queue.put((
+                    "milestone",
+                    milestone_type,
+                    str(milestone.get("title", "")),
+                    summary,
+                ))
+
+            milestone_since_seq = max_seq
+
+        def milestone_poll_loop() -> None:
+            while not milestone_poll_stop.is_set():
+                poll_milestones_once()
+                milestone_poll_stop.wait(0.5)
+
         # Stream output via SSE using server session ID
         stream_client = self._get_stream_client()
         exit_code = 0
         got_complete_event = False
 
-        # Detect if this is a provider that outputs stream-json (needs parsing)
-        # Claude/Qwen/Gemini/Kimi share line-delimited JSON output modes.
-        json_parser = None
-        try:
-            accounts = self.api_client.list_accounts()
-            for acc in accounts:
-                if acc.name == coding_account and acc.provider in ("anthropic", "qwen", "gemini", "kimi"):
-                    json_parser = ClaudeStreamJsonParser()
-                    break
-        except Exception:
-            pass  # Fall back to raw output if we can't determine provider
-
         # Track output across the entire run (for verification input) and for the
         # currently active chat phase (exploration vs implementation message bubbles).
         full_output_chunks: list[str] = []
         phase_output_chunks: list[str] = []
-        phase_message_split_done = False
 
         def _record_output_chunk(chunk: str) -> None:
             if not chunk:
@@ -2399,19 +2494,11 @@ class ChadWebUI:
             full_output_chunks.append(chunk)
             phase_output_chunks.append(chunk)
 
-        # For stream-json providers: parse text directly (no terminal width constraints).
-        # For others: use pyte terminal emulation for proper ANSI/cursor handling.
-        terminal = None if json_parser else TerminalEmulator(cols=effective_cols, rows=TERMINAL_ROWS)
-
-        # Detect provider for Codex prompt echo filtering
+        json_stream_providers = {"anthropic", "qwen", "gemini", "kimi"}
+        current_stream_provider = provider_by_account.get(coding_account)
+        json_parser: ClaudeStreamJsonParser | None = None
+        terminal: TerminalEmulator | None = None
         is_codex = False
-        try:
-            for acc in accounts:
-                if acc.name == coding_account and acc.provider == "openai":
-                    is_codex = True
-                    break
-        except Exception:
-            pass
 
         # Codex prompt echo filtering state
         # Codex echoes stdin after the header. The structure is:
@@ -2426,8 +2513,8 @@ class ChadWebUI:
         #
         # We keep everything up to the colored "user" line, filter the prompt,
         # and show everything after "mcp startup:"
-        codex_in_prompt_echo = False  # True when we're in the echoed prompt section
-        codex_past_prompt_echo = False  # True when we've seen "mcp startup:" and are done
+        codex_in_prompt_echo = False
+        codex_past_prompt_echo = False
         codex_output_buffer = ""
         codex_ansi_pattern = re.compile(r'\x1b\[[0-9;]*m')
         codex_user_line_pattern = re.compile(r'\n--------\nuser\n')
@@ -2436,6 +2523,36 @@ class ChadWebUI:
             r'(?:\x1b\[[0-9;]*m)*mcp startup:(?:\x1b\[[0-9;]*m)*[^\n]*\n',
             re.IGNORECASE,
         )
+
+        def _reset_codex_filter_state() -> None:
+            nonlocal codex_in_prompt_echo, codex_past_prompt_echo, codex_output_buffer
+            codex_in_prompt_echo = False
+            codex_past_prompt_echo = False
+            codex_output_buffer = ""
+
+        def _apply_stream_mode(provider_name: str | None) -> None:
+            nonlocal current_stream_provider, json_parser, terminal, is_codex
+            current_stream_provider = provider_name
+            is_json_provider = provider_name in json_stream_providers
+            json_parser = ClaudeStreamJsonParser() if is_json_provider else None
+            terminal = None if is_json_provider else TerminalEmulator(cols=effective_cols, rows=TERMINAL_ROWS)
+            is_codex = provider_name == "openai"
+            _reset_codex_filter_state()
+
+        def _switch_stream_mode(account_name: str | None, ai_name: str) -> None:
+            account_key = account_name or ""
+            provider_name = provider_by_account.get(account_key, current_stream_provider)
+            with stream_mode_lock:
+                if provider_name != current_stream_provider:
+                    _apply_stream_mode(provider_name)
+            message_queue.put(("ai_switch", ai_name))
+
+        with stream_mode_lock:
+            _apply_stream_mode(current_stream_provider)
+
+        poll_milestones_once()
+        milestone_poll_thread = threading.Thread(target=milestone_poll_loop, daemon=True)
+        milestone_poll_thread.start()
 
         try:
             try:
@@ -2460,123 +2577,113 @@ class ChadWebUI:
                         except Exception:
                             raw_bytes = b""
 
-                    # For anthropic, parse stream-json and render directly (no terminal emulation)
-                    if json_parser:
-                        text_chunks = json_parser.feed(raw_bytes)
-                        if text_chunks:
-                            # Accumulate parsed text and render as HTML directly
-                            for text_chunk in text_chunks:
-                                _record_output_chunk(text_chunk)
-                            readable_text = "\n".join(text_chunks) + "\n"
-                            # Escape HTML and preserve newlines
-                            all_text = "\n".join(full_output_chunks)
-                            html_output = html.escape(all_text)
-                            message_queue.put(("stream", readable_text, html_output))
-                        # If no complete lines yet, don't emit anything
-                    else:
-                        decoded = raw_bytes.decode("utf-8", errors="replace")
+                    with stream_mode_lock:
+                        active_json_parser = json_parser
+                        active_terminal = terminal
+                        active_is_codex = is_codex
 
-                        # Each task phase starts a new Codex process. If we see a fresh
-                        # Codex banner while in passthrough mode, restart prompt filtering
-                        # so the implementation prompt gets stripped too.
-                        if is_codex and codex_past_prompt_echo:
-                            banner_probe = codex_ansi_pattern.sub('', decoded).lower()
-                            if "openai codex" in banner_probe and "--------" in banner_probe:
-                                codex_past_prompt_echo = False
-                                codex_in_prompt_echo = False
-                                codex_output_buffer = ""
+                        # For stream-json providers: parse text directly (no terminal emulation)
+                        if active_json_parser:
+                            text_chunks = active_json_parser.feed(raw_bytes)
+                            if text_chunks:
+                                for text_chunk in text_chunks:
+                                    _record_output_chunk(text_chunk)
+                                readable_text = "\n".join(text_chunks) + "\n"
+                                all_text = "\n".join(full_output_chunks)
+                                # Cap HTML to last 30000 chars to prevent browser freeze on long sessions
+                                MAX_LIVE_HTML = 30000
+                                display_text = all_text[-MAX_LIVE_HTML:] if len(all_text) > MAX_LIVE_HTML else all_text
+                                html_output = html.escape(display_text)
+                                message_queue.put(("stream", readable_text, html_output))
+                        else:
+                            decoded = raw_bytes.decode("utf-8", errors="replace")
 
-                        # Filter Codex prompt echo
-                        # Codex output structure:
-                        #   [banner]
-                        #   --------
-                        #   [header info]
-                        #   --------
-                        #   user  (or [36muser[0m with ANSI)
-                        #   [prompt - FILTER THIS]
-                        #   mcp startup: ...
-                        #   [agent work - KEEP THIS]
-                        if is_codex and not codex_past_prompt_echo:
-                            codex_output_buffer += decoded
-                            normalized = codex_output_buffer.replace("\r\n", "\n").replace("\r", "\n")
+                            # Each task phase starts a new Codex process. If we see a fresh
+                            # Codex banner while in passthrough mode, restart prompt filtering
+                            # so the implementation prompt gets stripped too.
+                            if active_is_codex and codex_past_prompt_echo:
+                                banner_probe = codex_ansi_pattern.sub('', decoded).lower()
+                                if "openai codex" in banner_probe and "--------" in banner_probe:
+                                    _reset_codex_filter_state()
 
-                            # Strip ANSI codes for pattern matching
-                            stripped = codex_ansi_pattern.sub('', normalized)
+                            # Filter Codex prompt echo
+                            if active_is_codex and not codex_past_prompt_echo:
+                                codex_output_buffer += decoded
+                                normalized = codex_output_buffer.replace("\r\n", "\n").replace("\r", "\n")
+                                stripped = codex_ansi_pattern.sub('', normalized)
+                                user_line_match = codex_user_line_pattern.search(stripped)
 
-                            # Look for "user" on its own line (after second --------)
-                            # This marks the start of the echoed prompt
-                            user_line_match = codex_user_line_pattern.search(stripped)
+                                if not codex_in_prompt_echo and user_line_match:
+                                    match = codex_user_pattern.search(normalized)
+                                    if match:
+                                        pre_echo = normalized[:match.start()]
+                                        if pre_echo.strip():
+                                            if active_terminal:
+                                                active_terminal.feed(pre_echo.encode("utf-8"))
+                                                html_output = active_terminal.render_html()
+                                            else:
+                                                html_output = html.escape(pre_echo)
+                                            _record_output_chunk(pre_echo)
+                                            message_queue.put(("stream", pre_echo, html_output))
+                                        codex_in_prompt_echo = True
+                                        codex_output_buffer = normalized[match.end():]
+                                        normalized = codex_output_buffer
+                                        stripped = codex_ansi_pattern.sub('', normalized)
 
-                            # Check if we're entering the prompt echo section
-                            if not codex_in_prompt_echo and user_line_match:
-                                # Found start of prompt echo - emit content before it
-                                # Find the position in the original (non-stripped) string
-                                # by finding the pattern with ANSI codes
-                                match = codex_user_pattern.search(normalized)
-                                if match:
-                                    pre_echo = normalized[:match.start()]
-                                    if pre_echo.strip():
-                                        terminal.feed(pre_echo.encode("utf-8"))
-                                        _record_output_chunk(pre_echo)
-                                        html_output = terminal.render_html()
-                                        message_queue.put(("stream", pre_echo, html_output))
-                                    # Now in prompt echo section - update buffer
-                                    codex_in_prompt_echo = True
-                                    codex_output_buffer = normalized[match.end():]
-                                    normalized = codex_output_buffer
-                                    stripped = codex_ansi_pattern.sub('', normalized)
-
-                            # Check if we've passed the prompt echo section
-                            if codex_in_prompt_echo and "mcp startup:" in stripped.lower():
-                                # Found end of prompt echo - extract agent output after marker
-                                match = codex_mcp_pattern.search(normalized)
-                                if match:
-                                    agent_output = normalized[match.end():]
-                                else:
-                                    # Fallback: find in stripped and estimate position
-                                    marker_pos = stripped.lower().find("mcp startup:")
-                                    newline_after = stripped.find("\n", marker_pos)
-                                    if newline_after != -1:
-                                        agent_output = normalized[newline_after + 1:]
+                                if codex_in_prompt_echo and "mcp startup:" in stripped.lower():
+                                    match = codex_mcp_pattern.search(normalized)
+                                    if match:
+                                        agent_output = normalized[match.end():]
                                     else:
-                                        agent_output = ""
-                                codex_past_prompt_echo = True
-                                codex_output_buffer = ""
-                                if agent_output.strip():
-                                    terminal.feed(agent_output.encode("utf-8"))
-                                    _record_output_chunk(agent_output)
-                                    html_output = terminal.render_html()
-                                    message_queue.put(("stream", agent_output, html_output))
-                                continue
+                                        marker_pos = stripped.lower().find("mcp startup:")
+                                        newline_after = stripped.find("\n", marker_pos)
+                                        if newline_after != -1:
+                                            agent_output = normalized[newline_after + 1:]
+                                        else:
+                                            agent_output = ""
+                                    codex_past_prompt_echo = True
+                                    codex_output_buffer = ""
+                                    if agent_output.strip():
+                                        if active_terminal:
+                                            active_terminal.feed(agent_output.encode("utf-8"))
+                                            html_output = active_terminal.render_html()
+                                        else:
+                                            html_output = html.escape(agent_output)
+                                        _record_output_chunk(agent_output)
+                                        message_queue.put(("stream", agent_output, html_output))
+                                    continue
 
-                            # If not in prompt echo yet, emit normally but keep buffer small
-                            if not codex_in_prompt_echo:
-                                if len(codex_output_buffer) > 2000:
-                                    # No marker found - emit older content and keep looking
+                                if not codex_in_prompt_echo and len(codex_output_buffer) > 2000:
                                     to_emit = codex_output_buffer[:-500]
                                     codex_output_buffer = codex_output_buffer[-500:]
                                     if to_emit.strip():
-                                        terminal.feed(to_emit.encode("utf-8"))
+                                        if active_terminal:
+                                            active_terminal.feed(to_emit.encode("utf-8"))
+                                            html_output = active_terminal.render_html()
+                                        else:
+                                            html_output = html.escape(to_emit)
                                         _record_output_chunk(to_emit)
-                                        html_output = terminal.render_html()
                                         message_queue.put(("stream", to_emit, html_output))
-                            continue
+                                continue
 
-                        # Past prompt echo - pass through raw PTY output with terminal emulation
-                        terminal.feed(raw_bytes)
-                        _record_output_chunk(decoded)
-                        html_output = terminal.render_html()
-                        message_queue.put(("stream", decoded, html_output))
+                            if active_terminal:
+                                active_terminal.feed(raw_bytes)
+                                html_output = active_terminal.render_html()
+                            else:
+                                html_output = html.escape(decoded)
+                            _record_output_chunk(decoded)
+                            message_queue.put(("stream", decoded, html_output))
 
                 elif event.event_type == "complete":
                     exit_code = event.data.get("exit_code", 0)
                     got_complete_event = True
                     # Flush any remaining Codex output buffer
-                    if is_codex and codex_output_buffer.strip():
-                        if terminal:
-                            terminal.feed(codex_output_buffer.encode("utf-8"))
-                        _record_output_chunk(codex_output_buffer)
-                        codex_output_buffer = ""
+                    with stream_mode_lock:
+                        if is_codex and codex_output_buffer.strip():
+                            if terminal:
+                                terminal.feed(codex_output_buffer.encode("utf-8"))
+                            _record_output_chunk(codex_output_buffer)
+                            codex_output_buffer = ""
                     break
 
                 elif event.event_type == "error":
@@ -2592,16 +2699,6 @@ class ChadWebUI:
                     elif event_type == "status":
                         status_text = event.data.get("status", "")
                         if status_text:
-                            if (
-                                status_text == "Phase 2: Implementing changes..."
-                                and not phase_message_split_done
-                            ):
-                                exploration_output = _sanitize_terminal_text("\n".join(phase_output_chunks)).strip()
-                                if exploration_output:
-                                    message_queue.put(("message_complete", "CODING AI", exploration_output))
-                                    message_queue.put(("message_start", "CODING AI"))
-                                    phase_message_split_done = True
-                                phase_output_chunks = []
                             message_queue.put(("status", status_text))
                     elif event_type == "progress":
                         summary = str(event.data.get("summary", "")).strip()
@@ -2620,7 +2717,9 @@ class ChadWebUI:
                         data = event.data.get("data", "")
                         if data and data.strip():
                             # For JSON providers, use the already-parsed EventLog text
-                            if json_parser:
+                            with stream_mode_lock:
+                                use_json_parser = json_parser is not None
+                            if use_json_parser:
                                 full_output_chunks = [data]  # Replace with EventLog content
                                 phase_output_chunks = [data]
                                 html_output = html.escape(data)
@@ -2648,6 +2747,11 @@ class ChadWebUI:
         except Exception as e:
             message_queue.put(("status", f"❌ Stream error: {e}"))
             return False, str(e), server_session_id, work_done
+        finally:
+            milestone_poll_stop.set()
+            if milestone_poll_thread is not None:
+                milestone_poll_thread.join(timeout=1.0)
+            poll_milestones_once()
 
         # Check if stream ended without completion event - this indicates a bug
         # where the SSE stream dropped unexpectedly (e.g., PTY session marked inactive
@@ -2839,51 +2943,22 @@ class ChadWebUI:
         return self.provider_ui._get_qwen_remaining_usage()
 
     def _check_usage_and_switch(self, coding_account: str) -> tuple[str, str | None]:
-        """Check if current provider exceeds usage threshold and switch if needed.
+        """Check if any action_settings has a switch_provider action for the current account.
 
         Returns:
             Tuple of (account_to_use, switched_from_account)
             switched_from_account is None if no switch occurred
         """
         try:
-            threshold = self.api_client.get_usage_switch_threshold()
-            # Ensure threshold is a valid number
-            if not isinstance(threshold, (int, float)):
-                threshold = 90
-        except Exception:
-            threshold = 90
-
-        # Threshold of 100 disables usage-based switching
-        if threshold >= 100:
-            return coding_account, None
-
-        # Check current account usage
-        remaining = self.get_remaining_usage(coding_account)
-        used_pct = (1.0 - remaining) * 100
-
-        if used_pct < threshold:
-            # Usage is below threshold, no switch needed
-            return coding_account, None
-
-        # Usage exceeds threshold, try to find a fallback
-        try:
-            next_account = self.api_client.get_next_fallback_provider(coding_account)
+            settings = self.api_client.get_action_settings()
         except Exception:
             return coding_account, None
 
-        if not next_account:
-            return coding_account, None
+        for s in settings:
+            if s.get("action") == "switch_provider" and s.get("target_account"):
+                return s["target_account"], coding_account
 
-        # Check that fallback has better usage
-        next_remaining = self.get_remaining_usage(next_account)
-        next_used_pct = (1.0 - next_remaining) * 100
-
-        if next_used_pct >= threshold:
-            # Fallback also exceeds threshold, don't switch
-            return coding_account, None
-
-        # Switch to fallback
-        return next_account, coding_account
+        return coding_account, None
 
     def _provider_state(self, pending_delete: str = None) -> tuple:
         return self.provider_ui.provider_state(self.provider_card_count, pending_delete=pending_delete)
@@ -2927,6 +3002,60 @@ class ChadWebUI:
         from chad.util.project_setup import build_doc_reference_text
 
         return build_doc_reference_text(project_path)
+
+    def _resolve_override_prompt(
+        self,
+        project_path: str | None,
+        task_description: str | None,
+        coding_prompt_value: str | None,
+    ) -> str | None:
+        """Resolve whether the prompt textbox content should be sent as override.
+
+        The prompt editor normally shows a generated template with a `{task}`
+        placeholder. During runs we show the fully rendered prompt (with the
+        previous task text), so restart runs must not treat that stale generated
+        prompt as a manual override.
+        """
+        if not project_path or not task_description or not coding_prompt_value:
+            return None
+
+        task_text = task_description.strip()
+        prompt_text = coding_prompt_value.strip()
+        if not task_text or not prompt_text:
+            return None
+
+        path_obj = Path(project_path).expanduser().resolve()
+        previews = build_prompt_previews(path_obj)
+        template_prompt = previews.coding
+        template_prompt_stripped = template_prompt.strip()
+
+        # Unedited preview template -> no override.
+        if prompt_text == template_prompt_stripped:
+            return None
+
+        # Freshly generated prompt for current task -> no override.
+        current_generated_prompt = build_prompt(
+            task_text,
+            self._read_project_docs(path_obj),
+            str(path_obj),
+        ).strip()
+        if prompt_text == current_generated_prompt:
+            return None
+
+        # Detect stale generated prompt from an earlier task:
+        # same template shell, different inserted task body.
+        if "{task}" in template_prompt:
+            prefix, suffix = template_prompt.split("{task}", 1)
+            if coding_prompt_value.startswith(prefix) and coding_prompt_value.endswith(suffix):
+                end = len(coding_prompt_value) - len(suffix) if suffix else len(coding_prompt_value)
+                embedded_task = coding_prompt_value[len(prefix):end].strip()
+                if embedded_task != task_text:
+                    return None
+
+        # Manual template edits should still support {task} replacement.
+        if "{task}" in coding_prompt_value:
+            return coding_prompt_value.replace("{task}", task_text)
+        return coding_prompt_value
 
     def _run_verification(
         self,
@@ -3202,7 +3331,14 @@ class ChadWebUI:
             usage_pct = math.ceil((1.0 - usage_remaining) * 100)
         except Exception:
             usage_pct = None
-        return make_phase_milestone(phase_name, account_name, model_name, usage_pct)
+        weekly_pct = None
+        try:
+            weekly_remaining = self.provider_ui.get_weekly_remaining_usage(account_name)
+            if weekly_remaining is not None:
+                weekly_pct = math.ceil((1.0 - weekly_remaining) * 100)
+        except Exception:
+            pass
+        return make_phase_milestone(phase_name, account_name, model_name, usage_pct, weekly_pct)
 
     def assign_role(self, account_name: str, role: str):
         return self.provider_ui.assign_role(account_name, role, self.provider_card_count)
@@ -3333,6 +3469,44 @@ class ChadWebUI:
 
         return actual_account, resolved_model, resolved_reasoning
 
+    def _build_coding_dropdown_state(
+        self,
+        coding_agent: str | None,
+        accounts=None,
+    ) -> CodingDropdownState:
+        """Resolve coding model/reasoning dropdown values from the selected provider account."""
+        if accounts is None:
+            accounts = self.api_client.list_accounts()
+        accounts_map = {acc.name: acc for acc in accounts}
+        account = accounts_map.get(coding_agent or "")
+        if not account:
+            return CodingDropdownState(
+                ["default"],
+                "default",
+                ["default"],
+                "default",
+                False,
+            )
+
+        model_choices = self.get_models_for_account(account.name) or ["default"]
+        stored_model = account.model or "default"
+        model_value = stored_model if stored_model in model_choices else model_choices[0]
+
+        provider_type = account.provider or ""
+        reasoning_choices = self.get_reasoning_choices(provider_type, account.name) or ["default"]
+        stored_reasoning = account.reasoning or "default"
+        reasoning_value = (
+            stored_reasoning if stored_reasoning in reasoning_choices else reasoning_choices[0]
+        )
+
+        return CodingDropdownState(
+            model_choices=model_choices,
+            model_value=model_value,
+            reasoning_choices=reasoning_choices,
+            reasoning_value=reasoning_value,
+            interactive=True,
+        )
+
     def _build_verification_dropdown_state(
         self,
         coding_agent: str | None,
@@ -3418,8 +3592,7 @@ class ChadWebUI:
         verification_reasoning: str | None = None,
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
-        override_exploration_prompt: str | None = None,
-        override_implementation_prompt: str | None = None,
+        override_prompt: str | None = None,
     ) -> Iterator[
         tuple[
             list,
@@ -3442,6 +3615,7 @@ class ChadWebUI:
         prior_cancel_requested = session.cancel_requested
         session.cancel_requested = False
         session.config = None
+        session.session_limit_summary = None
 
         # Check if there's already an active task on the server for this session
         # This prevents accidental double-starts when generators get interrupted
@@ -3487,10 +3661,8 @@ class ChadWebUI:
                             gr.update(),  # diff_full_content
                             "",  # merge_section_header
                             "",  # live_patch_trigger
-                            gr.update(),  # exploration_prompt_accordion
-                            gr.update(),  # exploration_prompt_content
-                            gr.update(),  # implementation_prompt_accordion
-                            gr.update(),  # implementation_prompt_content
+                            gr.update(),  # coding_prompt_accordion
+                            gr.update(),  # coding_prompt_content
                             gr.update(),  # verification_prompt_accordion
                             gr.update(),  # verification_prompt_content
                         )
@@ -3516,10 +3688,12 @@ class ChadWebUI:
             live_patch: tuple[str, str] | None = None,
             task_state: str | None = None,
             task_ended: bool = False,
-            exploration_prompt: str | None = None,
-            implementation_prompt: str | None = None,
+            coding_prompt: str | None = None,
             verification_prompt: str | None = None,
             verification_account: str | None = None,
+            # Legacy aliases
+            exploration_prompt: str | None = None,
+            implementation_prompt: str | None = None,
         ):
             """Format output tuple for Gradio with current UI state.
 
@@ -3573,33 +3747,23 @@ class ChadWebUI:
             # This allows JS to patch the DOM in-place without Gradio replacing it
             live_stream_update = gr.update() if display_stream is None else gr.update(value=display_stream)
             # Prompt textboxes - update content and interactivity based on phase
-            # During task: lock prompts for phases that have started
+            # During task: lock prompts that have started
             # After task ends: unlock all prompts for editing
-            _explore_interactive = True if task_ended else (
+            # Handle legacy aliases
+            effective_coding_prompt = coding_prompt or exploration_prompt or implementation_prompt
+            _coding_interactive = True if task_ended else (
                 True if task_state is None else False
-            )
-            _impl_interactive = True if task_ended else (
-                True if task_state is None else (
-                    task_state == "running"  # Still editable during exploration
-                )
             )
             _verif_interactive = True if task_ended else (
                 True if task_state is None else (
-                    task_state in ("running",)  # Still editable during exploration/implementation
+                    task_state in ("running",)
                 )
             )
-            _explore_acc = gr.update(visible=True) if exploration_prompt else gr.update()
-            _explore_val = (
-                gr.update(value=exploration_prompt, interactive=_explore_interactive)
-                if exploration_prompt else (
-                    gr.update(interactive=_explore_interactive) if task_state is not None or task_ended else gr.update()
-                )
-            )
-            _impl_acc = gr.update(visible=True) if implementation_prompt else gr.update()
-            _impl_val = (
-                gr.update(value=implementation_prompt, interactive=_impl_interactive)
-                if implementation_prompt else (
-                    gr.update(interactive=_impl_interactive) if task_state is not None or task_ended else gr.update()
+            _coding_acc = gr.update(visible=True) if effective_coding_prompt else gr.update()
+            _coding_val = (
+                gr.update(value=effective_coding_prompt, interactive=_coding_interactive)
+                if effective_coding_prompt else (
+                    gr.update(interactive=_coding_interactive) if task_state is not None or task_ended else gr.update()
                 )
             )
             _verif_acc = gr.update(visible=True) if verification_prompt else gr.update()
@@ -3629,8 +3793,7 @@ class ChadWebUI:
                 gr.update(value=diff_full),  # Full diff content
                 header_text,  # merge_section_header - dynamic header
                 patch_html,  # live_patch_trigger - JS reads this to patch content
-                _explore_acc, _explore_val,
-                _impl_acc, _impl_val,
+                _coding_acc, _coding_val,
                 _verif_acc, _verif_val,
             )
 
@@ -3693,6 +3856,10 @@ class ChadWebUI:
                 verification_model_value,
                 verification_reasoning_value,
             )
+            verification_enabled = (
+                verification_agent != self.VERIFICATION_NONE
+                and actual_verification_account is not None
+            )
 
             try:
                 self.api_client.set_account_model(coding_account, selected_model)
@@ -3737,32 +3904,24 @@ class ChadWebUI:
             chat_history.append({"role": "user", "content": f"**Task**\n\n{task_description}"})
             session.event_log.log(UserMessageEvent(content=task_description))
 
-            # Build the exploration and implementation prompts for display
-            # Use override prompts if user edited them, otherwise auto-generate
+            # Build the coding prompt for display
+            # Use override prompt if user edited it, otherwise auto-generate
             project_docs = self._read_project_docs(path_obj)
-            display_exploration_prompt = override_exploration_prompt or build_exploration_prompt(
+            display_coding_prompt = override_prompt or build_prompt(
                 task_description, project_docs, str(path_obj)
             )
-            display_implementation_prompt = override_implementation_prompt or build_implementation_prompt(
-                task_description,
-                "{exploration_output}",  # Placeholder until exploration completes
-                project_docs,
-                str(path_obj),
-            )
-            session.last_exploration_prompt = display_exploration_prompt
-            session.last_implementation_prompt = display_implementation_prompt
+            session.last_coding_prompt = display_coding_prompt
 
-            # Insert exploration phase milestone
+            # Insert coding phase milestone
             chat_history.append(
-                self._make_phase_milestone("Exploration", coding_account, selected_model)
+                self._make_phase_milestone("Coding", coding_account, selected_model)
             )
 
             initial_status = f"{status_prefix}⏳ Initializing session..."
             yield make_yield(
                 chat_history, initial_status, summary=initial_status, interactive=False,
                 task_state="running",
-                exploration_prompt=display_exploration_prompt,
-                implementation_prompt=display_implementation_prompt,
+                coding_prompt=display_coding_prompt,
             )
 
             # Use the streaming API to run the task
@@ -3783,10 +3942,12 @@ class ChadWebUI:
                         message_queue=message_queue,
                         coding_model=selected_model if selected_model != "default" else None,
                         coding_reasoning=selected_reasoning if selected_reasoning != "default" else None,
+                        verification_account=actual_verification_account if verification_enabled else None,
+                        verification_model=resolved_verification_model if verification_enabled else None,
+                        verification_reasoning=resolved_verification_reasoning if verification_enabled else None,
                         terminal_cols=terminal_cols,
                         screenshots=screenshots,
-                        override_exploration_prompt=override_exploration_prompt,
-                        override_implementation_prompt=override_implementation_prompt,
+                        override_prompt=override_prompt,
                     )
                     # Store work_done for later use in revision context
                     session.last_work_done = work_done
@@ -3851,7 +4012,8 @@ class ChadWebUI:
             pending_message_idx = None
             render_state = LiveStreamRenderState()
             progress_emitted = False  # Track if we've shown a progress update bubble
-            coding_milestone_emitted = False  # Track if we've shown the Coding milestone
+            coding_milestone_emitted = True  # Already inserted at start of coding phase
+            api_verification_status: str | None = None
             while not relay_complete.is_set() and not session.cancel_requested:
                 try:
                     msg = message_queue.get(timeout=0.02)
@@ -3909,17 +4071,6 @@ class ChadWebUI:
                         current_live_stream = ""
                         latest_pyte_html = ""
                         render_state.reset()
-                        # Insert Coding milestone when Phase 2 starts
-                        if "Phase 2" in msg[1] and not coding_milestone_emitted:
-                            coding_milestone_emitted = True
-                            coding_milestone = self._make_phase_milestone(
-                                "Coding", coding_account, selected_model
-                            )
-                            if pending_message_idx is not None:
-                                chat_history.insert(pending_message_idx, coding_milestone)
-                                pending_message_idx += 1
-                            else:
-                                chat_history.append(coding_milestone)
                         summary_text = current_status
                         yield make_yield(
                             chat_history,
@@ -3985,6 +4136,31 @@ class ChadWebUI:
                             current_live_stream,
                             task_state="running",
                             summary=current_status,
+                        )
+                        last_yield_time = time_module.time()
+
+                    elif msg_type == "milestone":
+                        milestone_type = msg[1]
+                        milestone_title = msg[2]
+                        milestone_summary = msg[3]
+                        if milestone_type in ("session_limit_reached", "weekly_limit_reached"):
+                            session.session_limit_summary = milestone_summary
+                        if milestone_type == "verification_passed":
+                            api_verification_status = "passed"
+                        elif milestone_type == "verification_failed":
+                            api_verification_status = "failed"
+                        milestone_msg = {
+                            "role": "user",
+                            "content": f"**{milestone_title}:** {milestone_summary}",
+                        }
+                        if pending_message_idx is not None:
+                            chat_history.insert(pending_message_idx, milestone_msg)
+                            pending_message_idx += 1
+                        else:
+                            chat_history.append(milestone_msg)
+                        yield make_yield(
+                            chat_history, current_status, last_live_stream,
+                            task_state="running",
                         )
                         last_yield_time = time_module.time()
 
@@ -4169,6 +4345,13 @@ class ChadWebUI:
                                 ))
                             # Keep showing last live stream content during transition to verification
                             yield make_yield(chat_history, current_status, last_live_stream, task_state="running")
+                        elif msg_type == "milestone":
+                            if msg[1] in ("session_limit_reached", "weekly_limit_reached"):
+                                session.session_limit_summary = msg[3]
+                            if msg[1] == "verification_passed":
+                                api_verification_status = "passed"
+                            elif msg[1] == "verification_failed":
+                                api_verification_status = "failed"
                     except queue.Empty:
                         break
 
@@ -4177,8 +4360,8 @@ class ChadWebUI:
             # Track the active configuration only when the session can continue
             session.config = coding_config if session.active else None
 
-            verification_enabled = verification_agent != self.VERIFICATION_NONE
             verification_account_for_run = actual_verification_account if verification_enabled else None
+            verification_managed_by_api = verification_enabled and session.server_session_id is not None
             verification_log: list[dict[str, object]] = []
             verified: bool | None = None  # Track verification result
 
@@ -4195,6 +4378,20 @@ class ChadWebUI:
             elif task_success[0] and not verification_enabled:
                 final_status = "✓ Task completed (verification disabled)"
                 completion_msg = "───────────── ✅ TASK COMPLETED (VERIFICATION DISABLED) ─────────────"
+                chat_history.append({"role": "user", "content": completion_msg})
+            elif task_success[0] and verification_managed_by_api:
+                if api_verification_status == "passed":
+                    verified = True
+                    final_status = "✓ Task completed and verified!"
+                    completion_msg = "───────────── ✅ TASK COMPLETED (VERIFIED) ─────────────"
+                elif api_verification_status == "failed":
+                    verified = False
+                    final_status = "❌ Task failed - verification failed"
+                    completion_msg = "───────────── ❌ TASK FAILED (VERIFICATION) ─────────────"
+                else:
+                    verified = None
+                    final_status = "✓ Task completed"
+                    completion_msg = "───────────── ✅ TASK COMPLETED ─────────────"
                 chat_history.append({"role": "user", "content": completion_msg})
             elif task_success[0]:
                 # Get the last coding output for verification
@@ -4684,9 +4881,13 @@ class ChadWebUI:
                                         blocks=[{"kind": "text", "content": revision_output[:1000]}]
                                     ))
                             else:
+                                if session.session_limit_summary:
+                                    failure_detail = session.session_limit_summary
+                                else:
+                                    failure_detail = "Revision task did not complete successfully"
                                 chat_history.insert(revision_pending_idx, {
                                     "role": "assistant",
-                                    "content": "**CODING AI**\n\n❌ *Revision task did not complete successfully*",
+                                    "content": f"**CODING AI**\n\n❌ *{failure_detail}*",
                                 })
                                 break
 
@@ -4728,17 +4929,21 @@ class ChadWebUI:
                             completion_msg += f"\n\n*{verification_feedback}*"
                     chat_history.append({"role": "user", "content": completion_msg})
             else:
-                sanitized_reason = completion_reason[0] or ""
-                if "End your response with a JSON summary block" in sanitized_reason or '"change_summary": "One sentence describing what was changed"' in sanitized_reason:
-                    sanitized_reason = "Task ended before producing any agent output."
-                final_status = (
-                    f"❌ Task did not complete successfully\n\n*{sanitized_reason}*"
-                    if sanitized_reason
-                    else "❌ Task did not complete successfully"
-                )
-                failure_msg = "───────────── ❌ TASK FAILED ─────────────"
-                if sanitized_reason:
-                    failure_msg += f"\n\n*{sanitized_reason}*"
+                if session.session_limit_summary:
+                    final_status = f"❌ {session.session_limit_summary}"
+                    failure_msg = f"───────────── ❌ SESSION LIMIT ─────────────\n\n*{session.session_limit_summary}*"
+                else:
+                    sanitized_reason = completion_reason[0] or ""
+                    if "End your response with a JSON summary block" in sanitized_reason or '"change_summary": "One sentence describing what was changed"' in sanitized_reason:
+                        sanitized_reason = "Task ended before producing any agent output."
+                    final_status = (
+                        f"❌ Task did not complete successfully\n\n*{sanitized_reason}*"
+                        if sanitized_reason
+                        else "❌ Task did not complete successfully"
+                    )
+                    failure_msg = "───────────── ❌ TASK FAILED ─────────────"
+                    if sanitized_reason:
+                        failure_msg += f"\n\n*{sanitized_reason}*"
                 chat_history.append({"role": "user", "content": failure_msg})
 
             if final_status:
@@ -4753,6 +4958,12 @@ class ChadWebUI:
             elif not verification_enabled:
                 session_status = "completed"
                 overall_success = True
+            elif verification_managed_by_api:
+                if verified is False:
+                    session_status = "failed"
+                else:
+                    session_status = "completed"
+                    overall_success = True
             elif verified is True:
                 session_status = "completed"
                 overall_success = True
@@ -4877,7 +5088,6 @@ class ChadWebUI:
         chat_history = (
             current_history if len(current_history) >= len(session.chat_history) else session.chat_history.copy()
         )
-        verification_log: list[dict[str, object]] = []
 
         # Stable live_id for DOM patching across the session
         live_stream_id = f"live-{session.id}"
@@ -4918,9 +5128,7 @@ class ChadWebUI:
         # Capture raw message before screenshot/resume-prompt modifications
         raw_followup_message = followup_message
 
-        # The follow-up message IS the new task — use it as the task description
-        # for verification (session.task_description may be empty after merge/discard)
-        task_description = raw_followup_message
+        # The follow-up message IS the new task description
         session.task_description = raw_followup_message
 
         # Append screenshot paths to message if provided
@@ -4934,6 +5142,11 @@ class ChadWebUI:
         accounts_list = self.api_client.list_accounts()
         accounts = {acc.name: acc.provider for acc in accounts_list}  # Map name -> provider
         has_account = bool(coding_agent and coding_agent in accounts)
+
+        # If no agent explicitly selected, reuse the session's previous agent
+        if not has_account and session.coding_account and session.coding_account in accounts:
+            coding_agent = session.coding_account
+            has_account = True
 
         def normalize_model_value(value: str | None) -> str:
             return value if value else "default"
@@ -4999,51 +5212,20 @@ class ChadWebUI:
 
         # Also need handoff if session is active but provider was released (API-based execution)
         provider_reconnect_needed = has_account and session.active and session.provider is None
-        handoff_needed = provider_changed or pref_changed or provider_reconnect_needed
+        # Need restart if session completed (e.g. rate limit, task done) and user sends follow-up
+        session_restart_needed = has_account and not session.active
+        handoff_needed = provider_changed or pref_changed or provider_reconnect_needed or session_restart_needed
+
+        if not has_account:
+            chat_history.append({"role": "assistant", "content": "Session expired — no coding agent available."})
+            session.chat_history = chat_history
+            yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
+            return
 
         if handoff_needed:
-            # Get new provider type first (needed for formatting handoff context)
             coding_provider_type = accounts[coding_agent]
 
-            # Log handoff checkpoint to event log before stopping old provider
-            old_provider_type = ""
-            old_model = ""
-            if session.event_log and session.provider:
-                provider_session_id = None
-                if hasattr(session.provider, "get_session_id"):
-                    provider_session_id = session.provider.get_session_id()
-
-                log_handoff_checkpoint(
-                    session.event_log,
-                    session.task_description or "",
-                    provider_session_id,
-                    target_provider=coding_provider_type,
-                )
-
-                # Track old provider info for ProviderSwitchedEvent
-                if session.config:
-                    old_provider_type = getattr(session.config, "provider", "")
-                    old_model = getattr(session.config, "model_name", "") or ""
-
-            # Stop old session if active
-            if session.provider:
-                try:
-                    session.provider.stop_session()
-                except Exception:
-                    pass
-                session.provider = None
-                session.active = False
-
-            # Start new provider
-            coding_config = ModelConfig(
-                provider=coding_provider_type,
-                model_name=requested_model,
-                account_name=coding_agent,
-                reasoning_effort=None if requested_reasoning == "default" else requested_reasoning,
-            )
-
             # Only show handoff message if actually changing provider or preferences
-            # Skip message for silent reconnects (when provider was released after API-based execution)
             if provider_changed or pref_changed:
                 handoff_detail = f"{coding_agent} ({coding_provider_type}"
                 if requested_model and requested_model != "default":
@@ -5055,132 +5237,100 @@ class ChadWebUI:
                 handoff_title = "PROVIDER HANDOFF" if provider_changed else "PREFERENCE UPDATE"
                 handoff_msg = f"───────────── → {handoff_title} ─────────────\n\n" f"*Switching to {handoff_detail}*"
                 chat_history.append({"role": "user", "content": handoff_msg})
-            yield make_followup_yield(chat_history, "→ Reconnecting...", working=True, merge_updates=merge_no_change)
-
-            new_provider = create_provider(coding_config)
-            # Use worktree path if available, otherwise fall back to project path
-            if session.worktree_path:
-                working_dir = str(session.worktree_path)
-            else:
-                working_dir = session.project_path or str(Path.cwd())
-
-            if not new_provider.start_session(working_dir, None):
-                chat_history.append(
-                    {
-                        "role": "assistant",
-                        "content": f"**CODING AI**\n\n❌ *Failed to start {coding_agent} session*",
-                    }
-                )
-                session.config = None
-                yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
-                return
-
-            # Track the switch for UI indication
-            old_account = session.coding_account
-            session.switched_from = old_account if old_account else None
-
-            session.provider = new_provider
-            session.coding_account = coding_agent
-            session.active = True
-            session.config = coding_config
-
-            # Log provider switched event
-            if session.event_log:
-                session.event_log.log(ProviderSwitchedEvent(
-                    from_provider=old_provider_type,
-                    to_provider=coding_provider_type,
-                    from_model=old_model,
-                    to_model=requested_model or "",
-                    reason="user_requested" if provider_changed else "preference_update",
-                ))
-
-            # Build resume prompt from event log if available
-            if session.event_log:
-                followup_message = build_resume_prompt(
-                    session.event_log, followup_message, target_provider=coding_provider_type
-                )
-            else:
-                # Fallback to old method
-                context_summary = self._build_handoff_context(chat_history)
-                followup_message = f"{context_summary}\n\n# Follow-up Request\n\n{followup_message}"
-
-        if not session.active or not session.provider:
-            chat_history.append({"role": "user", "content": f"**Follow-up**\n\n{followup_message}"})
-            chat_history.append(
-                {
-                    "role": "assistant",
-                    "content": "**CODING AI**\n\n❌ *Session expired. Please start a new task.*",
-                }
-            )
-            session.active = False
-            yield make_followup_yield(chat_history, "", show_followup=False, merge_updates=merge_no_change)
-            return
+            yield make_followup_yield(chat_history, "→ Starting follow-up task...", working=True, merge_updates=merge_no_change)
 
         # Add user's follow-up message to history
-        if provider_changed:
-            # Extract just the user's actual message after handoff context
-            display_msg = followup_message.split("# Follow-up Request")[-1].strip()
-            user_content = f"**Follow-up** (via {coding_agent})\n\n{display_msg}"
-        else:
-            user_content = f"**Follow-up**\n\n{followup_message}"
+        # Always use raw_followup_message for display — followup_message may contain
+        # the resume prompt XML which should not be shown to the user
+        display_prefix = f"**Follow-up** (via {coding_agent})" if provider_changed else "**Follow-up**"
+        user_content = f"{display_prefix}\n\n{raw_followup_message}"
         chat_history.append({"role": "user", "content": user_content})
-
-        # Log follow-up user message to event log
-        if session.event_log:
-            session.event_log.start_turn()
-            session.event_log.log(UserMessageEvent(content=raw_followup_message))
 
         # Insert coding phase milestone for follow-up
         chat_history.append(
             self._make_phase_milestone("Coding", coding_agent, requested_model)
         )
 
-        # Track where the final message will be inserted
-        # Don't add a placeholder - use only the dedicated live stream panel
-        pending_idx = len(chat_history)
-
         yield make_followup_yield(chat_history, "⏳ Processing follow-up...", working=True, merge_updates=merge_no_change)
 
-        # Set up activity callback
-        def on_activity(activity_type: str, detail: str):
-            if activity_type == "stream":
-                message_queue.put(("stream", detail))
-            elif activity_type == "tool":
-                message_queue.put(("activity", f"● {detail}"))
-            elif activity_type == "text" and detail:
-                message_queue.put(("activity", f"  ⎿ {detail[:80]}"))
+        # Build override prompt for follow-up: use resume prompt for handoff, or
+        # the raw follow-up message for same-provider continuations
+        override_prompt = None
+        if handoff_needed and session.event_log:
+            coding_provider_type = accounts.get(coding_agent, "generic")
+            override_prompt = build_resume_prompt(
+                session.event_log, raw_followup_message, target_provider=coding_provider_type
+            )
+        else:
+            override_prompt = followup_message
 
-        coding_provider = session.provider
-        coding_provider.set_activity_callback(on_activity)
-
-        # Send message and wait for response in background
-        relay_complete = threading.Event()
-        response_holder = [None]
-        error_holder = [None]
-
-        def relay_loop():
+        # Stop old provider if active — the API task will spawn a new PTY
+        if session.provider:
             try:
-                coding_provider.send_message(followup_message)
-                response = coding_provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
-                response_holder[0] = response
-            except Exception as e:
-                error_holder[0] = str(e)
-            finally:
-                relay_complete.set()
+                session.provider.stop_session()
+            except Exception:
+                pass
+            session.provider = None
 
-        relay_thread = threading.Thread(target=relay_loop, daemon=True)
-        relay_thread.start()
+        # Determine verification config
+        verification_enabled = verification_agent != self.VERIFICATION_NONE
+        verification_account_for_run = actual_verification_account if verification_enabled else None
 
-        # Stream updates while waiting
+        # Run the follow-up task via the API (same path as start_chad_task)
+        relay_complete = threading.Event()
+        task_success = [False]
+
         import time as time_module
 
-        full_history = []  # List of (ai_name, content, timestamp) tuples
+        full_history = []
         current_ai = "CODING AI"
         display_buffer = LiveStreamDisplayBuffer()
         last_yield_time = 0.0
         min_yield_interval = 0.05
-
         live_stream = ""
+
+        def api_followup_loop():
+            try:
+                success, output, srv_session_id, work_done = self.run_task_via_api(
+                    session_id=session_id,
+                    project_path=session.project_path or str(Path.cwd()),
+                    task_description=raw_followup_message,
+                    coding_account=coding_agent,
+                    message_queue=message_queue,
+                    coding_model=requested_model if requested_model != "default" else None,
+                    coding_reasoning=requested_reasoning if requested_reasoning != "default" else None,
+                    verification_account=verification_account_for_run if verification_enabled else None,
+                    verification_model=resolved_verification_model if verification_enabled else None,
+                    verification_reasoning=resolved_verification_reasoning if verification_enabled else None,
+                    server_session_id=session.server_session_id,
+                    screenshots=screenshots,
+                    override_prompt=override_prompt,
+                    is_followup=True,
+                )
+                task_success[0] = success
+                if srv_session_id:
+                    session.server_session_id = srv_session_id
+                    try:
+                        wt_status = self.api_client.get_worktree_status(srv_session_id)
+                        if wt_status and wt_status.exists:
+                            session.worktree_path = Path(wt_status.path) if wt_status.path else None
+                            session.worktree_branch = wt_status.branch
+                            session.worktree_base_commit = wt_status.base_commit
+                            session.has_worktree_changes = wt_status.has_changes
+                    except Exception:
+                        pass
+            except Exception as exc:
+                message_queue.put(("status", f"❌ Error: {exc}"))
+            finally:
+                session.active = task_success[0]
+                session.provider = None
+                session.coding_account = coding_agent
+                relay_complete.set()
+
+        relay_thread = threading.Thread(target=api_followup_loop, daemon=True)
+        relay_thread.start()
+
+        # Stream events from message_queue while the API task runs
         while not relay_complete.is_set() and not session.cancel_requested:
             try:
                 msg = message_queue.get(timeout=0.02)
@@ -5192,7 +5342,6 @@ class ChadWebUI:
                     if chunk.strip():
                         full_history.append(_history_entry(current_ai, chunk))
                         display_buffer.append(chunk)
-                    # Use HTML chunk from API if available, otherwise render from text
                     if html_chunk:
                         live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai, live_stream_id)
                     elif chunk.strip():
@@ -5202,440 +5351,60 @@ class ChadWebUI:
                         now = time_module.time()
                         if now - last_yield_time >= min_yield_interval:
                             yield make_followup_yield(
-                                chat_history,
-                                live_stream,
-                                working=True,
-                                merge_updates=merge_no_change,
+                                chat_history, live_stream, working=True, merge_updates=merge_no_change,
                             )
                             last_yield_time = now
+
+                elif msg_type == "milestone":
+                    milestone_type = msg[1]
+                    milestone_title = msg[2]
+                    milestone_summary = msg[3]
+                    if milestone_type in ("session_limit_reached", "weekly_limit_reached"):
+                        session.session_limit_summary = milestone_summary
+                    chat_history.append({
+                        "role": "user",
+                        "content": f"**{milestone_title}:** {milestone_summary}",
+                    })
+                    yield make_followup_yield(
+                        chat_history, live_stream, working=True, merge_updates=merge_no_change,
+                    )
+                    last_yield_time = time_module.time()
+
+                elif msg_type == "ai_switch":
+                    current_ai = msg[1]
+                    display_buffer = LiveStreamDisplayBuffer()
+                    session.has_initial_live_render = False
 
                 elif msg_type == "activity":
                     now = time_module.time()
                     if now - last_yield_time >= min_yield_interval:
                         display_content = display_buffer.content
-                        if display_content:
-                            content = display_content + f"\n\n{msg[1]}"
-                        else:
-                            content = msg[1]
-                        # Update only the dedicated live stream panel
+                        content = display_content + f"\n\n{msg[1]}" if display_content else msg[1]
                         live_stream = build_live_stream_html(content, current_ai, live_stream_id)
                         yield make_followup_yield(
-                            chat_history,
-                            live_stream,
-                            working=True,
-                            merge_updates=merge_no_change,
+                            chat_history, live_stream, working=True, merge_updates=merge_no_change,
                         )
                         last_yield_time = now
+
+                elif msg_type == "status":
+                    pass  # Status events handled by milestones
 
             except queue.Empty:
                 now = time_module.time()
                 if now - last_yield_time >= 0.3:
                     display_content = display_buffer.content
                     if display_content:
-                        # Update only the dedicated live stream panel
                         live_stream = build_live_stream_html(display_content, current_ai, live_stream_id)
                         yield make_followup_yield(
-                            chat_history,
-                            live_stream,
-                            working=True,
-                            merge_updates=merge_no_change,
+                            chat_history, live_stream, working=True, merge_updates=merge_no_change,
                         )
                         last_yield_time = now
 
         relay_thread.join(timeout=1)
 
-        # Insert final response into chat history
-        if error_holder[0]:
-            # Try auto-switch on quota exhaustion
-            switched, new_account = self._try_auto_switch_provider(session, error_holder[0])
-            if switched and new_account:
-                # Show switch notification in chat
-                switch_msg = (
-                    f"───────────── → AUTO-SWITCH ─────────────\n\n"
-                    f"*Quota/rate limit reached on {session.switched_from}. "
-                    f"Switching to {new_account}...*"
-                )
-                chat_history.append({"role": "user", "content": switch_msg})
-                yield make_followup_yield(chat_history, "→ Retrying with fallback provider...", working=True, merge_updates=merge_no_change)
-
-                # Build resume prompt and retry
-                new_provider_type = session.config.provider if session.config else "generic"
-                if session.event_log:
-                    retry_message = build_resume_prompt(
-                        session.event_log, followup_message, target_provider=new_provider_type
-                    )
-                else:
-                    retry_message = followup_message
-
-                # Retry with new provider
-                retry_response_holder = [None]
-                retry_error_holder = [None]
-                retry_complete = threading.Event()
-
-                def retry_relay():
-                    try:
-                        session.provider.send_message(retry_message)
-                        response = session.provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
-                        retry_response_holder[0] = response
-                    except Exception as e:
-                        retry_error_holder[0] = str(e)
-                    finally:
-                        retry_complete.set()
-
-                retry_thread = threading.Thread(target=retry_relay, daemon=True)
-                retry_thread.start()
-
-                # Wait for retry with streaming
-                retry_live_stream = ""
-                while not retry_complete.is_set() and not session.cancel_requested:
-                    try:
-                        msg = message_queue.get(timeout=0.1)
-                        if msg[0] == "stream":
-                            chunk = msg[1]
-                            html_chunk = msg[2] if len(msg) > 2 else None
-                            if chunk.strip():
-                                full_history.append(_history_entry(current_ai, chunk))
-                                display_buffer.append(chunk)
-                            if html_chunk:
-                                retry_live_stream = build_live_stream_html_from_pyte(html_chunk, current_ai, live_stream_id)
-                            elif chunk.strip():
-                                retry_live_stream = build_live_stream_html(display_buffer.content, current_ai, live_stream_id)
-                            if retry_live_stream:
-                                session.last_live_stream = retry_live_stream
-                                yield make_followup_yield(chat_history, retry_live_stream, working=True, merge_updates=merge_no_change)
-                    except queue.Empty:
-                        pass
-
-                # Final yield to ensure content is shown
-                if retry_live_stream:
-                    yield make_followup_yield(chat_history, retry_live_stream, working=True, merge_updates=merge_no_change)
-
-                retry_thread.join(timeout=1)
-
-                if retry_error_holder[0]:
-                    # Retry also failed
-                    chat_history.insert(pending_idx, {
-                        "role": "assistant",
-                        "content": f"**CODING AI**\n\n❌ *Error after auto-switch: {retry_error_holder[0]}*",
-                    })
-                    session.active = False
-                    session.provider = None
-                    session.config = None
-                    self._update_session_log(session, chat_history, full_history)
-                    yield make_followup_yield(chat_history, "", show_followup=False, merge_updates=merge_no_change)
-                    return
-
-                if retry_response_holder[0]:
-                    # Update response holder with retry result
-                    response_holder[0] = retry_response_holder[0]
-                    error_holder[0] = None
-            else:
-                # No auto-switch available, show original error
-                chat_history.insert(pending_idx, {
-                    "role": "assistant",
-                    "content": f"**CODING AI**\n\n❌ *Error: {error_holder[0]}*",
-                })
-                session.active = False
-                session.provider = None
-                session.config = None
-                self._update_session_log(session, chat_history, full_history)
-                yield make_followup_yield(chat_history, "", show_followup=False, merge_updates=merge_no_change)
-                return
-
-        if not response_holder[0]:
-            chat_history.insert(pending_idx, {
-                "role": "assistant",
-                "content": "**CODING AI**\n\n❌ *No response received*",
-            })
-            self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
-            yield make_followup_yield(chat_history, "", show_followup=True, merge_updates=merge_no_change)
-            return
-
-        parsed = parse_codex_output(response_holder[0])
-        chat_history.insert(pending_idx, make_chat_message("CODING AI", parsed))
-        last_coding_output = parsed
-
-        # Log assistant response to event log
-        if session.event_log and parsed:
-            session.event_log.log(AssistantMessageEvent(
-                blocks=[{"kind": "text", "content": parsed[:1000]}]
-            ))
-
-        # Update stored history
+        # Always update stored history after follow-up completes
         session.chat_history = chat_history
-        self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
-
-        yield make_followup_yield(chat_history, "", show_followup=True, working=True, merge_updates=merge_no_change)
-
-        # Run verification on follow-up
-        verification_enabled = verification_agent != self.VERIFICATION_NONE
-        verification_account_for_run = actual_verification_account if verification_enabled else None
-
-        if verification_account_for_run and verification_account_for_run in accounts:
-            # Verification loop (like start_chad_task)
-            max_verification_attempts = self.api_client.get_max_verification_attempts()
-            verification_attempt = 0
-            verified = False
-
-            while not verified and verification_attempt < max_verification_attempts and not session.cancel_requested:
-                verification_attempt += 1
-                chat_history.append(
-                    self._make_phase_milestone(
-                        "Verification", verification_account_for_run, resolved_verification_model
-                    )
-                )
-                chat_history.append(
-                    {
-                        "role": "user",
-                        "content": f"───────────── 🔍 VERIFICATION (Attempt {verification_attempt}) ─────────────",
-                    }
-                )
-                self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
-
-                verify_placeholder = build_live_stream_html(
-                    "🔍 Starting verification...", "VERIFICATION AI", live_stream_id
-                )
-                # Reset live render flag so verification gets a full render, not a patch
-                session.has_initial_live_render = False
-                yield make_followup_yield(chat_history, verify_placeholder, working=True, merge_updates=merge_no_change)
-
-                def verification_activity(activity_type: str, detail: str):
-                    content = detail if activity_type == "stream" else f"[{activity_type}] {detail}\n"
-                    message_queue.put(("verify_stream", content))
-
-                # Run verification in worktree so it can see the changes
-                verification_path = str(session.worktree_path or session.project_path or Path.cwd())
-                verification_result: list = [None, None]  # [verified, feedback]
-                verification_complete = threading.Event()
-
-                def run_verification_thread():
-                    try:
-                        v, f = self._run_verification(
-                            verification_path,
-                            last_coding_output,
-                            task_description,
-                            verification_account_for_run,
-                            on_activity=verification_activity,
-                            verification_model=resolved_verification_model,
-                            verification_reasoning=resolved_verification_reasoning,
-                        )
-                        verification_result[0] = v
-                        verification_result[1] = f
-                    except Exception as exc:
-                        verification_result[0] = None
-                        verification_result[1] = f"Verification error: {exc}"
-                    finally:
-                        verification_complete.set()
-
-                verification_thread = threading.Thread(target=run_verification_thread, daemon=True)
-                verification_thread.start()
-
-                # Poll message queue while verification runs and stream to live view
-                verify_display_buffer = LiveStreamDisplayBuffer()
-                verify_display_buffer.append("🔍 Starting verification...\n")
-                verify_last_yield = 0.0
-                verify_live_stream = ""
-                while not verification_complete.is_set() and not session.cancel_requested:
-                    try:
-                        msg = message_queue.get(timeout=0.05)
-                        if msg[0] == "verify_stream":
-                            chunk = msg[1]
-                            if chunk.strip():
-                                verify_display_buffer.append(chunk)
-                                verify_live_stream = build_live_stream_html(
-                                    verify_display_buffer.content, "VERIFICATION AI", live_stream_id
-                                )
-                                if verify_live_stream:
-                                    session.last_live_stream = verify_live_stream
-                                now = time_module.time()
-                                if now - verify_last_yield >= min_yield_interval:
-                                    yield make_followup_yield(chat_history, verify_live_stream, working=True, merge_updates=merge_no_change)
-                                    verify_last_yield = now
-                    except queue.Empty:
-                        pass
-
-                # Final yield to ensure content is shown even if loop exited quickly
-                if verify_live_stream:
-                    yield make_followup_yield(chat_history, verify_live_stream, working=True, merge_updates=merge_no_change)
-
-                verification_thread.join(timeout=1.0)
-                verified, verification_feedback = verification_result[0], verification_result[1]
-
-                status_label = "error" if verified is None else ("passed" if verified else "failed")
-                verification_log.append(
-                    {
-                        "attempt": verification_attempt,
-                        "status": status_label,
-                        "feedback": verification_feedback,
-                        "account": verification_account_for_run,
-                    }
-                )
-
-                if verified is None:
-                    # Verification error - stop
-                    chat_history.append(
-                        {
-                            "role": "assistant",
-                            "content": f"**VERIFICATION AI**\n\n❌ {verification_feedback}",
-                        }
-                    )
-                    chat_history.append(
-                        {
-                            "role": "user",
-                            "content": "───────────── ❌ VERIFICATION ERROR ─────────────",
-                        }
-                    )
-                    if session.event_log:
-                        session.event_log.log(VerificationAttemptEvent(
-                            attempt_number=verification_attempt,
-                            passed=False,
-                            summary="Verification error",
-                        ))
-                    self._update_session_log(
-                        session, chat_history, full_history, verification_attempts=verification_log
-                    )
-                    break
-                elif verified:
-                    chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
-                    chat_history.append(
-                        {
-                            "role": "user",
-                            "content": "───────────── ✅ VERIFICATION PASSED ─────────────",
-                        }
-                    )
-                    if session.event_log:
-                        session.event_log.log(VerificationAttemptEvent(
-                            attempt_number=verification_attempt,
-                            passed=True,
-                            summary=verification_feedback[:500] if verification_feedback else "",
-                        ))
-                    self._update_session_log(
-                        session, chat_history, full_history, verification_attempts=verification_log
-                    )
-                else:
-                    chat_history.append(make_chat_message("VERIFICATION AI", verification_feedback))
-                    if session.event_log:
-                        session.event_log.log(VerificationAttemptEvent(
-                            attempt_number=verification_attempt,
-                            passed=False,
-                            summary=verification_feedback[:500] if verification_feedback else "",
-                        ))
-                    self._update_session_log(
-                        session, chat_history, full_history, verification_attempts=verification_log
-                    )
-
-                    # Check if we can revise
-                    can_revise = (
-                        session.active
-                        and coding_provider.is_alive()
-                        and verification_attempt < max_verification_attempts
-                    )
-                    if can_revise:
-                        chat_history.append(
-                            self._make_phase_milestone("Re-coding", coding_agent, requested_model)
-                        )
-                        chat_history.append(
-                            {
-                                "role": "user",
-                                "content": "───────────── → REVISION REQUESTED ─────────────",
-                            }
-                        )
-                        chat_history.append(
-                            {
-                                "role": "assistant",
-                                "content": "**CODING AI**\n\n⏳ *Working on revisions...*",
-                            }
-                        )
-                        revision_idx = len(chat_history) - 1
-                        self._update_session_log(
-                            session, chat_history, full_history, verification_attempts=verification_log
-                        )
-                        # Show live stream placeholder during revision
-                        revision_placeholder = build_live_stream_html("→ Revision in progress...", "CODING AI", live_stream_id)
-                        # Reset live render flag so revision gets a full render, not a patch
-                        session.has_initial_live_render = False
-                        yield make_followup_yield(chat_history, revision_placeholder, working=True, merge_updates=merge_no_change)
-
-                        revision_request = (
-                            "The verification agent found issues with your work. "
-                            "Please address them:\n\n"
-                            f"{verification_feedback}\n\n"
-                            "Please fix these issues and confirm when done."
-                        )
-                        if session.event_log:
-                            session.event_log.log(UserMessageEvent(content="Revision requested"))
-                        try:
-                            coding_provider.send_message(revision_request)
-                            revision_response = coding_provider.get_response(timeout=DEFAULT_CODING_TIMEOUT)
-                        except Exception as exc:
-                            chat_history[revision_idx] = {
-                                "role": "assistant",
-                                "content": f"**CODING AI**\n\n❌ *Error: {exc}*",
-                            }
-                            session.active = False
-                            session.provider = None
-                            session.config = None
-                            self._update_session_log(
-                                session, chat_history, full_history, verification_attempts=verification_log
-                            )
-                            break
-
-                        if revision_response:
-                            parsed_revision = parse_codex_output(revision_response)
-                            chat_history[revision_idx] = make_chat_message("CODING AI", parsed_revision)
-                            last_coding_output = parsed_revision
-                            if session.event_log and parsed_revision:
-                                session.event_log.log(AssistantMessageEvent(
-                                    blocks=[{"kind": "text", "content": parsed_revision[:1000]}]
-                                ))
-                            self._update_session_log(
-                                session, chat_history, full_history, verification_attempts=verification_log
-                            )
-                        else:
-                            chat_history[revision_idx] = {
-                                "role": "assistant",
-                                "content": "**CODING AI**\n\n❌ *No response to revision request*",
-                            }
-                            self._update_session_log(
-                                session, chat_history, full_history, verification_attempts=verification_log
-                            )
-                            break
-
-                        chat_history.append(
-                            self._make_phase_milestone(
-                                "Re-verification", verification_account_for_run, resolved_verification_model
-                            )
-                        )
-                        reverify_placeholder = build_live_stream_html(
-                            "✓ Revision complete, re-verifying...", "VERIFICATION AI", live_stream_id
-                        )
-                        yield make_followup_yield(
-                            chat_history,
-                            reverify_placeholder,
-                            working=True,
-                            merge_updates=merge_no_change,
-                        )
-                    else:
-                        # Can't continue - add failure message
-                        chat_history.append(
-                            {
-                                "role": "user",
-                                "content": "───────────── ❌ VERIFICATION FAILED ─────────────",
-                            }
-                        )
-                        self._update_session_log(
-                            session, chat_history, full_history, verification_attempts=verification_log
-                        )
-                        break
-
-                # Incremental session log update after each verification attempt
-                self._update_session_log(
-                    session, chat_history, full_history, verification_attempts=verification_log
-                )
-
-        # Always update stored history and session log after follow-up completes
-        session.chat_history = chat_history
-        self._update_session_log(session, chat_history, full_history, verification_attempts=verification_log)
+        self._update_session_log(session, chat_history, full_history)
 
         def build_merge_updates():
             if not session.project_path:
@@ -6119,156 +5888,6 @@ class ChadWebUI:
             "",                                          # diff_content
         )
 
-    def _build_handoff_context(self, chat_history: list) -> str:
-        """Build a context summary for provider handoff.
-
-        Args:
-            chat_history: The current chat history
-
-        Returns:
-            A summary of the conversation for the new provider
-        """
-        # Extract key messages from history
-        context_parts = ["# Previous Conversation Summary\n"]
-
-        for msg in chat_history:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-
-            # Skip dividers and status messages
-            if "─────" in content:
-                continue
-
-            if role == "user" and content.startswith("**Task**"):
-                context_parts.append(f"**Original Task:**\n{content.replace('**Task**', '').strip()}\n")
-            elif role == "assistant" and "CODING AI" in content:
-                # Summarize the response (first 500 chars)
-                summary = content.replace("**CODING AI**", "").strip()[:500]
-                if len(summary) == 500:
-                    summary += "..."
-                context_parts.append(f"**Previous Response (summary):**\n{summary}\n")
-
-        return "\n".join(context_parts)
-
-    def _try_auto_switch_provider(
-        self,
-        session: Session,
-        error_message: str,
-    ) -> tuple[bool, str | None]:
-        """Attempt to auto-switch to a fallback provider on quota exhaustion.
-
-        Args:
-            session: The current session
-            error_message: The error message from the failed provider
-
-        Returns:
-            Tuple of (switched: bool, new_account: str | None)
-            switched is True if we successfully switched to a new provider
-            new_account is the name of the new account, or None if no switch occurred
-        """
-        if not is_quota_exhaustion_error(error_message):
-            return False, None
-
-        current_account = session.coding_account
-        if not current_account:
-            return False, None
-
-        # Get the next fallback provider
-        try:
-            next_account = self.api_client.get_next_fallback_provider(current_account)
-        except Exception:
-            # API error getting fallback order - skip auto-switch
-            return False, None
-
-        if not next_account:
-            return False, None
-
-        # Get the new account's provider type
-        try:
-            accounts = {acc.name: acc.provider for acc in self.api_client.list_accounts()}
-            if next_account not in accounts:
-                return False, None
-            next_provider_type = accounts[next_account]
-        except Exception:
-            return False, None
-
-        # Log handoff checkpoint before stopping old provider
-        if session.event_log and session.provider:
-            provider_session_id = None
-            if hasattr(session.provider, "get_session_id"):
-                provider_session_id = session.provider.get_session_id()
-
-            log_handoff_checkpoint(
-                session.event_log,
-                session.task_description or "",
-                provider_session_id,
-                target_provider=next_provider_type,
-            )
-
-        # Track old provider info
-        old_provider_type = ""
-        old_model = ""
-        if session.config:
-            old_provider_type = getattr(session.config, "provider", "")
-            old_model = getattr(session.config, "model_name", "") or ""
-
-        # Stop old provider
-        if session.provider:
-            try:
-                session.provider.stop_session()
-            except Exception:
-                pass
-            session.provider = None
-            session.active = False
-
-        # Get new account info for model/reasoning
-        try:
-            next_acc = self.api_client.get_account(next_account)
-            next_model = next_acc.model or "default"
-            next_reasoning = next_acc.reasoning or "default"
-        except Exception:
-            next_model = "default"
-            next_reasoning = "default"
-
-        # Create new provider
-        new_config = ModelConfig(
-            provider=next_provider_type,
-            model_name=next_model,
-            account_name=next_account,
-            reasoning_effort=None if next_reasoning == "default" else next_reasoning,
-        )
-
-        new_provider = create_provider(new_config)
-
-        # Use worktree path if available
-        if session.worktree_path:
-            working_dir = str(session.worktree_path)
-        else:
-            working_dir = session.project_path or "."
-
-        if not new_provider.start_session(working_dir, None):
-            return False, None
-
-        # Track the switch
-        session.switched_from = current_account
-        session.provider = new_provider
-        session.coding_account = next_account
-        session.active = True
-        session.config = new_config
-
-        # Log provider switched event
-        reason = get_quota_error_reason(error_message) or "quota_exhaustion"
-        if session.event_log:
-            session.event_log.log(ProviderSwitchedEvent(
-                from_provider=old_provider_type,
-                to_provider=next_provider_type,
-                from_model=old_model,
-                to_model=next_model,
-                reason=f"auto_switch_{reason}",
-            ))
-
-        return True, next_account
-
     def _last_event_info(self, session: Session) -> dict | None:
         """Return the last event snapshot from the provider if available."""
         provider = getattr(session, "provider", None)
@@ -6353,27 +5972,11 @@ class ChadWebUI:
             initial_verification = self.SAME_AS_CODING
 
         # Get initial model/reasoning choices for coding agent
-        coding_model_choices = self.get_models_for_account(initial_coding) if initial_coding else ["default"]
-        if not coding_model_choices:
-            coding_model_choices = ["default"]
-        coding_acc = accounts_map.get(initial_coding)
-        stored_coding_model = coding_acc.model if coding_acc else "default"
-        coding_model_value = (
-            stored_coding_model if stored_coding_model in coding_model_choices else coding_model_choices[0]
-        )
-
-        coding_provider_type = coding_acc.provider if coding_acc else ""
-        coding_reasoning_choices = (
-            self.get_reasoning_choices(coding_provider_type, initial_coding) if coding_provider_type else ["default"]
-        )
-        if not coding_reasoning_choices:
-            coding_reasoning_choices = ["default"]
-        stored_coding_reasoning = coding_acc.reasoning if coding_acc else "default"
-        coding_reasoning_value = (
-            stored_coding_reasoning
-            if stored_coding_reasoning in coding_reasoning_choices
-            else coding_reasoning_choices[0]
-        )
+        coding_state = self._build_coding_dropdown_state(initial_coding, accounts=accounts)
+        coding_model_choices = coding_state.model_choices
+        coding_model_value = coding_state.model_value
+        coding_reasoning_choices = coding_state.reasoning_choices
+        coding_reasoning_value = coding_state.reasoning_value
 
         # Load preferred verification model from config
         stored_verification_model = (
@@ -6498,32 +6101,15 @@ class ChadWebUI:
 
                             # Prompt display accordions - editable textboxes
                             with gr.Accordion(
-                                "Exploration Prompt",
+                                "Coding Prompt",
                                 open=False,
                                 visible=True,
-                                key=f"exploration-prompt-accordion-{session_id}",
+                                key=f"coding-prompt-accordion-{session_id}",
                                 elem_classes=["prompt-accordion"],
-                            ) as exploration_prompt_accordion:
-                                exploration_prompt_display = gr.Textbox(
-                                    value=_initial_previews.exploration,
-                                    key=f"exploration-prompt-display-{session_id}",
-                                    elem_classes=["prompt-display"],
-                                    lines=10,
-                                    max_lines=30,
-                                    interactive=True,
-                                    show_label=False,
-                                )
-
-                            with gr.Accordion(
-                                "Implementation Prompt",
-                                open=False,
-                                visible=True,
-                                key=f"implementation-prompt-accordion-{session_id}",
-                                elem_classes=["prompt-accordion"],
-                            ) as implementation_prompt_accordion:
-                                implementation_prompt_display = gr.Textbox(
-                                    value=_initial_previews.implementation,
-                                    key=f"implementation-prompt-display-{session_id}",
+                            ) as coding_prompt_accordion:
+                                coding_prompt_display = gr.Textbox(
+                                    value=_initial_previews.coding,
+                                    key=f"coding-prompt-display-{session_id}",
                                     elem_classes=["prompt-display"],
                                     lines=10,
                                     max_lines=30,
@@ -6547,6 +6133,20 @@ class ChadWebUI:
                                     interactive=True,
                                     show_label=False,
                                 )
+                            with gr.Row(
+                                equal_height=True,
+                                elem_classes=["project-save-row"],
+                            ):
+                                project_save_btn = gr.Button(
+                                    "Save",
+                                    variant="primary",
+                                    size="sm",
+                                    interactive=False,
+                                    key=f"project-save-{session_id}",
+                                    elem_classes=["project-save-btn"],
+                                    min_width=80,
+                                    scale=0,
+                                )
                         # Action row stays outside the project accordion so it remains
                         # available when project details are collapsed.
                         with gr.Row(
@@ -6562,15 +6162,6 @@ class ChadWebUI:
                                 key=f"cancel-btn-{session_id}",
                                 elem_id="cancel-task-btn" if is_first else None,
                                 elem_classes=["cancel-task-btn"],
-                                min_width=80,
-                                scale=0,
-                            )
-                            project_save_btn = gr.Button(
-                                "Save",
-                                variant="primary",
-                                size="sm",
-                                key=f"project-save-{session_id}",
-                                elem_classes=["project-save-btn"],
                                 min_width=80,
                                 scale=0,
                             )
@@ -6606,7 +6197,7 @@ class ChadWebUI:
                             choices=coding_model_choices,
                             value=coding_model_value,
                             label="Model",
-                            allow_custom_value=True,
+                            allow_custom_value=False,
                             scale=1,
                             min_width=200,
                             key=f"coding-model-{session_id}",
@@ -6828,6 +6419,29 @@ class ChadWebUI:
         # Event handlers - must be defined inside @gr.render
 
         # Project setup handlers
+        def project_settings_snapshot(path_val, lint_cmd, test_cmd, instructions_path_val, architecture_path_val):
+            return (
+                str(path_val or "").strip(),
+                str(lint_cmd or "").strip(),
+                str(test_cmd or "").strip(),
+                str(instructions_path_val or "").strip(),
+                str(architecture_path_val or "").strip(),
+            )
+
+        project_saved_state = gr.State(
+            value=project_settings_snapshot(
+                default_path,
+                initial_lint,
+                initial_test,
+                initial_instructions,
+                initial_architecture,
+            )
+        )
+
+        def update_project_save_button(path_val, lint_cmd, test_cmd, instructions_path_val, architecture_path_val, saved_state):
+            current = project_settings_snapshot(path_val, lint_cmd, test_cmd, instructions_path_val, architecture_path_val)
+            return gr.update(interactive=(current != tuple(saved_state)))
+
         def on_project_path_change(path_val):
             """Auto-detect project type and commands when path changes."""
             empty_previews = build_prompt_previews(None)
@@ -6840,8 +6454,7 @@ class ChadWebUI:
                     gr.update(value=""),
                     "",
                     "",
-                    gr.update(value=empty_previews.exploration),
-                    gr.update(value=empty_previews.implementation),
+                    gr.update(value=empty_previews.coding),
                     gr.update(value=empty_previews.verification),
                 )
             path_obj = Path(path_val).expanduser().resolve()
@@ -6854,8 +6467,7 @@ class ChadWebUI:
                     gr.update(value=""),
                     "",
                     "",
-                    gr.update(value=empty_previews.exploration),
-                    gr.update(value=empty_previews.implementation),
+                    gr.update(value=empty_previews.coding),
                     gr.update(value=empty_previews.verification),
                 )
 
@@ -6873,8 +6485,7 @@ class ChadWebUI:
                     gr.update(value=(docs.architecture_path or "")),
                     "",
                     "",
-                    gr.update(value=previews.exploration),
-                    gr.update(value=previews.implementation),
+                    gr.update(value=previews.coding),
                     gr.update(value=previews.verification),
                 )
 
@@ -6889,12 +6500,11 @@ class ChadWebUI:
                 gr.update(value=detected_docs.architecture_path or ""),
                 "",
                 "",
-                gr.update(value=previews.exploration),
-                gr.update(value=previews.implementation),
+                gr.update(value=previews.coding),
                 gr.update(value=previews.verification),
             )
 
-        project_path.change(
+        project_path_changed = project_path.change(
             on_project_path_change,
             inputs=[project_path],
             outputs=[
@@ -6905,10 +6515,70 @@ class ChadWebUI:
                 architecture_input,
                 lint_status,
                 test_status,
-                exploration_prompt_display,
-                implementation_prompt_display,
+                coding_prompt_display,
                 verification_prompt_display,
             ],
+        )
+        project_path_changed.then(
+            update_project_save_button,
+            inputs=[
+                project_path,
+                lint_cmd_input,
+                test_cmd_input,
+                instructions_input,
+                architecture_input,
+                project_saved_state,
+            ],
+            outputs=[project_save_btn],
+        )
+
+        lint_cmd_input.change(
+            update_project_save_button,
+            inputs=[
+                project_path,
+                lint_cmd_input,
+                test_cmd_input,
+                instructions_input,
+                architecture_input,
+                project_saved_state,
+            ],
+            outputs=[project_save_btn],
+        )
+        test_cmd_input.change(
+            update_project_save_button,
+            inputs=[
+                project_path,
+                lint_cmd_input,
+                test_cmd_input,
+                instructions_input,
+                architecture_input,
+                project_saved_state,
+            ],
+            outputs=[project_save_btn],
+        )
+        instructions_input.change(
+            update_project_save_button,
+            inputs=[
+                project_path,
+                lint_cmd_input,
+                test_cmd_input,
+                instructions_input,
+                architecture_input,
+                project_saved_state,
+            ],
+            outputs=[project_save_btn],
+        )
+        architecture_input.change(
+            update_project_save_button,
+            inputs=[
+                project_path,
+                lint_cmd_input,
+                test_cmd_input,
+                instructions_input,
+                architecture_input,
+                project_saved_state,
+            ],
+            outputs=[project_save_btn],
         )
 
         def on_lint_test(path_val, lint_cmd):
@@ -6941,12 +6611,27 @@ class ChadWebUI:
             outputs=[test_status],
         )
 
-        def on_project_save(path_val, lint_cmd, test_cmd, instructions_path_val, architecture_path_val):
+        def on_project_save(path_val, lint_cmd, test_cmd, instructions_path_val, architecture_path_val, saved_state):
+            current_snapshot = project_settings_snapshot(
+                path_val,
+                lint_cmd,
+                test_cmd,
+                instructions_path_val,
+                architecture_path_val,
+            )
             if not path_val:
-                return "Enter a project path"
+                return (
+                    "Enter a project path",
+                    saved_state,
+                    gr.update(interactive=(current_snapshot != tuple(saved_state))),
+                )
             path_obj = Path(path_val).expanduser().resolve()
             if not path_obj.exists():
-                return "Path not found"
+                return (
+                    "Path not found",
+                    saved_state,
+                    gr.update(interactive=(current_snapshot != tuple(saved_state))),
+                )
 
             saved = save_project_settings(
                 path_obj,
@@ -6955,12 +6640,16 @@ class ChadWebUI:
                 instructions_path=instructions_path_val or None,
                 architecture_path=architecture_path_val or None,
             )
-            return f"Project settings saved (type: {saved.project_type})"
+            return (
+                f"Project settings saved (type: {saved.project_type})",
+                current_snapshot,
+                gr.update(interactive=False),
+            )
 
         project_save_btn.click(
             on_project_save,
-            inputs=[project_path, lint_cmd_input, test_cmd_input, instructions_input, architecture_input],
-            outputs=[task_status],
+            inputs=[project_path, lint_cmd_input, test_cmd_input, instructions_input, architecture_input, project_saved_state],
+            outputs=[task_status, project_saved_state, project_save_btn],
         )
 
         def start_task_wrapper(
@@ -6973,8 +6662,7 @@ class ChadWebUI:
             v_model,
             v_reason,
             term_cols,
-            explore_prompt_val,
-            impl_prompt_val,
+            coding_prompt_val,
         ):
             # Extract text and file paths from MultimodalTextbox
             task_desc = ""
@@ -6988,18 +6676,11 @@ class ChadWebUI:
                 else:
                     task_desc = str(task_input)
 
-            # Detect if user edited prompts by comparing with auto-generated defaults
-            override_explore = None
-            override_impl = None
-            if task_desc and proj_path:
-                from chad.util.prompts import build_prompt_previews as _bpp
-                defaults = _bpp(proj_path)
-                if explore_prompt_val and explore_prompt_val.strip() != defaults.exploration.strip():
-                    # Replace {task} placeholder with actual task description
-                    override_explore = explore_prompt_val.replace("{task}", task_desc)
-                if impl_prompt_val and impl_prompt_val.strip() != defaults.implementation.strip():
-                    # Replace {task} placeholder; {exploration_output} is replaced server-side
-                    override_impl = impl_prompt_val.replace("{task}", task_desc)
+            override_prompt = self._resolve_override_prompt(
+                project_path=proj_path,
+                task_description=task_desc,
+                coding_prompt_value=coding_prompt_val,
+            )
 
             yield from self.start_chad_task(
                 session_id,
@@ -7013,8 +6694,7 @@ class ChadWebUI:
                 v_reason,
                 terminal_cols=int(term_cols) if term_cols else None,
                 screenshots=screenshot_paths,
-                override_exploration_prompt=override_explore,
-                override_implementation_prompt=override_impl,
+                override_prompt=override_prompt,
             )
 
         def cancel_wrapper():
@@ -7084,8 +6764,7 @@ class ChadWebUI:
             verification_model,
             verification_reasoning,
             terminal_cols_state,
-            exploration_prompt_display,
-            implementation_prompt_display,
+            coding_prompt_display,
         ]
         _task_start_outputs = [
             live_stream,
@@ -7106,10 +6785,8 @@ class ChadWebUI:
             diff_content,
             merge_section_header,
             live_patch_trigger,
-            exploration_prompt_accordion,
-            exploration_prompt_display,
-            implementation_prompt_accordion,
-            implementation_prompt_display,
+            coding_prompt_accordion,
+            coding_prompt_display,
             verification_prompt_accordion,
             verification_prompt_display,
         ]
@@ -7260,24 +6937,11 @@ class ChadWebUI:
             proj_path = session.project_path
             is_ready, _ = self.get_role_config_status(worktree_path=wt_path, project_path=proj_path)
 
-            # Get model choices for the selected account
-            model_choices = self.get_models_for_account(selected_account)
-            if not model_choices:
-                model_choices = ["default"]
-            try:
-                acc = self.api_client.get_account(selected_account)
-                stored_model = acc.model or "default"
-            except Exception:
-                stored_model = "default"
-            model_value = stored_model if stored_model in model_choices else model_choices[0]
-
-            # Get reasoning choices
-            provider_type = acc.provider if acc else ""
-            reasoning_choices = self.get_reasoning_choices(provider_type, selected_account)
-            if not reasoning_choices:
-                reasoning_choices = ["default"]
-            stored_reasoning = acc.reasoning if acc else "default"
-            reasoning_value = stored_reasoning if stored_reasoning in reasoning_choices else reasoning_choices[0]
+            coding_state = self._build_coding_dropdown_state(selected_account)
+            model_choices = coding_state.model_choices
+            model_value = coding_state.model_value
+            reasoning_choices = coding_state.reasoning_choices
+            reasoning_value = coding_state.reasoning_value
 
             verif_model_update, verif_reasoning_update = verification_dropdown_updates(
                 selected_account,
@@ -7505,7 +7169,7 @@ class ChadWebUI:
             new_provider_api_key = gr.Textbox(
                 label="API Key",
                 type="password",
-                placeholder="Paste your OpenCode API key here",
+                placeholder="Paste your API key here",
                 visible=False,
             )
             add_btn = gr.Button("Add Provider", variant="primary", interactive=False)
@@ -7555,19 +7219,12 @@ class ChadWebUI:
             ]
 
             def coding_model_state(selected_agent: str | None) -> tuple[list[str], str, bool]:
-                if not selected_agent:
-                    return (["default"], "default", False)
-
-                model_choices = self.get_models_for_account(selected_agent) or ["default"]
-                try:
-                    acc = self.api_client.get_account(selected_agent)
-                    stored_model = (acc.model if acc else None) or "default"
-                except Exception:
-                    stored_model = "default"
-                if stored_model not in model_choices:
-                    model_choices = [*model_choices, stored_model]
-                model_value = stored_model if stored_model else model_choices[0]
-                return (model_choices, model_value, True)
+                coding_state = self._build_coding_dropdown_state(selected_agent, accounts=accounts)
+                return (
+                    coding_state.model_choices,
+                    coding_state.model_value,
+                    coding_state.interactive,
+                )
 
             def verification_model_state(selected_agent: str | None) -> tuple[list[str], str, bool, bool]:
                 if not selected_agent or selected_agent == self.SAME_AS_CODING or selected_agent == self.VERIFICATION_NONE:
@@ -7609,7 +7266,7 @@ class ChadWebUI:
                     label="Preferred Coding Model",
                     choices=coding_model_choices,
                     value=coding_model_value,
-                    allow_custom_value=True,
+                    allow_custom_value=False,
                     interactive=coding_model_interactive,
                 )
                 verification_pref = gr.Dropdown(
@@ -7650,37 +7307,85 @@ class ChadWebUI:
                     info="Gradio (web) or CLI (terminal) - applies on next launch",
                 )
 
-            # Auto-switch settings
-            gr.Markdown("### Auto-Switch Settings")
-            gr.Markdown(
-                "Configure automatic provider switching when quota is exhausted. "
-                "Order determines fallback priority."
-            )
+            # Action rules
+            _MAX_ACTION_RULES = 6
+            gr.Markdown("### Action Rules")
 
-            # Load current fallback order and threshold
+            # Load current action settings
             try:
-                fallback_order = init["fallback_order"] if init else self.api_client.get_provider_fallback_order()
-                fallback_order_str = ", ".join(fallback_order)
+                action_settings_data = init["action_settings"] if init else self.api_client.get_action_settings()
             except Exception:
-                fallback_order_str = ""
+                action_settings_data = []
 
-            usage_threshold = init["usage_threshold"] if init else self.api_client.get_usage_switch_threshold()
+            # Get account names for target dropdown
+            try:
+                account_names = [acc.name for acc in (init["accounts"] if init else self.api_client.list_accounts())]
+            except Exception:
+                account_names = []
+
+            all_event_choices = ["session_usage", "weekly_usage", "context_usage"]
+            all_action_choices = ["notify", "switch_provider", "await_reset"]
+
+            # Column headers
             with gr.Row():
-                fallback_order_input = gr.Textbox(
-                    label="Provider Fallback Order",
-                    placeholder="e.g., work-claude, backup-gpt, gemini-free",
-                    value=fallback_order_str,
-                    info="Comma-separated account names in priority order (press Enter to save)",
-                )
-            with gr.Row():
-                usage_threshold_input = gr.Slider(
-                    label="Usage Switch Threshold (%)",
-                    minimum=0,
-                    maximum=100,
-                    step=5,
-                    value=usage_threshold,
-                    info="Switch provider when usage exceeds this percentage (100 = disable)",
-                )
+                with gr.Column(scale=3):
+                    gr.Markdown("**Rule**")
+                with gr.Column(scale=3):
+                    gr.Markdown("**Action**")
+                with gr.Column(scale=0, min_width=60):
+                    gr.Markdown("")
+
+            # Pre-allocate a pool of rows
+            action_rule_rows = []
+            for i in range(_MAX_ACTION_RULES):
+                has_data = i < len(action_settings_data)
+                current = action_settings_data[i] if has_data else {}
+                with gr.Row(visible=has_data) as rule_row:
+                    with gr.Column(scale=3):
+                        with gr.Row():
+                            event_dd = gr.Dropdown(
+                                choices=all_event_choices,
+                                value=current.get("event", "session_usage"),
+                                show_label=False,
+                                allow_custom_value=False,
+                                min_width=140,
+                                scale=1,
+                            )
+                            threshold_sl = gr.Slider(
+                                minimum=0, maximum=100, step=5,
+                                value=current.get("threshold", 90),
+                                show_label=False,
+                                scale=2,
+                            )
+                    with gr.Column(scale=3):
+                        with gr.Row():
+                            action_dd = gr.Dropdown(
+                                choices=all_action_choices,
+                                value=current.get("action", "notify"),
+                                show_label=False,
+                                allow_custom_value=False,
+                                scale=1,
+                            )
+                            target_dd = gr.Dropdown(
+                                choices=[""] + account_names,
+                                value=current.get("target_account", ""),
+                                show_label=False,
+                                visible=current.get("action") == "switch_provider",
+                                allow_custom_value=False,
+                                scale=1,
+                            )
+                    delete_btn = gr.Button("✕", scale=0, min_width=60, size="sm")
+                action_rule_rows.append({
+                    "row": rule_row,
+                    "event": event_dd,
+                    "threshold": threshold_sl,
+                    "action": action_dd,
+                    "target": target_dd,
+                    "delete": delete_btn,
+                })
+
+            add_rule_btn = gr.Button("+ Add Rule", size="sm")
+            active_rule_count = gr.State(value=len(action_settings_data))
             # Verification settings
             gr.Markdown("### Verification Settings")
             max_attempts = init["max_verification_attempts"] if init else self.api_client.get_max_verification_attempts()
@@ -7695,6 +7400,45 @@ class ChadWebUI:
                     info="Maximum verification attempts before giving up (1-20)",
                     precision=0,
                 )
+
+            # Slack integration settings
+            gr.Markdown("### Slack Integration")
+            try:
+                slack_init = init.get("slack_settings") if init else None
+                if not slack_init:
+                    slack_init = self.api_client.get_slack_settings()
+            except Exception:
+                slack_init = {"enabled": False, "channel": None, "has_token": False}
+
+            with gr.Row():
+                slack_enabled_checkbox = gr.Checkbox(
+                    label="Enable Slack notifications",
+                    value=slack_init.get("enabled", False),
+                    info="Post milestone notifications to a Slack channel",
+                )
+            with gr.Row():
+                slack_bot_token_input = gr.Textbox(
+                    label="Bot Token",
+                    value="" if not slack_init.get("has_token") else "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+                    type="password",
+                    placeholder="xoxb-...",
+                    info="Slack bot OAuth token",
+                )
+                slack_signing_secret_input = gr.Textbox(
+                    label="Signing Secret",
+                    value="" if not slack_init.get("has_signing_secret") else "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+                    type="password",
+                    placeholder="whsec-...",
+                    info="Slack app signing secret for webhook verification",
+                )
+                slack_channel_input = gr.Textbox(
+                    label="Channel ID",
+                    value=slack_init.get("channel") or "",
+                    placeholder="C0123456789",
+                    info="Slack channel ID for notifications",
+                )
+            with gr.Row():
+                slack_test_btn = gr.Button("Test Slack Connection", size="sm")
 
         provider_outputs = [provider_feedback]
         for card in provider_cards:
@@ -7722,7 +7466,7 @@ class ChadWebUI:
             outputs=[add_btn],
         )
 
-        # Show API key field only for OpenCode
+        # Show API key field only for OpenCode (Mistral shows it after first click)
         new_provider_type.change(
             lambda ptype: gr.update(visible=(ptype == "opencode")),
             inputs=[new_provider_type],
@@ -7731,8 +7475,19 @@ class ChadWebUI:
 
         def add_provider_handler(provider_name, provider_type, api_key):
             base = self.add_provider(provider_name, provider_type, api_key=api_key)
+            # base ends with (name_field_value, add_btn_state, accordion_state)
+            name_val = base[len(provider_outputs)]
+            is_error = name_val != ""  # on success name is cleared
+
+            if is_error:
+                # Keep accordion open, show API key field for providers that need one
+                needs_key = provider_type in ("opencode", "mistral")
+                return (
+                    *base,
+                    gr.update(visible=needs_key),
+                )
             return (
-                *base[: len(provider_outputs)],
+                *base[:len(provider_outputs)],
                 "",
                 gr.update(interactive=False),
                 gr.update(open=False),
@@ -7864,37 +7619,91 @@ class ChadWebUI:
 
         ui_mode_pref.change(on_ui_mode_change, inputs=[ui_mode_pref], outputs=[config_status])
 
-        def on_fallback_order_change(order_str):
+        # -- Action Rules event wiring --
+        # Collect all inputs/outputs for the rule rows
+        all_rule_inputs = []
+        all_rule_row_outputs = []
+        for r in action_rule_rows:
+            all_rule_inputs.extend([r["event"], r["threshold"], r["action"], r["target"]])
+            all_rule_row_outputs.append(r["row"])
+
+        def _collect_rules_from_count(count, *values):
+            """Read the first *count* row values and return as settings list."""
+            settings = []
+            for i in range(min(count, _MAX_ACTION_RULES)):
+                base = i * 4
+                ev, thr, act, tgt = values[base], values[base + 1], values[base + 2], values[base + 3]
+                entry = {"event": ev, "threshold": int(thr), "action": act}
+                if act == "switch_provider":
+                    entry["target_account"] = tgt if tgt else (account_names[0] if account_names else "")
+                settings.append(entry)
+            return settings
+
+        def on_action_rule_change(count, *values):
+            """Save action rules when any control changes."""
+            settings = _collect_rules_from_count(count, *values)
             try:
-                # Parse comma-separated names
-                names = [n.strip() for n in order_str.split(",") if n.strip()]
-                self.api_client.set_provider_fallback_order(names)
-                if names:
-                    return f"✅ Fallback order set: {' → '.join(names)}"
-                return "✅ Fallback order cleared (auto-switch disabled)"
+                self.api_client.set_action_settings(settings)
+                return "✅ Action rules saved"
             except Exception as exc:
                 return f"❌ {exc}"
 
-        fallback_order_input.submit(
-            on_fallback_order_change,
-            inputs=[fallback_order_input],
-            outputs=[config_status],
+        # Bind change events for all rule controls
+        for r in action_rule_rows:
+            for component in [r["event"], r["threshold"], r["action"], r["target"]]:
+                component.change(
+                    on_action_rule_change,
+                    inputs=[active_rule_count] + all_rule_inputs,
+                    outputs=[config_status],
+                )
+
+        # Show/hide target dropdown when action changes
+        for r in action_rule_rows:
+            r["action"].change(
+                lambda a: gr.update(visible=a == "switch_provider"),
+                inputs=[r["action"]],
+                outputs=[r["target"]],
+            )
+
+        def on_add_rule(count):
+            """Show the next hidden rule row."""
+            if count >= _MAX_ACTION_RULES:
+                return [count] + [gr.update() for _ in range(_MAX_ACTION_RULES)]
+            new_count = count + 1
+            row_updates = []
+            for i in range(_MAX_ACTION_RULES):
+                row_updates.append(gr.update(visible=(i < new_count)))
+            return [new_count] + row_updates
+
+        add_rule_btn.click(
+            on_add_rule,
+            inputs=[active_rule_count],
+            outputs=[active_rule_count] + all_rule_row_outputs,
         )
 
-        def on_usage_threshold_change(threshold):
-            try:
-                self.api_client.set_usage_switch_threshold(int(threshold))
-                if threshold >= 100:
-                    return "✅ Usage-based switching disabled"
-                return f"✅ Will switch providers when usage exceeds {int(threshold)}%"
-            except Exception as exc:
-                return f"❌ {exc}"
+        def _make_delete_handler(row_idx):
+            def on_delete(count, *values):
+                """Delete a rule: save remaining, shift rows, decrement count."""
+                settings = _collect_rules_from_count(count, *values)
+                if row_idx < len(settings):
+                    settings.pop(row_idx)
+                try:
+                    self.api_client.set_action_settings(settings)
+                except Exception:
+                    pass
+                new_count = len(settings)
+                row_updates = []
+                for i in range(_MAX_ACTION_RULES):
+                    row_updates.append(gr.update(visible=(i < new_count)))
+                return [new_count] + row_updates
+            return on_delete
 
-        usage_threshold_input.change(
-            on_usage_threshold_change,
-            inputs=[usage_threshold_input],
-            outputs=[config_status],
-        )
+        for i, r in enumerate(action_rule_rows):
+            r["delete"].click(
+                _make_delete_handler(i),
+                inputs=[active_rule_count] + all_rule_inputs,
+                outputs=[active_rule_count] + all_rule_row_outputs,
+            )
 
         def on_max_verification_attempts_change(attempts):
             try:
@@ -7906,6 +7715,79 @@ class ChadWebUI:
         max_verification_attempts_input.change(
             on_max_verification_attempts_change,
             inputs=[max_verification_attempts_input],
+            outputs=[config_status],
+        )
+
+        def on_slack_enabled_change(enabled):
+            try:
+                self.api_client.set_slack_settings(enabled=enabled)
+                state = "enabled" if enabled else "disabled"
+                return f"\u2705 Slack notifications {state}"
+            except Exception as exc:
+                return f"\u274c {exc}"
+
+        slack_enabled_checkbox.change(
+            on_slack_enabled_change,
+            inputs=[slack_enabled_checkbox],
+            outputs=[config_status],
+        )
+
+        def on_slack_bot_token_change(token):
+            # Ignore the placeholder dots
+            if token and not all(c == "\u2022" for c in token):
+                try:
+                    self.api_client.set_slack_settings(bot_token=token)
+                    return "\u2705 Slack bot token saved"
+                except Exception as exc:
+                    return f"\u274c {exc}"
+            return ""
+
+        slack_bot_token_input.change(
+            on_slack_bot_token_change,
+            inputs=[slack_bot_token_input],
+            outputs=[config_status],
+        )
+
+        def on_slack_signing_secret_change(secret):
+            if secret and not all(c == "\u2022" for c in secret):
+                try:
+                    self.api_client.set_slack_settings(signing_secret=secret)
+                    return "\u2705 Slack signing secret saved"
+                except Exception as exc:
+                    return f"\u274c {exc}"
+            return ""
+
+        slack_signing_secret_input.change(
+            on_slack_signing_secret_change,
+            inputs=[slack_signing_secret_input],
+            outputs=[config_status],
+        )
+
+        def on_slack_channel_change(channel):
+            try:
+                self.api_client.set_slack_settings(channel=channel)
+                return f"\u2705 Slack channel set to {channel}" if channel else "\u2705 Slack channel cleared"
+            except Exception as exc:
+                return f"\u274c {exc}"
+
+        slack_channel_input.change(
+            on_slack_channel_change,
+            inputs=[slack_channel_input],
+            outputs=[config_status],
+        )
+
+        def on_slack_test():
+            try:
+                result = self.api_client.test_slack_connection()
+                if result.get("ok"):
+                    return "\u2705 Test message sent to Slack"
+                return f"\u274c {result.get('error', 'Unknown error')}"
+            except Exception as exc:
+                return f"\u274c {exc}"
+
+        slack_test_btn.click(
+            on_slack_test,
+            inputs=[],
             outputs=[config_status],
         )
 
@@ -7986,26 +7868,30 @@ class ChadWebUI:
         except Exception:
             cleanup_settings = None
         try:
-            fallback_order = self.api_client.get_provider_fallback_order()
+            action_settings = self.api_client.get_action_settings()
         except Exception:
-            fallback_order = []
-        try:
-            usage_threshold = self.api_client.get_usage_switch_threshold()
-        except Exception:
-            usage_threshold = 90
+            action_settings = [
+                {"event": "session_usage", "threshold": 90, "action": "notify"},
+                {"event": "weekly_usage", "threshold": 90, "action": "notify"},
+                {"event": "context_usage", "threshold": 90, "action": "notify"},
+            ]
         try:
             max_verification_attempts = self.api_client.get_max_verification_attempts()
         except Exception:
             max_verification_attempts = 5
+        try:
+            slack_settings = self.api_client.get_slack_settings()
+        except Exception:
+            slack_settings = {"enabled": False, "channel": None, "has_token": False}
         return {
             "accounts": accounts,
             "verification_agent": verification_agent,
             "preferred_verification_model": preferred_verification_model,
             "preferences": preferences,
             "cleanup_settings": cleanup_settings,
-            "fallback_order": fallback_order,
-            "usage_threshold": usage_threshold,
+            "action_settings": action_settings,
             "max_verification_attempts": max_verification_attempts,
+            "slack_settings": slack_settings,
         }
 
     def _startup_log(self, msg: str) -> None:
@@ -8461,6 +8347,102 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
                     setInterval(findAndSetupContainers, 500);
                     setTimeout(findAndSetupContainers, 100);
                   };
+
+                  const initializeMilestonesScrollTracking = () => {
+                    window._milestonesScrollState = window._milestonesScrollState || {
+                      userScrolledUp: false,
+                      savedScrollTop: 0,
+                      lastScrollHeight: 0,
+                      settingScroll: false
+                    };
+
+                    const attachMilestonesScrollListener = () => {
+                      const chatbot = document.querySelector('#agent-chatbot');
+                      if (!chatbot) return;
+                      
+                      const container = chatbot.querySelector('.gr-box') || chatbot;
+                      if (!container) return;
+
+                      const state = window._milestonesScrollState;
+
+                      container.addEventListener('scroll', () => {
+                        if (state.settingScroll) return;
+
+                        const scrollTop = container.scrollTop;
+                        const isAtBottom = scrollTop + container.clientHeight >= container.scrollHeight - 10;
+                        const scrolledDown = scrollTop > state.savedScrollTop;
+
+                        state.savedScrollTop = scrollTop;
+
+                        if (isAtBottom && scrolledDown) {
+                          state.userScrolledUp = false;
+                        } else if (!isAtBottom) {
+                          state.userScrolledUp = true;
+                        }
+                      });
+
+                      // Set initial state
+                      state.lastScrollHeight = container.scrollHeight;
+                      state.savedScrollTop = container.scrollTop;
+                    };
+
+                    const setupMilestonesObserver = () => {
+                      const chatbot = document.querySelector('#agent-chatbot');
+                      if (!chatbot) return;
+                      
+                      const container = chatbot.querySelector('.gr-box') || chatbot;
+                      if (!container) return;
+                      
+                      const state = window._milestonesScrollState;
+                      const observer = new MutationObserver(() => {
+                        if (state.settingScroll) return;
+
+                        requestAnimationFrame(() => {
+                          requestAnimationFrame(() => {
+                            const newScrollHeight = container.scrollHeight;
+                            const contentGrew = newScrollHeight > state.lastScrollHeight;
+
+                            // Check if user was at bottom BEFORE content grew (using old height)
+                            const wasAtBottomBeforeGrowth = state.savedScrollTop + container.clientHeight >= state.lastScrollHeight - 10;
+
+                            state.lastScrollHeight = newScrollHeight;
+                            state.settingScroll = true;
+
+                            if (contentGrew && wasAtBottomBeforeGrowth && !state.userScrolledUp) {
+                              // User was at bottom before content grew and hasn't scrolled up - auto-scroll
+                              container.scrollTop = newScrollHeight;
+                              state.savedScrollTop = newScrollHeight;
+                              state.userScrolledUp = false;
+                            } else if (state.userScrolledUp) {
+                              // User has scrolled up - preserve their scroll position
+                              container.scrollTop = state.savedScrollTop;
+                            }
+
+                            requestAnimationFrame(() => {
+                              state.settingScroll = false;
+                            });
+                          });
+                        });
+                      });
+
+                      observer.observe(container, {
+                        childList: true,
+                        subtree: true
+                      });
+                    };
+
+                    const findAndSetupMilestones = () => {
+                      const chatbot = document.querySelector('#agent-chatbot');
+                      if (chatbot) {
+                        attachMilestonesScrollListener();
+                        setupMilestonesObserver();
+                      }
+                    };
+
+                    setInterval(findAndSetupMilestones, 500);
+                    setTimeout(findAndSetupMilestones, 100);
+                  };
+
                   const ensureDiscardEditable = () => {
                     // Find status elements more broadly
                     const statuses = collectAll('.task-status-header, [id*=\"task-status\"], [class*=\"task-status\"], [class*=\"status\"]');
@@ -8804,6 +8786,7 @@ padding:6px 10px;font-size:16px;cursor:pointer;">➕</button>
 
                   initializeLiveDomPatching();
                   initializeLiveStreamScrollTracking();
+                  initializeMilestonesScrollTracking();
                   initializeLiveStreamSearch();
                   initializeTerminalColumnTracking();
                   const tickAll = () => {

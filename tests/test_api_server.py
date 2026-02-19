@@ -172,7 +172,7 @@ class TestConfigEndpoints:
         response = client.get("/api/v1/config/preferences")
         assert response.status_code == 200
         data = response.json()
-        assert "dark_mode" in data
+        assert "ui_mode" in data
 
     def test_get_verification_settings(self, client):
         """Can get verification settings."""
@@ -231,15 +231,41 @@ class TestConfigEndpoints:
         get_data = get_response.json()
         assert get_data["account_name"] is None
 
-    def test_set_provider_fallback_order_invalid_account_returns_400(self, client):
-        """Fallback order should return 400 when any account does not exist."""
+    def test_update_verification_settings_partial(self, client):
+        """Can partially update verification settings and disable verification."""
+        # Disable verification only
+        resp = client.put("/api/v1/config/verification", json={"enabled": False})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["enabled"] is False
+        # auto_run should remain default True
+        assert data["auto_run"] is True
+
+        # Disable auto_run while enabled already false
+        resp2 = client.put("/api/v1/config/verification", json={"auto_run": False})
+        assert resp2.status_code == 200
+        data2 = resp2.json()
+        assert data2["enabled"] is False
+        assert data2["auto_run"] is False
+
+        # GET should reflect latest values
+        resp3 = client.get("/api/v1/config/verification")
+        assert resp3.status_code == 200
+        data3 = resp3.json()
+        assert data3["enabled"] is False
+        assert data3["auto_run"] is False
+
+    def test_set_action_settings_invalid_account_returns_400(self, client):
+        """Action settings with invalid switch target should return 400."""
         response = client.put(
-            "/api/v1/config/provider-fallback-order",
-            json={"order": ["codex-work"]},
+            "/api/v1/config/action-settings",
+            json={"settings": [
+                {"event": "session_usage", "threshold": 90, "action": "switch_provider", "target_account": "nonexistent"},
+            ]},
         )
 
         assert response.status_code == 400
-        assert "Unknown account(s): codex-work" in response.json()["detail"]
+        assert "valid target_account" in response.json()["detail"]
 
     def test_mock_run_duration_endpoints(self, client):
         """Can get/set per-account mock run duration."""
@@ -277,3 +303,364 @@ class TestWorktreeEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["exists"] is False
+
+    def test_merge_request_accepts_commit_message(self, client, tmp_path, monkeypatch):
+        """Merge request should accept optional commit_message field."""
+        # Create a test git repo
+        import subprocess
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=project_dir, capture_output=True)
+        (project_dir / "file.txt").write_text("initial")
+        subprocess.run(["git", "add", "."], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=project_dir, capture_output=True)
+
+        # Create session with project path
+        create_resp = client.post(
+            "/api/v1/sessions",
+            json={"name": "Test", "project_path": str(project_dir)},
+        )
+        session_id = create_resp.json()["id"]
+
+        # Create worktree
+        wt_resp = client.post(f"/api/v1/sessions/{session_id}/worktree")
+        assert wt_resp.status_code == 201
+
+        # Merge request with commit message should be accepted
+        merge_resp = client.post(
+            f"/api/v1/sessions/{session_id}/worktree/merge",
+            json={"target_branch": None, "commit_message": "Custom merge commit"},
+        )
+        # Should not fail due to unknown field
+        assert merge_resp.status_code in [200, 400]  # 400 is ok if no changes
+
+    def test_get_branches_endpoint(self, client, tmp_path):
+        """GET /worktree/branches should return branch list."""
+        # Create a test git repo
+        import subprocess
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=project_dir, capture_output=True)
+        (project_dir / "file.txt").write_text("initial")
+        subprocess.run(["git", "add", "."], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=project_dir, capture_output=True)
+
+        # Create session with project path
+        create_resp = client.post(
+            "/api/v1/sessions",
+            json={"name": "Test", "project_path": str(project_dir)},
+        )
+        session_id = create_resp.json()["id"]
+
+        # Create worktree
+        client.post(f"/api/v1/sessions/{session_id}/worktree")
+
+        # Get branches
+        response = client.get(f"/api/v1/sessions/{session_id}/worktree/branches")
+        assert response.status_code == 200
+        data = response.json()
+        assert "branches" in data
+        assert "default" in data
+        assert isinstance(data["branches"], list)
+
+    def test_resolve_conflicts_endpoint(self, client, tmp_path):
+        """POST /worktree/resolve-conflicts should exist."""
+        # Create a test git repo
+        import subprocess
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=project_dir, capture_output=True)
+        (project_dir / "file.txt").write_text("initial")
+        subprocess.run(["git", "add", "."], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=project_dir, capture_output=True)
+
+        # Create session with project path
+        create_resp = client.post(
+            "/api/v1/sessions",
+            json={"name": "Test", "project_path": str(project_dir)},
+        )
+        session_id = create_resp.json()["id"]
+
+        # Create worktree
+        client.post(f"/api/v1/sessions/{session_id}/worktree")
+
+        # Test endpoint exists (even without actual conflicts it should respond)
+        response = client.post(
+            f"/api/v1/sessions/{session_id}/worktree/resolve-conflicts",
+            json={"use_incoming": True},
+        )
+        # Should return 200 or 400, not 404 (endpoint must exist)
+        assert response.status_code != 404
+
+    def test_abort_merge_endpoint(self, client, tmp_path):
+        """POST /worktree/abort-merge should exist."""
+        # Create a test git repo
+        import subprocess
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=project_dir, capture_output=True)
+        (project_dir / "file.txt").write_text("initial")
+        subprocess.run(["git", "add", "."], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=project_dir, capture_output=True)
+
+        # Create session with project path
+        create_resp = client.post(
+            "/api/v1/sessions",
+            json={"name": "Test", "project_path": str(project_dir)},
+        )
+        session_id = create_resp.json()["id"]
+
+        # Create worktree
+        client.post(f"/api/v1/sessions/{session_id}/worktree")
+
+        # Test endpoint exists
+        response = client.post(f"/api/v1/sessions/{session_id}/worktree/abort-merge")
+        # Should return 200 or 400, not 404 (endpoint must exist)
+        assert response.status_code != 404
+
+    def test_merge_cleans_up_session_state(self, client, tmp_path):
+        """Successful merge should clear session worktree state."""
+        import subprocess
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=project_dir, capture_output=True)
+        (project_dir / "file.txt").write_text("initial")
+        subprocess.run(["git", "add", "."], cwd=project_dir, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=project_dir, capture_output=True)
+
+        # Create session with project path
+        create_resp = client.post(
+            "/api/v1/sessions",
+            json={"name": "Test", "project_path": str(project_dir)},
+        )
+        session_id = create_resp.json()["id"]
+
+        # Create worktree
+        wt_resp = client.post(f"/api/v1/sessions/{session_id}/worktree")
+        assert wt_resp.status_code == 201
+        wt_data = wt_resp.json()
+        worktree_path = wt_data["path"]
+
+        # Make a change in the worktree
+        import os
+        (tmp_path / "project" / ".chad-worktrees").mkdir(exist_ok=True)
+        if os.path.exists(worktree_path):
+            with open(os.path.join(worktree_path, "new_file.txt"), "w") as f:
+                f.write("new content")
+            subprocess.run(["git", "add", "."], cwd=worktree_path, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "change"], cwd=worktree_path, capture_output=True)
+
+        # Merge
+        merge_resp = client.post(
+            f"/api/v1/sessions/{session_id}/worktree/merge",
+            json={"target_branch": None},
+        )
+
+        # After successful merge, worktree should not exist
+        if merge_resp.status_code == 200 and merge_resp.json().get("success"):
+            wt_status = client.get(f"/api/v1/sessions/{session_id}/worktree")
+            assert wt_status.status_code == 200
+            assert wt_status.json()["exists"] is False
+
+
+class TestMockAccountUsage:
+    """Tests for get_mock_account_usage() fixture function."""
+
+    def test_openai_account_returns_session_and_weekly(self):
+        """OpenAI accounts map primary→session, secondary→weekly."""
+        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
+        result = get_mock_account_usage("codex-work")
+        assert result["account_name"] == "codex-work"
+        assert result["provider"] == "openai"
+        assert result["session_usage_pct"] == 15.0
+        assert result["weekly_usage_pct"] == 42.0
+        assert result["session_reset_eta"] is not None
+        assert result["weekly_reset_eta"] is not None
+
+    def test_openai_free_no_weekly(self):
+        """OpenAI free plan has no secondary usage → weekly is None."""
+        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
+        result = get_mock_account_usage("codex-free")
+        assert result["session_usage_pct"] == 95.0
+        assert result["weekly_usage_pct"] is None
+        assert result["weekly_reset_eta"] is None
+
+    def test_anthropic_account_returns_session_and_weekly(self):
+        """Anthropic accounts map five_hour→session, seven_day→weekly."""
+        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
+        result = get_mock_account_usage("claude-pro")
+        assert result["provider"] == "anthropic"
+        assert result["session_usage_pct"] == 23.0
+        assert result["weekly_usage_pct"] == 55.0
+
+    def test_gemini_account_returns_session_only(self):
+        """Gemini maps request count to session pct, no weekly."""
+        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
+        result = get_mock_account_usage("gemini-advanced")
+        assert result["provider"] == "gemini"
+        assert result["session_usage_pct"] is not None
+        assert result["session_usage_pct"] > 0
+        assert result["weekly_usage_pct"] is None
+
+    def test_mistral_account_returns_session_only(self):
+        """Mistral maps token count to session pct, no weekly."""
+        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
+        result = get_mock_account_usage("vibe-pro")
+        assert result["provider"] == "mistral"
+        assert result["session_usage_pct"] is not None
+        assert result["session_usage_pct"] > 0
+        assert result["weekly_usage_pct"] is None
+
+    def test_unknown_account_returns_all_none(self):
+        """Unknown accounts return all-None usage fields."""
+        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
+        result = get_mock_account_usage("nonexistent-account")
+        assert result["account_name"] == "nonexistent-account"
+        assert result["session_usage_pct"] is None
+        assert result["weekly_usage_pct"] is None
+        assert result["session_reset_eta"] is None
+        assert result["weekly_reset_eta"] is None
+
+
+class TestScreenshotModeUsageEndpoint:
+    """Tests for usage endpoint with CHAD_SCREENSHOT_MODE=1."""
+
+    @staticmethod
+    def _init_config_with_accounts(config_mgr):
+        """Initialize config with encryption salt and register mock accounts."""
+        import base64
+        import bcrypt
+        from chad.ui.gradio.verification.screenshot_fixtures import setup_mock_accounts
+        password = ""
+        password_hash = config_mgr.hash_password(password)
+        encryption_salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
+        config_mgr.save_config({
+            "password_hash": password_hash,
+            "encryption_salt": encryption_salt,
+            "accounts": {},
+        })
+        setup_mock_accounts(config_mgr, password)
+
+    def test_usage_returns_mock_data_in_screenshot_mode(self, client, monkeypatch):
+        """Usage endpoint returns fixture data when CHAD_SCREENSHOT_MODE=1."""
+        monkeypatch.setenv("CHAD_SCREENSHOT_MODE", "1")
+
+        config_mgr = get_config_manager()
+        self._init_config_with_accounts(config_mgr)
+
+        response = client.get("/api/v1/accounts/claude-pro/usage")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["account_name"] == "claude-pro"
+        assert data["provider"] == "anthropic"
+        assert data["session_usage_pct"] == 23.0
+        assert data["weekly_usage_pct"] == 55.0
+
+    def test_usage_returns_mock_for_openai_in_screenshot_mode(self, client, monkeypatch):
+        """OpenAI usage endpoint returns fixture data in screenshot mode."""
+        monkeypatch.setenv("CHAD_SCREENSHOT_MODE", "1")
+
+        config_mgr = get_config_manager()
+        self._init_config_with_accounts(config_mgr)
+
+        response = client.get("/api/v1/accounts/codex-work/usage")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["session_usage_pct"] == 15.0
+        assert data["weekly_usage_pct"] == 42.0
+
+    def test_usage_404_for_nonexistent_account_in_screenshot_mode(self, client, monkeypatch):
+        """Non-existent accounts still return 404 in screenshot mode."""
+        monkeypatch.setenv("CHAD_SCREENSHOT_MODE", "1")
+        response = client.get("/api/v1/accounts/nonexistent/usage")
+        assert response.status_code == 404
+
+
+class TestProjectSettingsEndpoints:
+    """Tests for project settings API endpoints."""
+
+    def test_get_project_settings_no_project(self, client):
+        """Returns 400 when no project path provided."""
+        response = client.get("/api/v1/config/project")
+        assert response.status_code == 400
+
+    def test_get_project_settings_nonexistent(self, client, tmp_path):
+        """Returns default settings for new project."""
+        project_path = str(tmp_path / "new-project")
+        response = client.get(f"/api/v1/config/project?project_path={project_path}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["project_path"] == project_path
+        assert data["lint_command"] is None
+        assert data["test_command"] is None
+
+    def test_set_project_settings(self, client, tmp_path):
+        """Can save project settings."""
+        project_dir = tmp_path / "test-project"
+        project_dir.mkdir()
+        project_path = str(project_dir)
+
+        response = client.put(
+            "/api/v1/config/project",
+            json={
+                "project_path": project_path,
+                "lint_command": "flake8 .",
+                "test_command": "pytest tests/",
+                "instructions_path": "AGENTS.md",
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["lint_command"] == "flake8 ."
+        assert data["test_command"] == "pytest tests/"
+        assert data["instructions_path"] == "AGENTS.md"
+
+    def test_get_project_settings_after_save(self, client, tmp_path):
+        """Saved project settings are returned on GET."""
+        project_dir = tmp_path / "test-project2"
+        project_dir.mkdir()
+        project_path = str(project_dir)
+
+        # Save settings
+        client.put(
+            "/api/v1/config/project",
+            json={
+                "project_path": project_path,
+                "lint_command": "npm run lint",
+                "test_command": "npm test",
+            },
+        )
+
+        # Retrieve settings
+        response = client.get(f"/api/v1/config/project?project_path={project_path}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["lint_command"] == "npm run lint"
+        assert data["test_command"] == "npm test"
+
+    def test_get_session_log_path(self, client):
+        """Can get session log file path."""
+        # Create a session
+        create_resp = client.post("/api/v1/sessions", json={"name": "Test"})
+        session_id = create_resp.json()["id"]
+
+        response = client.get(f"/api/v1/sessions/{session_id}/log")
+        assert response.status_code == 200
+        data = response.json()
+        assert "log_path" in data
+        assert "log_exists" in data
+        assert data["session_id"] == session_id
+        # Log file may not exist until a task is started
+        # If log_path is set, it should contain the session id
+        if data["log_path"]:
+            assert session_id in data["log_path"]

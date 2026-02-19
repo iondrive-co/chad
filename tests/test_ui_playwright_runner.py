@@ -111,6 +111,51 @@ class TestProcessCleanup:
 
         assert upr._wait_for_port(mock_process, timeout=1) == 43123
 
+    def test_start_chad_uses_reserved_port_without_waiting_for_stdout(self, monkeypatch, tmp_path):
+        """start_chad should use a reserved port instead of parsing stdout for CHAD_PORT."""
+        from chad.ui.gradio.verification import ui_playwright_runner as upr
+        from chad.util.process_registry import ProcessRegistry
+
+        test_pidfile = tmp_path / "test_servers.pids"
+        test_registry = ProcessRegistry(pidfile=test_pidfile)
+        monkeypatch.setattr(upr, "_test_server_registry", test_registry)
+        monkeypatch.setattr(upr, "_find_free_port", lambda: 41234)
+
+        mock_process = Mock()
+        mock_process.pid = 98765
+        mock_process.poll.return_value = None
+        mock_process.stdout = Mock()
+        mock_process.stdout.readline.return_value = ""
+
+        captured_cmd = []
+        captured_ready = []
+
+        def fake_popen(cmd, **kwargs):
+            captured_cmd[:] = cmd
+            return mock_process
+
+        def fake_wait_for_ready(port, timeout=60, process=None):
+            captured_ready.append(port)
+
+        def fail_wait_for_port(*args, **kwargs):
+            raise AssertionError("start_chad should not depend on _wait_for_port")
+
+        monkeypatch.setattr(upr.subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(upr, "_wait_for_ready", fake_wait_for_ready)
+        monkeypatch.setattr(upr, "_wait_for_port", fail_wait_for_port)
+
+        env = Mock()
+        env.config_path = Path("/tmp/config.json")
+        env.project_dir = Path("/tmp/project")
+        env.password = ""
+        env.env_vars = {}
+
+        instance = upr.start_chad(env)
+
+        assert captured_cmd[captured_cmd.index("--port") + 1] == "41234"
+        assert captured_ready == [41234]
+        assert instance.port == 41234
+
     def test_registry_created_on_first_call(self, monkeypatch, tmp_path):
         """_get_test_registry should create a registry on first call."""
         from chad.ui.gradio.verification import ui_playwright_runner as upr

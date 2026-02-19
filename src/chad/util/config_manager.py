@@ -3,7 +3,9 @@
 import base64
 import getpass
 import json
+import shutil
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -24,16 +26,24 @@ CONFIG_BASE_KEYS: set[str] = {
     "cleanup_days",
     "ui_mode",
     "projects",  # Per-project settings keyed by absolute project path
-    "provider_fallback_order",  # List of account names for auto-switching on quota exhaustion
-    "usage_switch_threshold",  # Percentage (0-100) of usage before auto-switching providers
+    "action_settings",  # List of {event, threshold, action, target_account?} for usage actions
     "mock_remaining_usage",  # Dict of account_name -> 0.0-1.0 for mock provider testing
     "mock_run_duration_seconds",  # Dict of account_name -> 0-3600 mock run duration for handover testing
+    "mock_session_reset_time",  # Dict of account_name -> ISO 8601 datetime for mock session reset
     "max_verification_attempts",  # Maximum verification attempts before giving up (default 5)
+    "verification_enabled",  # Whether verification is enabled (default True)
+    "verification_auto_run",  # Whether to auto-run verification after coding (default True)
+    "slack_enabled",       # Whether Slack integration is active
+    "slack_bot_token",     # Encrypted Slack bot token (xoxb-...)
+    "slack_channel",       # Slack channel ID to post milestones to
+    "slack_signing_secret",  # Slack app signing secret for webhook verification
 }
 
 
 class ConfigManager:
     """Manages application configuration including accounts, preferences, and settings."""
+
+    BACKUP_MAX_AGE = timedelta(days=2)
 
     def __init__(self, config_path: Path | None = None):
         import os
@@ -45,6 +55,66 @@ class ConfigManager:
         else:
             self.config_path = config_path or Path.home() / ".chad.conf"
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_config()
+
+    def _migrate_legacy_config(self) -> None:
+        """One-time migration from legacy config keys to current format."""
+        if not self.config_path.exists():
+            return
+        try:
+            config = self.load_config()
+        except Exception:
+            return
+        changed = False
+        # Migrate provider_fallback_order + usage_switch_threshold -> action_settings
+        if "action_settings" not in config and (
+            "provider_fallback_order" in config or "usage_switch_threshold" in config
+        ):
+            threshold = config.get("usage_switch_threshold", 90)
+            config["action_settings"] = [
+                {"event": "session_usage", "threshold": threshold, "action": "notify"},
+                {"event": "weekly_usage", "threshold": threshold, "action": "notify"},
+                {"event": "context_usage", "threshold": threshold, "action": "notify"},
+            ]
+            changed = True
+        for key in ("provider_fallback_order", "usage_switch_threshold"):
+            if key in config:
+                del config[key]
+                changed = True
+        if changed:
+            self.save_config(config)
+
+    def ensure_recent_backup(self) -> Path | None:
+        """Create a backup of the config file if none exists in the last two days.
+
+        Returns:
+            Path to the backup file if created or already present; None if no
+            backup was made (e.g., config file missing or error).
+        """
+        config_file = self.config_path
+        if not config_file.exists():
+            return None
+
+        backup_path = Path(f"{config_file}.bak")
+        now = datetime.now(timezone.utc)
+
+        if backup_path.exists():
+            backup_mtime = datetime.fromtimestamp(
+                backup_path.stat().st_mtime, tz=timezone.utc
+            )
+            if now - backup_mtime < self.BACKUP_MAX_AGE:
+                return backup_path
+
+        try:
+            shutil.copy2(config_file, backup_path)
+            try:
+                backup_path.chmod(config_file.stat().st_mode)
+            except OSError:
+                # On some platforms chmod may not be supported; continue anyway.
+                pass
+            return backup_path
+        except OSError:
+            return None
 
     def _derive_encryption_key(self, password: str, salt: bytes) -> bytes:
         """Derive an encryption key from password using PBKDF2."""
@@ -512,6 +582,37 @@ class ConfigManager:
         config = self.load_config()
         return config.get("preferences")
 
+    # ── Verification settings ──
+
+    def get_runtime_verification_settings(self) -> tuple[bool, bool]:
+        """Return the persisted verification flags (enabled, auto_run)."""
+        config = self.load_config()
+        enabled = config.get("verification_enabled", True)
+        auto_run = config.get("verification_auto_run", True)
+        return bool(enabled), bool(auto_run)
+
+    def set_runtime_verification_settings(
+        self,
+        enabled: bool | None = None,
+        auto_run: bool | None = None,
+    ) -> tuple[bool, bool]:
+        """Update and persist verification flags.
+
+        Args:
+            enabled: Optional new value for verification enabled
+            auto_run: Optional new value for auto-run verification
+
+        Returns:
+            Tuple of (enabled, auto_run) after applying updates
+        """
+        config = self.load_config()
+        if enabled is not None:
+            config["verification_enabled"] = bool(enabled)
+        if auto_run is not None:
+            config["verification_auto_run"] = bool(auto_run)
+        self.save_config(config)
+        return bool(config.get("verification_enabled", True)), bool(config.get("verification_auto_run", True))
+
     # Special marker value indicating verification is disabled
     VERIFICATION_NONE = "__verification_none__"
 
@@ -681,91 +782,67 @@ class ConfigManager:
         config = self.load_config()
         return config.get("projects", {})
 
-    def get_provider_fallback_order(self) -> list[str]:
-        """Get the ordered list of account names for auto-switching on quota exhaustion.
+    VALID_ACTION_EVENTS = ("session_usage", "weekly_usage", "context_usage")
+    VALID_ACTIONS = ("notify", "switch_provider", "await_reset")
 
-        When a provider runs out of credits/quota, the system will automatically
-        switch to the next provider in this list.
+    _DEFAULT_ACTION_SETTINGS: list[dict] = [
+        {"event": "session_usage", "threshold": 90, "action": "notify"},
+        {"event": "weekly_usage", "threshold": 90, "action": "notify"},
+        {"event": "context_usage", "threshold": 90, "action": "notify"},
+    ]
+
+    def get_action_settings(self) -> list[dict]:
+        """Get usage action settings.
 
         Returns:
-            List of account names in fallback priority order
+            List of action setting dicts, or defaults if not configured.
         """
         config = self.load_config()
-        order = config.get("provider_fallback_order", [])
-        # Filter out accounts that no longer exist
-        valid_accounts = set(self.list_accounts().keys())
-        return [acc for acc in order if acc in valid_accounts]
+        return config.get("action_settings", list(self._DEFAULT_ACTION_SETTINGS))
 
-    def set_provider_fallback_order(self, account_names: list[str]) -> None:
-        """Set the ordered list of account names for auto-switching.
-
-        Args:
-            account_names: List of account names in fallback priority order.
-                          Accounts not in this list will not be used for auto-switching.
+    def set_action_settings(self, settings: list[dict]) -> None:
+        """Validate and save action settings.
 
         Raises:
-            ValueError: If any account name doesn't exist
+            ValueError: On invalid settings.
         """
-        valid_accounts = set(self.list_accounts().keys())
-        invalid = [name for name in account_names if name not in valid_accounts]
-        if invalid:
-            raise ValueError(f"Unknown account(s): {', '.join(invalid)}")
-
+        self._validate_action_settings(settings)
         config = self.load_config()
-        config["provider_fallback_order"] = account_names
+        config["action_settings"] = settings
         self.save_config(config)
 
-    def get_next_fallback_provider(self, current_account: str) -> str | None:
-        """Get the next provider in the fallback order after the current one.
-
-        Args:
-            current_account: The currently active account name
-
-        Returns:
-            Next account name in fallback order, or None if no more fallbacks
-        """
-        order = self.get_provider_fallback_order()
-        if not order:
-            return None
-
-        try:
-            current_idx = order.index(current_account)
-            if current_idx + 1 < len(order):
-                return order[current_idx + 1]
-        except ValueError:
-            # Current account not in fallback order, return first in order
-            if order:
-                return order[0]
-
+    def get_action_for_event(self, event_type: str) -> dict | None:
+        """Convenience lookup for a single event type's action."""
+        for s in self.get_action_settings():
+            if s.get("event") == event_type:
+                return s
         return None
 
-    def get_usage_switch_threshold(self) -> int:
-        """Get the usage percentage threshold for auto-switching providers.
+    def _validate_action_settings(self, settings: list[dict]) -> None:
+        valid_accounts = set(self.list_accounts().keys())
 
-        When a provider reports usage above this percentage of its limit,
-        the system will automatically switch to the next fallback provider.
+        for entry in settings:
+            event = entry.get("event")
+            if event not in self.VALID_ACTION_EVENTS:
+                raise ValueError(f"Invalid event type: {event}")
 
-        Returns:
-            Percentage threshold (0-100), defaults to 90
-        """
-        config = self.load_config()
-        return config.get("usage_switch_threshold", 90)
+            threshold = entry.get("threshold")
+            if not isinstance(threshold, (int, float)) or not (0 <= threshold <= 100):
+                raise ValueError(f"Threshold must be 0-100, got {threshold}")
 
-    def set_usage_switch_threshold(self, percentage: int) -> None:
-        """Set the usage percentage threshold for auto-switching providers.
+            action = entry.get("action")
+            if action not in self.VALID_ACTIONS:
+                raise ValueError(f"Invalid action: {action}")
 
-        Args:
-            percentage: Threshold percentage (0-100). Use 100 to disable
-                       usage-based switching (only error-based switching).
+            if action == "await_reset" and event == "context_usage":
+                raise ValueError("await_reset is not valid for context_usage (context doesn't reset)")
 
-        Raises:
-            ValueError: If percentage is not between 0 and 100
-        """
-        if not 0 <= percentage <= 100:
-            raise ValueError("usage_switch_threshold must be between 0 and 100")
-        config = self.load_config()
-        config["usage_switch_threshold"] = percentage
-        self.save_config(config)
+            if action == "switch_provider":
+                target = entry.get("target_account")
+                if not target or target not in valid_accounts:
+                    raise ValueError(
+                        f"switch_provider requires a valid target_account, got '{target}'"
+                    )
 
     def get_mock_remaining_usage(self, account_name: str) -> float:
         """Get mock remaining usage for a mock provider account.
@@ -845,6 +922,35 @@ class ConfigManager:
         config["mock_run_duration_seconds"][account_name] = seconds_int
         self.save_config(config)
 
+    def get_mock_session_reset_time(self, account_name: str) -> str | None:
+        """Get the mock session reset time for a mock provider account.
+
+        Args:
+            account_name: The mock account name
+
+        Returns:
+            ISO 8601 datetime string, or None if not set
+        """
+        config = self.load_config()
+        reset_dict = config.get("mock_session_reset_time", {})
+        return reset_dict.get(account_name)
+
+    def set_mock_session_reset_time(self, account_name: str, iso_str: str | None) -> None:
+        """Set the mock session reset time for a mock provider account.
+
+        Args:
+            account_name: The mock account name
+            iso_str: ISO 8601 datetime string, or None to clear
+        """
+        config = self.load_config()
+        if "mock_session_reset_time" not in config:
+            config["mock_session_reset_time"] = {}
+        if iso_str is None:
+            config["mock_session_reset_time"].pop(account_name, None)
+        else:
+            config["mock_session_reset_time"][account_name] = iso_str
+        self.save_config(config)
+
     def get_max_verification_attempts(self) -> int:
         """Get the maximum number of verification attempts.
 
@@ -867,6 +973,75 @@ class ConfigManager:
             raise ValueError("max_verification_attempts must be between 1 and 20")
         config = self.load_config()
         config["max_verification_attempts"] = attempts
+        self.save_config(config)
+
+    def get_slack_enabled(self) -> bool:
+        """Get whether Slack integration is enabled."""
+        config = self.load_config()
+        return config.get("slack_enabled", False)
+
+    def set_slack_enabled(self, enabled: bool) -> None:
+        """Enable or disable Slack integration."""
+        config = self.load_config()
+        config["slack_enabled"] = enabled
+        self.save_config(config)
+
+    def get_slack_bot_token(self) -> str | None:
+        """Get the Slack bot token.
+
+        Returns:
+            Bot token string, or None if not set
+        """
+        config = self.load_config()
+        return config.get("slack_bot_token") or None
+
+    def set_slack_bot_token(self, token: str | None) -> None:
+        """Store the Slack bot token.
+
+        Args:
+            token: Bot token (xoxb-...), or None to clear
+        """
+        config = self.load_config()
+        if token:
+            config["slack_bot_token"] = token
+        elif "slack_bot_token" in config:
+            del config["slack_bot_token"]
+        self.save_config(config)
+
+    def get_slack_channel(self) -> str | None:
+        """Get the Slack channel ID for milestone notifications."""
+        config = self.load_config()
+        return config.get("slack_channel")
+
+    def set_slack_channel(self, channel: str | None) -> None:
+        """Set the Slack channel ID for milestone notifications.
+
+        Args:
+            channel: Slack channel ID (e.g. C0123456789), or None to clear
+        """
+        config = self.load_config()
+        if channel:
+            config["slack_channel"] = channel
+        elif "slack_channel" in config:
+            del config["slack_channel"]
+        self.save_config(config)
+
+    def get_slack_signing_secret(self) -> str | None:
+        """Get the Slack app signing secret used for webhook verification."""
+        config = self.load_config()
+        return config.get("slack_signing_secret") or None
+
+    def set_slack_signing_secret(self, secret: str | None) -> None:
+        """Store the Slack app signing secret.
+
+        Args:
+            secret: Signing secret string, or None to clear
+        """
+        config = self.load_config()
+        if secret:
+            config["slack_signing_secret"] = secret
+        elif "slack_signing_secret" in config:
+            del config["slack_signing_secret"]
         self.save_config(config)
 
 

@@ -518,7 +518,7 @@ class TestGradioStreamAlignment:
 
     def test_stream_task_output_left_aligned(self, client, git_repo):
         """stream_task_output HTML should not drift right across lines."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
         from chad.ui.client.stream_client import SyncStreamClient
 
         account_resp = client.post("/api/v1/accounts", json={"name": "gradio-mock", "provider": "mock"})
@@ -681,6 +681,375 @@ class TestCancelSession:
         assert data["cancel_requested"] is False
         assert "No active task" in data["message"]
 
+    def test_cancel_marks_task_cancelled_without_continuation(self, client, git_repo, monkeypatch):
+        """Cancelling must stop the task instead of triggering continuation retries."""
+        import chad.server.services.task_executor as task_executor_module
+
+        def build_cancel_resistant_command(
+            provider,
+            account_name,
+            project_path,
+            task_description=None,
+            screenshots=None,
+            phase="exploration",
+            exploration_output=None,
+            model=None,
+            reasoning_effort=None,
+            mock_run_duration_seconds=0,
+            override_prompt=None,
+        ):
+            del (
+                provider,
+                account_name,
+                project_path,
+                screenshots,
+                phase,
+                exploration_output,
+                model,
+                reasoning_effort,
+                mock_run_duration_seconds,
+                override_prompt,
+            )
+            marker = repr(task_description or "")
+            script = (
+                "import signal,time,sys\n"
+                f"TASK={marker}\n"
+                "def _on_term(sig, frame):\n"
+                "    print(f'TERM_EXIT_0 {TASK}')\n"
+                "    sys.stdout.flush()\n"
+                "    raise SystemExit(0)\n"
+                "signal.signal(signal.SIGTERM, _on_term)\n"
+                "print(f'RUN_START {TASK}')\n"
+                "sys.stdout.flush()\n"
+                "while True:\n"
+                "    time.sleep(0.1)\n"
+            )
+            return ["python3", "-c", script], {}, None
+
+        monkeypatch.setattr(task_executor_module, "build_agent_command", build_cancel_resistant_command)
+
+        session_resp = client.post("/api/v1/sessions", json={"name": "Cancel Regression"})
+        session_id = session_resp.json()["id"]
+        account_resp = client.post("/api/v1/accounts", json={"name": "cancel-regression", "provider": "mock"})
+        assert account_resp.status_code in (200, 201, 409)
+
+        start_resp = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "cancel-regression-task",
+                "coding_agent": "cancel-regression",
+            },
+        )
+        assert start_resp.status_code == 201
+        task_id = start_resp.json()["task_id"]
+
+        time.sleep(0.25)
+        cancel_resp = client.post(f"/api/v1/sessions/{session_id}/cancel")
+        assert cancel_resp.status_code == 200
+        assert cancel_resp.json()["cancel_requested"] is True
+
+        final_status = None
+        for _ in range(50):
+            status_resp = client.get(f"/api/v1/sessions/{session_id}/tasks/{task_id}")
+            assert status_resp.status_code == 200
+            status = status_resp.json()["status"]
+            if status in ("cancelled", "failed", "completed"):
+                final_status = status
+                if status == "cancelled":
+                    break
+            time.sleep(0.1)
+
+        assert final_status == "cancelled"
+
+        events_payload = client.get(f"/api/v1/sessions/{session_id}/events")
+        assert events_payload.status_code == 200
+        statuses = [
+            event.get("status", "")
+            for event in events_payload.json().get("events", [])
+            if event.get("type") == "status"
+        ]
+        assert not any("Agent continuing" in status for status in statuses)
+
+    def test_start_task_rejects_parallel_run_in_same_session(self, client, git_repo, monkeypatch):
+        """Starting a second task while one is running must be rejected."""
+        import chad.server.services.task_executor as task_executor_module
+
+        def build_slow_command(
+            provider,
+            account_name,
+            project_path,
+            task_description=None,
+            screenshots=None,
+            phase="exploration",
+            exploration_output=None,
+            model=None,
+            reasoning_effort=None,
+            mock_run_duration_seconds=0,
+            override_prompt=None,
+        ):
+            del (
+                provider,
+                account_name,
+                project_path,
+                task_description,
+                screenshots,
+                phase,
+                exploration_output,
+                model,
+                reasoning_effort,
+                mock_run_duration_seconds,
+                override_prompt,
+            )
+            script = (
+                "import time,sys\n"
+                "print('RUNNING')\n"
+                "sys.stdout.flush()\n"
+                "time.sleep(3)\n"
+            )
+            return ["python3", "-c", script], {}, None
+
+        monkeypatch.setattr(task_executor_module, "build_agent_command", build_slow_command)
+
+        session_resp = client.post("/api/v1/sessions", json={"name": "Parallel Start Regression"})
+        session_id = session_resp.json()["id"]
+        account_resp = client.post("/api/v1/accounts", json={"name": "parallel-regression", "provider": "mock"})
+        assert account_resp.status_code in (200, 201, 409)
+
+        first_start = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "first",
+                "coding_agent": "parallel-regression",
+            },
+        )
+        assert first_start.status_code == 201
+
+        second_start = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "second",
+                "coding_agent": "parallel-regression",
+            },
+        )
+        assert second_start.status_code == 409
+        assert "already running" in second_start.json().get("detail", "").lower()
+
+    def test_milestones_include_cancelled_task_after_restart(self, client, git_repo, monkeypatch):
+        """Milestone polling should keep milestones from cancelled tasks after restart."""
+        import chad.server.services.task_executor as task_executor_module
+
+        def build_task_specific_command(
+            provider,
+            account_name,
+            project_path,
+            task_description=None,
+            screenshots=None,
+            phase="exploration",
+            exploration_output=None,
+            model=None,
+            reasoning_effort=None,
+            mock_run_duration_seconds=0,
+            override_prompt=None,
+        ):
+            del (
+                provider,
+                account_name,
+                project_path,
+                screenshots,
+                phase,
+                exploration_output,
+                model,
+                reasoning_effort,
+                mock_run_duration_seconds,
+                override_prompt,
+            )
+            marker = repr(task_description or "")
+            if task_description == "first-cancelled-task":
+                script = (
+                    "import signal,time,sys\n"
+                    f"TASK={marker}\n"
+                    "def _on_term(sig, frame):\n"
+                    "    raise SystemExit(0)\n"
+                    "signal.signal(signal.SIGTERM, _on_term)\n"
+                    "print(f'EXPLORATION_RESULT: first milestone for {TASK}')\n"
+                    "sys.stdout.flush()\n"
+                    "while True:\n"
+                    "    time.sleep(0.1)\n"
+                )
+            else:
+                script = (
+                    "import sys\n"
+                    f"TASK={marker}\n"
+                    "print(f'EXPLORATION_RESULT: second milestone for {TASK}')\n"
+                    "print('{\"change_summary\":\"done\",\"files_changed\":[\"README.md\"],\"completion_status\":\"success\"}')\n"
+                    "sys.stdout.flush()\n"
+                )
+            return ["python3", "-c", script], {}, None
+
+        monkeypatch.setattr(task_executor_module, "build_agent_command", build_task_specific_command)
+
+        session_resp = client.post("/api/v1/sessions", json={"name": "Milestone Restart Regression"})
+        session_id = session_resp.json()["id"]
+        account_resp = client.post("/api/v1/accounts", json={"name": "milestone-restart-regression", "provider": "mock"})
+        assert account_resp.status_code in (200, 201, 409)
+
+        first_start = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "first-cancelled-task",
+                "coding_agent": "milestone-restart-regression",
+            },
+        )
+        assert first_start.status_code == 201
+        first_task_id = first_start.json()["task_id"]
+
+        first_seen = False
+        for _ in range(40):
+            milestones = client.get(f"/api/v1/sessions/{session_id}/milestones").json().get("milestones", [])
+            summaries = [str(m.get("summary", "")) for m in milestones]
+            if any("first milestone" in summary for summary in summaries):
+                first_seen = True
+                break
+            time.sleep(0.1)
+        assert first_seen
+
+        cancel_resp = client.post(f"/api/v1/sessions/{session_id}/cancel")
+        assert cancel_resp.status_code == 200
+        assert cancel_resp.json()["cancel_requested"] is True
+
+        for _ in range(50):
+            status = client.get(f"/api/v1/sessions/{session_id}/tasks/{first_task_id}").json()["status"]
+            if status == "cancelled":
+                break
+            time.sleep(0.1)
+        assert status == "cancelled"
+
+        second_start = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "second-restart-task",
+                "coding_agent": "milestone-restart-regression",
+            },
+        )
+        assert second_start.status_code == 201
+        second_task_id = second_start.json()["task_id"]
+
+        for _ in range(50):
+            second_status = client.get(f"/api/v1/sessions/{session_id}/tasks/{second_task_id}").json()["status"]
+            if second_status in ("completed", "failed", "cancelled"):
+                break
+            time.sleep(0.1)
+        assert second_status == "completed"
+
+        all_milestones = client.get(f"/api/v1/sessions/{session_id}/milestones").json().get("milestones", [])
+        all_summaries = [str(m.get("summary", "")) for m in all_milestones]
+        assert any("first milestone" in summary for summary in all_summaries)
+        assert any("second milestone" in summary for summary in all_summaries)
+
+    def test_events_latest_seq_uses_latest_task_after_restart(self, client, git_repo, monkeypatch):
+        """Events endpoint should report latest_seq from the most recent task."""
+        import chad.server.services.task_executor as task_executor_module
+
+        def build_fast_command(
+            provider,
+            account_name,
+            project_path,
+            task_description=None,
+            screenshots=None,
+            phase="exploration",
+            exploration_output=None,
+            model=None,
+            reasoning_effort=None,
+            mock_run_duration_seconds=0,
+            override_prompt=None,
+        ):
+            del (
+                provider,
+                account_name,
+                project_path,
+                screenshots,
+                phase,
+                exploration_output,
+                model,
+                reasoning_effort,
+                mock_run_duration_seconds,
+                override_prompt,
+            )
+            marker = repr(task_description or "")
+            script = (
+                "import sys,time\n"
+                f"TASK={marker}\n"
+                "print(f'RUN_DONE {TASK}')\n"
+                "sys.stdout.flush()\n"
+                "time.sleep(0.05)\n"
+            )
+            return ["python3", "-c", script], {}, None
+
+        monkeypatch.setattr(task_executor_module, "build_agent_command", build_fast_command)
+
+        session_resp = client.post("/api/v1/sessions", json={"name": "Latest Seq Regression"})
+        session_id = session_resp.json()["id"]
+        account_resp = client.post("/api/v1/accounts", json={"name": "latest-seq-regression", "provider": "mock"})
+        assert account_resp.status_code in (200, 201, 409)
+
+        first_start = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "first-task",
+                "coding_agent": "latest-seq-regression",
+            },
+        )
+        assert first_start.status_code == 201
+        first_task_id = first_start.json()["task_id"]
+
+        for _ in range(50):
+            first_status = client.get(f"/api/v1/sessions/{session_id}/tasks/{first_task_id}").json()["status"]
+            if first_status in ("completed", "failed", "cancelled"):
+                break
+            time.sleep(0.05)
+        assert first_status in ("completed", "failed", "cancelled")
+
+        second_start = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "second-task",
+                "coding_agent": "latest-seq-regression",
+            },
+        )
+        assert second_start.status_code == 201
+        second_task_id = second_start.json()["task_id"]
+
+        for _ in range(50):
+            second_status = client.get(f"/api/v1/sessions/{session_id}/tasks/{second_task_id}").json()["status"]
+            if second_status in ("completed", "failed", "cancelled"):
+                break
+            time.sleep(0.05)
+        assert second_status in ("completed", "failed", "cancelled")
+
+        payload = {}
+        events = []
+        max_seq = 0
+        # Wait for event stream bookkeeping to settle (session_ended may land just after terminal state).
+        for _ in range(40):
+            events_resp = client.get(f"/api/v1/sessions/{session_id}/events")
+            assert events_resp.status_code == 200
+            payload = events_resp.json()
+            events = payload.get("events", [])
+            assert events
+            max_seq = max(event.get("seq", 0) for event in events)
+            if payload.get("latest_seq", 0) == max_seq:
+                break
+            time.sleep(0.05)
+
+        assert payload.get("latest_seq", 0) == max_seq
+
 
 class TestMockProviderFullIntegration:
     """End-to-end integration tests for mock provider through full API stack.
@@ -785,7 +1154,7 @@ coding = mock-agent
         mock_api_client.base_url = "http://localhost:8000"
 
         # Import ChadWebUI
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         ui = ChadWebUI(mock_api_client)
 
@@ -803,8 +1172,8 @@ coding = mock-agent
         # Import from CLI app
         from chad.ui.cli.app import SyncStreamClient as CLISyncStreamClient
 
-        # Import from Gradio web_ui
-        from chad.ui.gradio.web_ui import SyncStreamClient as GradioSyncStreamClient
+        # Import from Gradio gradio_ui
+        from chad.ui.gradio.gradio_ui import SyncStreamClient as GradioSyncStreamClient
 
         # Both should be the same class
         assert CLISyncStreamClient is GradioSyncStreamClient
@@ -817,7 +1186,7 @@ coding = mock-agent
 
     def test_ansi_to_html_preserves_layout(self):
         """Test ANSI to HTML conversion preserves terminal layout."""
-        from chad.ui.gradio.web_ui import ansi_to_html
+        from chad.ui.gradio.gradio_ui import ansi_to_html
 
         # Test simple ANSI codes
         input_text = "\x1b[32mGreen\x1b[0m Normal \x1b[31mRed\x1b[0m"
@@ -832,7 +1201,7 @@ coding = mock-agent
     def test_mock_provider_produces_parseable_output(self, tmp_path):
         """Mock provider output can be parsed by ANSI-to-HTML converter."""
         from chad.server.services.task_executor import _build_mock_agent_command
-        from chad.ui.gradio.web_ui import ansi_to_html
+        from chad.ui.gradio.gradio_ui import ansi_to_html
         import subprocess
 
         cmd = _build_mock_agent_command(tmp_path, "test task")
@@ -855,28 +1224,14 @@ class TestPlainTextTerminalEvents:
     def test_gradio_run_task_handles_plain_text_terminal_events(self):
         """Gradio run_task_via_api streams plain text terminal output safely."""
         from chad.ui.client.stream_client import StreamEvent
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         terminal_text = "╭─ streamed log line"
 
         class DummyAPI:
             base_url = "http://localhost:8000"
 
-            def start_task(
-                self,
-                *,
-                session_id: str,
-                project_path: str,
-                task_description: str,
-                coding_agent: str,
-                coding_model=None,
-                coding_reasoning=None,
-                terminal_rows=None,
-                terminal_cols=None,
-                screenshots=None,
-                override_exploration_prompt=None,
-                override_implementation_prompt=None,
-            ):
+            def start_task(self, **kwargs):
                 return None
 
         class DummyStreamClient:
@@ -1150,8 +1505,140 @@ class TestEventLogAPI:
             assert event["type"] == "terminal_output"
 
 
+class TestFollowupTaskRouting:
+    """Tests that follow-up tasks route through TaskExecutor with is_followup=True."""
+
+    @staticmethod
+    def _wait_task_done(client, session_id, task_id, timeout=15.0):
+        deadline = time.time() + timeout
+        terminal = {"completed", "failed", "cancelled"}
+        while time.time() < deadline:
+            resp = client.get(f"/api/v1/sessions/{session_id}/tasks/{task_id}")
+            if resp.status_code == 200 and resp.json().get("status") in terminal:
+                return resp.json()["status"]
+            time.sleep(0.2)
+        return None
+
+    def test_followup_reuses_worktree(self, client, git_repo):
+        """Start task, complete, start follow-up with is_followup=True — worktree path reused."""
+        # Create mock account
+        client.post("/api/v1/accounts", json={"name": "fu-mock", "provider": "mock"})
+
+        # Create session and run first task
+        session_resp = client.post("/api/v1/sessions", json={"name": "followup-wt"})
+        session_id = session_resp.json()["id"]
+
+        task_resp = client.post(f"/api/v1/sessions/{session_id}/tasks", json={
+            "project_path": str(git_repo),
+            "task_description": "Initial task",
+            "coding_agent": "fu-mock",
+        })
+        assert task_resp.status_code == 201
+        task_id = task_resp.json()["task_id"]
+
+        status = self._wait_task_done(client, session_id, task_id)
+        assert status in ("completed", "failed")
+
+        # Get worktree path after first task
+        wt_resp = client.get(f"/api/v1/sessions/{session_id}/worktree")
+        assert wt_resp.status_code == 200
+        first_wt_path = wt_resp.json().get("path")
+        assert first_wt_path is not None
+
+        # Start follow-up task with is_followup=True
+        followup_resp = client.post(f"/api/v1/sessions/{session_id}/tasks", json={
+            "project_path": str(git_repo),
+            "task_description": "Follow-up changes",
+            "coding_agent": "fu-mock",
+            "is_followup": True,
+        })
+        assert followup_resp.status_code == 201
+        followup_task_id = followup_resp.json()["task_id"]
+
+        followup_status = self._wait_task_done(client, session_id, followup_task_id)
+        assert followup_status in ("completed", "failed")
+
+        # Worktree path should be the same
+        wt_resp2 = client.get(f"/api/v1/sessions/{session_id}/worktree")
+        assert wt_resp2.json().get("path") == first_wt_path
+
+    def test_followup_creates_session_event_loop(self, client, git_repo):
+        """Follow-up task should have a _session_event_loop attribute set."""
+        from chad.server.services.task_executor import get_task_executor
+
+        client.post("/api/v1/accounts", json={"name": "sel-mock", "provider": "mock"})
+        session_resp = client.post("/api/v1/sessions", json={"name": "sel-test"})
+        session_id = session_resp.json()["id"]
+
+        # Run initial task
+        task_resp = client.post(f"/api/v1/sessions/{session_id}/tasks", json={
+            "project_path": str(git_repo),
+            "task_description": "First task",
+            "coding_agent": "sel-mock",
+        })
+        task_id = task_resp.json()["task_id"]
+        self._wait_task_done(client, session_id, task_id)
+
+        # Run follow-up
+        fu_resp = client.post(f"/api/v1/sessions/{session_id}/tasks", json={
+            "project_path": str(git_repo),
+            "task_description": "Follow-up task",
+            "coding_agent": "sel-mock",
+            "is_followup": True,
+        })
+        fu_task_id = fu_resp.json()["task_id"]
+
+        # While running or after completion, the task should have _session_event_loop
+        self._wait_task_done(client, session_id, fu_task_id)
+        executor = get_task_executor()
+        task = executor.get_task(fu_task_id)
+        assert task is not None
+        assert task._session_event_loop is not None
+
+    def test_coding_account_in_session_response(self, client, git_repo):
+        """Session response should include coding_account after a task runs."""
+        client.post("/api/v1/accounts", json={"name": "ca-mock", "provider": "mock"})
+        session_resp = client.post("/api/v1/sessions", json={"name": "ca-test"})
+        session_id = session_resp.json()["id"]
+
+        task_resp = client.post(f"/api/v1/sessions/{session_id}/tasks", json={
+            "project_path": str(git_repo),
+            "task_description": "Test coding account",
+            "coding_agent": "ca-mock",
+        })
+        task_id = task_resp.json()["task_id"]
+        self._wait_task_done(client, session_id, task_id)
+
+        session = client.get(f"/api/v1/sessions/{session_id}").json()
+        assert session.get("coding_account") == "ca-mock"
+
+
 class TestAgentHandover:
     """Tests for handover between agents using EventLog."""
+
+    @staticmethod
+    def _wait_for_task_terminal_status(
+        client: TestClient,
+        session_id: str,
+        task_id: str,
+        timeout: float = 15.0,
+        interval: float = 0.1,
+    ) -> str:
+        """Wait for task status to reach a terminal state."""
+        deadline = time.time() + timeout
+        terminal_states = {"completed", "failed", "cancelled"}
+
+        while time.time() < deadline:
+            resp = client.get(f"/api/v1/sessions/{session_id}/tasks/{task_id}")
+            if resp.status_code == 200:
+                status = resp.json().get("status")
+                if status in terminal_states:
+                    return status
+            time.sleep(interval)
+
+        pytest.fail(
+            f"Task {task_id} in session {session_id} did not reach terminal state within {timeout}s"
+        )
 
     def test_eventlog_contains_handover_info(self, client, git_repo, tmp_path, monkeypatch):
         """EventLog contains sufficient information for agent handover."""
@@ -1159,9 +1646,10 @@ class TestAgentHandover:
         create_resp = client.post("/api/v1/sessions", json={"name": "Handover Test"})
         session_id = create_resp.json()["id"]
 
-        client.post("/api/v1/accounts", json={"name": "handover-mock", "provider": "mock"})
+        account_resp = client.post("/api/v1/accounts", json={"name": "handover-mock", "provider": "mock"})
+        assert account_resp.status_code == 201
 
-        client.post(
+        start_resp = client.post(
             f"/api/v1/sessions/{session_id}/tasks",
             json={
                 "project_path": str(git_repo),
@@ -1169,8 +1657,10 @@ class TestAgentHandover:
                 "coding_agent": "handover-mock",
             },
         )
+        assert start_resp.status_code == 201
+        task_id = start_resp.json()["task_id"]
 
-        time.sleep(1)
+        self._wait_for_task_terminal_status(client, session_id, task_id)
 
         # Get events
         response = client.get(f"/api/v1/sessions/{session_id}/events")
@@ -1204,9 +1694,10 @@ class TestAgentHandover:
         create_resp = client.post("/api/v1/sessions", json={"name": "Agent 1"})
         session1_id = create_resp.json()["id"]
 
-        client.post("/api/v1/accounts", json={"name": "agent1-mock", "provider": "mock"})
+        account1_resp = client.post("/api/v1/accounts", json={"name": "agent1-mock", "provider": "mock"})
+        assert account1_resp.status_code == 201
 
-        client.post(
+        agent1_start = client.post(
             f"/api/v1/sessions/{session1_id}/tasks",
             json={
                 "project_path": str(git_repo),
@@ -1214,8 +1705,10 @@ class TestAgentHandover:
                 "coding_agent": "agent1-mock",
             },
         )
+        assert agent1_start.status_code == 201
+        agent1_task_id = agent1_start.json()["task_id"]
 
-        time.sleep(1)
+        self._wait_for_task_terminal_status(client, session1_id, agent1_task_id)
 
         # Get Agent 1's events
         agent1_events = client.get(f"/api/v1/sessions/{session1_id}/events").json()["events"]
@@ -1237,9 +1730,10 @@ class TestAgentHandover:
         assert handover_context["task_description"] != ""
 
         # Agent 2 can now continue the work
-        client.post("/api/v1/accounts", json={"name": "agent2-mock", "provider": "mock"})
+        account2_resp = client.post("/api/v1/accounts", json={"name": "agent2-mock", "provider": "mock"})
+        assert account2_resp.status_code == 201
 
-        client.post(
+        agent2_start = client.post(
             f"/api/v1/sessions/{session2_id}/tasks",
             json={
                 "project_path": str(git_repo),
@@ -1247,12 +1741,23 @@ class TestAgentHandover:
                 "coding_agent": "agent2-mock",
             },
         )
+        assert agent2_start.status_code == 201, agent2_start.text
+        agent2_task_id = agent2_start.json()["task_id"]
 
-        time.sleep(1)
+        def _wait_for_events(session_id: str, timeout: float = 15.0, interval: float = 0.1):
+            deadline = time.time() + timeout
+            last_events: list[dict] = []
+            while time.time() < deadline:
+                last_events = client.get(f"/api/v1/sessions/{session_id}/events").json()["events"]
+                if last_events:
+                    return last_events
+                time.sleep(interval)
+            return last_events
 
-        # Agent 2 should have its own events
-        agent2_events = client.get(f"/api/v1/sessions/{session2_id}/events").json()["events"]
+        # Agent 2 should have its own events (allow extra time under parallel load)
+        agent2_events = _wait_for_events(session2_id)
         assert len(agent2_events) > 0
+        self._wait_for_task_terminal_status(client, session2_id, agent2_task_id)
 
         # Both logs should exist in the log directory
         log_files = list(log_dir.glob("*.jsonl"))
@@ -1315,27 +1820,24 @@ class TestUsageBasedProviderSwitch:
         resp = client.get("/api/v1/config/mock-remaining-usage/usage-mock-1")
         assert resp.json()["remaining"] == 0.2
 
-    def test_usage_threshold_triggers_switch(self, client, git_repo):
-        """Test that exceeding usage threshold triggers provider switch.
+    def test_action_settings_switch_provider(self, client, git_repo):
+        """Test that action settings can configure provider switch on threshold.
 
-        When the primary provider's usage exceeds the configured threshold,
-        the system should automatically switch to the next fallback provider.
+        When session_usage exceeds the configured threshold with a switch_provider
+        action, the system should be configured to switch to the target account.
         """
         # Create two mock provider accounts
         client.post("/api/v1/accounts", json={"name": "primary-mock", "provider": "mock"})
         client.post("/api/v1/accounts", json={"name": "fallback-mock", "provider": "mock"})
 
-        # Set up fallback order: primary-mock -> fallback-mock
+        # Configure action settings: switch provider at 50% session usage
         resp = client.put(
-            "/api/v1/config/provider-fallback-order",
-            json={"order": ["primary-mock", "fallback-mock"]}
-        )
-        assert resp.status_code == 200
-
-        # Set usage threshold to 50% (switch when usage exceeds 50%)
-        resp = client.put(
-            "/api/v1/config/usage-switch-threshold",
-            json={"threshold": 50}
+            "/api/v1/config/action-settings",
+            json={"settings": [
+                {"event": "session_usage", "threshold": 50, "action": "switch_provider", "target_account": "fallback-mock"},
+                {"event": "weekly_usage", "threshold": 90, "action": "notify"},
+                {"event": "context_usage", "threshold": 90, "action": "notify"},
+            ]}
         )
         assert resp.status_code == 200
 
@@ -1360,19 +1862,27 @@ class TestUsageBasedProviderSwitch:
         resp = client.get("/api/v1/config/mock-remaining-usage/fallback-mock")
         assert resp.json()["remaining"] == 0.8
 
-        resp = client.get("/api/v1/config/usage-switch-threshold")
-        assert resp.json()["threshold"] == 50
-
-        resp = client.get("/api/v1/config/provider-fallback-order")
-        assert resp.json()["order"] == ["primary-mock", "fallback-mock"]
+        resp = client.get("/api/v1/config/action-settings")
+        settings = resp.json()["settings"]
+        session_setting = next(s for s in settings if s["event"] == "session_usage")
+        assert session_setting["threshold"] == 50
+        assert session_setting["action"] == "switch_provider"
+        assert session_setting["target_account"] == "fallback-mock"
 
     def test_no_switch_when_under_threshold(self, client, git_repo):
         """Test that no switch occurs when usage is under threshold."""
         # Create a mock provider
         client.post("/api/v1/accounts", json={"name": "healthy-mock", "provider": "mock"})
 
-        # Set threshold to 90%
-        client.put("/api/v1/config/usage-switch-threshold", json={"threshold": 90})
+        # Configure action settings with notify at 90%
+        client.put(
+            "/api/v1/config/action-settings",
+            json={"settings": [
+                {"event": "session_usage", "threshold": 90, "action": "notify"},
+                {"event": "weekly_usage", "threshold": 90, "action": "notify"},
+                {"event": "context_usage", "threshold": 90, "action": "notify"},
+            ]}
+        )
 
         # Set usage to 70% (30% remaining) - under the 90% threshold
         client.put(
@@ -1384,12 +1894,16 @@ class TestUsageBasedProviderSwitch:
         resp = client.get("/api/v1/config/mock-remaining-usage/healthy-mock")
         assert resp.json()["remaining"] == 0.3
 
-    def test_switch_disabled_at_100_percent(self, client):
-        """Test that usage-based switching is disabled when threshold is 100%."""
-        # Set threshold to 100% (disabled)
-        resp = client.put("/api/v1/config/usage-switch-threshold", json={"threshold": 100})
+    def test_action_settings_notify_only(self, client):
+        """Test that action settings default to notify-only actions."""
+        # Get default action settings
+        resp = client.get("/api/v1/config/action-settings")
         assert resp.status_code == 200
-        assert resp.json()["threshold"] == 100
+        settings = resp.json()["settings"]
+        # All defaults should be notify at 90%
+        for setting in settings:
+            assert setting["action"] == "notify"
+            assert setting["threshold"] == 90
 
 
 class TestMockRunDurationAPI:

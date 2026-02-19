@@ -8,11 +8,13 @@ import signal
 import subprocess
 import sys
 import termios
+import threading
 import tty
 from pathlib import Path
 
 from chad.ui.client import APIClient
 from chad.ui.client.stream_client import SyncStreamClient, decode_terminal_data
+from chad.util.providers import is_mistral_configured
 
 
 def _get_codex_home(account_name: str) -> Path:
@@ -168,26 +170,23 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
             return False, f"Login error: {e}"
 
     elif provider == "mistral":
-        vibe_config = Path.home() / ".vibe" / "config.toml"
-        if vibe_config.exists():
+        vibe_dir = Path.home() / ".vibe"
+        if is_mistral_configured(vibe_dir):
             return True, "Already logged in"
 
-        print("Starting Vibe setup...")
+        import webbrowser
+        print("Mistral requires an API key.")
+        print("Opening https://console.mistral.ai/codestral/cli ...")
+        webbrowser.open("https://console.mistral.ai/codestral/cli")
         print()
-        try:
-            result = subprocess.run(
-                ["vibe", "--setup"],
-                timeout=120,
-            )
-            if result.returncode == 0 and vibe_config.exists():
-                return True, "Login successful"
-            return False, "Login failed or was cancelled"
-        except FileNotFoundError:
-            return False, "Vibe CLI not found"
-        except subprocess.TimeoutExpired:
-            return False, "Login timed out"
-        except Exception as e:
-            return False, f"Login error: {e}"
+        api_key = input("Paste your MISTRAL_API_KEY: ").strip()
+        if not api_key:
+            return False, "No API key provided"
+
+        vibe_dir.mkdir(parents=True, exist_ok=True)
+        env_file = vibe_dir / ".env"
+        env_file.write_text(f"MISTRAL_API_KEY='{api_key}'\n", encoding="utf-8")
+        return True, "Login successful"
 
     elif provider == "opencode":
         # OpenCode stores credentials at ~/.local/share/opencode/auth.json
@@ -233,7 +232,7 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
         # Run interactive kimi login in the terminal
         kimi_cli = shutil.which("kimi")
         if not kimi_cli:
-            return False, "Kimi CLI not found. Install with: npm install -g @anthropic-ai/kimi-code"
+            return False, "Kimi CLI not found. Install with: pip install kimi-cli"
 
         kimi_home.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
@@ -248,6 +247,12 @@ def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
                 timeout=120,
             )
             if result.returncode == 0 and creds_file.exists():
+                return True, "Logged in successfully"
+            # Kimi may persist credentials before a non-fatal model listing error.
+            # Accept this as logged in and repair config if needed.
+            if creds_file.exists() or global_creds.exists():
+                if not (config_file.exists() and "[models." in config_file.read_text(encoding="utf-8")):
+                    _write_kimi_default_config(config_file)
                 return True, "Logged in successfully"
             return False, "Kimi login did not complete"
         except subprocess.TimeoutExpired:
@@ -323,6 +328,20 @@ def select_from_list(prompt: str, options: list[tuple[str, str]], default_idx: i
             return None
 
 
+def _format_action_settings(settings: list[dict]) -> str:
+    """Format action settings for display."""
+    lines = []
+    for s in settings:
+        event = s.get("event", "?")
+        threshold = s.get("threshold", 90)
+        action = s.get("action", "notify")
+        target = s.get("target_account", "")
+        label = event.replace("_", " ").title()
+        suffix = f" -> {target}" if action == "switch_provider" and target else ""
+        lines.append(f"    {label}: {threshold}% {action}{suffix}")
+    return "\n".join(lines) if lines else "    (none)"
+
+
 def run_settings_menu(client: APIClient) -> None:
     """Run the settings submenu.
 
@@ -343,8 +362,11 @@ def run_settings_menu(client: APIClient) -> None:
         verification_agent_name = client.get_verification_agent()
         verification_model = client.get_preferred_verification_model()
         max_verification_attempts = client.get_max_verification_attempts()
-        fallback_order = client.get_provider_fallback_order()
-        usage_threshold = client.get_usage_switch_threshold()
+        action_settings = client.get_action_settings()
+        try:
+            slack_settings = client.get_slack_settings()
+        except Exception:
+            slack_settings = {"enabled": False, "channel": None, "has_token": False}
         # Find coding agent from roles
         coding_agent = None
         for acc in accounts:
@@ -359,9 +381,11 @@ def run_settings_menu(client: APIClient) -> None:
         print(f"  Verification Agent: {verification_agent_name or '(not set)'}")
         print(f"  Verification Model: {verification_model or '(auto)'}")
         print(f"  Max Verif Attempts: {max_verification_attempts}")
-        fallback_str = " -> ".join(fallback_order) if fallback_order else "(none)"
-        print(f"  Fallback Order:     {fallback_str}")
-        print(f"  Usage Threshold:    {usage_threshold}%")
+        print("  Action Rules:")
+        print(_format_action_settings(action_settings))
+        slack_status = "enabled" if slack_settings.get("enabled") else "disabled"
+        slack_ch = slack_settings.get("channel") or "(not set)"
+        print(f"  Slack:              {slack_status}, channel={slack_ch}")
         print()
 
         print("Settings Menu:")
@@ -370,9 +394,9 @@ def run_settings_menu(client: APIClient) -> None:
         print("  [3] Set verification agent")
         print("  [4] Set verification model")
         print("  [5] Set max verification attempts")
-        print("  [6] Set provider fallback order")
-        print("  [7] Set usage threshold")
-        print("  [8] Set UI mode")
+        print("  [6] Action rules")
+        print("  [7] Set UI mode")
+        print("  [8] Slack integration")
         print("  [b] Back to main menu")
         print()
 
@@ -482,56 +506,103 @@ def run_settings_menu(client: APIClient) -> None:
             input("Press Enter to continue...")
 
         elif choice == "6":
-            # Set provider fallback order
+            # Action rules
             print()
-            print("Provider Fallback Order")
+            print("Action Rules")
             print("-" * 30)
-            if fallback_order:
-                print("Current order:")
-                for i, name in enumerate(fallback_order, 1):
-                    print(f"  {i}. {name}")
-            else:
-                print("No fallback order set.")
+            print(_format_action_settings(action_settings))
             print()
-            print("Enter account names separated by commas, in priority order.")
-            print("Available accounts:", ", ".join(acc.name for acc in accounts) if accounts else "(none)")
+            print("  [a] Add rule")
+            if action_settings:
+                print("  [e] Edit rule")
+                print("  [d] Delete rule")
             print()
             try:
-                order_input = input("New order (or Enter to keep current): ").strip()
-                if order_input:
-                    new_order = [name.strip() for name in order_input.split(",") if name.strip()]
-                    # Validate account names
-                    valid_names = {acc.name for acc in accounts}
-                    invalid = [name for name in new_order if name not in valid_names]
-                    if invalid:
-                        print(f"Unknown accounts: {', '.join(invalid)}")
+                sub = input("Choice (or Enter to skip): ").strip().lower()
+                event_names = ["session_usage", "weekly_usage", "context_usage"]
+                all_actions = ["notify", "switch_provider", "await_reset"]
+
+                if sub == "a":
+                    print("Event types: " + ", ".join(event_names))
+                    event_key = input("Event type: ").strip()
+                    if event_key not in event_names:
+                        print("Invalid event type")
                     else:
-                        client.set_provider_fallback_order(new_order)
-                        print(f"Fallback order set: {' -> '.join(new_order)}")
-            except Exception as e:
-                print(f"Error: {e}")
+                        cur_threshold = int(input("Threshold (0-100): ").strip())
+                        avail_actions = [a for a in all_actions if not (a == "await_reset" and event_key == "context_usage")]
+                        print(f"Actions: {', '.join(avail_actions)}")
+                        cur_action = input("Action: ").strip()
+                        if cur_action not in avail_actions:
+                            print("Invalid action")
+                        else:
+                            target = None
+                            if cur_action == "switch_provider":
+                                print("Available accounts:", ", ".join(acc.name for acc in accounts) if accounts else "(none)")
+                                target = input("Target account: ").strip() or None
+                            new_entry = {"event": event_key, "threshold": cur_threshold, "action": cur_action}
+                            if target:
+                                new_entry["target_account"] = target
+                            new_settings = list(action_settings) + [new_entry]
+                            try:
+                                client.set_action_settings(new_settings)
+                                print("Rule added.")
+                            except Exception as e:
+                                print(f"Error: {e}")
+
+                elif sub == "e" and action_settings:
+                    for i, s in enumerate(action_settings, 1):
+                        ev = s.get("event", "?")
+                        print(f"  [{i}] {ev} >= {s.get('threshold', 90)}% -> {s.get('action', 'notify')}")
+                    idx = int(input("Rule number: ").strip()) - 1
+                    if 0 <= idx < len(action_settings):
+                        current = action_settings[idx]
+                        event_key = current.get("event", "session_usage")
+                        cur_threshold = current.get("threshold", 90)
+                        cur_action = current.get("action", "notify")
+
+                        new_thr = input(f"Threshold (0-100, current {cur_threshold}): ").strip()
+                        if new_thr:
+                            cur_threshold = int(new_thr)
+
+                        avail_actions = [a for a in all_actions if not (a == "await_reset" and event_key == "context_usage")]
+                        print(f"Actions: {', '.join(avail_actions)} (current: {cur_action})")
+                        new_action = input("Action: ").strip()
+                        if new_action and new_action in avail_actions:
+                            cur_action = new_action
+
+                        target = None
+                        if cur_action == "switch_provider":
+                            print("Available accounts:", ", ".join(acc.name for acc in accounts) if accounts else "(none)")
+                            target = input("Target account: ").strip() or None
+
+                        new_entry = {"event": event_key, "threshold": cur_threshold, "action": cur_action}
+                        if target:
+                            new_entry["target_account"] = target
+                        new_settings = list(action_settings)
+                        new_settings[idx] = new_entry
+                        try:
+                            client.set_action_settings(new_settings)
+                            print("Rule updated.")
+                        except Exception as e:
+                            print(f"Error: {e}")
+
+                elif sub == "d" and action_settings:
+                    for i, s in enumerate(action_settings, 1):
+                        ev = s.get("event", "?")
+                        print(f"  [{i}] {ev} >= {s.get('threshold', 90)}% -> {s.get('action', 'notify')}")
+                    idx = int(input("Rule to delete: ").strip()) - 1
+                    if 0 <= idx < len(action_settings):
+                        new_settings = [s for j, s in enumerate(action_settings) if j != idx]
+                        try:
+                            client.set_action_settings(new_settings)
+                            print("Rule deleted.")
+                        except Exception as e:
+                            print(f"Error: {e}")
+            except ValueError:
+                print("Invalid input")
             input("Press Enter to continue...")
 
         elif choice == "7":
-            # Set usage threshold
-            print()
-            print(f"Current usage threshold: {usage_threshold}%")
-            print("When provider usage exceeds this %, auto-switch to next fallback.")
-            print("Set to 100 to disable usage-based switching.")
-            try:
-                new_threshold = input("New threshold (0-100): ").strip()
-                if new_threshold:
-                    threshold = int(new_threshold)
-                    if 0 <= threshold <= 100:
-                        client.set_usage_switch_threshold(threshold)
-                        print(f"Usage threshold set to {threshold}%")
-                    else:
-                        print("Please enter a number between 0 and 100")
-            except ValueError:
-                print("Invalid number")
-            input("Press Enter to continue...")
-
-        elif choice == "8":
             # Set UI mode
             print()
             print(f"Current UI mode: {preferences.ui_mode}")
@@ -544,6 +615,53 @@ def run_settings_menu(client: APIClient) -> None:
             if selected is not None:
                 client.set_preferences(ui_mode=selected)
                 print(f"UI mode set to: {selected}")
+            input("Press Enter to continue...")
+
+        elif choice == "8":
+            # Slack integration
+            print()
+            print("Slack Integration")
+            print("-" * 30)
+            print(f"  Enabled:   {slack_settings.get('enabled', False)}")
+            print(f"  Token:     {'(set)' if slack_settings.get('has_token') else '(not set)'}")
+            print(f"  Signing:   {'(set)' if slack_settings.get('has_signing_secret') else '(not set)'}")
+            print(f"  Channel:   {slack_settings.get('channel') or '(not set)'}")
+            print()
+            print("  [e] Toggle enabled")
+            print("  [t] Set bot token")
+            print("  [g] Set signing secret")
+            print("  [c] Set channel ID")
+            print("  [s] Send test message")
+            print()
+            try:
+                sub = input("Choice (or Enter to skip): ").strip().lower()
+                if sub == "e":
+                    new_val = not slack_settings.get("enabled", False)
+                    client.set_slack_settings(enabled=new_val)
+                    print(f"Slack {'enabled' if new_val else 'disabled'}")
+                elif sub == "t":
+                    token = input("Bot token (xoxb-...): ").strip()
+                    if token:
+                        client.set_slack_settings(bot_token=token)
+                        print("Bot token saved")
+                elif sub == "g":
+                    secret = input("Signing secret: ").strip()
+                    if secret:
+                        client.set_slack_settings(signing_secret=secret)
+                        print("Signing secret saved")
+                elif sub == "c":
+                    channel = input("Channel ID (e.g. C0123456789): ").strip()
+                    if channel:
+                        client.set_slack_settings(channel=channel)
+                        print(f"Channel set to {channel}")
+                elif sub == "s":
+                    result = client.test_slack_connection()
+                    if result.get("ok"):
+                        print("Test message sent to Slack")
+                    else:
+                        print(f"Failed: {result.get('error', 'unknown error')}")
+            except (ValueError, EOFError):
+                pass
             input("Press Enter to continue...")
 
 
@@ -710,6 +828,51 @@ def run_task_with_streaming(
         terminal_cols=cols,
     )
 
+    milestone_since_seq = 0
+    milestone_poll_stop = threading.Event()
+
+    def _emit_milestones_once() -> None:
+        nonlocal milestone_since_seq
+        try:
+            milestones = client.get_milestones(session_id, since_seq=milestone_since_seq)
+        except Exception:
+            return
+
+        if not isinstance(milestones, list):
+            return
+
+        max_seq = milestone_since_seq
+        for milestone in milestones:
+            if not isinstance(milestone, dict):
+                continue
+
+            seq = milestone.get("seq", 0)
+            try:
+                seq_int = int(seq)
+            except (TypeError, ValueError):
+                seq_int = 0
+            if seq_int > max_seq:
+                max_seq = seq_int
+
+            summary = str(milestone.get("summary", "")).strip()
+            if not summary:
+                continue
+
+            title = str(milestone.get("title", "")).strip()
+            line = f"\r\n[MILESTONE] {title}: {summary}\r\n"
+            os.write(sys.stdout.fileno(), line.encode("utf-8", errors="replace"))
+
+        milestone_since_seq = max_seq
+
+    def _milestone_poll_loop() -> None:
+        while not milestone_poll_stop.is_set():
+            _emit_milestones_once()
+            milestone_poll_stop.wait(0.5)
+
+    _emit_milestones_once()
+    milestone_poll_thread = threading.Thread(target=_milestone_poll_loop, daemon=True)
+    milestone_poll_thread.start()
+
     # Save terminal state
     old_settings = None
     try:
@@ -782,6 +945,10 @@ def run_task_with_streaming(
                         pass
 
     finally:
+        milestone_poll_stop.set()
+        milestone_poll_thread.join(timeout=1.0)
+        _emit_milestones_once()
+
         # Restore SIGWINCH handler
         if old_sigwinch is not None:
             try:

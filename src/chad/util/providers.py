@@ -10,6 +10,7 @@ import subprocess
 import time
 import threading
 import queue
+import math
 from datetime import datetime, timezone
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -672,26 +673,112 @@ def _stream_pty_output(
     return "".join(output_chunks), timed_out, idle_stalled
 
 
-def _get_claude_usage_percentage(account_name: str) -> float | None:
-    """Get Claude usage percentage from Anthropic API.
+def _normalize_usage_percentage(util_value: float | int | None) -> float | None:
+    """Convert utilization values to 0-100 percentage, scaling fractional inputs."""
+    try:
+        pct = float(util_value)
+    except (TypeError, ValueError):
+        return None
+
+    if math.isnan(pct) or math.isinf(pct):
+        return None
+
+    # Anthropic usage APIs sometimes return 0.0-1.0 fractions; scale those.
+    if 0.0 <= pct <= 1.0:
+        pct *= 100.0
+
+    return max(0.0, min(100.0, pct))
+
+
+def _find_claude_credentials(account_name: str) -> Path | None:
+    """Find the Claude credentials file for an account.
+
+    Checks the per-account config directory first, then falls back to
+    the default ``~/.claude`` location.
+    """
+    base_home = safe_home()
+    candidates = []
+    if account_name:
+        # Per-account isolated dir (matches ClaudeCodeProvider._get_claude_config_dir)
+        candidates.append(Path(base_home) / ".chad" / "claude-configs" / account_name / ".credentials.json")
+    # Default location
+    candidates.append(Path(base_home) / ".claude" / ".credentials.json")
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+_CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+_CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+
+
+def _refresh_claude_token(creds_file: Path, oauth_data: dict) -> str | None:
+    """Refresh an expired Claude OAuth access token and update the credentials file.
+
+    Returns the new access token, or None if refresh fails.
+    """
+    import requests
+    from datetime import datetime, timezone
+
+    refresh_token = oauth_data.get("refreshToken", "")
+    if not refresh_token:
+        return None
+
+    try:
+        response = requests.post(
+            _CLAUDE_OAUTH_TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": _CLAUDE_OAUTH_CLIENT_ID,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=10,
+        )
+
+        if response.status_code != 200:
+            return None
+
+        token_data = response.json()
+        new_access_token = token_data.get("access_token", "")
+        if not new_access_token:
+            return None
+
+        # Update credentials file with new token
+        with open(creds_file, encoding="utf-8") as f:
+            creds = json.load(f)
+
+        creds["claudeAiOauth"]["accessToken"] = new_access_token
+        if "refresh_token" in token_data:
+            creds["claudeAiOauth"]["refreshToken"] = token_data["refresh_token"]
+        if "expires_in" in token_data:
+            expires_ms = int((datetime.now(timezone.utc).timestamp() + token_data["expires_in"]) * 1000)
+            creds["claudeAiOauth"]["expiresAt"] = expires_ms
+
+        with open(creds_file, "w", encoding="utf-8") as f:
+            json.dump(creds, f, indent=2)
+
+        return new_access_token
+
+    except Exception:
+        return None
+
+
+def _fetch_claude_usage_data(account_name: str) -> dict | None:
+    """Fetch all Claude usage data from Anthropic API in a single request.
 
     Args:
         account_name: The account name to check usage for
 
     Returns:
-        Usage percentage (0-100), or None if unavailable
+        Parsed JSON response dict, or None if unavailable.
     """
     import requests
+    from datetime import datetime, timezone
 
-    # Get the isolated config directory for this account
-    base_home = safe_home()
-    if account_name:
-        config_dir = Path(base_home) / ".chad" / "claude_homes" / account_name / ".claude"
-    else:
-        config_dir = Path(base_home) / ".claude"
-
-    creds_file = config_dir / ".credentials.json"
-    if not creds_file.exists():
+    creds_file = _find_claude_credentials(account_name)
+    if not creds_file:
         return None
 
     try:
@@ -702,6 +789,15 @@ def _get_claude_usage_percentage(account_name: str) -> float | None:
         access_token = oauth_data.get("accessToken", "")
         if not access_token:
             return None
+
+        # Refresh token if expired (expiresAt is in milliseconds)
+        expires_ms = oauth_data.get("expiresAt", 0)
+        if expires_ms:
+            expires_dt = datetime.fromtimestamp(expires_ms / 1000, tz=timezone.utc)
+            if expires_dt <= datetime.now(timezone.utc):
+                refreshed = _refresh_claude_token(creds_file, oauth_data)
+                if refreshed:
+                    access_token = refreshed
 
         response = requests.get(
             "https://api.anthropic.com/api/oauth/usage",
@@ -717,19 +813,127 @@ def _get_claude_usage_percentage(account_name: str) -> float | None:
         if response.status_code != 200:
             return None
 
-        usage_data = response.json()
-        five_hour = usage_data.get("five_hour", {})
-        util = five_hour.get("utilization")
-        if util is not None:
-            try:
-                return float(util)
-            except (ValueError, TypeError):
-                pass
-
-        return None
+        return response.json()
 
     except Exception:
         return None
+
+
+def _get_claude_usage_percentage(account_name: str) -> float | None:
+    """Get Claude session (5-hour) usage percentage from Anthropic API."""
+    data = _fetch_claude_usage_data(account_name)
+    if data is None:
+        return None
+    return _normalize_usage_percentage((data.get("five_hour") or {}).get("utilization"))
+
+
+def _get_claude_weekly_usage_percentage(account_name: str) -> float | None:
+    """Get Claude weekly (7-day) usage percentage from Anthropic API."""
+    data = _fetch_claude_usage_data(account_name)
+    if data is None:
+        return None
+    return _normalize_usage_percentage((data.get("seven_day") or {}).get("utilization"))
+
+
+def _parse_reset_eta(resets_at: str) -> str | None:
+    """Parse an ISO 8601 reset timestamp into a human-readable ETA string."""
+    from datetime import datetime, timezone
+    try:
+        reset_dt = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        total_seconds = max(0, int((reset_dt - now).total_seconds()))
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        if hours > 0:
+            return f"{hours}h {minutes}m"
+        return f"{minutes}m"
+    except Exception:
+        return None
+
+
+def _get_claude_reset_eta(account_name: str, period_key: str) -> str | None:
+    """Get estimated time until a Claude usage period resets.
+
+    Args:
+        account_name: The account name to check
+        period_key: ``"five_hour"`` or ``"seven_day"``
+
+    Returns:
+        Human-readable ETA like ``"2h 15m"``, or ``None`` if unavailable.
+    """
+    data = _fetch_claude_usage_data(account_name)
+    if data is None:
+        return None
+    resets_at = (data.get(period_key) or {}).get("resets_at")
+    if not resets_at:
+        return None
+    return _parse_reset_eta(resets_at)
+
+
+def _get_codex_weekly_usage_percentage(account_name: str) -> float | None:
+    """Get Codex weekly usage percentage from session files.
+
+    Args:
+        account_name: The account name to check usage for
+
+    Returns:
+        Usage percentage (0-100), or None if unavailable
+    """
+    base_home = safe_home()
+    if account_name:
+        codex_home = Path(base_home) / ".chad" / "codex-homes" / account_name
+    else:
+        codex_home = Path(base_home)
+
+    if account_name and not codex_home.exists():
+        return None
+
+    sessions_dir = codex_home / ".codex" / "sessions"
+    if not sessions_dir.exists():
+        return 0.0
+
+    # Find the most recent session file
+    session_files: list[tuple[float, Path]] = []
+    for root, _, files in os.walk(sessions_dir):
+        for filename in files:
+            if filename.endswith(".jsonl"):
+                path = platform_path(root) / filename
+                try:
+                    session_files.append((path.stat().st_mtime, path))
+                except OSError:
+                    pass
+
+    if not session_files:
+        return 0.0
+
+    session_files.sort(reverse=True)
+    latest_session = session_files[0][1]
+
+    try:
+        rate_limits = None
+        with open(latest_session, encoding="utf-8") as f:
+            for line in f:
+                if "rate_limits" in line:
+                    data = json.loads(line.strip())
+                    if data.get("type") == "event_msg":
+                        payload = data.get("payload", {})
+                        if payload.get("type") == "token_count":
+                            rate_limits = payload.get("rate_limits")
+
+        if rate_limits:
+            secondary = rate_limits.get("secondary", {})
+            if secondary:
+                util = secondary.get("used_percent")
+                if util is not None:
+                    try:
+                        return float(util)
+                    except (ValueError, TypeError):
+                        pass
+
+    except Exception:
+        pass
+
+    return 0.0
 
 
 def _get_codex_usage_percentage(account_name: str) -> float | None:
@@ -744,13 +948,16 @@ def _get_codex_usage_percentage(account_name: str) -> float | None:
     # Get the isolated home directory for this account
     base_home = safe_home()
     if account_name:
-        codex_home = Path(base_home) / ".chad" / "codex_homes" / account_name
+        codex_home = Path(base_home) / ".chad" / "codex-homes" / account_name
     else:
         codex_home = Path(base_home)
 
+    if account_name and not codex_home.exists():
+        return None
+
     sessions_dir = codex_home / ".codex" / "sessions"
     if not sessions_dir.exists():
-        return None
+        return 0.0
 
     # Find the most recent session file
     session_files: list[tuple[float, Path]] = []
@@ -764,7 +971,7 @@ def _get_codex_usage_percentage(account_name: str) -> float | None:
                     pass
 
     if not session_files:
-        return None
+        return 0.0
 
     session_files.sort(reverse=True)
     latest_session = session_files[0][1]
@@ -793,7 +1000,7 @@ def _get_codex_usage_percentage(account_name: str) -> float | None:
     except Exception:
         pass
 
-    return None
+    return 0.0
 
 
 def _gemini_usage_path() -> Path:
@@ -939,6 +1146,47 @@ def _get_qwen_usage_percentage(account_name: str) -> float | None:
     return min((today_requests / daily_limit) * 100, 100.0)
 
 
+def is_mistral_configured(vibe_dir: Path | None = None) -> bool:
+    """Return True when Mistral/Vibe has a usable API key.
+
+    Checks two locations in order:
+    1. ``MISTRAL_API_KEY`` environment variable
+    2. ``~/.vibe/.env`` file containing ``MISTRAL_API_KEY=...``
+
+    Note: ``~/.vibe/config.toml`` alone is NOT sufficient — vibe will launch
+    its interactive onboarding TUI at runtime if ``MISTRAL_API_KEY`` is
+    missing, which cannot work inside Chad.
+
+    Args:
+        vibe_dir: Path to the .vibe directory. Defaults to ~/.vibe.
+    """
+    if os.environ.get("MISTRAL_API_KEY", "").strip():
+        return True
+
+    home_dir = vibe_dir if vibe_dir is not None else Path(safe_home()) / ".vibe"
+
+    # Check .env file for explicit key
+    env_file = home_dir / ".env"
+    if env_file.exists():
+        try:
+            for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export "):].strip()
+                if not line.startswith("MISTRAL_API_KEY"):
+                    continue
+                _, _, value = line.partition("=")
+                value = value.strip().strip('"').strip("'")
+                if value:
+                    return True
+        except OSError:
+            pass
+
+    return False
+
+
 def _get_mistral_usage_percentage(account_name: str) -> float | None:
     """Get Mistral usage percentage by counting today's requests.
 
@@ -954,8 +1202,7 @@ def _get_mistral_usage_percentage(account_name: str) -> float | None:
     from datetime import datetime, timezone
 
     vibe_dir = Path(safe_home()) / ".vibe"
-    config_file = vibe_dir / "config.toml"
-    if not config_file.exists():
+    if not is_mistral_configured(vibe_dir):
         return None
 
     sessions_dir = vibe_dir / "logs" / "session"
@@ -1210,12 +1457,42 @@ class AIProvider(ABC):
         """
         return False
 
-    def get_usage_percentage(self) -> float | None:
-        """Get the current usage as a percentage of the limit.
+    def get_session_usage_percentage(self) -> float | None:
+        """Get the current session usage as a percentage of the limit.
 
         Returns:
             Usage percentage (0-100), or None if not available.
         """
+        return None
+
+    def get_weekly_usage_percentage(self) -> float | None:
+        """Get weekly usage as a percentage (0-100), or None if unavailable."""
+        return None
+
+    def get_context_usage_percentage(self) -> float | None:
+        """Get context window usage as a percentage (0-100), or None if unavailable."""
+        return None
+
+    def get_session_reset_eta(self) -> str | None:
+        """Estimated time until session usage resets, human-readable. None if unavailable."""
+        return None
+
+    def get_weekly_reset_eta(self) -> str | None:
+        """Estimated time until weekly usage resets, human-readable. None if unavailable."""
+        return None
+
+    def is_quota_exhausted(self, output_tail: str) -> str | None:
+        """Check if output indicates quota exhaustion.
+
+        Args:
+            output_tail: Last ~500 chars of terminal output.
+
+        Returns:
+            "session_limit_reached", "weekly_limit_reached", or None.
+        """
+        from chad.util.handoff import is_quota_exhaustion_error
+        if is_quota_exhaustion_error(output_tail):
+            return "session_limit_reached"
         return None
 
 
@@ -1228,11 +1505,27 @@ class ClaudeCodeProvider(AIProvider):
     Each account gets an isolated CLAUDE_CONFIG_DIR to support multiple accounts.
     """
 
+    # Cache TTL: must be <= the threshold-check interval (10s) so the checker
+    # always gets fresh data, but multiple methods called in the same tick share
+    # one HTTP request.
+    _USAGE_CACHE_TTL: float = 10.0
+
     def __init__(self, config: ModelConfig):
         super().__init__(config)
         self.process: object | None = None
         self.project_path: str | None = None
         self.accumulated_text: list[str] = []
+        self._usage_data_cache: dict | None = None
+        self._usage_data_fetched_at: float = 0.0
+
+    def _get_usage_data(self) -> dict | None:
+        """Return Anthropic usage data, refreshing after the cache TTL."""
+        import time
+        now = time.monotonic()
+        if now - self._usage_data_fetched_at >= self._USAGE_CACHE_TTL:
+            self._usage_data_cache = _fetch_claude_usage_data(self.config.account_name)
+            self._usage_data_fetched_at = now
+        return self._usage_data_cache
 
     def _get_claude_config_dir(self) -> str:
         """Get the isolated CLAUDE_CONFIG_DIR for this account."""
@@ -1357,7 +1650,7 @@ class ClaudeCodeProvider(AIProvider):
                         line_queue.put(line)
                     elif self.process.poll() is not None:
                         break
-            except (OSError, ValueError):
+            except (OSError, ValueError, StopIteration):
                 pass
 
         reader = threading.Thread(target=reader_thread, daemon=True)
@@ -1443,9 +1736,59 @@ class ClaudeCodeProvider(AIProvider):
         """Claude supports usage reporting via Anthropic API."""
         return True
 
-    def get_usage_percentage(self) -> float | None:
-        """Get Claude usage percentage from Anthropic API."""
-        return _get_claude_usage_percentage(self.config.account_name)
+    def get_session_usage_percentage(self) -> float | None:
+        """Get Claude session (5-hour) usage percentage from Anthropic API."""
+        data = self._get_usage_data()
+        if data is None:
+            # Return 0.0 (not None) if credentials exist but API call failed,
+            # so the UI shows a bar at 0% rather than hiding usage entirely.
+            return 0.0 if _find_claude_credentials(self.config.account_name) else None
+        return _normalize_usage_percentage((data.get("five_hour") or {}).get("utilization"))
+
+    def get_weekly_usage_percentage(self) -> float | None:
+        """Get Claude weekly (7-day) usage percentage from Anthropic API."""
+        data = self._get_usage_data()
+        if data is None:
+            return 0.0 if _find_claude_credentials(self.config.account_name) else None
+        return _normalize_usage_percentage((data.get("seven_day") or {}).get("utilization"))
+
+    def get_session_reset_eta(self) -> str | None:
+        """Get estimated time until Claude session (5-hour) usage resets."""
+        data = self._get_usage_data()
+        if data is None:
+            return None
+        resets_at = (data.get("five_hour") or {}).get("resets_at")
+        return _parse_reset_eta(resets_at) if resets_at else None
+
+    def get_weekly_reset_eta(self) -> str | None:
+        """Get estimated time until Claude weekly (7-day) usage resets."""
+        data = self._get_usage_data()
+        if data is None:
+            return None
+        resets_at = (data.get("seven_day") or {}).get("resets_at")
+        return _parse_reset_eta(resets_at) if resets_at else None
+
+    def is_quota_exhausted(self, output_tail: str) -> str | None:
+        """Check if output indicates Claude quota exhaustion.
+
+        Distinguishes session vs weekly limit by querying the usage API.
+        """
+        import re
+        from chad.util.handoff import is_quota_exhaustion_error
+
+        # Claude CLI: "You've hit your limit · resets 4pm (Australia/Melbourne)"
+        hit_limit = bool(re.search(
+            r"You['\u2018\u2019]ve hit your limit",
+            output_tail,
+        ))
+        if not hit_limit and not is_quota_exhaustion_error(output_tail):
+            return None
+
+        # Distinguish session vs weekly by checking weekly utilization
+        weekly_pct = self.get_weekly_usage_percentage()
+        if weekly_pct is not None and weekly_pct >= 95:
+            return "weekly_limit_reached"
+        return "session_limit_reached"
 
 
 class OpenAICodexProvider(AIProvider):
@@ -2036,9 +2379,23 @@ class OpenAICodexProvider(AIProvider):
         """Codex supports usage reporting via session files."""
         return True
 
-    def get_usage_percentage(self) -> float | None:
-        """Get Codex usage percentage from session files."""
+    def get_session_usage_percentage(self) -> float | None:
+        """Get Codex session usage percentage from session files."""
         return _get_codex_usage_percentage(self.config.account_name)
+
+    def get_weekly_usage_percentage(self) -> float | None:
+        """Get Codex weekly usage percentage from session files."""
+        return _get_codex_weekly_usage_percentage(self.config.account_name)
+
+    def is_quota_exhausted(self, output_tail: str) -> str | None:
+        """Check if Codex output indicates quota exhaustion."""
+        from chad.util.handoff import is_quota_exhaustion_error
+        if not is_quota_exhaustion_error(output_tail):
+            return None
+        weekly_pct = _get_codex_weekly_usage_percentage(self.config.account_name)
+        if weekly_pct is not None and weekly_pct >= 95:
+            return "weekly_limit_reached"
+        return "session_limit_reached"
 
 
 class GeminiCodeAssistProvider(AIProvider):
@@ -2217,7 +2574,7 @@ class GeminiCodeAssistProvider(AIProvider):
         """Gemini supports usage reporting via local session files."""
         return True
 
-    def get_usage_percentage(self) -> float | None:
+    def get_session_usage_percentage(self) -> float | None:
         """Get Gemini usage percentage from local session files."""
         return _get_gemini_usage_percentage(self.config.account_name)
 
@@ -2410,7 +2767,7 @@ class QwenCodeProvider(AIProvider):
         """Qwen supports usage reporting via local session files."""
         return True
 
-    def get_usage_percentage(self) -> float | None:
+    def get_session_usage_percentage(self) -> float | None:
         """Get Qwen usage percentage from local session files."""
         return _get_qwen_usage_percentage(self.config.account_name)
 
@@ -2586,7 +2943,7 @@ class OpenCodeProvider(AIProvider):
         """OpenCode supports usage reporting via local session files."""
         return True
 
-    def get_usage_percentage(self) -> float | None:
+    def get_session_usage_percentage(self) -> float | None:
         """Get OpenCode usage percentage from local session files."""
         return _get_opencode_usage_percentage(self.config.account_name)
 
@@ -2784,7 +3141,7 @@ class KimiCodeProvider(AIProvider):
         """Kimi supports usage reporting via local session files."""
         return True
 
-    def get_usage_percentage(self) -> float | None:
+    def get_session_usage_percentage(self) -> float | None:
         """Get Kimi usage percentage from local session files."""
         return _get_kimi_usage_percentage(self.config.account_name)
 
@@ -2911,7 +3268,7 @@ class MistralVibeProvider(AIProvider):
         """Mistral supports usage reporting via local session files."""
         return True
 
-    def get_usage_percentage(self) -> float | None:
+    def get_session_usage_percentage(self) -> float | None:
         """Get Mistral usage percentage from local session files."""
         return _get_mistral_usage_percentage(self.config.account_name)
 
@@ -3230,6 +3587,62 @@ I modified BUGS.md to add a test marker.
 
     def supports_multi_turn(self) -> bool:
         return True
+
+    def supports_usage_reporting(self) -> bool:
+        return True
+
+    def get_session_usage_percentage(self) -> float | None:
+        remaining = self._get_remaining_usage()
+
+        # If usage is exhausted and a reset time is configured, check if
+        # the reset time has passed and simulate the quota reset.
+        if remaining <= 0.0 and self.config.account_name:
+            from .config_manager import ConfigManager
+            config_mgr = ConfigManager()
+            reset_iso = config_mgr.get_mock_session_reset_time(self.config.account_name)
+            if reset_iso:
+                try:
+                    from datetime import datetime, timezone
+                    reset_dt = datetime.fromisoformat(reset_iso)
+                    if datetime.now(timezone.utc) >= reset_dt:
+                        config_mgr.set_mock_remaining_usage(self.config.account_name, 1.0)
+                        return 0.0
+                except Exception:
+                    pass
+
+        return (1.0 - remaining) * 100.0
+
+    def get_session_reset_eta(self) -> str | None:
+        """Return human-readable ETA until mock session reset."""
+        from .config_manager import ConfigManager
+
+        account_name = self.config.account_name
+        if not account_name:
+            return None
+
+        config_mgr = ConfigManager()
+        reset_iso = config_mgr.get_mock_session_reset_time(account_name)
+        if not reset_iso:
+            return None
+
+        try:
+            from datetime import datetime, timezone
+            reset_dt = datetime.fromisoformat(reset_iso)
+            now = datetime.now(timezone.utc)
+            delta = reset_dt - now
+            total_seconds = int(delta.total_seconds())
+            if total_seconds <= 0:
+                return None  # Already past
+            hours, remainder = divmod(total_seconds, 3600)
+            minutes = remainder // 60
+            if hours > 0:
+                return f"{hours}h {minutes}m"
+            return f"{minutes}m"
+        except Exception:
+            return None
+
+    def get_context_usage_percentage(self) -> float | None:
+        return self.get_session_usage_percentage()
 
 
 def create_provider(config: ModelConfig) -> AIProvider:

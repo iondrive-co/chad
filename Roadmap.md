@@ -1,31 +1,18 @@
-v0.11 Epochalypse
-
-Event loop
-Use loop to extract progress updates from agent stream and notify API listeners, who can now get rid of exploration phase
-Use loop to make option to resume task once usage limit has reset (rather than switch to another provider)
-
 v0.12 Agent Ick
 
-Receive tasks from slack and output progress from event loop
-Repeated failures (see below)
+- Queue of bugs/features. Get agent to add to this list as it finds issues while coding
+- Integrate with `cloudflared` to create tunnels on demand by exposing the local API server through a Cloudflare tunnel. 
+Using token-based pairing: Chad registers a short-lived pairing code (e.g., QR code or "TIGER-42") mapped to the tunnel 
+URL, and the browser UI resolves the code to connect. This enables accessing Chad from any device by entering a code on 
+the hosted UI page, with no relay server—Cloudflare proxies traffic directly to the user's machine through the tunnel.
 
 v0.13 Intentionality Reduction
 
+Planning agent
 Packaging for different platforms
-Renamed web_ui to gradio_ui. Make Remix static site ui which downloads and talks to the server on localhost
+Remove gradio ui
 
 v0.14 Slip Slop Slap
 
-Session branching and resume session at startup
-Queue of bugs/features
-
-
----- Repeated failures ----
-
-Ask the coding agent to answer the following questions:
-- Is this a temporary fix or will it work in the future?
-- What about the structure of the code cause so many failed attempts to fix this? 
-- How could the code be improved so that fewer attempts are needed for similar issues in the future?
-- Is there any redundant code from the failed attempts that could be removed?
-
-
+Resume session at startup
+Session branching

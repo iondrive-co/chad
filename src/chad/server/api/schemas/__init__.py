@@ -41,11 +41,15 @@ from .worktree import (
     MergeResponse,
     WorktreeResetResponse,
     WorktreeDeleteResponse,
+    ResolveConflictsRequest,
+    BranchesResponse,
 )
 from .config import (
     VerificationSettings,
     CleanupSettings,
     UserPreferences,
+    SlackSettingsResponse,
+    SlackSettingsUpdate,
 )
 from .streaming import (
     StreamMessage,
@@ -103,10 +107,14 @@ __all__ = [
     "MergeResponse",
     "WorktreeResetResponse",
     "WorktreeDeleteResponse",
+    "ResolveConflictsRequest",
+    "BranchesResponse",
     # Config
     "VerificationSettings",
     "CleanupSettings",
     "UserPreferences",
+    "SlackSettingsResponse",
+    "SlackSettingsUpdate",
     # Streaming
     "StreamMessage",
     "StreamMessageType",

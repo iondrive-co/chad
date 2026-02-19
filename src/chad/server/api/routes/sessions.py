@@ -16,11 +16,13 @@ from chad.server.api.schemas import (
 )
 from chad.server.api.schemas.events import (
     SendInputRequest,
+    SendMessageRequest,
     ResizeTerminalRequest,
 )
 from chad.server.services import Session, get_session_manager, get_task_executor, TaskState
 from chad.server.services.pty_stream import get_pty_stream_service
 from chad.server.services.event_mux import EventMultiplexer, format_sse_event
+from chad.util.event_log import EventLog
 
 router = APIRouter()
 
@@ -34,6 +36,7 @@ def _session_to_response(session: Session) -> SessionResponse:
         active=session.active,
         has_worktree=session.worktree_path is not None,
         has_changes=session.has_worktree_changes,
+        coding_account=getattr(session, "coding_account", None),
         created_at=session.created_at,
         last_activity=session.last_activity,
     )
@@ -104,7 +107,17 @@ async def cancel_session(session_id: str) -> SessionCancelResponse:
     if session is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
 
-    # Terminate PTY session if active
+    executor = get_task_executor()
+    cancelled_tasks = executor.cancel_tasks_for_session(session_id)
+    if cancelled_tasks > 0:
+        manager.set_cancel_requested(session_id, True)
+        return SessionCancelResponse(
+            session_id=session_id,
+            cancel_requested=True,
+            message="Cancellation requested",
+        )
+
+    # Fallback: terminate PTY session if active even if task tracking is unavailable
     pty_service = get_pty_stream_service()
     pty_session = pty_service.get_session_by_session_id(session_id)
     if pty_session and pty_session.active:
@@ -144,6 +157,12 @@ async def start_task(session_id: str, request: TaskCreate) -> TaskStatusResponse
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
 
     executor = get_task_executor()
+    running_task = executor.get_running_task_for_session(session_id)
+    if running_task is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A task is already running in this session (task_id={running_task.id})",
+        )
 
     try:
         task = executor.start_task(
@@ -156,8 +175,11 @@ async def start_task(session_id: str, request: TaskCreate) -> TaskStatusResponse
             terminal_rows=request.terminal_rows,
             terminal_cols=request.terminal_cols,
             screenshots=request.screenshots,
-            override_exploration_prompt=request.override_exploration_prompt,
-            override_implementation_prompt=request.override_implementation_prompt,
+            override_prompt=request.override_prompt or request.override_exploration_prompt,
+            verification_account=request.verification_agent,
+            verification_model=request.verification_model,
+            verification_reasoning=request.verification_reasoning,
+            is_followup=request.is_followup,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -230,12 +252,7 @@ async def stream_session(
         pty_service = get_pty_stream_service()
         executor = get_task_executor()
 
-        # Find the task for this session to access its EventLog
-        task = None
-        for t in executor._tasks.values():
-            if t.session_id == session_id:
-                task = t
-                break
+        task = executor.get_latest_task_for_session(session_id)
 
         # Create multiplexer with task's EventLog
         event_log = task.event_log if task else None
@@ -309,6 +326,67 @@ async def resize_terminal(session_id: str, request: ResizeTerminalRequest) -> di
     return {"success": True, "rows": request.rows, "cols": request.cols}
 
 
+@router.post("/{session_id}/messages")
+async def send_message(session_id: str, request: SendMessageRequest) -> dict:
+    """Send a user message to the running session.
+
+    The message is forwarded to the session's event loop, which writes it
+    to the active PTY.
+    """
+    manager = get_session_manager()
+    session = manager.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+    executor = get_task_executor()
+    task = executor.get_running_task_for_session(session_id)
+
+    if not task:
+        raise HTTPException(status_code=400, detail="No active task in session")
+
+    event_loop = getattr(task, "_session_event_loop", None)
+    if event_loop is None:
+        raise HTTPException(status_code=400, detail="No active event loop in session")
+
+    event_loop.enqueue_message(request.content, request.source)
+    return {"success": True, "session_id": session_id}
+
+
+@router.get("/{session_id}/milestones")
+async def get_milestones(
+    session_id: str,
+    since_seq: int = Query(default=0, description="Return milestones after this sequence"),
+) -> dict:
+    """Get milestones for a session (polling catch-up).
+
+    Milestones also flow through the SSE endpoint via EventLog events,
+    but this endpoint allows catch-up after reconnection.
+    """
+    manager = get_session_manager()
+    session = manager.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+    event_log = EventLog(session_id)
+    milestone_events = event_log.get_events(since_seq=since_seq, event_types=["milestone"])
+    milestones = []
+    for event in milestone_events:
+        milestones.append(
+            {
+                "seq": event.get("seq", 0),
+                "milestone_type": event.get("milestone_type", ""),
+                "title": event.get("title", ""),
+                "summary": event.get("summary", ""),
+                "details": event.get("details", {}) if isinstance(event.get("details"), dict) else {},
+            }
+        )
+
+    return {
+        "milestones": milestones,
+        "latest_seq": event_log.get_latest_seq(),
+    }
+
+
 @router.get("/{session_id}/events")
 async def get_session_events(
     session_id: str,
@@ -334,13 +412,8 @@ async def get_session_events(
     if session is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
 
-    # Find the task for this session to access its EventLog
     executor = get_task_executor()
-    task = None
-    for t in executor._tasks.values():
-        if t.session_id == session_id:
-            task = t
-            break
+    task = executor.get_latest_task_for_session(session_id)
 
     if not task or not task.event_log:
         return {"events": [], "latest_seq": 0}
@@ -357,4 +430,27 @@ async def get_session_events(
         "events": events,
         "latest_seq": latest_seq,
         "session_id": session_id,
+    }
+
+
+@router.get("/{session_id}/log")
+async def get_session_log(session_id: str) -> dict:
+    """Get the session event log file path.
+
+    The log file contains all structured events from the session in JSONL format.
+    This endpoint returns the path so the client can display it or offer download.
+    """
+    manager = get_session_manager()
+    session = manager.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+    # Get the log path from EventLog
+    log = EventLog(session_id)
+    log_path = log.log_path
+
+    return {
+        "session_id": session_id,
+        "log_path": str(log_path) if log_path and log_path.exists() else None,
+        "log_exists": log_path is not None and log_path.exists(),
     }
