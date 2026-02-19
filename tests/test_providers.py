@@ -2749,6 +2749,42 @@ class TestUsagePercentageCalculation:
         assert session_eta is not None
         assert weekly_eta is not None
 
+    def test_claude_provider_usage_refreshes_after_ttl(self, tmp_path):
+        """Usage data is re-fetched after the cache TTL so threshold checks see current values."""
+        from chad.util.providers import ClaudeCodeProvider, ModelConfig
+
+        account = "claude-ttl-test"
+        self._write_claude_creds(tmp_path, account)
+
+        call_count = [0]
+
+        def mock_get_response(*args, **kwargs):
+            call_count[0] += 1
+            r = Mock()
+            r.status_code = 200
+            # Return increasing utilization to simulate usage rising over time
+            r.json.return_value = {
+                "five_hour": {"utilization": call_count[0] * 0.1},
+                "seven_day": {"utilization": 0.5},
+            }
+            return r
+
+        provider = ClaudeCodeProvider(ModelConfig(provider="anthropic", model_name="default", account_name=account))
+        with patch("chad.util.providers.safe_home", return_value=tmp_path), \
+                patch("requests.get", side_effect=mock_get_response):
+            pct1 = provider.get_session_usage_percentage()   # first fetch (call 1 → 10%)
+            pct1b = provider.get_session_usage_percentage()  # within TTL → uses cache
+
+            # Expire the cache by rewinding the fetch timestamp
+            provider._usage_data_fetched_at -= provider._USAGE_CACHE_TTL + 1
+
+            pct2 = provider.get_session_usage_percentage()   # TTL expired → re-fetch (call 2 → 20%)
+
+        assert call_count[0] == 2, "Expected exactly 2 HTTP requests (initial + post-TTL refresh)"
+        assert pct1 == pytest.approx(10.0)
+        assert pct1b == pytest.approx(10.0)   # cached, not re-fetched
+        assert pct2 == pytest.approx(20.0)    # fresh data after TTL
+
     def test_claude_provider_usage_reset_eta_format(self, tmp_path):
         """Reset ETA is formatted correctly for hours and minutes."""
         from datetime import datetime, timezone, timedelta
