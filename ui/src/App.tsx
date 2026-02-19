@@ -94,34 +94,33 @@ export function App() {
       </header>
 
       <div className="app-body">
-        {tab === "chat" && (
-          <>
-            <aside className="sidebar">
-              <SessionList
+        {/* Keep chat content mounted so form state and merge panel survive tab switches */}
+        <div style={{ display: tab === "chat" ? "contents" : "none" }}>
+          <aside className="sidebar">
+            <SessionList
+              api={api}
+              selectedId={selectedSession}
+              onSelect={setSelectedSession}
+              version={sessionVersion}
+              onRefresh={refreshSessions}
+            />
+          </aside>
+          <main className="main">
+            {selectedSession ? (
+              <ChatView
+                key={selectedSession}
                 api={api}
-                selectedId={selectedSession}
-                onSelect={setSelectedSession}
-                version={sessionVersion}
-                onRefresh={refreshSessions}
+                sessionId={selectedSession}
+                onSessionChange={refreshSessions}
+                defaultProjectPath={defaultProjectPath}
               />
-            </aside>
-            <main className="main">
-              {selectedSession ? (
-                <ChatView
-                  key={selectedSession}
-                  api={api}
-                  sessionId={selectedSession}
-                  onSessionChange={refreshSessions}
-                  defaultProjectPath={defaultProjectPath}
-                />
-              ) : (
-                <div className="placeholder">
-                  Select or create a session to get started.
-                </div>
-              )}
-            </main>
-          </>
-        )}
+            ) : (
+              <div className="placeholder">
+                Select or create a session to get started.
+              </div>
+            )}
+          </main>
+        </div>
         {tab === "providers" && (
           <main className="main full-width">
             <ProvidersPanel api={api} />
