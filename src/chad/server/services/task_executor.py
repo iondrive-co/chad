@@ -1392,6 +1392,10 @@ class TaskExecutor:
             )
             task._session_event_loop = event_loop
 
+            # Decrement mock usage before running so the final threshold check
+            # inside event_loop.run() sees post-task usage levels.
+            self._decrement_mock_usage(coding_provider, coding_account)
+
             # Run coding + optional verification (blocks until complete)
             final_exit_code, accumulated_output = event_loop.run(
                 session=session,
@@ -1407,9 +1411,6 @@ class TaskExecutor:
                 override_prompt=override_prompt,
                 verification_config=verification_config,
             )
-
-            if final_exit_code == 0:
-                self._decrement_mock_usage(coding_provider, coding_account)
 
             # Handle cancellation
             if task.cancel_requested or final_exit_code == -1:

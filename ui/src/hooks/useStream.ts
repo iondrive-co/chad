@@ -23,6 +23,9 @@ export function useStream(sessionId: string | null, sinceSeq?: number) {
   const [completed, setCompleted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const utf8Decoder = useRef<TextDecoder | null>(null);
+  // Track completion so onError (fired by normal SSE connection close) is
+  // suppressed after a clean completion event arrives.
+  const completedRef = useRef(false);
   // Capture sinceSeq in a ref so it's available in the useEffect without
   // triggering reconnections when the value changes.
   const sinceSeqRef = useRef(sinceSeq);
@@ -52,6 +55,7 @@ export function useStream(sessionId: string | null, sinceSeq?: number) {
     setEvents([]);
     setCompleted(false);
     setError(null);
+    completedRef.current = false;
   }, []);
 
   useEffect(() => {
@@ -75,13 +79,14 @@ export function useStream(sessionId: string | null, sinceSeq?: number) {
     });
 
     stream.onComplete(() => {
+      completedRef.current = true;
       setCompleted(true);
     });
 
     stream.onError((evt) => {
-      setError(
-        (evt.data.error as string) ?? "Stream error",
-      );
+      // Suppress errors that fire due to normal SSE connection close after completion.
+      if (completedRef.current) return;
+      setError((evt.data.error as string) ?? "Stream error");
     });
 
     stream.connect(sessionId, { sinceSeq: sinceSeqRef.current });
