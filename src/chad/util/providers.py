@@ -709,6 +709,62 @@ def _find_claude_credentials(account_name: str) -> Path | None:
     return None
 
 
+_CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+_CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+
+
+def _refresh_claude_token(creds_file: Path, oauth_data: dict) -> str | None:
+    """Refresh an expired Claude OAuth access token and update the credentials file.
+
+    Returns the new access token, or None if refresh fails.
+    """
+    import requests
+    from datetime import datetime, timezone
+
+    refresh_token = oauth_data.get("refreshToken", "")
+    if not refresh_token:
+        return None
+
+    try:
+        response = requests.post(
+            _CLAUDE_OAUTH_TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": _CLAUDE_OAUTH_CLIENT_ID,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=10,
+        )
+
+        if response.status_code != 200:
+            return None
+
+        token_data = response.json()
+        new_access_token = token_data.get("access_token", "")
+        if not new_access_token:
+            return None
+
+        # Update credentials file with new token
+        with open(creds_file, encoding="utf-8") as f:
+            creds = json.load(f)
+
+        creds["claudeAiOauth"]["accessToken"] = new_access_token
+        if "refresh_token" in token_data:
+            creds["claudeAiOauth"]["refreshToken"] = token_data["refresh_token"]
+        if "expires_in" in token_data:
+            expires_ms = int((datetime.now(timezone.utc).timestamp() + token_data["expires_in"]) * 1000)
+            creds["claudeAiOauth"]["expiresAt"] = expires_ms
+
+        with open(creds_file, "w", encoding="utf-8") as f:
+            json.dump(creds, f, indent=2)
+
+        return new_access_token
+
+    except Exception:
+        return None
+
+
 def _fetch_claude_usage_data(account_name: str) -> dict | None:
     """Fetch all Claude usage data from Anthropic API in a single request.
 
@@ -719,6 +775,7 @@ def _fetch_claude_usage_data(account_name: str) -> dict | None:
         Parsed JSON response dict, or None if unavailable.
     """
     import requests
+    from datetime import datetime, timezone
 
     creds_file = _find_claude_credentials(account_name)
     if not creds_file:
@@ -732,6 +789,15 @@ def _fetch_claude_usage_data(account_name: str) -> dict | None:
         access_token = oauth_data.get("accessToken", "")
         if not access_token:
             return None
+
+        # Refresh token if expired (expiresAt is in milliseconds)
+        expires_ms = oauth_data.get("expiresAt", 0)
+        if expires_ms:
+            expires_dt = datetime.fromtimestamp(expires_ms / 1000, tz=timezone.utc)
+            if expires_dt <= datetime.now(timezone.utc):
+                refreshed = _refresh_claude_token(creds_file, oauth_data)
+                if refreshed:
+                    access_token = refreshed
 
         response = requests.get(
             "https://api.anthropic.com/api/oauth/usage",
