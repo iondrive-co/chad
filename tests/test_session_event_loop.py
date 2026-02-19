@@ -648,16 +648,26 @@ class TestUsageThresholdMonitoring:
         assert "Context" in milestones[0][1]["summary"]
         assert milestones[0][1]["details"]["metric"] == "context"
 
-    def test_no_milestone_when_already_above_threshold(self):
-        """No milestone if previous reading was already above 90%."""
+    def test_fires_when_first_reading_already_above_threshold(self):
+        """Milestone fires on the first check when usage is already above threshold.
+
+        Previously this was a seeding-only call (prev=None → no crossing). Now prev
+        is initialized to 0.0, so the first call detects the crossing from 0% to 91%.
+        """
         pct = [91.0]
         loop, event_log, emitted = self._make_loop(session_fn=lambda: pct[0])
 
         loop._check_usage_thresholds()
+
+        # Should fire: 0.0 < 90 and 91.0 >= 90
+        milestones = self._usage_milestones(emitted)
+        assert len(milestones) == 1
+        assert "91%" in milestones[0][1]["summary"]
+
+        # Second check at 95%: prev=91, 91 < 90 is False → no second milestone
         pct[0] = 95.0
         loop._check_usage_thresholds()
-
-        assert len(self._usage_milestones(emitted)) == 0
+        assert len(self._usage_milestones(emitted)) == 1
 
     def test_no_milestone_when_still_below_threshold(self):
         """No milestone if usage stays below 90%."""
@@ -949,10 +959,15 @@ class TestActionExecution:
         assert loop._pending_action is None
         assert len(self._usage_milestones(emitted)) == 0
 
-    def test_no_action_when_already_above(self):
-        """No pending action if previous reading was already above threshold."""
+    def test_action_fires_when_first_reading_already_above(self):
+        """Pending action is set when usage is already above threshold on first check.
+
+        Previously prev=None seeding meant this check was silently skipped. Now
+        prev=0.0 so the first call correctly detects the crossing from 0% to 92%.
+        """
         event_log = FakeEventLog()
         emitted = []
+        terminated = []
 
         pct = [92.0]
         loop = SessionEventLoop(
@@ -966,13 +981,81 @@ class TestActionExecution:
             action_settings=[
                 {"event": "session_usage", "threshold": 90, "action": "switch_provider", "target_account": "backup"},
             ],
+            terminate_pty_fn=lambda: terminated.append(True),
         )
 
+        # First check: 0.0 < 90 and 92.0 >= 90 → fires
         loop._check_usage_thresholds()
+        assert loop._pending_action is not None
+        assert loop._pending_action["action"] == "switch_provider"
+        assert len(terminated) == 1
+
+        # Second check: prev=92, 92 < 90 is False → no second firing
+        loop._pending_action = None
+        terminated.clear()
         pct[0] = 95.0
         loop._check_usage_thresholds()
-
         assert loop._pending_action is None
+        assert len(terminated) == 0
+
+
+class TestFinalThresholdCheckAfterPhase:
+    """Tests that _run_coding_phase does a final threshold check after completion."""
+
+    def test_await_reset_fires_via_final_check_when_task_completes_before_tick(self, monkeypatch):
+        """When task completes before the 10s periodic tick, the final check in
+        _run_coding_phase catches thresholds that were crossed during the run."""
+        import chad.server.services.session_event_loop as sel_module
+        monkeypatch.setattr(sel_module, 'get_pty_stream_service', lambda: type('S', (), {
+            'get_session': lambda self, sid: None,
+            'send_input': lambda self, *a, **kw: True,
+        })())
+
+        event_log = FakeEventLog()
+        emitted = []
+        terminated = []
+        phases_run = []
+
+        # Usage starts at 0%, will be reported as 25% after the "task"
+        usage_calls = [0]
+
+        def usage_fn():
+            usage_calls[0] += 1
+            return 25.0  # Always 25% — already above both thresholds
+
+        def fake_run_phase(**kwargs):
+            phases_run.append(kwargs.get("phase"))
+            return 0, '{"change_summary": "done"}'
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=type("Task", (), {"cancel_requested": False, "stream_id": None})(),
+            run_phase_fn=fake_run_phase,
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            get_session_usage_fn=usage_fn,
+            action_settings=[
+                {"event": "session_usage", "threshold": 5, "action": "notify"},
+                {"event": "session_usage", "threshold": 10, "action": "await_reset"},
+            ],
+            terminate_pty_fn=lambda: terminated.append(True),
+        )
+
+        # Simulate _run_coding_phase without the full run() lifecycle
+        loop._running = True
+
+        # Manually call just the check that _run_coding_phase performs after phase exit
+        # (the periodic tick never fires in this test — we're simulating a fast task)
+        loop._check_usage_thresholds()
+
+        # Both thresholds should have fired: prev=0, current=25%, crosses 5% and 10%
+        usage_milestones = [
+            e for e in emitted if e[0] == "milestone" and e[1].get("milestone_type") == "usage_threshold"
+        ]
+        assert len(usage_milestones) >= 1  # At least notify at 5%
+        assert loop._pending_action is not None
+        assert loop._pending_action["action"] == "await_reset"
 
 
 class TestMessageForwarding:

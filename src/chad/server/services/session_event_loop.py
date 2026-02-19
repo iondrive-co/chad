@@ -79,9 +79,10 @@ class SessionEventLoop:
         self._get_context_usage_fn = get_context_usage_fn
         self._usage_check_counter = 0
 
-        # Action settings — each rule tracks its own previous value
+        # Action settings — each rule tracks its own previous value.
+        # Initialized to 0.0 so the first check detects crossings from a clean start.
         self._action_settings = action_settings or []
-        self._prev_pct_per_rule: list[float | None] = [None] * len(self._action_settings)
+        self._prev_pct_per_rule: list[float] = [0.0] * len(self._action_settings)
         self._terminate_pty_fn = terminate_pty_fn
         self._get_account_info_fn = get_account_info_fn
         self._get_session_reset_eta_fn = get_session_reset_eta_fn
@@ -416,7 +417,7 @@ class SessionEventLoop:
                 continue
 
             prev = self._prev_pct_per_rule[idx]
-            crossed = prev is not None and prev < threshold and current >= threshold
+            crossed = prev < threshold and current >= threshold
             self._prev_pct_per_rule[idx] = current
 
             if not crossed:
@@ -585,7 +586,13 @@ class SessionEventLoop:
         if exit_code < 0:
             return exit_code, output
 
-        # Check for pending action from background threshold check
+        # Final threshold check: catches cases where the task completed before
+        # the 10s periodic tick fired, or usage was already above threshold at
+        # session start (the first periodic check would have seeded prev without
+        # detecting the crossing).
+        self._check_usage_thresholds()
+
+        # Check for pending action from background threshold check (or final check above)
         with self._pending_action_lock:
             pending = self._pending_action
             self._pending_action = None

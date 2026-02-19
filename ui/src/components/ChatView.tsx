@@ -41,8 +41,8 @@ export function ChatView({
     streamSinceSeqRef.current,
   );
 
-  // On mount, check if this session already has an active task and reconnect.
-  // Capture the current event log position so the stream skips old events.
+  // On mount, check if this session already has an active task and reconnect,
+  // or if there are pending worktree changes that need merging.
   useEffect(() => {
     let cancelled = false;
     api.getSession(sessionId).then(async (session) => {
@@ -54,6 +54,15 @@ export function ChatView({
           // Fall back to streaming all events
         }
         if (!cancelled) setTaskActive(true);
+      } else if (!cancelled) {
+        // Session not active — check for pending worktree changes to merge
+        api.getWorktreeStatus(sessionId).then((status) => {
+          if (!cancelled && status.exists && status.has_changes) {
+            setShowMerge(true);
+          }
+        }).catch(() => {
+          // Ignore errors checking worktree status
+        });
       }
     }).catch(() => {
       // Ignore - session may not exist yet
@@ -207,7 +216,7 @@ export function ChatView({
       )}
 
       {/* Task form or streaming output */}
-      {!taskActive && !terminalOutput && (
+      {!taskActive && !terminalOutput && !showMerge && (
         <TaskForm
           api={api}
           sessionId={sessionId}
