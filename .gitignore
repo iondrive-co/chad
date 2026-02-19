@@ -90,3 +90,4 @@ dist/install-chad.sh
 /.chad-worktrees/
 /.chad/tools/
 /client/.chad-worktrees/
+/ui/.vite/

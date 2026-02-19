@@ -920,6 +920,11 @@ class TaskExecutor:
         last_output_time = time.time()
         last_warning_time = 0.0
         last_log_flush = time.time()
+        # Reset the activity timestamp for this task so a stale timestamp from a
+        # prior phase (e.g., the coding phase before an await_reset pause) does
+        # not cause the inactivity check to fire immediately when a new phase starts.
+        with self._lock:
+            self._activity_times[task.id] = last_output_time
         terminal_buffer = bytearray()
         terminal_lock = threading.Lock()
         first_stream_chunk_seen = False
