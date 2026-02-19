@@ -72,6 +72,7 @@ class PTYEvent:
     exit_code: int | None = None
     error: str | None = None
     has_ansi: bool = True
+    text: bool = False  # True when data is plain text (not base64)
 
 
 class PTYStreamService:

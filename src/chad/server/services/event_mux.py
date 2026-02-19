@@ -267,6 +267,7 @@ class EventMultiplexer:
                                 data={
                                     "data": pty_event.data,
                                     "has_ansi": pty_event.has_ansi,
+                                    "text": getattr(pty_event, "text", False),
                                 },
                                 seq=self._seq or self._next_seq(),
                             )
@@ -411,6 +412,7 @@ class EventMultiplexer:
                                         data={
                                             "data": pty_event.data,
                                             "has_ansi": pty_event.has_ansi,
+                                            "text": getattr(pty_event, "text", False),
                                         },
                                         seq=self._seq or self._next_seq(),
                                     )

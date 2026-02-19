@@ -1,5 +1,7 @@
 """Provider and account management endpoints."""
 
+import os
+
 from fastapi import APIRouter, HTTPException
 
 from chad.server.api.schemas import (
@@ -224,11 +226,47 @@ async def set_account_role(name: str, request: AccountRoleUpdate) -> AccountResp
 
 @router.get("/accounts/{name}/usage", response_model=AccountUsage)
 async def get_account_usage(name: str) -> AccountUsage:
-    """Get usage statistics for an account."""
-    # Usage stats require provider-specific integrations
-    raise HTTPException(
-        status_code=501,
-        detail="Usage stats not implemented in API - use the UI"
+    """Get usage statistics for an account.
+
+    Returns session and weekly usage percentages where available.
+    Not all providers support usage reporting.
+    """
+    config_mgr = get_config_manager()
+
+    if not config_mgr.has_account(name):
+        raise HTTPException(status_code=404, detail=f"Account '{name}' not found")
+
+    # In screenshot mode, return synthetic fixture data
+    if os.environ.get("CHAD_SCREENSHOT_MODE") == "1":
+        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
+        mock = get_mock_account_usage(name)
+        return AccountUsage(**mock)
+
+    accounts_dict = config_mgr.list_accounts()
+    provider_type = accounts_dict.get(name)
+
+    # Create a provider instance to query usage
+    from chad.util.providers import create_provider, ModelConfig
+
+    model = config_mgr.get_account_model(name) or "default"
+    provider = create_provider(ModelConfig(
+        provider=provider_type,
+        model_name=model,
+        account_name=name,
+    ))
+
+    session_pct = provider.get_session_usage_percentage()
+    weekly_pct = provider.get_weekly_usage_percentage()
+    session_eta = provider.get_session_reset_eta() if hasattr(provider, "get_session_reset_eta") else None
+    weekly_eta = provider.get_weekly_reset_eta() if hasattr(provider, "get_weekly_reset_eta") else None
+
+    return AccountUsage(
+        account_name=name,
+        provider=provider_type,
+        session_usage_pct=session_pct,
+        weekly_usage_pct=weekly_pct,
+        session_reset_eta=session_eta,
+        weekly_reset_eta=weekly_eta,
     )
 
 

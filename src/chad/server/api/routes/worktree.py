@@ -19,6 +19,8 @@ from chad.server.api.schemas import (
     ConflictHunk as SchemaConflictHunk,
     WorktreeResetResponse,
     WorktreeDeleteResponse,
+    ResolveConflictsRequest,
+    BranchesResponse,
 )
 from chad.server.services import get_session_manager
 
@@ -227,12 +229,21 @@ async def merge_worktree(session_id: str, request: MergeRequest) -> MergeRespons
     if not wt_mgr.worktree_exists(session_id):
         raise HTTPException(status_code=400, detail="Worktree does not exist")
 
+    commit_msg = request.commit_message.strip() if request.commit_message else None
     success, conflicts, error_msg = wt_mgr.merge_to_main(
         session_id,
+        commit_message=commit_msg,
         target_branch=request.target_branch,
     )
 
     if success:
+        # Cleanup worktree after successful merge (mirrors Gradio attempt_merge)
+        wt_mgr.cleanup_after_merge(session_id)
+        session.worktree_path = None
+        session.worktree_branch = None
+        session.worktree_base_commit = None
+        session.has_worktree_changes = False
+        session.merge_conflicts = None
         return MergeResponse(
             success=True,
             message="Changes merged successfully",
@@ -322,4 +333,104 @@ async def delete_worktree(session_id: str) -> WorktreeDeleteResponse:
         session_id=session_id,
         deleted=True,
         message="Worktree deleted successfully",
+    )
+
+
+@router.get("/{session_id}/worktree/branches", response_model=BranchesResponse)
+async def get_branches(session_id: str) -> BranchesResponse:
+    """Get available branches for merge target selection."""
+    session = _get_session_or_404(session_id)
+
+    if not session.worktree_path:
+        raise HTTPException(status_code=400, detail="Session has no worktree")
+
+    wt_mgr = _get_worktree_manager(session)
+    if not wt_mgr.worktree_exists(session_id):
+        raise HTTPException(status_code=400, detail="Worktree does not exist")
+
+    branches = wt_mgr.get_branches()
+    default_branch = wt_mgr.get_main_branch()
+
+    return BranchesResponse(
+        branches=branches,
+        default=default_branch,
+    )
+
+
+@router.post("/{session_id}/worktree/resolve-conflicts", response_model=MergeResponse)
+async def resolve_conflicts(session_id: str, request: ResolveConflictsRequest) -> MergeResponse:
+    """Resolve merge conflicts by accepting all original or all incoming changes.
+
+    After resolving conflicts, completes the merge and cleans up.
+    """
+    session = _get_session_or_404(session_id)
+
+    if not session.worktree_path:
+        raise HTTPException(status_code=400, detail="Session has no worktree")
+
+    wt_mgr = _get_worktree_manager(session)
+    if not wt_mgr.worktree_exists(session_id):
+        raise HTTPException(status_code=400, detail="Worktree does not exist")
+
+    # Resolve all conflicts
+    resolved = wt_mgr.resolve_all_conflicts(request.use_incoming)
+    if not resolved:
+        return MergeResponse(
+            success=False,
+            message="Failed to resolve conflicts",
+            conflicts=None,
+        )
+
+    # Complete the merge
+    if wt_mgr.complete_merge():
+        # Cleanup after successful merge
+        wt_mgr.cleanup_after_merge(session_id)
+        session.worktree_path = None
+        session.worktree_branch = None
+        session.worktree_base_commit = None
+        session.has_worktree_changes = False
+        session.merge_conflicts = None
+        return MergeResponse(
+            success=True,
+            message="Conflicts resolved and merged successfully",
+            conflicts=None,
+        )
+
+    return MergeResponse(
+        success=False,
+        message="Failed to complete merge after resolving conflicts",
+        conflicts=None,
+    )
+
+
+@router.post("/{session_id}/worktree/abort-merge", response_model=MergeResponse)
+async def abort_merge(session_id: str) -> MergeResponse:
+    """Abort an in-progress merge.
+
+    Returns the worktree to pre-merge state with conflicts cleared.
+    """
+    session = _get_session_or_404(session_id)
+
+    if not session.worktree_path:
+        raise HTTPException(status_code=400, detail="Session has no worktree")
+
+    wt_mgr = _get_worktree_manager(session)
+    if not wt_mgr.worktree_exists(session_id):
+        raise HTTPException(status_code=400, detail="Worktree does not exist")
+
+    # Abort the merge
+    aborted = wt_mgr.abort_merge()
+    session.merge_conflicts = None
+
+    if aborted:
+        return MergeResponse(
+            success=True,
+            message="Merge aborted",
+            conflicts=None,
+        )
+
+    return MergeResponse(
+        success=False,
+        message="No merge in progress to abort",
+        conflicts=None,
     )

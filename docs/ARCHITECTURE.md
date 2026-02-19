@@ -5,12 +5,15 @@ Chad pairs a FastAPI backend with shared streaming clients used by both the Grad
 
 ## Backend (FastAPI)
 - Entry point: `src/chad/server/main.py:create_app` — health lives at `GET /status`; all other endpoints are under `/api/v1`.
-- Routers (`src/chad/server/api/routes`): `health`, `sessions`, `providers`, `worktree`, `config`, `ws`.
+- Routers (`src/chad/server/api/routes`): `health`, `sessions`, `providers`, `worktree`, `config`, `ws`, `slack`.
 - Services:
   - `task_executor.py` builds provider commands, creates per-task git worktrees, logs events, and drives PTY streaming.
   - `pty_stream.py` manages PTY lifecycle and subscriber fan‑out.
   - `event_mux.py` merges PTY output with EventLog entries into an ordered SSE/WS stream.
   - `session_manager.py` holds in-memory session state; `state.py` exposes singletons (ConfigManager, ModelCatalog, uptime).
+  - `session_event_loop.py` per-session orchestration loop for coding → verification → revision with milestone detection.
+  - `verification.py` runs automated (flake8/tests) and LLM-based verification of coding agent work.
+  - `slack_service.py` posts milestone notifications to Slack and forwards incoming messages to sessions.
 - Domain exports: `src/chad/server/domain` re-exports utilities (providers, git_worktree, prompts, event_log, model_catalog, cleanup, process_registry) for UI consumption.
 
 ## API Surface
@@ -56,11 +59,18 @@ Base path `/api/v1` (except `/status`).
 **Configuration**
 - `GET/PUT /config/verification` — enabled/auto_run flags
 - `GET/PUT /config/cleanup` — `cleanup_days`, `auto_cleanup`
-- `GET/PUT /config/preferences` — `last_project_path`, `dark_mode`, `ui_mode`
+- `GET/PUT /config/preferences` — `last_project_path`, `ui_mode`
 - `GET/PUT /config/verification-agent`
 - `GET/PUT /config/preferred-verification-model`
-- `GET/PUT /config/provider-fallback-order` — ordered list of account names for auto-switching
-- `GET/PUT /config/usage-switch-threshold` — percentage (0-100) to trigger auto-switch
+- `GET/PUT /config/action-settings` — per-event-type usage actions (thresholds + notify/switch behavior)
+- `GET/PUT /config/max-verification-attempts` — max LLM verification rounds
+- `GET/PUT /config/slack` — Slack integration (enabled, channel, bot token, signing secret)
+- `GET/PUT /config/mock-remaining-usage/{account_name}` — mock provider simulated usage
+- `GET/PUT /config/mock-run-duration/{account_name}` — mock provider simulated run time
+
+**Slack**
+- `POST /slack/test` — send a test message to verify bot token and channel
+- `POST /slack/webhook` — Slack Events API webhook (message forwarding to sessions)
 
 **Streaming**
 - SSE: `GET /sessions/{id}/stream`
@@ -106,7 +116,7 @@ The fix (using markdown) was validated by running reproduction tests:
 - JSON progress: Codex exits immediately, no files created
 - Markdown progress: Codex completes full task
 
-**DO NOT reintroduce JSON format for progress updates** without testing against all providers, especially Codex. Future multi-step progress updates should also use markdown. See `tests/test_web_ui.py::TestProgressUpdateExtraction` for format examples.
+**DO NOT reintroduce JSON format for progress updates** without testing against all providers, especially Codex. Future multi-step progress updates should also use markdown. See `tests/test_gradio_ui.py::TestProgressUpdateExtraction` for format examples.
 
 Related files:
 - `chad.util.prompts.CODING_AGENT_PROMPT`: The prompt template
@@ -128,17 +138,20 @@ Each provider implements `AIProvider` (in `chad.util.providers`) with these capa
 
 **Usage Reporting** enables automatic provider switching based on quota consumption:
 - `supports_usage_reporting()`: Returns `True` if the provider can report usage percentage
-- `get_usage_percentage()`: Returns 0-100 usage percentage, or `None` if unavailable
+- `get_session_usage_percentage()`: Returns 0-100 session usage percentage, or `None` if unavailable
+- `get_weekly_usage_percentage()`: Returns 0-100 weekly usage percentage, or `None` if unavailable
+- `is_quota_exhausted(output_tail)`: Checks CLI output for quota errors, returns milestone type or `None`
 
-When a provider's usage exceeds the configured threshold (`usage_switch_threshold`, default 90%), Chad can automatically switch to the next provider in `provider_fallback_order`.
+When a provider's usage exceeds the configured threshold (set via `action_settings`), Chad can automatically notify or switch providers based on the per-event-type action rules.
 
-For providers without usage reporting, Chad relies on error pattern matching to detect quota exhaustion (rate limits, insufficient credits, etc.) and trigger automatic switching.
+Quota detection is provider-specific via `is_quota_exhausted()`. Providers that can distinguish session vs weekly limits (Claude, Codex) return `"weekly_limit_reached"` when the weekly limit is hit, allowing the UI to show the correct milestone type.
 
 **Adding Usage Support to a Provider:**
 1. Implement a way to fetch usage data (API call, session file parsing, etc.)
 2. Override `supports_usage_reporting()` to return `True`
-3. Override `get_usage_percentage()` to return usage as 0-100
-4. Update this table
+3. Override `get_session_usage_percentage()` to return session usage as 0-100
+4. Optionally override `get_weekly_usage_percentage()` and `is_quota_exhausted()`
+5. Update this table
 
 ## Provider Handoff
 
@@ -176,8 +189,28 @@ When switching providers (due to quota exhaustion or user preference), Chad pres
 - JSONL logs at `~/.chad/logs/{session}.jsonl`; large outputs under `~/.chad/logs/artifacts/{session}/`. Override with `CHAD_LOG_DIR`.
 - `chad.util.event_log.EventLog` manages sequences, artifacts, and typed events.
 
+## UI Architecture Principles
+
+**CRITICAL: These principles are fundamental to Chad's architecture and must be followed:**
+
+1. **View-Only UI Code**: All UI implementations (React, Gradio, CLI) contain ONLY view logic. They must not contain business logic, validation, or state management beyond display state.
+
+2. **Business Logic in Server**: ALL business logic, validation, calculations, and persistent state management MUST live in the server (`src/chad/server`). The server is the single source of truth for all operations.
+
+3. **No UI-Specific Server Code**: The server must not contain UI-specific code paths. Avoid patterns like "if ui_mode == 'gradio'". The server provides a uniform API consumed by all UIs equally.
+
+4. **Complete Session Logging**: All agent output displayed to users MUST also be recorded in the session log (EventLog). This ensures:
+   - Provider handoffs have access to complete context
+   - Session history is preserved for debugging
+   - All UIs can reconstruct the same session state
+
+Examples of proper separation:
+- UI calls API endpoint, server validates and processes
+- Server logs all events, UI displays from event stream
+- UI manages only display state (collapsed/expanded, theme)
+
 ## UI Layers
-- Gradio UI (`src/chad/ui/gradio/web_ui.py`) drives tasks via the API/SSE using `SyncStreamClient`, renders terminal output with `TerminalEmulator`, and uses provider management components in `provider_ui.py` plus shared state in `ui_state.py`. Visual tooling lives in `ui/gradio/verification/`.
+- Gradio UI (`src/chad/ui/gradio/gradio_ui.py`) drives tasks via the API/SSE using `SyncStreamClient`, renders terminal output with `TerminalEmulator`, and uses provider management components in `provider_ui.py` plus shared state in `ui_state.py`. Visual tooling lives in `ui/gradio/verification/`.
 - CLI UI (`src/chad/ui/cli/app.py`) streams the same SSE feed via `SyncStreamClient`.
 - Shared clients: `src/chad/ui/client/api_client.py` (REST) and `stream_client.py` (SSE).
 - Terminal rendering: `src/chad/ui/terminal_emulator.py` shared by CLI and Gradio.
@@ -195,16 +228,22 @@ src/chad/
 ├── server/
 │   ├── main.py
 │   ├── state.py
-│   ├── api/routes/ {health.py, sessions.py, providers.py, worktree.py, config.py, ws.py}
-│   └── services/ {task_executor.py, pty_stream.py, event_mux.py, session_manager.py}
+│   ├── api/routes/ {health.py, sessions.py, providers.py, worktree.py, config.py, ws.py, slack.py}
+│   └── services/ {task_executor.py, pty_stream.py, event_mux.py, session_manager.py,
+│                   session_event_loop.py, verification.py, slack_service.py}
 ├── ui/
-│   ├── gradio/ {web_ui.py, provider_ui.py, ui_state.py, verification/}
+│   ├── gradio/ {gradio_ui.py, provider_ui.py, ui_state.py, verification/}
 │   ├── cli/app.py
 │   ├── client/ {api_client.py, stream_client.py}
 │   └── terminal_emulator.py
 └── util/ {providers.py, git_worktree.py, event_log.py, project_setup.py, model_catalog.py,
            cleanup.py, process_registry.py, installer.py, prompts.py, config_manager.py}
 ```
+
+## TypeScript Client & Browser UI
+- `client/` — Zero-dependency TypeScript library (`chad-client`) wrapping Chad's REST, SSE, and WebSocket APIs. Uses native `fetch`, `EventSource`, and `WebSocket`. Built with Vite as an ES module library.
+- `ui/` — Vite + React browser UI that imports `chad-client`. Dev server proxies `/api` and `/ws` to Chad's backend. Components: SessionList, ChatView, TaskForm, AccountPicker, SettingsPanel, ProvidersPanel, ActionRules, DiffViewer, MergePanel, ConflictViewer.
+- Both packages are independent of the Python codebase and communicate with Chad exclusively through its HTTP API.
 
 ## Session Event Logs
 Session logs are JSONL in `~/.chad/logs/{session_id}.jsonl`; artifacts for large outputs live in `~/.chad/logs/artifacts/{session_id}/`. Each event includes `event_id`, `ts`, `seq`, `session_id`, optional `turn_id`, and a type-specific payload. `CHAD_LOG_DIR` overrides the base directory.

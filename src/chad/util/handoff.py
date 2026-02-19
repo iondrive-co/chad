@@ -200,11 +200,51 @@ def build_handoff_summary(
 
     # Extract and format conversation history
     turns = extract_conversation_from_events(event_log, since_seq)
+    has_assistant_turns = any(t.role == "assistant" for t in turns)
     if turns:
         conversation_text = format_for_provider(turns, target_provider)
         if conversation_text:
             parts.append("## Conversation History")
             parts.append(conversation_text)
+            parts.append("")
+
+    # Include exploration milestones as condensed discoveries
+    milestone_events = event_log.get_events(
+        since_seq=since_seq,
+        event_types=["milestone"],
+    )
+    discoveries = [
+        e["summary"] for e in milestone_events
+        if e.get("milestone_type") == "exploration" and e.get("summary")
+    ]
+    if discoveries:
+        parts.append(
+            "## Discoveries\n"
+            "The previous agent established these facts. "
+            "Do not re-verify them — build on them:"
+        )
+        for d in discoveries:
+            parts.append(f"- {d}")
+        parts.append("")
+
+    # When no structured assistant messages or discoveries exist (stream-json
+    # providers with no milestones), include terminal output as a work log so
+    # the new provider sees what the agent was doing. Skip when discoveries
+    # exist since they are higher-quality deduplicated summaries of the same
+    # content. Terminal output events are cumulative screen snapshots, so we
+    # use only the last event to avoid duplication.
+    if not has_assistant_turns and not discoveries:
+        terminal_events = event_log.get_events(
+            since_seq=since_seq,
+            event_types=["terminal_output"],
+        )
+        if terminal_events:
+            terminal_text = terminal_events[-1].get("data", "")
+            MAX_TERMINAL_CONTEXT = 8000
+            if len(terminal_text) > MAX_TERMINAL_CONTEXT:
+                terminal_text = "(truncated)\n" + terminal_text[-MAX_TERMINAL_CONTEXT:]
+            parts.append("## Agent Work Log")
+            parts.append(terminal_text)
             parts.append("")
 
     if progress["files_changed"] or progress["files_created"]:

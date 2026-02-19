@@ -19,6 +19,7 @@ class Session:
     has_changes: bool
     created_at: datetime
     last_activity: datetime
+    coding_account: str | None = None
 
 
 @dataclass
@@ -81,7 +82,6 @@ class Preferences:
     """User preferences from API."""
 
     last_project_path: str | None
-    dark_mode: bool
     ui_mode: str
 
 
@@ -205,6 +205,7 @@ class APIClient:
             active=data.get("active", False),
             has_worktree=data.get("has_worktree", False),
             has_changes=data.get("has_changes", False),
+            coding_account=data.get("coding_account"),
             created_at=self._parse_datetime(data["created_at"]),
             last_activity=self._parse_datetime(data["last_activity"]),
         )
@@ -289,6 +290,51 @@ class APIClient:
             ready=data.get("ready", False),
         )
 
+    # Messages
+    def send_message(
+        self,
+        session_id: str,
+        content: str,
+        source: str = "ui",
+    ) -> dict[str, Any]:
+        """Send a user message to a running session.
+
+        Args:
+            session_id: Session ID
+            content: Message content
+            source: Message source (ui, cli, slack, api)
+
+        Returns:
+            Response dict with success status
+        """
+        resp = self._client.post(
+            self._url(f"/sessions/{session_id}/messages"),
+            json={"content": content, "source": source},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_milestones(
+        self,
+        session_id: str,
+        since_seq: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Get milestones for a session (polling catch-up).
+
+        Args:
+            session_id: Session ID
+            since_seq: Return milestones after this sequence
+
+        Returns:
+            List of milestone dicts
+        """
+        resp = self._client.get(
+            self._url(f"/sessions/{session_id}/milestones"),
+            params={"since_seq": since_seq},
+        )
+        resp.raise_for_status()
+        return resp.json().get("milestones", [])
+
     # Tasks
     def start_task(
         self,
@@ -305,6 +351,9 @@ class APIClient:
         terminal_rows: int | None = None,
         terminal_cols: int | None = None,
         screenshots: list[str] | None = None,
+        override_prompt: str | None = None,
+        is_followup: bool = False,
+        # Legacy kwargs
         override_exploration_prompt: str | None = None,
         override_implementation_prompt: str | None = None,
     ) -> TaskStatus:
@@ -314,8 +363,7 @@ class APIClient:
             terminal_rows: Terminal height in rows (for PTY sizing)
             terminal_cols: Terminal width in columns (for PTY sizing)
             screenshots: Optional list of screenshot file paths for agent reference
-            override_exploration_prompt: User-edited exploration prompt override
-            override_implementation_prompt: User-edited implementation prompt override
+            override_prompt: User-edited coding prompt override
         """
         data = {
             "project_path": project_path,
@@ -340,10 +388,11 @@ class APIClient:
             data["terminal_cols"] = terminal_cols
         if screenshots:
             data["screenshots"] = screenshots
-        if override_exploration_prompt:
-            data["override_exploration_prompt"] = override_exploration_prompt
-        if override_implementation_prompt:
-            data["override_implementation_prompt"] = override_implementation_prompt
+        effective_prompt = override_prompt or override_exploration_prompt
+        if effective_prompt:
+            data["override_prompt"] = effective_prompt
+        if is_followup:
+            data["is_followup"] = True
 
         resp = self._client.post(
             self._url(f"/sessions/{session_id}/tasks"),
@@ -504,22 +553,18 @@ class APIClient:
         data = resp.json()
         return Preferences(
             last_project_path=data.get("last_project_path"),
-            dark_mode=data.get("dark_mode", True),
             ui_mode=data.get("ui_mode", "gradio"),
         )
 
     def set_preferences(
         self,
         last_project_path: str | None = None,
-        dark_mode: bool | None = None,
         ui_mode: str | None = None,
     ) -> "Preferences":
         """Update user preferences."""
         data = {}
         if last_project_path is not None:
             data["last_project_path"] = last_project_path
-        if dark_mode is not None:
-            data["dark_mode"] = dark_mode
         if ui_mode is not None:
             data["ui_mode"] = ui_mode
 
@@ -528,7 +573,6 @@ class APIClient:
         result = resp.json()
         return Preferences(
             last_project_path=result.get("last_project_path"),
-            dark_mode=result.get("dark_mode", True),
             ui_mode=result.get("ui_mode", "gradio"),
         )
 
@@ -584,82 +628,27 @@ class APIClient:
         resp.raise_for_status()
         return resp.json().get("model")
 
-    def get_provider_fallback_order(self) -> list[str]:
-        """Get the ordered list of account names for auto-switching on quota exhaustion.
-
-        Returns:
-            List of account names in fallback priority order
-        """
-        resp = self._client.get(self._url("/config/provider-fallback-order"))
+    def get_action_settings(self) -> list[dict]:
+        """Get usage action settings."""
+        resp = self._client.get(self._url("/config/action-settings"))
         resp.raise_for_status()
-        return resp.json().get("order", [])
+        return resp.json().get("settings", [])
 
-    def set_provider_fallback_order(self, account_names: list[str]) -> list[str]:
-        """Set the ordered list of account names for auto-switching.
+    def set_action_settings(self, settings: list[dict]) -> list[dict]:
+        """Set usage action settings.
 
         Args:
-            account_names: List of account names in fallback priority order
+            settings: List of action setting dicts
 
         Returns:
-            The order that was set
+            The settings that were saved
         """
         resp = self._client.put(
-            self._url("/config/provider-fallback-order"),
-            json={"order": account_names},
+            self._url("/config/action-settings"),
+            json={"settings": settings},
         )
         resp.raise_for_status()
-        return resp.json().get("order", [])
-
-    def get_next_fallback_provider(self, current_account: str) -> str | None:
-        """Get the next provider in the fallback order after the current one.
-
-        Args:
-            current_account: The currently active account name
-
-        Returns:
-            Next account name in fallback order, or None if no more fallbacks
-        """
-        order = self.get_provider_fallback_order()
-        if not order:
-            return None
-
-        try:
-            current_idx = order.index(current_account)
-            if current_idx + 1 < len(order):
-                return order[current_idx + 1]
-        except ValueError:
-            # Current account not in fallback order, return first in order
-            if order:
-                return order[0]
-
-        return None
-
-    def get_usage_switch_threshold(self) -> int:
-        """Get the usage percentage threshold for auto-switching providers.
-
-        Returns:
-            Percentage threshold (0-100), defaults to 90
-        """
-        resp = self._client.get(self._url("/config/usage-switch-threshold"))
-        resp.raise_for_status()
-        return resp.json().get("threshold", 90)
-
-    def set_usage_switch_threshold(self, threshold: int) -> int:
-        """Set the usage percentage threshold for auto-switching providers.
-
-        Args:
-            threshold: Percentage threshold (0-100). Use 100 to disable
-                      usage-based switching.
-
-        Returns:
-            The threshold that was set
-        """
-        resp = self._client.put(
-            self._url("/config/usage-switch-threshold"),
-            json={"threshold": threshold},
-        )
-        resp.raise_for_status()
-        return resp.json().get("threshold", threshold)
+        return resp.json().get("settings", [])
 
     def get_mock_remaining_usage(self, account_name: str) -> float:
         """Get mock remaining usage for a mock provider account.
@@ -754,3 +743,48 @@ class APIClient:
         )
         resp.raise_for_status()
         return resp.json().get("attempts", attempts)
+
+    def get_slack_settings(self) -> dict:
+        """Get Slack integration settings.
+
+        Returns:
+            Dict with enabled, channel, has_token
+        """
+        resp = self._client.get(self._url("/config/slack"))
+        resp.raise_for_status()
+        return resp.json()
+
+    def set_slack_settings(
+        self,
+        enabled: bool | None = None,
+        channel: str | None = None,
+        bot_token: str | None = None,
+        signing_secret: str | None = None,
+    ) -> dict:
+        """Update Slack integration settings.
+
+        Returns:
+            Updated settings dict
+        """
+        payload: dict = {}
+        if enabled is not None:
+            payload["enabled"] = enabled
+        if channel is not None:
+            payload["channel"] = channel
+        if bot_token is not None:
+            payload["bot_token"] = bot_token
+        if signing_secret is not None:
+            payload["signing_secret"] = signing_secret
+        resp = self._client.put(self._url("/config/slack"), json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def test_slack_connection(self) -> dict:
+        """Send a test message to verify Slack configuration.
+
+        Returns:
+            Dict with ok (bool) and error (str|None)
+        """
+        resp = self._client.post(self._url("/slack/test"))
+        resp.raise_for_status()
+        return resp.json()

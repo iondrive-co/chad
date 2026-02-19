@@ -373,8 +373,7 @@ def cli_config_parity_check() -> ConfigParityResult:
             "cleanup_settings",
             "retention_input",
         ],
-        "provider_fallback_order": ["fallback_order"],
-        "usage_switch_threshold": ["usage_threshold", "usage_switch"],
+        "action_settings": ["action_settings", "action_setting", "action_rule"],
         "max_verification_attempts": [
             "max_verification_attempts",
             "verification_attempts",

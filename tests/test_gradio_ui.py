@@ -12,7 +12,8 @@ from unittest.mock import Mock, patch, MagicMock
 import pytest
 
 from chad.util.git_worktree import GitWorktreeManager
-from chad.util.providers import ModelConfig, MockProvider
+from chad.util.providers import ModelConfig
+from chad.ui.gradio.provider_ui import ProviderUIManager
 
 
 @dataclass
@@ -84,170 +85,190 @@ class TestChadWebUI:
             "gpt": gpt_account,
         }.get(name, Mock(name=name, provider="unknown", model="default", reasoning="default", role=None))
         client.get_verification_agent.return_value = None
-        client.get_preferences.return_value = Mock(last_project_path=None, dark_mode=True, ui_mode="gradio")
+        client.get_milestones.return_value = []
+        client.get_preferences.return_value = Mock(last_project_path=None, ui_mode="gradio")
         client.get_cleanup_settings.return_value = Mock(retention_days=7, auto_cleanup=True)
         return client
 
     @pytest.fixture
-    def web_ui(self, mock_api_client, monkeypatch, tmp_path):
+    def gradio_ui(self, mock_api_client, monkeypatch, tmp_path):
         """Create a ChadWebUI instance with mocked dependencies."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         monkeypatch.setenv("CHAD_CONFIG", str(tmp_path / "test_chad.conf"))
         ui = ChadWebUI(mock_api_client)
         ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/codex"))
         return ui
 
-    def test_init(self, web_ui, mock_api_client):
+    def test_init(self, gradio_ui, mock_api_client):
         """Test ChadWebUI initialization."""
-        assert web_ui.api_client == mock_api_client
+        assert gradio_ui.api_client == mock_api_client
 
-    def test_progress_bar_helper(self, web_ui):
+    def test_progress_bar_helper(self, gradio_ui):
         """Progress bar helper should clamp values and preserve width."""
-        half_bar = web_ui._progress_bar(50)
+        half_bar = gradio_ui._progress_bar(50)
         assert len(half_bar) == 20
         assert half_bar.startswith("█████")
         assert half_bar.endswith("░░░░░")
-        full_bar = web_ui._progress_bar(150)
+        full_bar = gradio_ui._progress_bar(150)
         assert full_bar == "█" * 20
 
     @patch("subprocess.run")
-    def test_add_provider_success(self, mock_run, web_ui, mock_api_client, tmp_path):
+    def test_add_provider_success(self, mock_run, gradio_ui, mock_api_client, tmp_path):
         """Test adding a new provider successfully (OpenAI/Codex)."""
         mock_api_client.list_accounts.return_value = []
         mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
         with (
-            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
-            patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)),
+            patch.object(gradio_ui.provider_ui, "_is_windows", return_value=False),
+            patch.object(gradio_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)),
         ):
-            result = web_ui.add_provider("my-codex", "openai")[0]
+            result = gradio_ui.add_provider("my-codex", "openai")[0]
 
         assert "✅" in result or "✓" in result
         assert "my-codex" in result
         mock_api_client.create_account.assert_called_once_with("my-codex", "openai")
 
     @patch("subprocess.run")
-    def test_add_provider_auto_name(self, mock_run, web_ui, mock_api_client, tmp_path):
+    def test_add_provider_auto_name(self, mock_run, gradio_ui, mock_api_client, tmp_path):
         """Test adding provider with auto-generated name."""
         mock_api_client.list_accounts.return_value = []
         mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
         with (
-            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
-            patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)),
+            patch.object(gradio_ui.provider_ui, "_is_windows", return_value=False),
+            patch.object(gradio_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)),
         ):
-            result = web_ui.add_provider("", "openai")[0]
+            result = gradio_ui.add_provider("", "openai")[0]
 
         assert "✓" in result or "Provider" in result
         assert "openai" in result
         mock_api_client.create_account.assert_called_once_with("openai", "openai")
 
     @patch("subprocess.run")
-    def test_add_provider_duplicate_name(self, mock_run, web_ui, mock_api_client, tmp_path):
+    def test_add_provider_duplicate_name(self, mock_run, gradio_ui, mock_api_client, tmp_path):
         """Test adding provider when name already exists (OpenAI/Codex)."""
         mock_api_client.list_accounts.return_value = [MockAccount(name="openai", provider="openai")]
         mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
 
         with (
-            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
-            patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)),
+            patch.object(gradio_ui.provider_ui, "_is_windows", return_value=False),
+            patch.object(gradio_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)),
         ):
-            result = web_ui.add_provider("", "openai")[0]
+            result = gradio_ui.add_provider("", "openai")[0]
 
         # Should create openai-1
         assert "✅" in result or "✓" in result
         mock_api_client.create_account.assert_called_once_with("openai-1", "openai")
 
     @patch("subprocess.run")
-    def test_add_provider_error(self, mock_run, web_ui, mock_api_client, tmp_path):
+    def test_add_provider_error(self, mock_run, gradio_ui, mock_api_client, tmp_path):
         """Test adding provider when login fails (OpenAI/Codex)."""
         mock_api_client.list_accounts.return_value = []
         # Mock Codex login to fail
         mock_run.return_value = Mock(returncode=1, stderr="Login cancelled", stdout="")
 
         with (
-            patch.object(web_ui.provider_ui, "_is_windows", return_value=False),
-            patch.object(web_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)),
+            patch.object(gradio_ui.provider_ui, "_is_windows", return_value=False),
+            patch.object(gradio_ui.provider_ui, "_setup_codex_account", return_value=str(tmp_path)),
         ):
-            result = web_ui.add_provider("test", "openai")[0]
+            result = gradio_ui.add_provider("test", "openai")[0]
 
         assert "❌" in result
         assert "Login failed" in result or "cancelled" in result.lower()
 
-    def test_assign_role_success(self, web_ui, mock_api_client):
+    def test_assign_role_success(self, gradio_ui, mock_api_client):
         """Test assigning a role successfully."""
         # Use gpt account which doesn't have a role yet
-        result = web_ui.assign_role("gpt", "CODING")[0]
+        result = gradio_ui.assign_role("gpt", "CODING")[0]
 
         assert "✓" in result
         assert "CODING" in result
         mock_api_client.set_account_role.assert_called_once_with("gpt", "CODING")
 
-    def test_assign_role_not_found(self, web_ui, mock_api_client):
+    def test_assign_role_not_found(self, gradio_ui, mock_api_client):
         """Test assigning role to non-existent provider."""
-        result = web_ui.assign_role("nonexistent", "CODING")[0]
+        result = gradio_ui.assign_role("nonexistent", "CODING")[0]
 
         assert "❌" in result
         assert "not found" in result
 
-    def test_assign_role_lowercase_converted(self, web_ui, mock_api_client):
+    def test_assign_role_lowercase_converted(self, gradio_ui, mock_api_client):
         """Test that lowercase role names are converted to uppercase."""
         # Use gpt account which doesn't have an existing role
-        web_ui.assign_role("gpt", "coding")
+        gradio_ui.assign_role("gpt", "coding")
 
         mock_api_client.set_account_role.assert_called_once_with("gpt", "CODING")
 
-    def test_assign_role_missing_account(self, web_ui, mock_api_client):
+    def test_assign_role_missing_account(self, gradio_ui, mock_api_client):
         """Test assigning role without selecting account."""
-        result = web_ui.assign_role("", "CODING")[0]
+        result = gradio_ui.assign_role("", "CODING")[0]
 
         assert "❌" in result
         assert "select an account" in result
 
-    def test_assign_role_missing_role(self, web_ui, mock_api_client):
+    def test_assign_role_missing_role(self, gradio_ui, mock_api_client):
         """Test assigning role without selecting role."""
-        result = web_ui.assign_role("claude", "")[0]
+        result = gradio_ui.assign_role("claude", "")[0]
 
         assert "❌" in result
         assert "select a role" in result
 
-    def test_delete_provider_success(self, web_ui, mock_api_client):
+    def test_build_coding_dropdown_state_uses_selected_provider_models(self, gradio_ui, mock_api_client, monkeypatch):
+        """Coding model dropdown must never keep a model outside the selected provider catalog."""
+        mock_account = MockAccount(
+            name="testy",
+            provider="mock",
+            model="gemini-2.5-flash",
+            reasoning="default",
+            role="CODING",
+        )
+        mock_api_client.list_accounts.return_value = [mock_account]
+        mock_api_client.get_account.side_effect = lambda name: mock_account if name == "testy" else None
+        monkeypatch.setattr(gradio_ui.model_catalog, "get_models", lambda provider, acct=None: ["default"])
+
+        state = gradio_ui._build_coding_dropdown_state("testy", accounts=[mock_account])
+
+        assert state.model_choices == ["default"]
+        assert state.model_value == "default"
+        assert state.interactive is True
+
+    def test_delete_provider_success(self, gradio_ui, mock_api_client):
         """Test deleting a provider successfully."""
-        result = web_ui.delete_provider("claude", True)[0]
+        result = gradio_ui.delete_provider("claude", True)[0]
 
         assert "✓" in result
         assert "deleted" in result
         mock_api_client.delete_account.assert_called_once_with("claude")
 
-    def test_delete_provider_requires_confirmation(self, web_ui, mock_api_client):
+    def test_delete_provider_requires_confirmation(self, gradio_ui, mock_api_client):
         """Test that deletion requires confirmation."""
-        result = web_ui.delete_provider("claude", False)[0]
+        result = gradio_ui.delete_provider("claude", False)[0]
 
         # When not confirmed, deletion is cancelled
         assert "cancelled" in result.lower()
         mock_api_client.delete_account.assert_not_called()
 
-    def test_delete_provider_error(self, web_ui, mock_api_client):
+    def test_delete_provider_error(self, gradio_ui, mock_api_client):
         """Test deleting provider when error occurs."""
         mock_api_client.delete_account.side_effect = Exception("Delete error")
 
-        result = web_ui.delete_provider("claude", True)[0]
+        result = gradio_ui.delete_provider("claude", True)[0]
 
         assert "❌" in result
         assert "Error" in result
 
-    def test_delete_provider_missing_account(self, web_ui, mock_api_client):
+    def test_delete_provider_missing_account(self, gradio_ui, mock_api_client):
         """Test deleting provider without selecting account."""
-        result = web_ui.delete_provider("", False)[0]
+        result = gradio_ui.delete_provider("", False)[0]
 
         assert "❌" in result
         assert "no provider selected" in result.lower()
 
-    def test_attempt_merge_handles_commit_error(self, web_ui, git_repo, monkeypatch):
+    def test_attempt_merge_handles_commit_error(self, gradio_ui, git_repo, monkeypatch):
         """Attempting merge should surface commit errors without clearing state."""
         session_id = "merge-error"
-        session = web_ui.get_session(session_id)
+        session = gradio_ui.get_session(session_id)
         session.project_path = str(git_repo)
         session.worktree_path = Path(git_repo / ".chad-worktrees" / session_id)
         session.worktree_path.mkdir(parents=True, exist_ok=True)
@@ -260,7 +281,7 @@ class TestChadWebUI:
 
         monkeypatch.setattr(GitWorktreeManager, "merge_to_main", fake_merge)
 
-        outputs = web_ui.attempt_merge(session_id, "msg", "main")
+        outputs = gradio_ui.attempt_merge(session_id, "msg", "main")
 
         merge_section_update = outputs[0]
         task_status = outputs[5]
@@ -270,17 +291,17 @@ class TestChadWebUI:
         assert session.worktree_path is not None
         assert session.worktree_path.exists()
 
-    def test_discard_keeps_task_description(self, web_ui, git_repo):
+    def test_discard_keeps_task_description(self, gradio_ui, git_repo):
         """Discard should keep the task description so user can retry."""
         session_id = "discard-test"
-        session = web_ui.get_session(session_id)
+        session = gradio_ui.get_session(session_id)
         session.project_path = str(git_repo)
         session.worktree_path = Path(git_repo / ".chad-worktrees" / session_id)
         session.worktree_path.mkdir(parents=True, exist_ok=True)
         session.worktree_branch = f"chad-task-{session_id}"
         session.task_description = "Test task to be preserved"
 
-        outputs = web_ui.discard_worktree_changes(session_id)
+        outputs = gradio_ui.discard_worktree_changes(session_id)
 
         # Index 11 should be task_description update (no_change to preserve it)
         # Note: 14 outputs total (includes merge_section_header, diff_content)
@@ -297,10 +318,10 @@ class TestChadWebUI:
         assert header_text == "", "Header should be cleared after discard"
         assert diff_content == "", "Diff content should be cleared after discard"
 
-    def test_merge_clears_task_description_on_success(self, web_ui, git_repo, monkeypatch):
+    def test_merge_clears_task_description_on_success(self, gradio_ui, git_repo, monkeypatch):
         """Successful merge should clear the task description input."""
         session_id = "merge-clear-test"
-        session = web_ui.get_session(session_id)
+        session = gradio_ui.get_session(session_id)
         session.project_path = str(git_repo)
         session.worktree_path = Path(git_repo / ".chad-worktrees" / session_id)
         session.worktree_path.mkdir(parents=True, exist_ok=True)
@@ -317,7 +338,7 @@ class TestChadWebUI:
         monkeypatch.setattr(GitWorktreeManager, "cleanup_after_merge", fake_cleanup)
         monkeypatch.setattr(GitWorktreeManager, "get_main_branch", lambda self: "main")
 
-        outputs = web_ui.attempt_merge(session_id, "msg", "main")
+        outputs = gradio_ui.attempt_merge(session_id, "msg", "main")
 
         # Index 11 should be task_description update (direct value "" or gr.update)
         # Note: 14 outputs total (includes merge_section_header, diff_content)
@@ -335,10 +356,10 @@ class TestChadWebUI:
         assert header_text == "", "Header should be cleared after merge"
         assert diff_content == "", "Diff content should be cleared after merge"
 
-    def test_merge_preserves_chatbot_and_followup(self, web_ui, git_repo, monkeypatch):
+    def test_merge_preserves_chatbot_and_followup(self, gradio_ui, git_repo, monkeypatch):
         """Successful merge should preserve chatbot and followup_row for follow-up conversations."""
         session_id = "merge-preserve-chat-test"
-        session = web_ui.get_session(session_id)
+        session = gradio_ui.get_session(session_id)
         session.project_path = str(git_repo)
         session.worktree_path = Path(git_repo / ".chad-worktrees" / session_id)
         session.worktree_path.mkdir(parents=True, exist_ok=True)
@@ -355,7 +376,7 @@ class TestChadWebUI:
         monkeypatch.setattr(GitWorktreeManager, "cleanup_after_merge", fake_cleanup)
         monkeypatch.setattr(GitWorktreeManager, "get_main_branch", lambda self: "main")
 
-        outputs = web_ui.attempt_merge(session_id, "msg", "main")
+        outputs = gradio_ui.attempt_merge(session_id, "msg", "main")
 
         # Index 6 is chatbot - should NOT be cleared (use no_change)
         chatbot_update = outputs[6]
@@ -365,17 +386,17 @@ class TestChadWebUI:
         followup_update = outputs[10]
         assert followup_update.get("visible") is not False, "Followup row should remain visible"
 
-    def test_discard_preserves_chatbot_and_followup(self, web_ui, git_repo):
+    def test_discard_preserves_chatbot_and_followup(self, gradio_ui, git_repo):
         """Discard should preserve chatbot and followup_row for follow-up conversations."""
         session_id = "discard-preserve-chat-test"
-        session = web_ui.get_session(session_id)
+        session = gradio_ui.get_session(session_id)
         session.project_path = str(git_repo)
         session.worktree_path = Path(git_repo / ".chad-worktrees" / session_id)
         session.worktree_path.mkdir(parents=True, exist_ok=True)
         session.worktree_branch = f"chad-task-{session_id}"
         session.chat_history = [{"role": "user", "content": "Test message"}]
 
-        outputs = web_ui.discard_worktree_changes(session_id)
+        outputs = gradio_ui.discard_worktree_changes(session_id)
 
         # Index 6 is chatbot - should NOT be cleared (use no_change)
         chatbot_update = outputs[6]
@@ -385,146 +406,336 @@ class TestChadWebUI:
         followup_update = outputs[10]
         assert followup_update.get("visible") is not False, "Followup row should remain visible"
 
-    def test_followup_after_discard_uses_clean_worktree(self, web_ui, git_repo, monkeypatch):
-        """Follow-up after discard should still operate in a clean worktree."""
+    def test_followup_after_discard_routes_through_api(self, gradio_ui, git_repo, monkeypatch):
+        """Follow-up after discard should route through run_task_via_api with is_followup=True."""
         session_id = "discard-followup-test"
         git_mgr = GitWorktreeManager(git_repo)
         worktree_path, base_commit = git_mgr.create_worktree(session_id)
 
-        session = web_ui.get_session(session_id)
+        session = gradio_ui.get_session(session_id)
         session.project_path = str(git_repo)
         session.worktree_path = worktree_path
         session.worktree_branch = git_mgr._branch_name(session_id)
         session.worktree_base_commit = base_commit
         session.active = True
         session.chat_history = [{"role": "user", "content": "**Task**\n\nModify BUGS.md"}]
-
-        # Speed up the mock provider
-        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
-        config = ModelConfig(provider="mock", model_name="default", account_name="claude")
-        provider = MockProvider(config)
-        provider._get_remaining_usage = lambda: 0.5
-        provider._decrement_usage = lambda amount=None: None
-        provider.start_session(str(worktree_path))
-        session.provider = provider
         session.coding_account = "claude"
-        session.config = config
-
-        # Simulate an initial coding turn to represent the first task run
-        provider.send_message("Initial coding turn")
-        provider.get_response()
+        session.config = ModelConfig(provider="mock", model_name="default", account_name="claude")
 
         # Discard before sending a follow-up
-        web_ui.discard_worktree_changes(session_id)
+        gradio_ui.discard_worktree_changes(session_id)
 
-        # Send a follow-up; this should succeed and write BUGS.md in the worktree
+        # Mock run_task_via_api to simulate successful API execution
+        api_call_args = {}
+
+        def mock_run_task_via_api(**kwargs):
+            api_call_args.update(kwargs)
+            return (True, "Task completed", "srv-123", None)
+
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", mock_run_task_via_api)
+
         list(
-            web_ui.send_followup(
+            gradio_ui.send_followup(
                 session_id,
                 "Add follow-up entry",
                 session.chat_history,
                 coding_agent="claude",
-                verification_agent=web_ui.VERIFICATION_NONE,
+                verification_agent=gradio_ui.VERIFICATION_NONE,
             )
         )
 
-        assert session.worktree_path is not None
-        bugs_file = session.worktree_path / "BUGS.md"
-        assert bugs_file.exists(), "BUGS.md should be present after follow-up"
-        content = bugs_file.read_text()
-        assert "follow-up" in content.lower(), "Follow-up marker should be added to BUGS.md"
-        assert not any(
-            "Error" in msg.get("content", "") for msg in session.chat_history if msg.get("role") == "assistant"
-        ), "Follow-up response should not include errors"
+        assert api_call_args.get("is_followup") is True, "Follow-up should pass is_followup=True"
+        assert api_call_args.get("coding_account") == "claude"
+        assert "Add follow-up entry" in api_call_args.get("task_description", "")
 
-    def test_followup_reconnects_when_provider_released(self, web_ui, git_repo, monkeypatch):
-        """Follow-up should reconnect to provider after API-based execution releases it."""
+    def test_followup_reconnects_via_api(self, gradio_ui, git_repo, monkeypatch):
+        """Follow-up after API-based execution should route through run_task_via_api."""
         session_id = "reconnect-test"
         git_mgr = GitWorktreeManager(git_repo)
         worktree_path, base_commit = git_mgr.create_worktree(session_id)
 
-        session = web_ui.get_session(session_id)
+        session = gradio_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = worktree_path
+        session.worktree_branch = git_mgr._branch_name(session_id)
+        session.worktree_base_commit = base_commit
+        session.active = True
+        session.provider = None  # Released after API execution
+        session.coding_account = "mock-claude"
+        session.config = ModelConfig(provider="mock", model_name="default", account_name="mock-claude")
+        session.chat_history = [{"role": "user", "content": "**Task**\n\nInitial task"}]
+
+        mock_account = MockAccount(name="mock-claude", provider="mock", role="CODING")
+        gradio_ui.api_client.list_accounts.return_value = [mock_account]
+        gradio_ui.api_client.get_account.return_value = mock_account
+
+        api_call_args = {}
+
+        def mock_run_task_via_api(**kwargs):
+            api_call_args.update(kwargs)
+            return (True, "Task completed", "srv-123", None)
+
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", mock_run_task_via_api)
+
+        list(
+            gradio_ui.send_followup(
+                session_id,
+                "Follow-up after API execution",
+                session.chat_history,
+                coding_agent="mock-claude",
+                verification_agent=gradio_ui.VERIFICATION_NONE,
+            )
+        )
+
+        all_messages = [msg.get("content", "") for msg in session.chat_history]
+        assert not any("Session expired" in msg for msg in all_messages), (
+            "Follow-up should reconnect, not show 'Session expired'"
+        )
+        assert api_call_args.get("is_followup") is True
+
+    def test_followup_restarts_session_via_api(self, gradio_ui, git_repo, monkeypatch):
+        """Follow-up after session completion should route through run_task_via_api."""
+        session_id = "restart-test"
+        git_mgr = GitWorktreeManager(git_repo)
+        worktree_path, base_commit = git_mgr.create_worktree(session_id)
+
+        session = gradio_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = worktree_path
+        session.worktree_branch = git_mgr._branch_name(session_id)
+        session.worktree_base_commit = base_commit
+        session.active = False
+        session.provider = None
+        session.coding_account = "mock-claude"
+        session.config = None
+        session.chat_history = [{"role": "user", "content": "**Task**\n\nInitial task"}]
+
+        mock_account = MockAccount(name="mock-claude", provider="mock", role="CODING")
+        gradio_ui.api_client.list_accounts.return_value = [mock_account]
+        gradio_ui.api_client.get_account.return_value = mock_account
+
+        api_call_args = {}
+
+        def mock_run_task_via_api(**kwargs):
+            api_call_args.update(kwargs)
+            return (True, "Task completed", "srv-123", None)
+
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", mock_run_task_via_api)
+
+        list(
+            gradio_ui.send_followup(
+                session_id,
+                "Continue after rate limit",
+                session.chat_history,
+                coding_agent="mock-claude",
+                verification_agent=gradio_ui.VERIFICATION_NONE,
+            )
+        )
+
+        all_messages = [msg.get("content", "") for msg in session.chat_history]
+        assert not any("Session expired" in msg for msg in all_messages), (
+            "Follow-up after completion should restart, not show 'Session expired'"
+        )
+        assert api_call_args.get("is_followup") is True
+        assert api_call_args.get("coding_account") == "mock-claude"
+
+    def test_followup_account_fallback_from_session(self, gradio_ui, git_repo, monkeypatch):
+        """When no agent is explicitly selected, reuse the session's previous coding_account."""
+        session_id = "fallback-test"
+        git_mgr = GitWorktreeManager(git_repo)
+        worktree_path, base_commit = git_mgr.create_worktree(session_id)
+
+        session = gradio_ui.get_session(session_id)
         session.project_path = str(git_repo)
         session.worktree_path = worktree_path
         session.worktree_branch = git_mgr._branch_name(session_id)
         session.worktree_base_commit = base_commit
 
-        # Simulate state after API-based execution:
-        # - session.active = True (task succeeded)
-        # - session.provider = None (released after API execution)
-        # - session.coding_account set to the account name
-        session.active = True
-        session.provider = None  # This is the key condition we're testing
+        session.active = False
+        session.provider = None
         session.coding_account = "mock-claude"
-        session.config = ModelConfig(provider="mock", model_name="default", account_name="mock-claude")
+        session.config = None
         session.chat_history = [{"role": "user", "content": "**Task**\n\nInitial task"}]
 
-        # Set up mock account with "mock" provider so create_provider uses MockProvider
         mock_account = MockAccount(name="mock-claude", provider="mock", role="CODING")
-        web_ui.api_client.list_accounts.return_value = [mock_account]
-        web_ui.api_client.get_account.return_value = mock_account
+        gradio_ui.api_client.list_accounts.return_value = [mock_account]
+        gradio_ui.api_client.get_account.return_value = mock_account
 
-        # Speed up the mock provider
-        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
+        api_call_args = {}
 
-        # Send a follow-up; this should reconnect and succeed, not show "Session expired"
+        def mock_run_task_via_api(**kwargs):
+            api_call_args.update(kwargs)
+            return (True, "Task completed", "srv-123", None)
+
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", mock_run_task_via_api)
+
+        # Send follow-up with NO coding_agent (empty string / None) — should fall back
         list(
-            web_ui.send_followup(
+            gradio_ui.send_followup(
                 session_id,
-                "Follow-up after API execution",
+                "Continue with previous agent",
                 session.chat_history,
-                coding_agent="mock-claude",
-                verification_agent=web_ui.VERIFICATION_NONE,
+                coding_agent="",
+                verification_agent=gradio_ui.VERIFICATION_NONE,
             )
         )
 
-        # Check that no "Session expired" message was added
         all_messages = [msg.get("content", "") for msg in session.chat_history]
         assert not any("Session expired" in msg for msg in all_messages), (
-            "Follow-up should reconnect, not show 'Session expired'"
+            "Should fall back to session's coding_account, not expire"
+        )
+        # Verify fallback resolved to the session's previous coding_account
+        assert api_call_args.get("coding_account") == "mock-claude"
+
+    def test_followup_no_account_shows_expired(self, gradio_ui, git_repo):
+        """When no account is configured and no previous account exists, show 'Session expired'."""
+        session_id = "no-account-test"
+
+        session = gradio_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.active = False
+        session.provider = None
+        session.coding_account = None
+        session.config = None
+        session.chat_history = []
+
+        gradio_ui.api_client.list_accounts.return_value = []
+
+        list(
+            gradio_ui.send_followup(
+                session_id,
+                "Try to continue",
+                session.chat_history,
+                coding_agent="",
+                verification_agent=gradio_ui.VERIFICATION_NONE,
+            )
         )
 
-        # Check that the follow-up was processed (BUGS.md should exist from mock provider)
-        assert session.worktree_path is not None
-        bugs_file = session.worktree_path / "BUGS.md"
-        assert bugs_file.exists(), "BUGS.md should be created by follow-up"
+        all_messages = [msg.get("content", "") for msg in session.chat_history]
+        assert any("Session expired" in msg for msg in all_messages), (
+            "Should show 'Session expired' when no account is available"
+        )
 
-    def test_set_reasoning_success(self, web_ui, mock_api_client):
+    def test_followup_provider_change_after_completion(self, gradio_ui, git_repo, monkeypatch):
+        """Switching provider on follow-up after completion should show handoff message."""
+        session_id = "switch-test"
+        git_mgr = GitWorktreeManager(git_repo)
+        worktree_path, base_commit = git_mgr.create_worktree(session_id)
+
+        session = gradio_ui.get_session(session_id)
+        session.project_path = str(git_repo)
+        session.worktree_path = worktree_path
+        session.worktree_branch = git_mgr._branch_name(session_id)
+        session.worktree_base_commit = base_commit
+
+        session.active = False
+        session.provider = None
+        session.coding_account = "old-agent"
+        session.config = None
+        session.chat_history = [{"role": "user", "content": "**Task**\n\nInitial task"}]
+
+        mock_old = MockAccount(name="old-agent", provider="mock", role="CODING")
+        mock_new = MockAccount(name="new-agent", provider="mock", role="CODING")
+        gradio_ui.api_client.list_accounts.return_value = [mock_old, mock_new]
+        gradio_ui.api_client.get_account.return_value = mock_new
+
+        api_call_args = {}
+
+        def mock_run_task_via_api(**kwargs):
+            api_call_args.update(kwargs)
+            return (True, "Task completed", "srv-123", None)
+
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", mock_run_task_via_api)
+
+        list(
+            gradio_ui.send_followup(
+                session_id,
+                "Continue with different agent",
+                session.chat_history,
+                coding_agent="new-agent",
+                verification_agent=gradio_ui.VERIFICATION_NONE,
+            )
+        )
+
+        all_messages = [msg.get("content", "") for msg in session.chat_history]
+        assert not any("Session expired" in msg for msg in all_messages), (
+            "Should not show 'Session expired' when switching provider"
+        )
+        assert any("PROVIDER HANDOFF" in msg for msg in all_messages), (
+            "Should show handoff message when switching provider after completion"
+        )
+        assert api_call_args.get("coding_account") == "new-agent"
+
+    def test_set_reasoning_success(self, gradio_ui, mock_api_client):
         """Test setting reasoning level for an account."""
-        result = web_ui.set_reasoning("claude", "high")[0]
+        result = gradio_ui.set_reasoning("claude", "high")[0]
 
         assert "✓" in result
         assert "high" in result
         mock_api_client.set_account_reasoning.assert_called_once_with("claude", "high")
 
-    def test_add_provider_install_failure(self, web_ui, mock_api_client):
+    def test_add_provider_install_failure(self, gradio_ui, mock_api_client):
         """Installer failures should surface to the user."""
-        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(False, "Node missing"))
+        gradio_ui.provider_ui.installer.ensure_tool = Mock(return_value=(False, "Node missing"))
         mock_api_client.list_accounts.return_value = []
 
-        result = web_ui.add_provider("", "openai")[0]
+        result = gradio_ui.add_provider("", "openai")[0]
 
         assert "❌" in result
         assert "Node missing" in result
         mock_api_client.create_account.assert_not_called()
 
-    def test_add_provider_mistral_requires_login_before_account_creation(self, web_ui, mock_api_client):
-        """Mistral accounts should only be created after successful vibe auth."""
+    def test_add_provider_mistral_with_api_key_creates_account(self, gradio_ui, mock_api_client, monkeypatch, tmp_path):
+        """Mistral add flow should write API key to ~/.vibe/.env and create account."""
         mock_api_client.list_accounts.return_value = []
-        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/vibe"))
+        gradio_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/vibe"))
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
 
-        with patch.object(web_ui.provider_ui, "_check_provider_login", return_value=(False, "Not logged in")):
-            result = web_ui.add_provider("mistral-1", "mistral")[0]
+        result = gradio_ui.add_provider("mistral-1", "mistral", api_key="sk-my-key")[0]
+
+        assert "✅" in result
+        assert "mistral-1" in result
+        mock_api_client.create_account.assert_called_once_with("mistral-1", "mistral")
+        env_file = tmp_path / ".vibe" / ".env"
+        assert env_file.exists()
+        assert "sk-my-key" in env_file.read_text()
+
+    def test_add_provider_mistral_no_key_shows_error(self, gradio_ui, mock_api_client, monkeypatch, tmp_path):
+        """Mistral add flow without API key should prompt user to provide one."""
+        mock_api_client.list_accounts.return_value = []
+        gradio_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/vibe"))
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+
+        result = gradio_ui.add_provider("mistral-1", "mistral")[0]
 
         assert "❌" in result
-        assert "vibe --setup" in result
+        assert "requires an API key" in result
         mock_api_client.create_account.assert_not_called()
 
-    def test_add_provider_kimi_login_flow_failure(self, web_ui, mock_api_client):
+    def test_add_provider_mistral_already_configured_skips_key(self, gradio_ui, mock_api_client, monkeypatch, tmp_path):
+        """Mistral add flow should skip key entry when already configured."""
+        mock_api_client.list_accounts.return_value = []
+        gradio_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/vibe"))
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+
+        # Pre-create .env with a key
+        vibe_dir = tmp_path / ".vibe"
+        vibe_dir.mkdir(parents=True)
+        (vibe_dir / ".env").write_text("MISTRAL_API_KEY=existing-key\n")
+
+        result = gradio_ui.add_provider("mistral-1", "mistral")[0]
+
+        assert "✅" in result
+        mock_api_client.create_account.assert_called_once_with("mistral-1", "mistral")
+
+    def test_add_provider_kimi_login_flow_failure(self, gradio_ui, mock_api_client):
         """Kimi login flow shows error on failure (no creds written)."""
         mock_api_client.list_accounts.return_value = []
-        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/kimi"))
-        web_ui.provider_ui.installer.find_tool_path = Mock(return_value="/tmp/kimi")
+        gradio_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/kimi"))
+        gradio_ui.provider_ui.installer.find_tool_path = Mock(return_value="/tmp/kimi")
 
         # Mock subprocess.Popen to simulate a failed login (no success event)
         mock_proc = Mock()
@@ -536,16 +747,29 @@ class TestChadWebUI:
         import subprocess as _subprocess
         with patch.object(_subprocess, "Popen", return_value=mock_proc):
             with patch("chad.ui.gradio.provider_ui.shutil.which", return_value="/tmp/kimi"):
-                result = web_ui.add_provider("kimi-1", "kimi")[0]
+                result = gradio_ui.add_provider("kimi-1", "kimi")[0]
 
         assert "❌" in result
         mock_api_client.create_account.assert_not_called()
 
-    def test_add_provider_kimi_creds_saved_but_error_event(self, web_ui, mock_api_client, tmp_path):
+    def test_add_provider_kimi_missing_cli_suggests_pip_install(self, gradio_ui, mock_api_client):
+        """Kimi missing CLI message should match the managed pip install path."""
+        mock_api_client.list_accounts.return_value = []
+        gradio_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/kimi"))
+        gradio_ui.provider_ui.installer.resolve_tool_path = Mock(return_value=None)
+
+        with patch("chad.ui.gradio.provider_ui.shutil.which", return_value=None):
+            result = gradio_ui.add_provider("kimi-1", "kimi")[0]
+
+        assert "❌" in result
+        assert "pip install kimi-cli" in result
+        mock_api_client.create_account.assert_not_called()
+
+    def test_add_provider_kimi_creds_saved_but_error_event(self, gradio_ui, mock_api_client, tmp_path):
         """Kimi login should succeed when CLI saves creds but emits error (model listing fails)."""
         mock_api_client.list_accounts.return_value = []
-        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/kimi"))
-        web_ui.provider_ui.installer.find_tool_path = Mock(return_value="/tmp/kimi")
+        gradio_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/kimi"))
+        gradio_ui.provider_ui.installer.find_tool_path = Mock(return_value="/tmp/kimi")
 
         # The CLI emits: verification_url → waiting → error (model listing 401)
         # BUT it saves credentials before trying to list models.
@@ -573,7 +797,7 @@ class TestChadWebUI:
         with patch.object(_subprocess, "Popen", side_effect=fake_popen):
             with patch("chad.ui.gradio.provider_ui.shutil.which", return_value="/tmp/kimi"):
                 with patch("chad.ui.gradio.provider_ui.safe_home", return_value=str(tmp_path)):
-                    result = web_ui.add_provider("kimi-1", "kimi")[0]
+                    result = gradio_ui.add_provider("kimi-1", "kimi")[0]
 
         assert "✅" in result
         mock_api_client.create_account.assert_called_once()
@@ -582,19 +806,19 @@ class TestChadWebUI:
         assert config_file.exists()
         assert "[models." in config_file.read_text()
 
-    def test_get_models_includes_stored_model(self, web_ui, mock_api_client, tmp_path):
+    def test_get_models_includes_stored_model(self, gradio_ui, mock_api_client, tmp_path):
         """Stored models should always be present in dropdown choices."""
         mock_api_client.list_accounts.return_value = [MockAccount(name="gpt", provider="openai")]
         mock_api_client.get_account_model.return_value = "gpt-5.1-codex-max"
         from chad.util.model_catalog import ModelCatalog
 
-        web_ui.model_catalog = ModelCatalog(api_client=mock_api_client, home_dir=tmp_path, cache_ttl=0)
-        models = web_ui.get_models_for_account("gpt")
+        gradio_ui.model_catalog = ModelCatalog(api_client=mock_api_client, home_dir=tmp_path, cache_ttl=0)
+        models = gradio_ui.get_models_for_account("gpt")
 
         assert "gpt-5.1-codex-max" in models
         assert "default" in models
 
-    def test_get_models_for_mock_excludes_foreign_stored_model(self, web_ui, mock_api_client, tmp_path):
+    def test_get_models_for_mock_excludes_foreign_stored_model(self, gradio_ui, mock_api_client, tmp_path):
         """Mock coding agent should not expose models from other providers."""
         mock_account = MockAccount(
             name="testy",
@@ -608,25 +832,25 @@ class TestChadWebUI:
 
         from chad.util.model_catalog import ModelCatalog
 
-        web_ui.model_catalog = ModelCatalog(api_client=mock_api_client, home_dir=tmp_path, cache_ttl=0)
-        models = web_ui.get_models_for_account("testy")
+        gradio_ui.model_catalog = ModelCatalog(api_client=mock_api_client, home_dir=tmp_path, cache_ttl=0)
+        models = gradio_ui.get_models_for_account("testy")
 
         assert models == ["default"]
 
-    def test_get_account_choices(self, web_ui, mock_api_client):
+    def test_get_account_choices(self, gradio_ui, mock_api_client):
         """Test getting account choices for dropdowns."""
-        choices = web_ui.get_account_choices()
+        choices = gradio_ui.get_account_choices()
 
         assert "claude" in choices
         assert "gpt" in choices
 
-    def test_cancel_task(self, web_ui, mock_api_client):
+    def test_cancel_task(self, gradio_ui, mock_api_client):
         """Test cancelling a running task."""
-        session = web_ui.create_session("test")
+        session = gradio_ui.create_session("test")
         mock_provider = Mock()
         session.provider = mock_provider
 
-        result = web_ui.cancel_task(session.id)
+        result = gradio_ui.cancel_task(session.id)
 
         # Result is a tuple of gr.update dicts
         # Order: live_stream, chatbot, task_status, project_path, task_description,
@@ -643,10 +867,10 @@ class TestChadWebUI:
         assert start_btn_update.get("interactive") is True, "Start button should be enabled after cancel"
         assert cancel_btn_update.get("interactive") is False, "Cancel button should be disabled after cancel"
 
-    def test_cancel_task_no_session(self, web_ui, mock_api_client):
+    def test_cancel_task_no_session(self, gradio_ui, mock_api_client):
         """Test cancelling when no session is running."""
-        session = web_ui.create_session("test")
-        result = web_ui.cancel_task(session.id)
+        session = gradio_ui.create_session("test")
+        result = gradio_ui.cancel_task(session.id)
 
         # Result is a tuple of gr.update dicts - live_stream is at index 0
         assert isinstance(result, tuple)
@@ -654,25 +878,25 @@ class TestChadWebUI:
         assert "🛑" in live_stream_update.get("value", "")
         assert session.cancel_requested is True
 
-    def test_start_task_rejects_when_server_session_is_still_active(self, web_ui, git_repo):
+    def test_start_task_rejects_when_server_session_is_still_active(self, gradio_ui, git_repo):
         """Starting a new task with an active server task should return one full Gradio update tuple."""
-        session = web_ui.create_session("test")
+        session = gradio_ui.create_session("test")
         session.server_session_id = "server-session-1"
-        web_ui.api_client.get_session.return_value = Mock(active=True)
+        gradio_ui.api_client.get_session.return_value = Mock(active=True)
 
-        updates = list(web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+        updates = list(gradio_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
 
         assert len(updates) == 1
         update = updates[0]
-        # 24 elements: 18 base (role_status removed) + 6 prompt outputs
-        assert len(update) == 24
+        # 22 elements: 18 base + 4 prompt outputs (coding + verification)
+        assert len(update) == 22
         assert "already running" in update[2].get("value", "").lower()
         assert update[5].get("interactive") is True
         assert update[6].get("interactive") is False
 
-    def test_start_task_after_cancel_requests_server_cancel_and_continues(self, web_ui, git_repo, monkeypatch):
+    def test_start_task_after_cancel_requests_server_cancel_and_continues(self, gradio_ui, git_repo, monkeypatch):
         """Restart right after cancel should request server cancel and continue once inactive."""
-        session = web_ui.create_session("test")
+        session = gradio_ui.create_session("test")
         session.server_session_id = "server-session-1"
         session.cancel_requested = True
 
@@ -684,7 +908,7 @@ class TestChadWebUI:
                 return Mock(active=True)
             return Mock(active=False)
 
-        web_ui.api_client.get_session.side_effect = get_session_side_effect
+        gradio_ui.api_client.get_session.side_effect = get_session_side_effect
 
         started = {"value": False}
 
@@ -705,33 +929,33 @@ class TestChadWebUI:
                 "total_tool_calls": 0,
             }
 
-        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", fake_run_task_via_api)
 
         updates = list(
-            web_ui.start_chad_task(
+            gradio_ui.start_chad_task(
                 session.id,
                 str(git_repo),
                 "do something",
                 "claude",
-                verification_agent=web_ui.VERIFICATION_NONE,
+                verification_agent=gradio_ui.VERIFICATION_NONE,
             )
         )
 
         assert started["value"] is True
-        web_ui.api_client.cancel_session.assert_called_once_with("server-session-1")
+        gradio_ui.api_client.cancel_session.assert_called_once_with("server-session-1")
         assert all("already running" not in (u[2].get("value", "").lower()) for u in updates)
 
     def test_start_task_after_cancel_detaches_stale_server_session_when_cancel_wait_fails(
         self,
-        web_ui,
+        gradio_ui,
         git_repo,
         monkeypatch,
     ):
         """Restart after cancel should continue even if stale session still reports active."""
-        session = web_ui.create_session("test")
+        session = gradio_ui.create_session("test")
         session.server_session_id = "server-session-1"
         session.cancel_requested = True
-        web_ui.api_client.get_session.return_value = Mock(active=True)
+        gradio_ui.api_client.get_session.return_value = Mock(active=True)
 
         cancel_attempts = {"count": 0}
 
@@ -739,7 +963,7 @@ class TestChadWebUI:
             cancel_attempts["count"] += 1
             return False
 
-        monkeypatch.setattr(web_ui, "_request_server_cancel", fake_request_server_cancel)
+        monkeypatch.setattr(gradio_ui, "_request_server_cancel", fake_request_server_cancel)
 
         started = {"value": False}
 
@@ -760,15 +984,15 @@ class TestChadWebUI:
                 "total_tool_calls": 0,
             }
 
-        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", fake_run_task_via_api)
 
         updates = list(
-            web_ui.start_chad_task(
+            gradio_ui.start_chad_task(
                 session.id,
                 str(git_repo),
                 "do something",
                 "claude",
-                verification_agent=web_ui.VERIFICATION_NONE,
+                verification_agent=gradio_ui.VERIFICATION_NONE,
             )
         )
 
@@ -777,28 +1001,28 @@ class TestChadWebUI:
         assert session.server_session_id == "server-session-2"
         assert all("already running" not in (u[2].get("value", "").lower()) for u in updates)
 
-    def test_workspace_label_prefers_worktree_over_project(self, web_ui):
+    def test_workspace_label_prefers_worktree_over_project(self, gradio_ui):
         """Workspace label should show active worktree path when available."""
-        session = web_ui.create_session("workspace")
+        session = gradio_ui.create_session("workspace")
         session.project_path = "/repo"
         session.worktree_path = Path("/repo/.chad-worktrees/abcd1234")
 
-        label = web_ui._workspace_label(session)
+        label = gradio_ui._workspace_label(session)
 
         assert "Workspace:" in label
         assert "/repo/.chad-worktrees/abcd1234" in label
 
-    def test_workspace_html_escapes_label_and_sets_tooltip(self, web_ui):
+    def test_workspace_html_escapes_label_and_sets_tooltip(self, gradio_ui):
         """Workspace HTML should escape path text and include it in tooltip."""
-        session = web_ui.create_session("workspace-html")
+        session = gradio_ui.create_session("workspace-html")
         session.project_path = '/tmp/repo/<unsafe>"path'
 
-        html_output = web_ui._workspace_html(session)
+        html_output = gradio_ui._workspace_html(session)
 
         assert 'title="/tmp/repo/&lt;unsafe&gt;&quot;path"' in html_output
         assert "Workspace: /tmp/repo/&lt;unsafe&gt;&quot;path" in html_output
 
-    def test_cancel_preserves_live_stream(self, monkeypatch, web_ui, git_repo):
+    def test_cancel_preserves_live_stream(self, monkeypatch, gradio_ui, git_repo):
         """Cancelling should not clear the live output panel."""
 
         live_html = "<pre>MOCK LIVE OUTPUT</pre>"
@@ -813,9 +1037,9 @@ class TestChadWebUI:
             cancel_gate.wait(timeout=1.0)
             return False, "stopped", "server-session", None
 
-        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", fake_run_task_via_api)
 
-        session = web_ui.create_session("test")
+        session = gradio_ui.create_session("test")
         updates = []
 
         def trigger_cancel():
@@ -826,7 +1050,7 @@ class TestChadWebUI:
 
         threading.Thread(target=trigger_cancel, daemon=True).start()
 
-        for update in web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
+        for update in gradio_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
             updates.append(update)
 
         final_live_stream = updates[-1][0]  # live_stream is at index 0
@@ -835,7 +1059,7 @@ class TestChadWebUI:
             final_live_stream = final_live_stream.get("value", "")
         assert "MOCK LIVE OUTPUT" in final_live_stream
 
-    def test_cancel_preserves_plain_live_stream(self, monkeypatch, web_ui, git_repo):
+    def test_cancel_preserves_plain_live_stream(self, monkeypatch, gradio_ui, git_repo):
         """Cancelling should keep plain text live output when no HTML chunk is provided."""
 
         live_text = "MOCK LIVE OUTPUT FROM TEXT"
@@ -849,9 +1073,9 @@ class TestChadWebUI:
             cancel_gate.wait(timeout=1.0)
             return False, "stopped", "server-session", None
 
-        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", fake_run_task_via_api)
 
-        session = web_ui.create_session("test")
+        session = gradio_ui.create_session("test")
         updates = []
 
         def trigger_cancel():
@@ -862,7 +1086,7 @@ class TestChadWebUI:
 
         threading.Thread(target=trigger_cancel, daemon=True).start()
 
-        for update in web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
+        for update in gradio_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
             updates.append(update)
 
         final_live_stream = updates[-1][0]  # live_stream is at index 0
@@ -871,7 +1095,7 @@ class TestChadWebUI:
             final_live_stream = final_live_stream.get("value", "")
         assert "MOCK LIVE OUTPUT FROM TEXT" in final_live_stream
 
-    def test_cancel_enables_start_button_in_final_yield(self, monkeypatch, web_ui, git_repo):
+    def test_cancel_enables_start_button_in_final_yield(self, monkeypatch, gradio_ui, git_repo):
         """After cancel, start_task's final yield should enable start button and disable cancel."""
         cancel_gate = threading.Event()
 
@@ -881,9 +1105,9 @@ class TestChadWebUI:
             cancel_gate.wait(timeout=1.0)
             return False, "cancelled", "server-session"
 
-        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", fake_run_task_via_api)
 
-        session = web_ui.create_session("test")
+        session = gradio_ui.create_session("test")
         updates = []
 
         def trigger_cancel():
@@ -893,7 +1117,7 @@ class TestChadWebUI:
 
         threading.Thread(target=trigger_cancel, daemon=True).start()
 
-        for update in web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
+        for update in gradio_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
             updates.append(update)
 
         # Final yield's button states (indices: 5=start_btn, 6=cancel_btn)
@@ -913,7 +1137,7 @@ class TestChadWebUI:
         assert start_interactive is True, f"Start button should be enabled after cancel, got {start_btn_update}"
         assert cancel_interactive is False, f"Cancel button should be disabled after cancel, got {cancel_btn_update}"
 
-    def test_progress_emission_preserves_live_stream(self, monkeypatch, web_ui, git_repo):
+    def test_progress_emission_preserves_live_stream(self, monkeypatch, gradio_ui, git_repo):
         """Progress detection should not clear the live output panel.
 
         Regression test: Previously, emitting a progress update would yield ""
@@ -939,12 +1163,12 @@ class TestChadWebUI:
             stream_complete.set()
             return True, "completed", "server-session", None
 
-        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", fake_run_task_via_api)
 
-        session = web_ui.create_session("test")
+        session = gradio_ui.create_session("test")
         updates = []
 
-        for update in web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
+        for update in gradio_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"):
             updates.append(update)
 
         # After progress emission, live stream should not be empty
@@ -968,28 +1192,24 @@ class TestChadWebUI:
         )]
         assert len(content_updates) > 0, f"Live stream should have content during streaming. Got updates: {progress_updates[:5]}"
 
-    def test_coding_milestone_inserted_on_phase2_status(self, monkeypatch, web_ui, git_repo):
-        """Coding milestone appears when Phase 2 status is received, even without progress JSON."""
+    def test_coding_milestone_inserted_at_start(self, monkeypatch, gradio_ui, git_repo):
+        """Coding milestone appears at the start of a task, before any streaming."""
 
         def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
             message_queue.put(("ai_switch", "CODING AI"))
             message_queue.put(("message_start", "CODING AI"))
-            message_queue.put(("stream", "exploring...\n"))
-            # Phase 2 status triggers the Coding milestone
-            message_queue.put(("status", "Phase 2: Implementing changes..."))
-            time.sleep(0.02)
-            message_queue.put(("stream", "implementing...\n"))
+            message_queue.put(("stream", "working...\n"))
             message_queue.put(("message_complete", "CODING AI", "Task done"))
             return True, "completed", "server-session", None
 
-        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", fake_run_task_via_api)
 
-        session = web_ui.create_session("test")
-        updates = list(web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+        session = gradio_ui.create_session("test")
+        updates = list(gradio_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
 
         # Collect all chat history snapshots
         all_histories = [u[1] for u in updates if isinstance(u[1], list)]
-        # The final chat history should contain a Coding milestone
+        # The final chat history should contain exactly one Coding milestone
         final_history = all_histories[-1] if all_histories else []
         coding_milestones = [
             msg for msg in final_history
@@ -1000,17 +1220,15 @@ class TestChadWebUI:
             f"History contents: {[m.get('content', '')[:60] for m in final_history if isinstance(m, dict)]}"
         )
 
-    def test_coding_milestone_not_duplicated_with_progress_json(self, monkeypatch, web_ui, git_repo):
-        """Coding milestone is not duplicated when both Phase 2 status and progress JSON appear."""
+    def test_coding_milestone_not_duplicated_with_progress_json(self, monkeypatch, gradio_ui, git_repo):
+        """Coding milestone is not duplicated when progress JSON appears in stream."""
 
         def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
             message_queue.put(("ai_switch", "CODING AI"))
             message_queue.put(("message_start", "CODING AI"))
             message_queue.put(("stream", "exploring...\n"))
-            # Phase 2 status first
-            message_queue.put(("status", "Phase 2: Implementing changes..."))
             time.sleep(0.02)
-            # Then progress JSON
+            # Progress JSON in stream
             progress_json = '{"type": "progress", "summary": "Found bug", "location": "x.py:1", "next_step": "Fix"}'
             message_queue.put(("stream", progress_json))
             time.sleep(0.02)
@@ -1018,10 +1236,10 @@ class TestChadWebUI:
             message_queue.put(("message_complete", "CODING AI", "Task done"))
             return True, "completed", "server-session", None
 
-        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", fake_run_task_via_api)
 
-        session = web_ui.create_session("test")
-        updates = list(web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+        session = gradio_ui.create_session("test")
+        updates = list(gradio_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
 
         all_histories = [u[1] for u in updates if isinstance(u[1], list)]
         final_history = all_histories[-1] if all_histories else []
@@ -1033,8 +1251,8 @@ class TestChadWebUI:
             f"Expected exactly 1 Coding milestone even with progress JSON, found {len(coding_milestones)}"
         )
 
-    def test_structured_progress_renders_before_coding_milestone(self, monkeypatch, web_ui, git_repo):
-        """Structured progress events should appear before the coding phase milestone."""
+    def test_structured_progress_renders_after_coding_milestone(self, monkeypatch, gradio_ui, git_repo):
+        """Structured progress events should appear after the initial coding milestone."""
         from chad.util.prompts import ProgressUpdate
 
         def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
@@ -1042,14 +1260,11 @@ class TestChadWebUI:
             message_queue.put(("message_start", "CODING AI"))
             message_queue.put(("stream", "exploring...\n"))
             time.sleep(0.02)
-            # TaskExecutor emits structured progress before Phase 2 status.
             message_queue.put(("progress", ProgressUpdate(
                 summary="Found bug",
                 location="x.py:1",
                 next_step="Fix",
             )))
-            time.sleep(0.02)
-            message_queue.put(("status", "Phase 2: Implementing changes..."))
             time.sleep(0.02)
             # Delayed echoed JSON should not create a second progress bubble.
             message_queue.put((
@@ -1061,10 +1276,10 @@ class TestChadWebUI:
             message_queue.put(("message_complete", "CODING AI", "Task done"))
             return True, "completed", "server-session", None
 
-        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", fake_run_task_via_api)
 
-        session = web_ui.create_session("test")
-        updates = list(web_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+        session = gradio_ui.create_session("test")
+        updates = list(gradio_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
 
         all_histories = [u[1] for u in updates if isinstance(u[1], list)]
         final_history = all_histories[-1] if all_histories else []
@@ -1086,10 +1301,164 @@ class TestChadWebUI:
             f"Expected exactly one coding milestone, got {len(coding_indices)} "
             f"with history: {[m.get('content', '')[:80] for m in final_history if isinstance(m, dict)]}"
         )
-        assert progress_indices[0] < coding_indices[0], (
-            "Progress bubble should be shown before the Coding milestone when structured progress "
-            "arrives first"
+        assert coding_indices[0] < progress_indices[0], (
+            "Coding milestone should appear first since it is inserted at task start"
         )
+
+    def test_exploration_milestones_appear_in_chat_history(self, monkeypatch, gradio_ui, git_repo):
+        """Server-side exploration milestones should appear as Discovery chat bubbles."""
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", "exploring...\n"))
+            time.sleep(0.02)
+            # Server-side milestones flow through SSE as ("milestone", type, title, summary)
+            message_queue.put(("milestone", "exploration", "Discovery", "Found auth logic in src/auth.py"))
+            message_queue.put(("milestone", "exploration", "Discovery", "Config is loaded from ~/.app/config"))
+            time.sleep(0.02)
+            message_queue.put(("stream", "implementing...\n"))
+            message_queue.put(("message_complete", "CODING AI", "Task done"))
+            return True, "completed", "server-session", None
+
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = gradio_ui.create_session("test")
+        updates = list(gradio_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+
+        all_histories = [u[1] for u in updates if isinstance(u[1], list)]
+        final_history = all_histories[-1] if all_histories else []
+
+        discovery_msgs = [
+            msg for msg in final_history
+            if isinstance(msg, dict) and "**Discovery:**" in msg.get("content", "")
+        ]
+        assert len(discovery_msgs) == 2, (
+            f"Expected 2 discovery milestones, found {len(discovery_msgs)}. "
+            f"History: {[m.get('content', '')[:60] for m in final_history if isinstance(m, dict)]}"
+        )
+        assert "src/auth.py" in discovery_msgs[0]["content"]
+        assert "config" in discovery_msgs[1]["content"].lower()
+
+    def test_session_limit_milestone_appears_in_chat_history(self, monkeypatch, gradio_ui, git_repo):
+        """Session limit milestones should appear as Session Limit chat bubbles and improve failure message."""
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", "working on task...\n"))
+            time.sleep(0.02)
+            message_queue.put(("milestone", "session_limit_reached", "Session Limit", "Session limit reached - resets 4pm (Australia/Melbourne)"))
+            time.sleep(0.02)
+            message_queue.put(("status", "❌ Agent exited with code 1"))
+            message_queue.put(("message_complete", "CODING AI", "partial output"))
+            return False, "Agent exited with code 1", "server-session", None
+
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = gradio_ui.create_session("test")
+        updates = list(gradio_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+
+        all_histories = [u[1] for u in updates if isinstance(u[1], list)]
+        final_history = all_histories[-1] if all_histories else []
+
+        # Check session limit milestone appeared
+        limit_msgs = [
+            msg for msg in final_history
+            if isinstance(msg, dict) and "**Session Limit:**" in msg.get("content", "")
+        ]
+        assert len(limit_msgs) == 1, (
+            f"Expected 1 session limit milestone, found {len(limit_msgs)}. "
+            f"History: {[m.get('content', '')[:80] for m in final_history if isinstance(m, dict)]}"
+        )
+        assert "resets 4pm" in limit_msgs[0]["content"]
+
+        # Check failure message is specific (not generic)
+        failure_msgs = [
+            msg for msg in final_history
+            if isinstance(msg, dict) and "SESSION LIMIT" in msg.get("content", "")
+        ]
+        assert len(failure_msgs) == 1, (
+            f"Expected session limit failure banner, found {len(failure_msgs)}. "
+            f"History: {[m.get('content', '')[:80] for m in final_history if isinstance(m, dict)]}"
+        )
+
+    def test_session_limit_replaces_generic_revision_failure(self, monkeypatch, gradio_ui, git_repo):
+        """When a revision fails due to session limit, the failure message should be specific."""
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("stream", "working...\n"))
+            # Emit session limit milestone
+            message_queue.put(("milestone", "session_limit_reached", "Session Limit", "Session limit reached - resets 4pm (Australia/Melbourne)"))
+            message_queue.put(("message_complete", "CODING AI", "partial output"))
+            return False, "Agent exited with code 1", "server-session", None
+
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = gradio_ui.create_session("test")
+        list(gradio_ui.start_chad_task(session.id, str(git_repo), "do something", "claude"))
+
+        # After the task, session should have the limit summary stored
+        assert session.session_limit_summary is not None
+        assert "resets 4pm" in session.session_limit_summary
+
+    def test_session_limit_summary_reset_between_tasks(self, monkeypatch, gradio_ui, git_repo):
+        """session_limit_summary should be reset at start of each new task."""
+        session = gradio_ui.create_session("test")
+        session.session_limit_summary = "old limit"
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("message_complete", "CODING AI", "done"))
+            return True, "completed", "server-session", None
+
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", fake_run_task_via_api)
+        list(gradio_ui.start_chad_task(session.id, str(git_repo), "new task", "claude"))
+
+        assert session.session_limit_summary is None
+
+    def test_resolve_override_prompt_ignores_stale_generated_prompt(self, gradio_ui, git_repo):
+        """Generated prompt text from a previous task should not become an override."""
+        from chad.util.prompts import build_prompt
+
+        project_path = str(git_repo)
+        old_task = "Investigate Mistral startup behavior"
+        new_task = "Raise verification bar for second attempt"
+
+        stale_prompt = build_prompt(old_task, gradio_ui._read_project_docs(git_repo), project_path)
+
+        override = gradio_ui._resolve_override_prompt(
+            project_path=project_path,
+            task_description=new_task,
+            coding_prompt_value=stale_prompt,
+        )
+
+        assert override is None
+
+    def test_resolve_override_prompt_keeps_user_template_edits(self, gradio_ui, git_repo):
+        """Manual prompt edits should still be sent as override for the new task."""
+        from chad.util.prompts import build_prompt_previews
+
+        project_path = str(git_repo)
+        task = "Improve verification structure"
+        edited_template = build_prompt_previews(project_path).coding.replace(
+            "## Instructions",
+            "## Instructions\n- Add a dedicated section called Root Cause Analysis.",
+        )
+
+        override = gradio_ui._resolve_override_prompt(
+            project_path=project_path,
+            task_description=task,
+            coding_prompt_value=edited_template,
+        )
+
+        assert override is not None
+        assert "{task}" not in override
+        assert task in override
+        assert "Root Cause Analysis" in override
 
 
 class TestClaudeJsonParsingIntegration:
@@ -1105,14 +1474,14 @@ class TestClaudeJsonParsingIntegration:
         return client
 
     @pytest.fixture
-    def web_ui(self, mock_api_client):
+    def gradio_ui(self, mock_api_client):
         """Create a ChadWebUI instance with mocked dependencies."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         ui = ChadWebUI(mock_api_client)
         return ui
 
-    def test_run_task_parses_claude_json_for_anthropic_provider(self, web_ui, mock_api_client, git_repo):
+    def test_run_task_parses_claude_json_for_anthropic_provider(self, gradio_ui, mock_api_client, git_repo):
         """run_task_via_api should parse Claude stream-json output for anthropic accounts."""
         import base64
         import queue
@@ -1150,11 +1519,11 @@ class TestClaudeJsonParsingIntegration:
 
         mock_stream_client = Mock()
         mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
-        web_ui._stream_client = mock_stream_client
+        gradio_ui._stream_client = mock_stream_client
 
         # Run the task
         message_queue = queue.Queue()
-        success, output, _, _ = web_ui.run_task_via_api(
+        success, output, _, _ = gradio_ui.run_task_via_api(
             session_id="test",
             project_path=str(git_repo),
             task_description="test task",
@@ -1177,7 +1546,7 @@ class TestClaudeJsonParsingIntegration:
         assert '{"type":"system"' not in combined, "Raw JSON should not appear"
         assert '{"type":"result"' not in combined, "Result events should be filtered"
 
-    def test_run_task_parses_gemini_json_for_gemini_provider(self, web_ui, mock_api_client, git_repo):
+    def test_run_task_parses_gemini_json_for_gemini_provider(self, gradio_ui, mock_api_client, git_repo):
         """run_task_via_api should parse Gemini stream-json output for gemini accounts."""
         import base64
         import queue
@@ -1208,10 +1577,10 @@ class TestClaudeJsonParsingIntegration:
 
         mock_stream_client = Mock()
         mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
-        web_ui._stream_client = mock_stream_client
+        gradio_ui._stream_client = mock_stream_client
 
         message_queue = queue.Queue()
-        success, output, _, _ = web_ui.run_task_via_api(
+        success, output, _, _ = gradio_ui.run_task_via_api(
             session_id="test",
             project_path=str(git_repo),
             task_description="test task",
@@ -1231,7 +1600,7 @@ class TestClaudeJsonParsingIntegration:
         assert '{"type":"message"' not in combined
         assert '{"type":"result"' not in combined
 
-    def test_run_task_emits_progress_messages_from_structured_events(self, web_ui, mock_api_client, git_repo):
+    def test_run_task_emits_progress_messages_from_structured_events(self, gradio_ui, mock_api_client, git_repo):
         """run_task_via_api should convert structured progress events into queue progress messages."""
         import queue
         from unittest.mock import Mock
@@ -1251,7 +1620,7 @@ class TestClaudeJsonParsingIntegration:
         progress_event.data = {
             "type": "progress",
             "summary": "Found workspace CSS issue",
-            "location": "src/chad/ui/gradio/web_ui.py:1066",
+            "location": "src/chad/ui/gradio/gradio_ui.py:1066",
             "next_step": "Apply CSS fix",
         }
 
@@ -1265,10 +1634,10 @@ class TestClaudeJsonParsingIntegration:
 
         mock_stream_client = Mock()
         mock_stream_client.stream_events.return_value = iter([progress_event, status_event, complete_event])
-        web_ui._stream_client = mock_stream_client
+        gradio_ui._stream_client = mock_stream_client
 
         message_queue = queue.Queue()
-        success, output, _, _ = web_ui.run_task_via_api(
+        success, output, _, _ = gradio_ui.run_task_via_api(
             session_id="test",
             project_path=str(git_repo),
             task_description="test task",
@@ -1289,10 +1658,10 @@ class TestClaudeJsonParsingIntegration:
         progress_payload = progress_messages[0][1]
         assert isinstance(progress_payload, ProgressUpdate)
         assert progress_payload.summary == "Found workspace CSS issue"
-        assert progress_payload.location == "src/chad/ui/gradio/web_ui.py:1066"
+        assert progress_payload.location == "src/chad/ui/gradio/gradio_ui.py:1066"
         assert progress_payload.next_step == "Apply CSS fix"
 
-    def test_run_task_passes_through_raw_for_non_anthropic(self, web_ui, mock_api_client, git_repo):
+    def test_run_task_passes_through_raw_for_non_anthropic(self, gradio_ui, mock_api_client, git_repo):
         """run_task_via_api should pass through raw output for non-anthropic providers."""
         import base64
         import queue
@@ -1323,11 +1692,11 @@ class TestClaudeJsonParsingIntegration:
 
         mock_stream_client = Mock()
         mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
-        web_ui._stream_client = mock_stream_client
+        gradio_ui._stream_client = mock_stream_client
 
         # Run the task
         message_queue = queue.Queue()
-        success, output, _, _ = web_ui.run_task_via_api(
+        success, output, _, _ = gradio_ui.run_task_via_api(
             session_id="test",
             project_path=str(git_repo),
             task_description="test task",
@@ -1347,7 +1716,7 @@ class TestClaudeJsonParsingIntegration:
         assert "Working on task" in combined
         assert "Done!" in combined
 
-    def test_codex_prompt_echo_keeps_content_before_user_marker(self, web_ui, mock_api_client, git_repo):
+    def test_codex_prompt_echo_keeps_content_before_user_marker(self, gradio_ui, mock_api_client, git_repo):
         """Codex filter should keep content BEFORE '-------- user' marker."""
         import base64
         import queue
@@ -1378,11 +1747,11 @@ class TestClaudeJsonParsingIntegration:
 
         mock_stream_client = Mock()
         mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
-        web_ui._stream_client = mock_stream_client
+        gradio_ui._stream_client = mock_stream_client
 
         # Run the task
         message_queue = queue.Queue()
-        success, output, _, _ = web_ui.run_task_via_api(
+        success, output, _, _ = gradio_ui.run_task_via_api(
             session_id="test",
             project_path=str(git_repo),
             task_description="test task",
@@ -1407,7 +1776,7 @@ class TestClaudeJsonParsingIntegration:
         assert "Actual agent output" in combined
         assert "Done!" in combined
 
-    def test_codex_prompt_echo_filtered_after_phase_restart(self, web_ui, mock_api_client, git_repo):
+    def test_codex_prompt_echo_filtered_after_phase_restart(self, gradio_ui, mock_api_client, git_repo):
         """Codex prompt echo filtering should restart for implementation phase output."""
         import base64
         import queue
@@ -1447,10 +1816,10 @@ class TestClaudeJsonParsingIntegration:
 
         mock_stream_client = Mock()
         mock_stream_client.stream_events.return_value = iter([phase_one_event, phase_two_event, complete_event])
-        web_ui._stream_client = mock_stream_client
+        gradio_ui._stream_client = mock_stream_client
 
         message_queue = queue.Queue()
-        success, output, _, _ = web_ui.run_task_via_api(
+        success, output, _, _ = gradio_ui.run_task_via_api(
             session_id="test",
             project_path=str(git_repo),
             task_description="test task",
@@ -1465,7 +1834,7 @@ class TestClaudeJsonParsingIntegration:
         assert "Implementation output kept" in output
         assert "Done!" in output
 
-    def test_long_codex_output_fully_captured(self, web_ui, mock_api_client, git_repo):
+    def test_long_codex_output_fully_captured(self, gradio_ui, mock_api_client, git_repo):
         """Long Codex output should be fully captured in final_output, not just last screenful."""
         import base64
         import queue
@@ -1496,10 +1865,10 @@ class TestClaudeJsonParsingIntegration:
 
         mock_stream_client = Mock()
         mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
-        web_ui._stream_client = mock_stream_client
+        gradio_ui._stream_client = mock_stream_client
 
         message_queue = queue.Queue()
-        success, output, _, _ = web_ui.run_task_via_api(
+        success, output, _, _ = gradio_ui.run_task_via_api(
             session_id="test",
             project_path=str(git_repo),
             task_description="test task",
@@ -1513,7 +1882,7 @@ class TestClaudeJsonParsingIntegration:
         assert "Agent output line 100" in output
         assert "Agent output line 199" in output
 
-    def test_codex_output_buffer_flushed_on_completion(self, web_ui, mock_api_client, git_repo):
+    def test_codex_output_buffer_flushed_on_completion(self, gradio_ui, mock_api_client, git_repo):
         """Codex output buffer should be flushed when stream completes, even without mcp marker."""
         import base64
         import queue
@@ -1542,10 +1911,10 @@ class TestClaudeJsonParsingIntegration:
 
         mock_stream_client = Mock()
         mock_stream_client.stream_events.return_value = iter([mock_stream_event, mock_complete_event])
-        web_ui._stream_client = mock_stream_client
+        gradio_ui._stream_client = mock_stream_client
 
         message_queue = queue.Queue()
-        success, output, _, _ = web_ui.run_task_via_api(
+        success, output, _, _ = gradio_ui.run_task_via_api(
             session_id="test",
             project_path=str(git_repo),
             task_description="test task",
@@ -1557,7 +1926,7 @@ class TestClaudeJsonParsingIntegration:
         # The buffered content should be flushed and included in final output
         assert "Important content here" in output
 
-    def test_run_task_forwards_phase_status_and_strips_ansi(self, web_ui, mock_api_client, git_repo):
+    def test_run_task_forwards_phase_status_and_strips_ansi(self, gradio_ui, mock_api_client, git_repo):
         """Structured status events should reach UI and final output should be ANSI-clean."""
         import base64
         import queue
@@ -1588,10 +1957,10 @@ class TestClaudeJsonParsingIntegration:
 
         mock_stream_client = Mock()
         mock_stream_client.stream_events.return_value = iter([terminal_event, phase_event, complete_event])
-        web_ui._stream_client = mock_stream_client
+        gradio_ui._stream_client = mock_stream_client
 
         message_queue = queue.Queue()
-        success, output, _, _ = web_ui.run_task_via_api(
+        success, output, _, _ = gradio_ui.run_task_via_api(
             session_id="test",
             project_path=str(git_repo),
             task_description="test task",
@@ -1610,8 +1979,8 @@ class TestClaudeJsonParsingIntegration:
         assert "Mock Agent v1.0" in output
         assert "\x1b" not in output
 
-    def test_run_task_emits_separate_exploration_and_coding_messages(self, web_ui, mock_api_client, git_repo):
-        """Phase 2 transition should close exploration bubble and start a coding bubble."""
+    def test_run_task_emits_single_coding_message(self, gradio_ui, mock_api_client, git_repo):
+        """Combined coding phase should emit a single message_complete event."""
         import base64
         import queue
         from unittest.mock import Mock
@@ -1622,23 +1991,14 @@ class TestClaudeJsonParsingIntegration:
         ]
 
         mock_session = Mock()
-        mock_session.id = "server-sess-phase-split"
+        mock_session.id = "server-sess-combined"
         mock_api_client.create_session.return_value = mock_session
 
-        exploration = b"Prompt: Exploration\nExploring files...\n"
-        implementation = b"Prompt: Implementation\nApplying fix...\n"
+        coding_output = b"Exploring files...\nApplying fix...\n"
 
-        exploration_event = Mock()
-        exploration_event.event_type = "terminal"
-        exploration_event.data = {"data": base64.b64encode(exploration).decode()}
-
-        phase_event = Mock()
-        phase_event.event_type = "event"
-        phase_event.data = {"type": "status", "status": "Phase 2: Implementing changes..."}
-
-        implementation_event = Mock()
-        implementation_event.event_type = "terminal"
-        implementation_event.data = {"data": base64.b64encode(implementation).decode()}
+        terminal_event = Mock()
+        terminal_event.event_type = "terminal"
+        terminal_event.data = {"data": base64.b64encode(coding_output).decode()}
 
         complete_event = Mock()
         complete_event.event_type = "complete"
@@ -1646,12 +2006,12 @@ class TestClaudeJsonParsingIntegration:
 
         mock_stream_client = Mock()
         mock_stream_client.stream_events.return_value = iter(
-            [exploration_event, phase_event, implementation_event, complete_event]
+            [terminal_event, complete_event]
         )
-        web_ui._stream_client = mock_stream_client
+        gradio_ui._stream_client = mock_stream_client
 
         message_queue = queue.Queue()
-        success, output, _, _ = web_ui.run_task_via_api(
+        success, output, _, _ = gradio_ui.run_task_via_api(
             session_id="test",
             project_path=str(git_repo),
             task_description="test task",
@@ -1660,8 +2020,7 @@ class TestClaudeJsonParsingIntegration:
         )
 
         assert success
-        assert "Prompt: Exploration" in output
-        assert "Prompt: Implementation" in output
+        assert "Exploring files" in output
 
         completes = []
         while not message_queue.empty():
@@ -1669,11 +2028,243 @@ class TestClaudeJsonParsingIntegration:
             if msg[0] == "message_complete":
                 completes.append(msg[2])
 
-        assert len(completes) == 2
-        assert "Prompt: Exploration" in completes[0]
-        assert "Prompt: Implementation" in completes[1]
+        # Combined model: single message_complete event
+        assert len(completes) == 1
+        assert "Exploring files" in completes[0]
 
-    def test_run_task_reused_session_streams_only_new_events(self, web_ui, mock_api_client, git_repo):
+    def test_run_task_emits_milestone_events_from_api(self, gradio_ui, mock_api_client, git_repo):
+        """Milestones should be polled from the dedicated API endpoint."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="mock-coding", provider="mock", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-milestone"
+        mock_api_client.create_session.return_value = mock_session
+        mock_api_client.get_milestones.side_effect = [
+            [
+                {
+                    "seq": 1,
+                    "milestone_type": "exploration",
+                    "title": "Discovery",
+                    "summary": "Found the bug in main.py",
+                }
+            ],
+            [],
+        ]
+
+        terminal_event = Mock()
+        terminal_event.event_type = "terminal"
+        terminal_event.data = {"data": base64.b64encode(b"working...\n").decode()}
+
+        complete_event = Mock()
+        complete_event.event_type = "complete"
+        complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter(
+            [terminal_event, complete_event]
+        )
+        gradio_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = gradio_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="mock-coding",
+            message_queue=message_queue,
+        )
+
+        assert success
+
+        milestones = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "milestone":
+                milestones.append(msg)
+
+        assert len(milestones) == 1
+        assert milestones[0][1] == "exploration"
+        assert milestones[0][2] == "Discovery"
+        assert milestones[0][3] == "Found the bug in main.py"
+        assert mock_api_client.get_milestones.call_count >= 1
+
+    def test_run_task_switches_to_verification_parser_for_qwen(self, gradio_ui, mock_api_client, git_repo):
+        """Verification phase should parse Qwen stream-json even when coding provider differs."""
+        import base64
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="codex", provider="openai", model=None, reasoning=None, role="CODING", ready=True),
+            Account(name="qwen-verifier", provider="qwen", model=None, reasoning=None, role="VERIFICATION", ready=True),
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-verify-qwen"
+        mock_api_client.create_session.return_value = mock_session
+        mock_api_client.get_milestones.side_effect = [
+            [
+                {
+                    "seq": 1,
+                    "milestone_type": "verification_started",
+                    "title": "Verification",
+                    "summary": "Attempt 1",
+                }
+            ],
+            [],
+        ]
+
+        qwen_json_lines = (
+            b'{"type":"system","subtype":"init","session_id":"abc"}\n'
+            b'{"type":"assistant","message":{"content":[{"type":"text","text":"Verification phase output"}]}}\n'
+        )
+
+        terminal_event = Mock()
+        terminal_event.event_type = "terminal"
+        terminal_event.data = {"data": base64.b64encode(qwen_json_lines).decode()}
+
+        complete_event = Mock()
+        complete_event.event_type = "complete"
+        complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([terminal_event, complete_event])
+        gradio_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, output, _, _ = gradio_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="codex",
+            verification_account="qwen-verifier",
+            message_queue=message_queue,
+        )
+
+        assert success is True
+        combined_stream = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "stream":
+                combined_stream.append(msg[1])
+
+        rendered = "\n".join(combined_stream)
+        assert "Verification phase output" in rendered
+        assert '{"type":"system"' not in rendered
+        assert '{"type":"assistant"' not in rendered
+
+    def test_run_task_emits_ai_switch_for_verification_milestone(self, gradio_ui, mock_api_client, git_repo):
+        """verification_started milestone should emit ai_switch so live header updates immediately."""
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="codex", provider="openai", model=None, reasoning=None, role="CODING", ready=True),
+            Account(name="qwen-verifier", provider="qwen", model=None, reasoning=None, role="VERIFICATION", ready=True),
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-ai-switch"
+        mock_api_client.create_session.return_value = mock_session
+        mock_api_client.get_milestones.side_effect = [
+            [
+                {
+                    "seq": 1,
+                    "milestone_type": "verification_started",
+                    "title": "Verification",
+                    "summary": "Attempt 1",
+                }
+            ],
+            [],
+        ]
+
+        complete_event = Mock()
+        complete_event.event_type = "complete"
+        complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([complete_event])
+        gradio_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, _, _, _ = gradio_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="codex",
+            verification_account="qwen-verifier",
+            message_queue=message_queue,
+        )
+
+        assert success is True
+        switches = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "ai_switch":
+                switches.append(msg[1])
+
+        assert "VERIFICATION AI" in switches
+
+    def test_run_task_ignores_milestone_events_from_sse(self, gradio_ui, mock_api_client, git_repo):
+        """SSE milestone events should be ignored in favor of the dedicated endpoint."""
+        import queue
+        from unittest.mock import Mock
+        from chad.ui.client.api_client import Account
+
+        mock_api_client.list_accounts.return_value = [
+            Account(name="mock-coding", provider="mock", model=None, reasoning=None, role="CODING", ready=True)
+        ]
+
+        mock_session = Mock()
+        mock_session.id = "server-sess-milestone"
+        mock_api_client.create_session.return_value = mock_session
+        mock_api_client.get_milestones.return_value = []
+
+        milestone_event = Mock()
+        milestone_event.event_type = "event"
+        milestone_event.data = {
+            "type": "milestone",
+            "milestone_type": "exploration",
+            "title": "Discovery",
+            "summary": "Should be ignored",
+        }
+
+        complete_event = Mock()
+        complete_event.event_type = "complete"
+        complete_event.data = {"exit_code": 0}
+
+        mock_stream_client = Mock()
+        mock_stream_client.stream_events.return_value = iter([milestone_event, complete_event])
+        gradio_ui._stream_client = mock_stream_client
+
+        message_queue = queue.Queue()
+        success, _, _, _ = gradio_ui.run_task_via_api(
+            session_id="test",
+            project_path=str(git_repo),
+            task_description="test task",
+            coding_account="mock-coding",
+            message_queue=message_queue,
+        )
+
+        assert success
+        milestones = []
+        while not message_queue.empty():
+            msg = message_queue.get()
+            if msg[0] == "milestone":
+                milestones.append(msg)
+
+        assert milestones == []
+
+    def test_run_task_reused_session_streams_only_new_events(self, gradio_ui, mock_api_client, git_repo):
         """Reused server sessions should stream from latest sequence, not from the beginning."""
         import base64
         import queue
@@ -1704,10 +2295,10 @@ class TestClaudeJsonParsingIntegration:
 
         mock_stream_client = Mock()
         mock_stream_client.stream_events.side_effect = stream_events
-        web_ui._stream_client = mock_stream_client
+        gradio_ui._stream_client = mock_stream_client
 
         message_queue = queue.Queue()
-        success, output, _, _ = web_ui.run_task_via_api(
+        success, output, _, _ = gradio_ui.run_task_via_api(
             session_id="test",
             project_path=str(git_repo),
             task_description="test task",
@@ -1726,16 +2317,77 @@ class TestLiveStreamPresentation:
 
     def test_live_stream_spacing_removes_all_blank_lines(self):
         """Live stream should remove all blank lines for compact display."""
-        from chad.ui.gradio import web_ui
+        from chad.ui.gradio import gradio_ui
 
         raw = "first line\n\n\nsecond block\n\n\n\nthird"
-        normalized = web_ui.normalize_live_stream_spacing(raw)
+        normalized = gradio_ui.normalize_live_stream_spacing(raw)
 
         assert normalized == "first line\nsecond block\nthird"
-        rendered = web_ui.build_live_stream_html(raw, "AI")
+        rendered = gradio_ui.build_live_stream_html(raw, "AI")
 
         assert "first line\nsecond block\nthird" in rendered
         assert "\n\n" not in rendered
+
+
+class TestVerificationApiForwarding:
+    """Ensure start_chad_task runs verification through API execution path."""
+
+    @pytest.fixture
+    def mock_api_client(self):
+        """Create a mock API client."""
+        client = Mock()
+        claude_account = MockAccount(name="claude", provider="anthropic", role="CODING")
+        qwen_account = MockAccount(name="qwen-verifier", provider="qwen", role="VERIFICATION")
+        client.list_accounts.return_value = [claude_account, qwen_account]
+        client.get_account.side_effect = lambda name: {
+            "claude": claude_account,
+            "qwen-verifier": qwen_account,
+        }.get(name, Mock(name=name, provider="unknown", model="default", reasoning="default", role=None))
+        client.get_verification_agent.return_value = None
+        client.get_milestones.return_value = []
+        client.get_preferences.return_value = Mock(last_project_path=None, ui_mode="gradio")
+        client.get_cleanup_settings.return_value = Mock(retention_days=7, auto_cleanup=True)
+        return client
+
+    @pytest.fixture
+    def gradio_ui(self, mock_api_client, monkeypatch, tmp_path):
+        """Create a ChadWebUI instance with mocked dependencies."""
+        from chad.ui.gradio.gradio_ui import ChadWebUI
+
+        monkeypatch.setenv("CHAD_CONFIG", str(tmp_path / "test_chad.conf"))
+        ui = ChadWebUI(mock_api_client)
+        ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/codex"))
+        return ui
+
+    def test_start_task_forwards_verification_settings_to_api_run(self, monkeypatch, gradio_ui, git_repo):
+        """Regression: verification config must be passed to run_task_via_api."""
+        captured_kwargs = {}
+
+        def fake_run_task_via_api(session_id, project_path, task_description, coding_account, message_queue, **kwargs):
+            captured_kwargs.update(kwargs)
+            message_queue.put(("ai_switch", "CODING AI"))
+            message_queue.put(("message_start", "CODING AI"))
+            message_queue.put(("message_complete", "CODING AI", "Done"))
+            return True, "Done", "server-session", None
+
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", fake_run_task_via_api)
+
+        session = gradio_ui.create_session("verification-forwarding")
+        list(
+            gradio_ui.start_chad_task(
+                session.id,
+                str(git_repo),
+                "do something",
+                "claude",
+                verification_agent="qwen-verifier",
+                verification_model="qwen3-coder",
+                verification_reasoning="high",
+            )
+        )
+
+        assert captured_kwargs.get("verification_account") == "qwen-verifier"
+        assert captured_kwargs.get("verification_model") == "qwen3-coder"
+        assert captured_kwargs.get("verification_reasoning") == "high"
 
 
 class TestLiveStreamSearch:
@@ -1743,9 +2395,9 @@ class TestLiveStreamSearch:
 
     def test_live_stream_html_contains_search_bar(self):
         """build_live_stream_html should include search input in header."""
-        from chad.ui.gradio import web_ui
+        from chad.ui.gradio import gradio_ui
 
-        rendered = web_ui.build_live_stream_html("some content", "AI")
+        rendered = gradio_ui.build_live_stream_html("some content", "AI")
         assert 'class="live-search-input"' in rendered
         assert 'class="live-search-bar"' in rendered
         assert 'class="live-search-count"' in rendered
@@ -1754,9 +2406,9 @@ class TestLiveStreamSearch:
 
     def test_live_stream_pyte_contains_search_bar(self):
         """build_live_stream_html_from_pyte should include search input in header."""
-        from chad.ui.gradio import web_ui
+        from chad.ui.gradio import gradio_ui
 
-        rendered = web_ui.build_live_stream_html_from_pyte("<p>content</p>", "AI")
+        rendered = gradio_ui.build_live_stream_html_from_pyte("<p>content</p>", "AI")
         assert 'class="live-search-input"' in rendered
         assert 'class="live-search-bar"' in rendered
         assert 'class="live-search-count"' in rendered
@@ -1764,9 +2416,9 @@ class TestLiveStreamSearch:
 
     def test_search_bar_inside_header(self):
         """Search bar should be inside the live-output-header div."""
-        from chad.ui.gradio import web_ui
+        from chad.ui.gradio import gradio_ui
 
-        rendered = web_ui.build_live_stream_html("test", "AI")
+        rendered = gradio_ui.build_live_stream_html("test", "AI")
         # Header should contain the title and search bar
         assert 'class="live-header-title"' in rendered
         # Ensure the header still shows the AI name
@@ -1787,7 +2439,7 @@ class TestPortResolution:
 
     def test_resolve_port_keeps_requested_when_free(self):
         """Requested port should be used when it is available."""
-        from chad.ui.gradio.web_ui import _resolve_port
+        from chad.ui.gradio.gradio_ui import _resolve_port
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
@@ -1801,7 +2453,7 @@ class TestPortResolution:
 
     def test_resolve_port_returns_ephemeral_when_in_use(self):
         """If the requested port is busy, fall back to an ephemeral choice."""
-        from chad.ui.gradio.web_ui import _resolve_port
+        from chad.ui.gradio.gradio_ui import _resolve_port
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
@@ -1816,7 +2468,7 @@ class TestPortResolution:
 
     def test_resolve_port_supports_explicit_ephemeral(self):
         """Port zero should always yield an ephemeral assignment."""
-        from chad.ui.gradio.web_ui import _resolve_port
+        from chad.ui.gradio.gradio_ui import _resolve_port
 
         port, ephemeral, conflicted = _resolve_port(0)
 
@@ -1826,11 +2478,11 @@ class TestPortResolution:
 
     def test_live_stream_inline_code_is_color_only(self):
         """Inline code should be colored text without a background box."""
-        from chad.ui.gradio import web_ui
+        from chad.ui.gradio import gradio_ui
 
         code_css_match = re.search(
             r"#live-stream-box\s+code[^}]*\{([^}]*)\}",
-            web_ui.PROVIDER_PANEL_CSS,
+            gradio_ui.PROVIDER_PANEL_CSS,
         )
         assert code_css_match, "Expected live stream code style block"
 
@@ -1840,9 +2492,9 @@ class TestPortResolution:
 
     def test_live_stream_box_visibility_not_forced_globally(self):
         """Live stream box should not be forced visible in normal UI CSS."""
-        from chad.ui.gradio import web_ui
+        from chad.ui.gradio import gradio_ui
 
-        css = web_ui.PROVIDER_PANEL_CSS
+        css = gradio_ui.PROVIDER_PANEL_CSS
         start_idx = css.find("#live-stream-box")
         assert start_idx != -1, "Expected live stream box style block"
         brace_idx = css.find("{", start_idx)
@@ -1854,22 +2506,35 @@ class TestPortResolution:
         assert "visibility:" not in box_block
 
 
-def test_live_stream_display_buffer_keeps_all_content():
-    """Live stream display buffer should keep all content for infinite history."""
-    from chad.ui.gradio.web_ui import LiveStreamDisplayBuffer
+def test_live_stream_display_buffer_keeps_small_content():
+    """Live stream display buffer should keep content that fits within MAX_SIZE."""
+    from chad.ui.gradio.gradio_ui import LiveStreamDisplayBuffer
 
     buffer = LiveStreamDisplayBuffer()
     buffer.append("a" * 60)
     buffer.append("b" * 60)
 
-    # Should keep all content without truncation
+    # Should keep all content when below MAX_SIZE
     assert len(buffer.content) == 120
     assert buffer.content == ("a" * 60) + ("b" * 60)
 
 
+def test_live_stream_display_buffer_caps_size():
+    """Live stream display buffer should truncate old content when exceeding MAX_SIZE."""
+    from chad.ui.gradio.gradio_ui import LiveStreamDisplayBuffer
+
+    buffer = LiveStreamDisplayBuffer()
+    # Append more than MAX_SIZE chars
+    for i in range(6):
+        buffer.append("x" * 10000 + "\n")
+
+    # Should be bounded at or below MAX_SIZE
+    assert len(buffer.content) <= LiveStreamDisplayBuffer.MAX_SIZE
+
+
 def test_live_stream_render_state_resets_for_rerender():
     """Resetting render state should allow re-rendering the same output."""
-    from chad.ui.gradio.web_ui import LiveStreamRenderState
+    from chad.ui.gradio.gradio_ui import LiveStreamRenderState
 
     state = LiveStreamRenderState()
     rendered = "<div>output</div>"
@@ -1884,10 +2549,10 @@ def test_live_stream_render_state_resets_for_rerender():
 
 def test_workspace_display_allows_full_path():
     """Workspace display should allow full path without ellipsis truncation."""
-    from chad.ui.gradio import web_ui
+    from chad.ui.gradio import gradio_ui
 
     # Check that workspace display CSS doesn't cause text truncation
-    css = web_ui.PROVIDER_PANEL_CSS
+    css = gradio_ui.PROVIDER_PANEL_CSS
 
     # Look for workspace-inline style block that controls text display
     workspace_inline_pattern = r"\.workspace-inline[^}]*\{([^}]*)\}"
@@ -1905,10 +2570,10 @@ def test_workspace_display_allows_full_path():
 
 def test_workspace_font_color_is_black():
     """Workspace font should be black (#000000) for better readability."""
-    from chad.ui.gradio import web_ui
+    from chad.ui.gradio import gradio_ui
 
     # Check that workspace display CSS uses black font color
-    css = web_ui.PROVIDER_PANEL_CSS
+    css = gradio_ui.PROVIDER_PANEL_CSS
 
     # Look for workspace-inline style block that controls text color
     workspace_inline_pattern = r"\.workspace-inline[^}]*\{([^}]*)\}"
@@ -1926,11 +2591,11 @@ def test_workspace_font_color_is_black():
 
 def test_cancel_and_save_buttons_same_size():
     """Cancel and Save buttons should have consistent size properties."""
-    from chad.ui.gradio import web_ui
+    from chad.ui.gradio import gradio_ui
 
     # Read the web UI source to check button properties
     import inspect
-    source = inspect.getsource(web_ui.ChadWebUI)
+    source = inspect.getsource(gradio_ui.ChadWebUI)
 
     # Find both button definitions
     cancel_btn_pattern = r'cancel_btn = gr\.Button\(\s*"Cancel"[^)]+\)'
@@ -1970,35 +2635,40 @@ class TestChadWebUIInterface:
         mgr.load_preferences.return_value = {}
         mgr.get_cleanup_days.return_value = 3
         mgr.get_verification_agent.return_value = None
+        mgr.get_action_settings.return_value = [
+            {"event": "session_usage", "threshold": 90, "action": "notify"},
+            {"event": "weekly_usage", "threshold": 90, "action": "notify"},
+            {"event": "context_usage", "threshold": 90, "action": "notify"},
+        ]
         return mgr
 
-    @patch("chad.ui.gradio.web_ui.gr")
+    @patch("chad.ui.gradio.gradio_ui.gr")
     def test_create_interface(self, mock_gr, mock_api_client):
         """Test that create_interface creates a Gradio Blocks interface."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         # Mock the Gradio components
         mock_blocks = MagicMock()
         mock_gr.Blocks.return_value.__enter__ = Mock(return_value=mock_blocks)
         mock_gr.Blocks.return_value.__exit__ = Mock(return_value=None)
 
-        web_ui = ChadWebUI(mock_api_client)
-        web_ui.create_interface()
+        gradio_ui = ChadWebUI(mock_api_client)
+        gradio_ui.create_interface()
 
         # Verify Blocks was called
         mock_gr.Blocks.assert_called_once()
 
-    @patch("chad.ui.gradio.web_ui.gr")
+    @patch("chad.ui.gradio.gradio_ui.gr")
     def test_create_interface_uses_multimodal_textbox_for_task_input(self, mock_gr, mock_api_client):
         """Task input should use MultimodalTextbox for combined text and image drag-drop."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         mock_blocks = MagicMock()
         mock_gr.Blocks.return_value.__enter__ = Mock(return_value=mock_blocks)
         mock_gr.Blocks.return_value.__exit__ = Mock(return_value=None)
 
-        web_ui = ChadWebUI(mock_api_client)
-        web_ui.create_interface()
+        gradio_ui = ChadWebUI(mock_api_client)
+        gradio_ui.create_interface()
 
         # Check that MultimodalTextbox is used for task description
         multimodal_calls = [
@@ -2012,58 +2682,94 @@ class TestChadWebUIInterface:
         assert all(kwargs.get("file_types") == ["image"] for kwargs in multimodal_calls)
         assert all(kwargs.get("file_count") == "multiple" for kwargs in multimodal_calls)
 
-    @patch("chad.ui.gradio.web_ui.gr")
+    @patch("chad.ui.gradio.gradio_ui.gr")
     def test_create_interface_does_not_pass_scale_to_html(self, mock_gr, mock_api_client):
         """gr.HTML does not support scale; passing it causes startup failure."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         mock_blocks = MagicMock()
         mock_gr.Blocks.return_value.__enter__ = Mock(return_value=mock_blocks)
         mock_gr.Blocks.return_value.__exit__ = Mock(return_value=None)
 
-        web_ui = ChadWebUI(mock_api_client)
-        web_ui.create_interface()
+        gradio_ui = ChadWebUI(mock_api_client)
+        gradio_ui.create_interface()
 
         assert mock_gr.HTML.call_count > 0
         for call in mock_gr.HTML.call_args_list:
             assert "scale" not in call.kwargs
 
-    @patch("chad.ui.gradio.web_ui.gr")
+    @patch("chad.ui.gradio.gradio_ui.gr")
     def test_create_interface_disables_chat_message_grouping(self, mock_gr, mock_api_client):
         """Milestones chatbot should not merge consecutive same-role messages."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         mock_blocks = MagicMock()
         mock_gr.Blocks.return_value.__enter__ = Mock(return_value=mock_blocks)
         mock_gr.Blocks.return_value.__exit__ = Mock(return_value=None)
 
-        web_ui = ChadWebUI(mock_api_client)
-        web_ui.create_interface()
+        gradio_ui = ChadWebUI(mock_api_client)
+        gradio_ui.create_interface()
 
         chatbot_calls = [c.kwargs for c in mock_gr.Chatbot.call_args_list if c.kwargs.get("label") == "Milestones"]
         assert chatbot_calls, "Expected Milestones chatbot to be created"
         assert all(c.get("group_consecutive_messages") is False for c in chatbot_calls)
 
-    def test_provider_fallback_order_saves_on_submit_not_change(self):
-        """Fallback order should save on Enter/submit to avoid per-keystroke API calls."""
+    def test_action_rules_ui_exists_in_source(self):
+        """Action rules UI should exist in the web UI source."""
         import inspect
 
-        import chad.ui.gradio.web_ui as web_ui
+        import chad.ui.gradio.gradio_ui as gradio_ui
 
-        source = inspect.getsource(web_ui)
-        assert "fallback_order_input.submit(" in source
-        assert "fallback_order_input.change(" not in source
+        source = inspect.getsource(gradio_ui)
+        assert "action_settings" in source
+        assert "Action Rules" in source
+
+    def test_action_rules_ui_creates_with_real_gradio(self):
+        """Action Rules section must create without Gradio component errors."""
+        import gradio as gr
+
+        action_settings_data = [
+            {"event": "session_usage", "threshold": 90, "action": "notify"},
+        ]
+        account_names = ["test-account"]
+        _MAX = 6
+        all_event_choices = ["session_usage", "weekly_usage", "context_usage"]
+        all_action_choices = ["notify", "switch_provider", "await_reset"]
+
+        with gr.Blocks():
+            gr.Markdown("### Action Rules")
+            with gr.Row():
+                with gr.Column(scale=3):
+                    gr.Markdown("**Rule**")
+                with gr.Column(scale=3):
+                    gr.Markdown("**Action**")
+                with gr.Column(scale=0, min_width=60):
+                    gr.Markdown("")
+            for i in range(_MAX):
+                has_data = i < len(action_settings_data)
+                current = action_settings_data[i] if has_data else {}
+                with gr.Row(visible=has_data):
+                    with gr.Column(scale=3):
+                        with gr.Row():
+                            gr.Dropdown(choices=all_event_choices, value=current.get("event", "session_usage"), show_label=False)
+                            gr.Slider(minimum=0, maximum=100, step=5, value=current.get("threshold", 90), show_label=False)
+                    with gr.Column(scale=3):
+                        with gr.Row():
+                            gr.Dropdown(choices=all_action_choices, value=current.get("action", "notify"), show_label=False)
+                            gr.Dropdown(choices=[""] + account_names, value="", show_label=False, visible=False)
+                    gr.Button("✕", scale=0, min_width=60, size="sm")
+            gr.Button("+ Add Rule", size="sm")
 
 
 class TestLaunchWebUI:
     """Test cases for launch_web_ui function."""
 
-    @patch("chad.ui.gradio.web_ui._resolve_port", return_value=(7860, False, False))
-    @patch("chad.ui.gradio.web_ui.ChadWebUI")
+    @patch("chad.ui.gradio.gradio_ui._resolve_port", return_value=(7860, False, False))
+    @patch("chad.ui.gradio.gradio_ui.ChadWebUI")
     @patch("chad.ui.client.APIClient")
     def test_launch_creates_api_client(self, mock_api_client_class, mock_webui_class, mock_resolve_port):
         """Test launch_web_ui creates an API client and ChadWebUI."""
-        from chad.ui.gradio.web_ui import launch_web_ui
+        from chad.ui.gradio.gradio_ui import launch_web_ui
 
         mock_api_client = Mock()
         mock_api_client_class.return_value = mock_api_client
@@ -2083,12 +2789,12 @@ class TestLaunchWebUI:
         mock_app.launch.assert_called_once()
         assert result == (None, 7860)
 
-    @patch("chad.ui.gradio.web_ui._resolve_port", return_value=(43210, True, True))
-    @patch("chad.ui.gradio.web_ui.ChadWebUI")
+    @patch("chad.ui.gradio.gradio_ui._resolve_port", return_value=(43210, True, True))
+    @patch("chad.ui.gradio.gradio_ui.ChadWebUI")
     @patch("chad.ui.client.APIClient")
     def test_launch_falls_back_when_port_busy(self, mock_api_client_class, mock_webui_class, mock_resolve_port):
         """New launches should fall back to an ephemeral port if the default is in use."""
-        from chad.ui.gradio.web_ui import launch_web_ui
+        from chad.ui.gradio.gradio_ui import launch_web_ui
 
         mock_api_client = Mock()
         mock_api_client_class.return_value = mock_api_client
@@ -2105,12 +2811,12 @@ class TestLaunchWebUI:
         mock_app.launch.assert_called_once()
         assert result == (None, 43210)
 
-    @patch("chad.ui.gradio.web_ui._resolve_port", return_value=(7860, False, False))
-    @patch("chad.ui.gradio.web_ui.ChadWebUI")
+    @patch("chad.ui.gradio.gradio_ui._resolve_port", return_value=(7860, False, False))
+    @patch("chad.ui.gradio.gradio_ui.ChadWebUI")
     @patch("chad.ui.client.APIClient")
     def test_launch_dev_mode(self, mock_api_client_class, mock_webui_class, mock_resolve_port):
         """Test launch_web_ui passes dev_mode parameter."""
-        from chad.ui.gradio.web_ui import launch_web_ui
+        from chad.ui.gradio.gradio_ui import launch_web_ui
 
         mock_api_client = Mock()
         mock_api_client_class.return_value = mock_api_client
@@ -2142,26 +2848,26 @@ class TestGeminiUsage:
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_api_client):
+    def gradio_ui(self, mock_api_client):
         """Create a ChadWebUI instance."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         return ChadWebUI(mock_api_client)
 
     @patch("pathlib.Path.home")
-    def test_gemini_not_logged_in(self, mock_home, web_ui, tmp_path):
+    def test_gemini_not_logged_in(self, mock_home, gradio_ui, tmp_path):
         """Test Gemini usage when not logged in."""
         mock_home.return_value = tmp_path
         (tmp_path / ".gemini").mkdir()
         # No oauth_creds.json file
 
-        result = web_ui._get_gemini_usage()
+        result = gradio_ui._get_gemini_usage()
 
         assert "❌" in result
         assert "Not logged in" in result
 
     @patch("pathlib.Path.home")
-    def test_gemini_logged_in_no_usage(self, mock_home, web_ui, tmp_path):
+    def test_gemini_logged_in_no_usage(self, mock_home, gradio_ui, tmp_path):
         """Test Gemini usage when logged in but no usage data."""
         mock_home.return_value = tmp_path
         gemini_dir = tmp_path / ".gemini"
@@ -2169,14 +2875,14 @@ class TestGeminiUsage:
         (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
 
         with patch("chad.util.providers._read_gemini_usage", return_value=[]):
-            result = web_ui._get_gemini_usage()
+            result = gradio_ui._get_gemini_usage()
 
         assert "✅" in result
         assert "Logged in" in result
         assert "No usage data yet" in result
 
     @patch("pathlib.Path.home")
-    def test_gemini_usage_aggregates_models(self, mock_home, web_ui, tmp_path):
+    def test_gemini_usage_aggregates_models(self, mock_home, gradio_ui, tmp_path):
         """Test Gemini usage aggregates token counts by model from JSONL."""
         mock_home.return_value = tmp_path
         gemini_dir = tmp_path / ".gemini"
@@ -2193,7 +2899,7 @@ class TestGeminiUsage:
         ]
 
         with patch("chad.util.providers._read_gemini_usage", return_value=records):
-            result = web_ui._get_gemini_usage()
+            result = gradio_ui._get_gemini_usage()
 
         assert "✅" in result
         assert "Model Usage" in result
@@ -2217,89 +2923,89 @@ class TestModelSelection:
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_api_client):
+    def gradio_ui(self, mock_api_client):
         """Create a ChadWebUI instance."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         return ChadWebUI(mock_api_client)
 
-    def test_set_model_success(self, web_ui, mock_api_client):
+    def test_set_model_success(self, gradio_ui, mock_api_client):
         """Test setting model successfully."""
-        result = web_ui.set_model("claude", "claude-opus-4-20250514")[0]
+        result = gradio_ui.set_model("claude", "claude-opus-4-20250514")[0]
 
         assert "✓" in result
         assert "claude-opus-4-20250514" in result
         mock_api_client.set_account_model.assert_called_once_with("claude", "claude-opus-4-20250514")
 
-    def test_set_model_missing_account(self, web_ui, mock_api_client):
+    def test_set_model_missing_account(self, gradio_ui, mock_api_client):
         """Test setting model without selecting account."""
-        result = web_ui.set_model("", "some-model")[0]
+        result = gradio_ui.set_model("", "some-model")[0]
 
         assert "❌" in result
         assert "select an account" in result
 
-    def test_set_model_missing_model(self, web_ui, mock_api_client):
+    def test_set_model_missing_model(self, gradio_ui, mock_api_client):
         """Test setting model without selecting model."""
-        result = web_ui.set_model("claude", "")[0]
+        result = gradio_ui.set_model("claude", "")[0]
 
         assert "❌" in result
         assert "select a model" in result
 
-    def test_set_model_account_not_found(self, web_ui, mock_api_client):
+    def test_set_model_account_not_found(self, gradio_ui, mock_api_client):
         """Test setting model for non-existent account."""
-        result = web_ui.set_model("nonexistent", "some-model")[0]
+        result = gradio_ui.set_model("nonexistent", "some-model")[0]
 
         assert "❌" in result
         assert "not found" in result
 
-    def test_get_models_for_anthropic(self, web_ui, mock_api_client, monkeypatch):
+    def test_get_models_for_anthropic(self, gradio_ui, mock_api_client, monkeypatch):
         """Test getting models for anthropic provider."""
         # Mock the model catalog to return expected models
         mock_api_client.get_account.return_value = MockAccount(name="claude", provider="anthropic", model="default")
         monkeypatch.setattr(
-            web_ui.model_catalog, "get_models",
+            gradio_ui.model_catalog, "get_models",
             lambda provider, acct=None: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "default"]
         )
 
-        models = web_ui.get_models_for_account("claude")
+        models = gradio_ui.get_models_for_account("claude")
 
         assert "claude-sonnet-4-20250514" in models
         assert "claude-opus-4-20250514" in models
         assert "default" in models
 
-    def test_get_models_for_openai(self, web_ui, mock_api_client, monkeypatch):
+    def test_get_models_for_openai(self, gradio_ui, mock_api_client, monkeypatch):
         """Test getting models for openai provider."""
         mock_api_client.get_account.return_value = MockAccount(name="gpt", provider="openai", model="default")
         monkeypatch.setattr(
-            web_ui.model_catalog, "get_models",
+            gradio_ui.model_catalog, "get_models",
             lambda provider, acct=None: ["default"]
         )
 
-        models = web_ui.get_models_for_account("gpt")
+        models = gradio_ui.get_models_for_account("gpt")
 
         # Only 'default' is guaranteed - other models come from user's config/sessions
         assert "default" in models
 
-    def test_get_models_for_unknown_account(self, web_ui, monkeypatch):
+    def test_get_models_for_unknown_account(self, gradio_ui, monkeypatch):
         """Test getting models for unknown account returns default."""
         monkeypatch.setattr(
-            web_ui.model_catalog, "get_models",
+            gradio_ui.model_catalog, "get_models",
             lambda provider, acct=None: ["default"]
         )
 
-        models = web_ui.get_models_for_account("unknown")
+        models = gradio_ui.get_models_for_account("unknown")
 
         assert models == ["default"]
 
-    def test_get_models_for_empty_account(self, web_ui):
+    def test_get_models_for_empty_account(self, gradio_ui):
         """Test getting models with empty account name."""
-        models = web_ui.get_models_for_account("")
+        models = gradio_ui.get_models_for_account("")
 
         assert models == ["default"]
 
-    def test_provider_models_constant(self, web_ui):
+    def test_provider_models_constant(self, gradio_ui):
         """Test that PROVIDER_MODELS includes expected providers."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         assert "anthropic" in ChadWebUI.SUPPORTED_PROVIDERS
         assert "openai" in ChadWebUI.SUPPORTED_PROVIDERS
@@ -2335,28 +3041,28 @@ class TestRemainingUsage:
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_api_client):
+    def gradio_ui(self, mock_api_client):
         """Create a ChadWebUI instance."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         return ChadWebUI(mock_api_client)
 
-    def test_remaining_usage_unknown_account(self, web_ui):
+    def test_remaining_usage_unknown_account(self, gradio_ui):
         """Unknown account returns 0.0."""
-        result = web_ui.get_remaining_usage("nonexistent")
+        result = gradio_ui.get_remaining_usage("nonexistent")
         assert result == 0.0
 
     @patch("pathlib.Path.home")
-    def test_gemini_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
+    def test_gemini_remaining_usage_not_logged_in(self, mock_home, gradio_ui, tmp_path):
         """Gemini not logged in returns 0.0."""
         mock_home.return_value = tmp_path
         (tmp_path / ".gemini").mkdir()
 
-        result = web_ui._get_gemini_remaining_usage()
+        result = gradio_ui._get_gemini_remaining_usage()
         assert result == 0.0
 
     @patch("pathlib.Path.home")
-    def test_gemini_remaining_usage_logged_in(self, mock_home, web_ui, tmp_path):
+    def test_gemini_remaining_usage_logged_in(self, mock_home, gradio_ui, tmp_path):
         """Gemini logged in with no usage returns 1.0 (full capacity)."""
         mock_home.return_value = tmp_path
         gemini_dir = tmp_path / ".gemini"
@@ -2364,41 +3070,41 @@ class TestRemainingUsage:
         (gemini_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
 
         with patch("chad.util.providers._read_gemini_usage", return_value=[]):
-            result = web_ui._get_gemini_remaining_usage()
+            result = gradio_ui._get_gemini_remaining_usage()
         assert result == 1.0  # Logged in, no usage = full capacity
 
     @patch("pathlib.Path.home")
-    def test_mistral_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
+    def test_mistral_remaining_usage_not_logged_in(self, mock_home, gradio_ui, tmp_path):
         """Mistral not logged in returns 0.0."""
         mock_home.return_value = tmp_path
         (tmp_path / ".vibe").mkdir()
 
-        result = web_ui._get_mistral_remaining_usage()
+        result = gradio_ui._get_mistral_remaining_usage()
         assert result == 0.0
 
     @patch("pathlib.Path.home")
-    def test_mistral_remaining_usage_logged_in(self, mock_home, web_ui, tmp_path):
+    def test_mistral_remaining_usage_logged_in(self, mock_home, gradio_ui, tmp_path):
         """Mistral logged in with no usage returns 1.0 (full capacity)."""
         mock_home.return_value = tmp_path
         vibe_dir = tmp_path / ".vibe"
         vibe_dir.mkdir()
-        (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"')
+        (vibe_dir / ".env").write_text("MISTRAL_API_KEY=test-key\n")
 
-        result = web_ui._get_mistral_remaining_usage()
+        result = gradio_ui._get_mistral_remaining_usage()
         assert result == 1.0  # Logged in, no sessions = full capacity
 
     @patch("pathlib.Path.home")
-    def test_claude_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
+    def test_claude_remaining_usage_not_logged_in(self, mock_home, gradio_ui, tmp_path):
         """Claude not logged in returns 0.0."""
         mock_home.return_value = tmp_path
         (tmp_path / ".chad" / "claude-configs" / "claude-1").mkdir(parents=True)
 
-        result = web_ui._get_claude_remaining_usage("claude-1")
+        result = gradio_ui._get_claude_remaining_usage("claude-1")
         assert result == 0.0
 
     @patch("pathlib.Path.home")
     @patch("requests.get")
-    def test_claude_remaining_usage_from_api(self, mock_get, mock_home, web_ui, tmp_path):
+    def test_claude_remaining_usage_from_api(self, mock_get, mock_home, gradio_ui, tmp_path):
         """Claude calculates remaining from API utilization."""
         import json
 
@@ -2413,19 +3119,39 @@ class TestRemainingUsage:
         mock_response.json.return_value = {"five_hour": {"utilization": 25}}
         mock_get.return_value = mock_response
 
-        result = web_ui._get_claude_remaining_usage("claude-1")
+        result = gradio_ui._get_claude_remaining_usage("claude-1")
         assert result == 0.75  # 1.0 - 0.25
 
     @patch("pathlib.Path.home")
-    def test_codex_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
+    @patch("requests.get")
+    def test_claude_remaining_usage_fractional_utilization(self, mock_get, mock_home, gradio_ui, tmp_path):
+        """Fractional utilization values (0-1) should be treated as percentages."""
+        import json
+
+        mock_home.return_value = tmp_path
+        claude_dir = tmp_path / ".chad" / "claude-configs" / "claude-1"
+        claude_dir.mkdir(parents=True)
+        creds = {"claudeAiOauth": {"accessToken": "test-token", "subscriptionType": "PRO"}}
+        (claude_dir / ".credentials.json").write_text(json.dumps(creds))
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"five_hour": {"utilization": 0.25}}
+        mock_get.return_value = mock_response
+
+        result = gradio_ui._get_claude_remaining_usage("claude-1")
+        assert result == 0.75  # 25% used -> 75% remaining
+
+    @patch("pathlib.Path.home")
+    def test_codex_remaining_usage_not_logged_in(self, mock_home, gradio_ui, tmp_path):
         """Codex not logged in returns 0.0."""
         mock_home.return_value = tmp_path
 
-        result = web_ui._get_codex_remaining_usage("codex")
+        result = gradio_ui._get_codex_remaining_usage("codex")
         assert result == 0.0
 
     @patch("pathlib.Path.home")
-    def test_gemini_remaining_usage_with_records(self, mock_home, web_ui, tmp_path):
+    def test_gemini_remaining_usage_with_records(self, mock_home, gradio_ui, tmp_path):
         """Gemini calculates remaining usage from today's JSONL records."""
         from datetime import datetime, timezone
 
@@ -2439,30 +3165,30 @@ class TestRemainingUsage:
         records = [{"timestamp": today, "model": "gemini-pro"} for _ in range(10)]
 
         with patch("chad.util.providers._read_gemini_usage", return_value=records):
-            result = web_ui._get_gemini_remaining_usage()
+            result = gradio_ui._get_gemini_remaining_usage()
         assert result == pytest.approx(0.9, abs=0.01)  # 90% remaining
 
     @patch("pathlib.Path.home")
-    def test_qwen_remaining_usage_not_logged_in(self, mock_home, web_ui, tmp_path):
+    def test_qwen_remaining_usage_not_logged_in(self, mock_home, gradio_ui, tmp_path):
         """Qwen not logged in returns 0.0."""
         mock_home.return_value = tmp_path
 
-        result = web_ui._get_qwen_remaining_usage()
+        result = gradio_ui._get_qwen_remaining_usage()
         assert result == 0.0
 
     @patch("pathlib.Path.home")
-    def test_qwen_remaining_usage_logged_in_no_sessions(self, mock_home, web_ui, tmp_path):
+    def test_qwen_remaining_usage_logged_in_no_sessions(self, mock_home, gradio_ui, tmp_path):
         """Qwen logged in with no sessions returns 1.0 (full capacity)."""
         mock_home.return_value = tmp_path
         qwen_dir = tmp_path / ".qwen"
         qwen_dir.mkdir()
         (qwen_dir / "oauth_creds.json").write_text('{"access_token": "test"}')
 
-        result = web_ui._get_qwen_remaining_usage()
+        result = gradio_ui._get_qwen_remaining_usage()
         assert result == 1.0
 
     @patch("pathlib.Path.home")
-    def test_qwen_remaining_usage_with_sessions(self, mock_home, web_ui, tmp_path):
+    def test_qwen_remaining_usage_with_sessions(self, mock_home, gradio_ui, tmp_path):
         """Qwen calculates remaining usage from today's requests."""
         import json
         from datetime import datetime, timezone
@@ -2480,18 +3206,18 @@ class TestRemainingUsage:
         lines = [json.dumps({"type": "assistant", "timestamp": today}) for _ in range(400)]
         (session_dir / "session.jsonl").write_text("\n".join(lines))
 
-        result = web_ui._get_qwen_remaining_usage()
+        result = gradio_ui._get_qwen_remaining_usage()
         assert result == pytest.approx(0.8, abs=0.01)  # 80% remaining
 
     @patch("pathlib.Path.home")
-    def test_mistral_remaining_usage_with_sessions(self, mock_home, web_ui, tmp_path):
+    def test_mistral_remaining_usage_with_sessions(self, mock_home, gradio_ui, tmp_path):
         """Mistral calculates remaining usage from today's sessions."""
         import json
 
         mock_home.return_value = tmp_path
         vibe_dir = tmp_path / ".vibe"
         vibe_dir.mkdir()
-        (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"')
+        (vibe_dir / ".env").write_text("MISTRAL_API_KEY=test-key\n")
 
         session_dir = vibe_dir / "logs" / "session"
         session_dir.mkdir(parents=True)
@@ -2500,7 +3226,7 @@ class TestRemainingUsage:
         session_data = {"metadata": {"stats": {"prompt_count": 100}}}
         (session_dir / "session_today.json").write_text(json.dumps(session_data))
 
-        result = web_ui._get_mistral_remaining_usage()
+        result = gradio_ui._get_mistral_remaining_usage()
         assert result == pytest.approx(0.9, abs=0.01)  # 90% remaining
 
 
@@ -2528,108 +3254,51 @@ class TestUsageBasedProviderSwitch:
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_api_client):
+    def gradio_ui(self, mock_api_client):
         """Create a ChadWebUI instance."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         return ChadWebUI(mock_api_client)
 
-    def test_check_usage_and_switch_no_switch_under_threshold(self, web_ui, mock_api_client):
-        """No switch should occur when usage is below threshold."""
-        # Set threshold to 80%
-        mock_api_client.get_usage_switch_threshold.return_value = 80
+    def test_check_usage_and_switch_no_switch_when_no_switch_action(self, gradio_ui, mock_api_client):
+        """No switch should occur when action_settings has only notify actions."""
+        mock_api_client.get_action_settings.return_value = [
+            {"event": "session_usage", "threshold": 90, "action": "notify"},
+        ]
 
-        # Set mock remaining usage to 0.5 (50% remaining = 50% used, under 80% threshold)
-        mock_api_client.get_mock_remaining_usage.return_value = 0.5
-
-        account, switched_from = web_ui._check_usage_and_switch("primary-mock")
+        account, switched_from = gradio_ui._check_usage_and_switch("primary-mock")
 
         assert account == "primary-mock"
         assert switched_from is None
 
-    def test_check_usage_and_switch_triggers_switch(self, web_ui, mock_api_client):
-        """Switch should occur when usage exceeds threshold."""
-        # Set threshold to 50%
-        mock_api_client.get_usage_switch_threshold.return_value = 50
+    def test_check_usage_and_switch_triggers_switch(self, gradio_ui, mock_api_client):
+        """Switch should occur when action_settings has a switch_provider action."""
+        mock_api_client.get_action_settings.return_value = [
+            {"event": "session_usage", "threshold": 90, "action": "switch_provider", "target_account": "fallback-mock"},
+        ]
 
-        # Primary mock has 20% remaining (80% used, exceeds 50% threshold)
-        # Fallback mock has 80% remaining (20% used, under 50% threshold)
-        def mock_remaining(name):
-            if name == "primary-mock":
-                return 0.2  # 80% used
-            return 0.8  # 20% used
-
-        mock_api_client.get_mock_remaining_usage.side_effect = mock_remaining
-
-        # Set up fallback order
-        mock_api_client.get_next_fallback_provider.return_value = "fallback-mock"
-
-        account, switched_from = web_ui._check_usage_and_switch("primary-mock")
+        account, switched_from = gradio_ui._check_usage_and_switch("primary-mock")
 
         assert account == "fallback-mock"
         assert switched_from == "primary-mock"
 
-    def test_check_usage_and_switch_disabled_at_100_percent(self, web_ui, mock_api_client):
-        """No switch should occur when threshold is 100% (disabled)."""
-        # Set threshold to 100% (disabled)
-        mock_api_client.get_usage_switch_threshold.return_value = 100
+    def test_check_usage_and_switch_no_switch_on_api_error(self, gradio_ui, mock_api_client):
+        """No switch when API call fails."""
+        mock_api_client.get_action_settings.side_effect = Exception("API error")
 
-        # Even with high usage, no switch should occur
-        mock_api_client.get_mock_remaining_usage.return_value = 0.05  # 95% used
+        account, switched_from = gradio_ui._check_usage_and_switch("primary-mock")
 
-        account, switched_from = web_ui._check_usage_and_switch("primary-mock")
-
-        assert account == "primary-mock"
-        assert switched_from is None
-
-    def test_check_usage_and_switch_no_fallback_available(self, web_ui, mock_api_client):
-        """No switch should occur when no fallback is configured."""
-        # Set threshold to 50%
-        mock_api_client.get_usage_switch_threshold.return_value = 50
-
-        # High usage
-        mock_api_client.get_mock_remaining_usage.return_value = 0.2  # 80% used
-
-        # No fallback available
-        mock_api_client.get_next_fallback_provider.return_value = None
-
-        account, switched_from = web_ui._check_usage_and_switch("primary-mock")
-
-        assert account == "primary-mock"
-        assert switched_from is None
-
-    def test_check_usage_and_switch_fallback_also_exhausted(self, web_ui, mock_api_client):
-        """No switch when fallback is also over threshold."""
-        # Set threshold to 50%
-        mock_api_client.get_usage_switch_threshold.return_value = 50
-
-        # Both providers are over threshold
-        def mock_remaining(name):
-            return 0.1  # 90% used for both
-
-        mock_api_client.get_mock_remaining_usage.side_effect = mock_remaining
-        mock_api_client.get_next_fallback_provider.return_value = "fallback-mock"
-
-        account, switched_from = web_ui._check_usage_and_switch("primary-mock")
-
-        # Should not switch since fallback is also exhausted
         assert account == "primary-mock"
         assert switched_from is None
 
     def test_start_task_uses_selected_coding_agent_for_initial_run(
-        self, web_ui, mock_api_client, git_repo, monkeypatch
+        self, gradio_ui, mock_api_client, git_repo, monkeypatch
     ):
         """Initial coding run should honor the selected coding agent."""
-        mock_api_client.get_usage_switch_threshold.return_value = 50
-        mock_api_client.get_next_fallback_provider.return_value = "fallback-mock"
+        mock_api_client.get_action_settings.return_value = [
+            {"event": "session_usage", "threshold": 50, "action": "switch_provider", "target_account": "fallback-mock"},
+        ]
         mock_api_client.get_worktree_status.return_value = Mock(exists=False)
-
-        def mock_remaining(name):
-            if name == "primary-mock":
-                return 0.01  # 99% used (over threshold)
-            return 0.90
-
-        mock_api_client.get_mock_remaining_usage.side_effect = mock_remaining
 
         captured = {"coding_account": None}
 
@@ -2652,16 +3321,16 @@ class TestUsageBasedProviderSwitch:
                 "total_tool_calls": 1,
             }
 
-        monkeypatch.setattr(web_ui, "run_task_via_api", fake_run_task_via_api)
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", fake_run_task_via_api)
 
-        session = web_ui.create_session("selected-agent")
+        session = gradio_ui.create_session("selected-agent")
         list(
-            web_ui.start_chad_task(
+            gradio_ui.start_chad_task(
                 session.id,
                 str(git_repo),
                 "test",
                 coding_agent="primary-mock",
-                verification_agent=web_ui.VERIFICATION_NONE,
+                verification_agent=gradio_ui.VERIFICATION_NONE,
             )
         )
 
@@ -2682,38 +3351,38 @@ class TestClaudeMultiAccount:
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_api_client):
+    def gradio_ui(self, mock_api_client):
         """Create a ChadWebUI instance with mocked dependencies."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         ui = ChadWebUI(mock_api_client)
         ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "claude"))
         return ui
 
     @patch("pathlib.Path.home")
-    def test_get_claude_config_dir_returns_isolated_path(self, mock_home, web_ui, tmp_path):
+    def test_get_claude_config_dir_returns_isolated_path(self, mock_home, gradio_ui, tmp_path):
         """Each Claude account gets its own config directory."""
         mock_home.return_value = tmp_path
 
-        config_dir_1 = web_ui.provider_ui._get_claude_config_dir("claude-1")
-        config_dir_2 = web_ui.provider_ui._get_claude_config_dir("claude-2")
+        config_dir_1 = gradio_ui.provider_ui._get_claude_config_dir("claude-1")
+        config_dir_2 = gradio_ui.provider_ui._get_claude_config_dir("claude-2")
 
         assert str(config_dir_1) == str(tmp_path / ".chad" / "claude-configs" / "claude-1")
         assert str(config_dir_2) == str(tmp_path / ".chad" / "claude-configs" / "claude-2")
         assert config_dir_1 != config_dir_2
 
     @patch("pathlib.Path.home")
-    def test_setup_claude_account_creates_directory(self, mock_home, web_ui, tmp_path):
+    def test_setup_claude_account_creates_directory(self, mock_home, gradio_ui, tmp_path):
         """Setup creates the isolated config directory."""
         mock_home.return_value = tmp_path
 
-        result = web_ui.provider_ui._setup_claude_account("test-account")
+        result = gradio_ui.provider_ui._setup_claude_account("test-account")
 
         assert str(result) == str(tmp_path / ".chad" / "claude-configs" / "test-account")
         assert (tmp_path / ".chad" / "claude-configs" / "test-account").exists()
 
     @patch("pathlib.Path.home")
-    def test_claude_usage_reads_from_isolated_config(self, mock_home, web_ui, tmp_path):
+    def test_claude_usage_reads_from_isolated_config(self, mock_home, gradio_ui, tmp_path):
         """Claude usage reads credentials from account-specific config dir."""
         import json
 
@@ -2725,14 +3394,14 @@ class TestClaudeMultiAccount:
         creds = {"claudeAiOauth": {"accessToken": "", "subscriptionType": "PRO"}}
         (config_dir / ".credentials.json").write_text(json.dumps(creds))
 
-        result = web_ui.provider_ui._get_claude_usage("claude-1")
+        result = gradio_ui.provider_ui._get_claude_usage("claude-1")
 
         # Should report not logged in due to empty access token
         assert "Not logged in" in result
 
     @patch("pathlib.Path.home")
     @patch("requests.get")
-    def test_claude_usage_with_valid_credentials(self, mock_get, mock_home, web_ui, tmp_path):
+    def test_claude_usage_with_valid_credentials(self, mock_get, mock_home, gradio_ui, tmp_path):
         """Claude usage fetches data when credentials are valid."""
         import json
 
@@ -2750,14 +3419,14 @@ class TestClaudeMultiAccount:
         mock_response.json.return_value = {"five_hour": {"utilization": 25}}
         mock_get.return_value = mock_response
 
-        result = web_ui.provider_ui._get_claude_usage("claude-1")
+        result = gradio_ui.provider_ui._get_claude_usage("claude-1")
 
         assert "Logged in" in result
         assert "PRO" in result
 
     @patch("pathlib.Path.home")
     @patch("requests.get")
-    def test_claude_usage_extra_credits_are_displayed_as_dollars(self, mock_get, mock_home, web_ui, tmp_path):
+    def test_claude_usage_extra_credits_are_displayed_as_dollars(self, mock_get, mock_home, gradio_ui, tmp_path):
         """Claude extra credit values are cents and should render as dollars."""
         import json
 
@@ -2780,12 +3449,12 @@ class TestClaudeMultiAccount:
         }
         mock_get.return_value = mock_response
 
-        result = web_ui.provider_ui._get_claude_usage("claude-1")
+        result = gradio_ui.provider_ui._get_claude_usage("claude-1")
 
         assert "$14.99 / $40.00 (37.5%)" in result
 
     @patch("pathlib.Path.home")
-    def test_check_provider_login_uses_isolated_config(self, mock_home, web_ui, tmp_path):
+    def test_check_provider_login_uses_isolated_config(self, mock_home, gradio_ui, tmp_path):
         """Provider login check uses account-specific config directory."""
         import json
 
@@ -2801,35 +3470,106 @@ class TestClaudeMultiAccount:
         config_dir_2 = tmp_path / ".chad" / "claude-configs" / "claude-2"
         config_dir_2.mkdir(parents=True)
 
-        logged_in_1, _ = web_ui.provider_ui._check_provider_login("anthropic", "claude-1")
-        logged_in_2, _ = web_ui.provider_ui._check_provider_login("anthropic", "claude-2")
+        logged_in_1, _ = gradio_ui.provider_ui._check_provider_login("anthropic", "claude-1")
+        logged_in_2, _ = gradio_ui.provider_ui._check_provider_login("anthropic", "claude-2")
 
         assert logged_in_1 is True
         assert logged_in_2 is False
 
-    def test_opencode_login_check_detects_auth_file(self, web_ui, monkeypatch, tmp_path):
+    def test_opencode_login_check_detects_auth_file(self, gradio_ui, monkeypatch, tmp_path):
         """OpenCode login check succeeds when OAuth auth.json exists."""
         import json
         monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
         auth_dir = tmp_path / ".local" / "share" / "opencode"
         auth_dir.mkdir(parents=True)
         (auth_dir / "auth.json").write_text(json.dumps({"token": "test-token"}))
-        logged_in, msg = web_ui.provider_ui._check_provider_login("opencode", "oc-test")
+        logged_in, msg = gradio_ui.provider_ui._check_provider_login("opencode", "oc-test")
         assert logged_in is True
         assert "Logged in" in msg
 
-    def test_opencode_login_check_fails_without_auth(self, web_ui, monkeypatch, tmp_path):
+    def test_opencode_login_check_fails_without_auth(self, gradio_ui, monkeypatch, tmp_path):
         """OpenCode login check fails when no OAuth credentials exist."""
         monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
-        logged_in, msg = web_ui.provider_ui._check_provider_login("opencode", "oc-test")
+        logged_in, msg = gradio_ui.provider_ui._check_provider_login("opencode", "oc-test")
         assert logged_in is False
         assert "Not logged in" in msg
 
-    def test_kimi_add_provider_no_shutil_error(self, web_ui, mock_api_client):
+    def test_mistral_login_check_no_vibe_dir(self, gradio_ui, monkeypatch, tmp_path):
+        """Mistral login should fail when ~/.vibe does not exist at all."""
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+
+        logged_in, msg = gradio_ui.provider_ui._check_provider_login("mistral", "mistral-test")
+
+        assert logged_in is False
+        assert "Not logged in" in msg
+
+    def test_mistral_login_check_config_toml_only_not_sufficient(self, gradio_ui, monkeypatch, tmp_path):
+        """Mistral login should fail when only config.toml exists (no API key)."""
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        vibe_dir = tmp_path / ".vibe"
+        vibe_dir.mkdir(parents=True)
+        (vibe_dir / "config.toml").write_text("active_model = \"devstral-2\"\n")
+
+        logged_in, msg = gradio_ui.provider_ui._check_provider_login("mistral", "mistral-test")
+
+        assert logged_in is False
+        assert "Not logged in" in msg
+
+    def test_mistral_login_check_reads_env_file(self, gradio_ui, monkeypatch, tmp_path):
+        """Mistral login should pass when ~/.vibe/.env has MISTRAL_API_KEY."""
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        vibe_dir = tmp_path / ".vibe"
+        vibe_dir.mkdir(parents=True)
+        (vibe_dir / ".env").write_text("MISTRAL_API_KEY=test-key\n")
+
+        logged_in, msg = gradio_ui.provider_ui._check_provider_login("mistral", "mistral-test")
+
+        assert logged_in is True
+        assert "Logged in" in msg
+
+    def test_mistral_add_provider_with_api_key(
+        self, gradio_ui, mock_api_client, monkeypatch, tmp_path,
+    ):
+        """Adding Mistral with an API key should write it to ~/.vibe/.env."""
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+
+        mock_api_client.list_accounts.return_value = []
+        gradio_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/usr/bin/vibe"))
+
+        result = gradio_ui.provider_ui.add_provider(
+            "mistral-test", "mistral", 3, api_key="sk-test-key-123",
+        )
+
+        flat = str(result)
+        assert "added and logged in" in flat, f"Expected success, got: {flat}"
+        env_file = tmp_path / ".vibe" / ".env"
+        assert env_file.exists()
+        assert "sk-test-key-123" in env_file.read_text()
+
+    def test_mistral_add_provider_without_api_key_shows_error(
+        self, gradio_ui, mock_api_client, monkeypatch, tmp_path,
+    ):
+        """Adding Mistral without an API key should prompt user to provide one."""
+        monkeypatch.setattr("chad.ui.gradio.provider_ui.safe_home", lambda: tmp_path)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+
+        mock_api_client.list_accounts.return_value = []
+        gradio_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/usr/bin/vibe"))
+
+        result = gradio_ui.provider_ui.add_provider("mistral-test", "mistral", 3)
+
+        flat = str(result)
+        assert "requires an API key" in flat, f"Expected API key prompt, got: {flat}"
+
+    def test_kimi_add_provider_no_shutil_error(self, gradio_ui, mock_api_client):
         """Kimi add_provider should not raise UnboundLocalError for shutil."""
         mock_api_client.list_accounts.return_value = []
-        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/kimi"))
-        web_ui.provider_ui.installer.find_tool_path = Mock(return_value="/tmp/kimi")
+        gradio_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/kimi"))
+        gradio_ui.provider_ui.installer.find_tool_path = Mock(return_value="/tmp/kimi")
 
         # Mock subprocess.Popen to simulate a failed login (no creds written)
         mock_proc = Mock()
@@ -2842,12 +3582,12 @@ class TestClaudeMultiAccount:
         with patch.object(_subprocess, "Popen", return_value=mock_proc):
             with patch("chad.ui.gradio.provider_ui.shutil.which", return_value="/tmp/kimi"):
                 # This should NOT raise UnboundLocalError: local variable 'shutil'
-                result = web_ui.add_provider("kimi-test", "kimi")[0]
+                result = gradio_ui.add_provider("kimi-test", "kimi")[0]
         assert "❌" in result
 
     def test_delete_provider_cleans_up_claude_config(self, mock_api_client, tmp_path):
         """Deleting Claude provider removes its config directory."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         # Setup mock to return the correct provider
         mock_api_client.get_account.return_value = MockAccount(name="claude-1", provider="anthropic")
@@ -2868,7 +3608,7 @@ class TestClaudeMultiAccount:
         assert not config_dir.exists()
 
     @patch("pathlib.Path.home")
-    def test_add_provider_claude_login_timeout(self, mock_home, web_ui, mock_api_client, tmp_path):
+    def test_add_provider_claude_login_timeout(self, mock_home, gradio_ui, mock_api_client, tmp_path):
         """Adding Claude provider times out if OAuth not completed."""
         mock_home.return_value = tmp_path
         mock_api_client.list_accounts.return_value = []
@@ -2886,13 +3626,13 @@ class TestClaudeMultiAccount:
                 # Patch time to simulate timeout quickly
                 with patch("time.time", side_effect=[0, 0, 200]):  # Instant timeout
                     with patch("time.sleep"):
-                        result = web_ui.add_provider("my-claude", "anthropic")[0]
+                        result = gradio_ui.add_provider("my-claude", "anthropic")[0]
         else:
             with patch("pexpect.spawn", return_value=mock_child):
                 # Patch time to simulate timeout quickly
                 with patch("time.time", side_effect=[0, 0, 200]):  # Instant timeout
                     with patch("time.sleep"):
-                        result = web_ui.add_provider("my-claude", "anthropic")[0]
+                        result = gradio_ui.add_provider("my-claude", "anthropic")[0]
 
         # Provider should NOT be stored (login timed out)
         mock_api_client.create_account.assert_not_called()
@@ -2906,7 +3646,7 @@ class TestClaudeMultiAccount:
         assert not config_dir.exists()
 
     @patch("pathlib.Path.home")
-    def test_add_provider_claude_login_success(self, mock_home, web_ui, mock_api_client, tmp_path):
+    def test_add_provider_claude_login_success(self, mock_home, gradio_ui, mock_api_client, tmp_path):
         """Adding Claude provider succeeds when OAuth completes."""
         import json
 
@@ -2921,7 +3661,7 @@ class TestClaudeMultiAccount:
 
         # Mock pexpect - credentials already exist so pexpect won't be called
         # (the login check passes before pexpect is used)
-        result = web_ui.add_provider("my-claude", "anthropic")[0]
+        result = gradio_ui.add_provider("my-claude", "anthropic")[0]
 
         # Provider should be stored
         mock_api_client.create_account.assert_called_once_with("my-claude", "anthropic")
@@ -2932,7 +3672,7 @@ class TestClaudeMultiAccount:
 
     @patch("pathlib.Path.home")
     @patch("requests.get")
-    def test_add_provider_claude_already_logged_in(self, mock_get, mock_home, web_ui, mock_api_client, tmp_path):
+    def test_add_provider_claude_already_logged_in(self, mock_get, mock_home, gradio_ui, mock_api_client, tmp_path):
         """Adding Claude provider when already logged in shows success."""
         import json
 
@@ -2951,7 +3691,7 @@ class TestClaudeMultiAccount:
         mock_response.json.return_value = {"five_hour": {"utilization": 25}}
         mock_get.return_value = mock_response
 
-        result = web_ui.add_provider("my-claude", "anthropic")[0]
+        result = gradio_ui.add_provider("my-claude", "anthropic")[0]
 
         # Should show logged in status
         assert "✅" in result
@@ -2972,15 +3712,15 @@ class TestPexpectLoginDrain:
         return mgr
 
     @pytest.fixture
-    def web_ui(self, mock_api_client):
-        from chad.ui.gradio.web_ui import ChadWebUI
+    def gradio_ui(self, mock_api_client):
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         ui = ChadWebUI(mock_api_client)
         ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "gemini"))
         return ui
 
     @patch("pathlib.Path.home")
-    def test_gemini_login_creates_settings_json(self, mock_home, web_ui, mock_api_client, tmp_path):
+    def test_gemini_login_creates_settings_json(self, mock_home, gradio_ui, mock_api_client, tmp_path):
         """Gemini login pre-creates settings.json so the CLI skips the auth dialog."""
         import json
         import pexpect
@@ -3009,7 +3749,7 @@ class TestPexpectLoginDrain:
         with patch("pexpect.spawn", return_value=mock_child):
             with patch("time.sleep"):
                 with patch.object(Path, "exists", mock_exists):
-                    result = web_ui.add_provider("my-gemini", "gemini")[0]
+                    result = gradio_ui.add_provider("my-gemini", "gemini")[0]
 
         # settings.json must be created before the CLI is spawned
         settings_path = tmp_path / ".gemini" / "settings.json"
@@ -3019,7 +3759,7 @@ class TestPexpectLoginDrain:
         assert "✅" in result
 
     @patch("pathlib.Path.home")
-    def test_gemini_login_drains_pty_output(self, mock_home, web_ui, mock_api_client, tmp_path):
+    def test_gemini_login_drains_pty_output(self, mock_home, gradio_ui, mock_api_client, tmp_path):
         """Gemini login flow must drain PTY output to prevent buffer deadlock.
 
         Without draining, the Gemini CLI blocks when its PTY output buffer fills,
@@ -3057,7 +3797,7 @@ class TestPexpectLoginDrain:
         with patch("pexpect.spawn", return_value=mock_child):
             with patch("time.sleep"):
                 with patch.object(Path, "exists", mock_exists):
-                    result = web_ui.add_provider("my-gemini", "gemini")[0]
+                    result = gradio_ui.add_provider("my-gemini", "gemini")[0]
 
         # Verify draining happened during polling
         assert len(drain_calls) >= 2, (
@@ -3068,7 +3808,7 @@ class TestPexpectLoginDrain:
         mock_api_client.create_account.assert_called_once_with("my-gemini", "gemini")
 
     @patch("pathlib.Path.home")
-    def test_gemini_login_does_not_overwrite_existing_settings(self, mock_home, web_ui, mock_api_client, tmp_path):
+    def test_gemini_login_does_not_overwrite_existing_settings(self, mock_home, gradio_ui, mock_api_client, tmp_path):
         """If settings.json already exists, don't overwrite the user's config."""
         import json
         import pexpect
@@ -3098,7 +3838,7 @@ class TestPexpectLoginDrain:
         with patch("pexpect.spawn", return_value=mock_child):
             with patch("time.sleep"):
                 with patch.object(Path, "exists", mock_exists):
-                    web_ui.add_provider("my-gemini", "gemini")
+                    gradio_ui.add_provider("my-gemini", "gemini")
 
         # Original settings must be preserved
         settings = json.loads((gemini_dir / "settings.json").read_text())
@@ -3106,12 +3846,12 @@ class TestPexpectLoginDrain:
         assert settings["security"]["auth"]["selectedType"] == "gemini-api-key"
 
     @patch("pathlib.Path.home")
-    def test_qwen_login_drains_pty_output(self, mock_home, web_ui, mock_api_client, tmp_path):
+    def test_qwen_login_drains_pty_output(self, mock_home, gradio_ui, mock_api_client, tmp_path):
         """Qwen login flow drains PTY output (regression guard)."""
         import pexpect
 
         mock_home.return_value = tmp_path
-        web_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "qwen"))
+        gradio_ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "qwen"))
 
         drain_calls = []
 
@@ -3140,7 +3880,7 @@ class TestPexpectLoginDrain:
         with patch("pexpect.spawn", return_value=mock_child):
             with patch("time.sleep"):
                 with patch.object(Path, "exists", mock_exists):
-                    result = web_ui.add_provider("my-qwen", "qwen")[0]
+                    result = gradio_ui.add_provider("my-qwen", "qwen")[0]
 
         assert len(drain_calls) >= 2, (
             f"Expected read_nonblocking to be called during polling, got {len(drain_calls)} calls."
@@ -3221,7 +3961,7 @@ class TestCodingSummaryExtraction:
 
     def test_make_chat_message_uses_extracted_summary(self):
         """make_chat_message should prefer extracted JSON summary over heuristics."""
-        from chad.ui.gradio.web_ui import make_chat_message
+        from chad.ui.gradio.gradio_ui import make_chat_message
 
         # Content needs to be > 300 chars to trigger collapsible mode
         content = """I'm thinking about this task...
@@ -3245,7 +3985,7 @@ Here's some more filler text to ensure we hit that threshold.
 
     def test_make_chat_message_falls_back_to_heuristic(self):
         """make_chat_message should use heuristics when no JSON summary."""
-        from chad.ui.gradio.web_ui import make_chat_message
+        from chad.ui.gradio.gradio_ui import make_chat_message
 
         content = (
             """Some thinking text...
@@ -3262,7 +4002,7 @@ More details here...
 
     def test_make_chat_message_prefers_prompt_line_for_terminal_output(self):
         """Collapsed terminal summaries should prioritize prompt/phase markers over file paths."""
-        from chad.ui.gradio.web_ui import make_chat_message
+        from chad.ui.gradio.gradio_ui import make_chat_message
 
         content = (
             "Mock Agent v1.0\n"
@@ -3284,7 +4024,7 @@ More details here...
 
     def test_make_chat_message_strips_visible_escape_symbol_sequences(self):
         """Visible Unicode escape symbol sequences should be sanitized from chat output."""
-        from chad.ui.gradio.web_ui import make_chat_message
+        from chad.ui.gradio.gradio_ui import make_chat_message
 
         content = "␛[1;34mMock Agent v1.0␛[0m\n␛[36mPrompt: Exploration␛[0m"
         message = make_chat_message("CODING AI", content, collapsible=False)
@@ -3296,7 +4036,7 @@ More details here...
 
     def test_make_chat_message_displays_hypothesis_and_screenshots(self, tmp_path):
         """make_chat_message should show hypothesis and inline screenshot images."""
-        from chad.ui.gradio.web_ui import make_chat_message
+        from chad.ui.gradio.gradio_ui import make_chat_message
 
         # Create minimal PNG files for testing
         before_png = tmp_path / "before.png"
@@ -3681,7 +4421,7 @@ class TestMakeProgressMessage:
 
     def test_make_progress_message_with_next_step(self):
         """Progress message should display next step."""
-        from chad.ui.gradio.web_ui import make_progress_message
+        from chad.ui.gradio.gradio_ui import make_progress_message
         from chad.util.prompts import ProgressUpdate
 
         progress = ProgressUpdate(
@@ -3699,7 +4439,7 @@ class TestMakeProgressMessage:
 
     def test_make_progress_message_without_next_step(self):
         """Progress message should work without next step."""
-        from chad.ui.gradio.web_ui import make_progress_message
+        from chad.ui.gradio.gradio_ui import make_progress_message
         from chad.util.prompts import ProgressUpdate
 
         progress = ProgressUpdate(
@@ -3727,38 +4467,38 @@ class TestLivePatchScrollPreservation:
         return client
 
     @pytest.fixture
-    def web_ui(self, mock_api_client):
-        from chad.ui.gradio.web_ui import ChadWebUI
+    def gradio_ui(self, mock_api_client):
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         return ChadWebUI(mock_api_client)
 
-    def test_live_patch_returns_update_without_value(self, web_ui):
+    def test_live_patch_returns_update_without_value(self, gradio_ui):
         """When live_patch is used, live_stream update should not include a value (prevents scroll reset)."""
-        session = web_ui.create_session("scroll-test")
+        session = gradio_ui.create_session("scroll-test")
         session.has_initial_live_render = True  # Simulate after first render
         live_html = '<div data-live-id="live-stream-box"><div class="live-output-content">line 1</div></div>'
 
-        display_stream, live_patch, flag = web_ui._compute_live_stream_updates(
+        display_stream, live_patch, flag = gradio_ui._compute_live_stream_updates(
             live_html, None, session, live_stream_id="live-stream-box", task_ended=False
         )
         assert display_stream is None  # use live_patch path
         assert live_patch is not None
         assert flag is True  # remains set
 
-    def test_initial_render_sets_value(self, web_ui):
+    def test_initial_render_sets_value(self, gradio_ui):
         """On first render (no initial live render yet), value should be populated so content appears."""
-        session = web_ui.create_session("scroll-first")
+        session = gradio_ui.create_session("scroll-first")
         session.has_initial_live_render = False
         live_html = '<div data-live-id="live-stream-box"><div class="live-output-content">init</div></div>'
 
-        display_stream, live_patch, flag = web_ui._compute_live_stream_updates(
+        display_stream, live_patch, flag = gradio_ui._compute_live_stream_updates(
             live_html, None, session, live_stream_id="live-stream-box", task_ended=False
         )
         assert display_stream == live_html
         assert live_patch is None
         assert flag is True  # should flip on first render
 
-    def test_empty_content_resets_initial_flag(self, web_ui):
+    def test_empty_content_resets_initial_flag(self, gradio_ui):
         """Clearing live_stream must reset has_initial so next content does a full render.
 
         Reproduces the race condition where:
@@ -3766,7 +4506,7 @@ class TestLivePatchScrollPreservation:
         2. Empty content clears the DOM but has_initial stays True
         3. Next content tries JS patching on a cleared DOM and fails silently
         """
-        session = web_ui.create_session("clear-reset")
+        session = gradio_ui.create_session("clear-reset")
         live_stream_id = "live-stream-box"
         live_html = (
             f'<div data-live-id="{live_stream_id}">'
@@ -3774,7 +4514,7 @@ class TestLivePatchScrollPreservation:
         )
 
         # Step 1: initial render — sets has_initial = True
-        _, _, flag = web_ui._compute_live_stream_updates(
+        _, _, flag = gradio_ui._compute_live_stream_updates(
             live_html, None, session, live_stream_id=live_stream_id,
             task_ended=False,
         )
@@ -3782,7 +4522,7 @@ class TestLivePatchScrollPreservation:
 
         # Step 2: empty content arrives (e.g. status event clears live stream)
         session.has_initial_live_render = flag
-        _, _, flag = web_ui._compute_live_stream_updates(
+        _, _, flag = gradio_ui._compute_live_stream_updates(
             "", None, session, live_stream_id=live_stream_id,
             task_ended=False,
         )
@@ -3790,7 +4530,7 @@ class TestLivePatchScrollPreservation:
 
         # Step 3: new content arrives — must do a full Gradio render (not JS patch)
         session.has_initial_live_render = flag
-        display_stream, live_patch, flag = web_ui._compute_live_stream_updates(
+        display_stream, live_patch, flag = gradio_ui._compute_live_stream_updates(
             live_html, None, session, live_stream_id=live_stream_id,
             task_ended=False,
         )
@@ -3806,7 +4546,7 @@ class TestPhaseMilestones:
 
     def test_make_phase_milestone_with_metrics(self):
         """make_phase_milestone should format phase name, account, model, and metrics."""
-        from chad.ui.gradio.web_ui import make_phase_milestone
+        from chad.ui.gradio.gradio_ui import make_phase_milestone
 
         msg = make_phase_milestone("Exploration", "claude-1", "claude-sonnet-4-20250514", 85)
         assert msg["role"] == "user"
@@ -3817,7 +4557,7 @@ class TestPhaseMilestones:
 
     def test_make_phase_milestone_without_metrics(self):
         """make_phase_milestone should omit metrics when not provided."""
-        from chad.ui.gradio.web_ui import make_phase_milestone
+        from chad.ui.gradio.gradio_ui import make_phase_milestone
 
         msg = make_phase_milestone("Verification", "verifier", "gpt-4o")
         assert msg["role"] == "user"
@@ -3828,11 +4568,28 @@ class TestPhaseMilestones:
 
     def test_make_phase_milestone_different_phases(self):
         """make_phase_milestone should work with various phase names."""
-        from chad.ui.gradio.web_ui import make_phase_milestone
+        from chad.ui.gradio.gradio_ui import make_phase_milestone
 
         for phase in ("Coding", "Re-coding", "Re-verification"):
             msg = make_phase_milestone(phase, "acct", "model-x", 50)
             assert f"**{phase}:**" in msg["content"]
+
+    def test_make_phase_milestone_with_weekly_usage(self):
+        """make_phase_milestone should include weekly usage when provided."""
+        from chad.ui.gradio.gradio_ui import make_phase_milestone
+
+        msg = make_phase_milestone("Coding", "claude-1", "claude-opus-4", 18, weekly_usage_pct=85)
+        assert msg["role"] == "user"
+        assert "Usage: 18%" in msg["content"]
+        assert "Weekly: 85%" in msg["content"]
+
+    def test_make_phase_milestone_weekly_without_session(self):
+        """make_phase_milestone should show weekly even without session usage."""
+        from chad.ui.gradio.gradio_ui import make_phase_milestone
+
+        msg = make_phase_milestone("Coding", "claude-1", "claude-opus-4", weekly_usage_pct=100)
+        assert "Weekly: 100%" in msg["content"]
+        assert "Usage:" not in msg["content"].split("Weekly")[0]
 
     def test_idle_status_shows_ready_with_model(self):
         """Idle status should show Ready with coding model info (get_role_config_status still works)."""
@@ -3849,9 +4606,8 @@ class TestPhaseMilestones:
         assert "Coding" in status
         assert "claude-main" in status
 
-    def test_format_usage_metrics_returns_percentages(self):
+    def test_format_usage_metrics_returns_percentages(self, monkeypatch):
         """_format_usage_metrics should return formatted usage percentage."""
-        from chad.ui.gradio.provider_ui import ProviderUIManager
 
         class MockAPIClient:
             def __init__(self):
@@ -3867,8 +4623,37 @@ class TestPhaseMilestones:
                 return self._mock_usage.get(name, 0.5)
 
         ui = ProviderUIManager(MockAPIClient())
+
+        # Mock get_weekly_remaining_usage for this test
+        monkeypatch.setattr(ui, "get_weekly_remaining_usage", lambda name: 0.85)
+
         metrics = ui._format_usage_metrics("test-account")
-        assert "Usage: 75%" in metrics
+        assert "session usage: 75%" in metrics
+        assert "weekly usage: 85%" in metrics
+
+    def test_format_usage_metrics_returns_only_session_if_no_weekly(self, monkeypatch):
+        """_format_usage_metrics should return only session usage if no weekly data."""
+        class MockAPIClient:
+            def __init__(self):
+                self._mock_usage = {"test-account": 0.75}
+
+            def list_accounts(self):
+                return [MockAccount(name="test-account", provider="mock", role="CODING")]
+
+            def get_account(self, name):
+                return MockAccount(name=name, provider="mock", role="CODING")
+
+            def get_mock_remaining_usage(self, name):
+                return self._mock_usage.get(name, 0.5)
+
+        ui = ProviderUIManager(MockAPIClient())
+
+        # Mock get_weekly_remaining_usage to return None
+        monkeypatch.setattr(ui, "get_weekly_remaining_usage", lambda name: None)
+
+        metrics = ui._format_usage_metrics("test-account")
+        assert "session usage: 75%" in metrics
+        assert "weekly usage" not in metrics
 
     def test_ready_status_includes_usage_metrics(self):
         """Ready status should include usage metrics when available."""
@@ -3891,7 +4676,7 @@ class TestPhaseMilestones:
         ready, status = ui.get_role_config_status()
         assert ready is True
         assert "Ready" in status
-        assert "Usage: 80%" in status
+        assert "session usage: 80%" in status
 
 
 class TestMockProviderCardControls:
@@ -3938,7 +4723,7 @@ class TestVerificationPrompt:
 
     def test_truncation_keeps_indicator_and_fits_limit(self):
         """Verification payloads should be compact and annotated when truncated."""
-        from chad.ui.gradio.web_ui import _truncate_verification_output, MAX_VERIFICATION_PROMPT_CHARS
+        from chad.ui.gradio.gradio_ui import _truncate_verification_output, MAX_VERIFICATION_PROMPT_CHARS
 
         long_text = "a" * (MAX_VERIFICATION_PROMPT_CHARS + 500)
         truncated = _truncate_verification_output(long_text)
@@ -3947,7 +4732,7 @@ class TestVerificationPrompt:
 
     def test_run_verification_aborts_without_required_inputs(self, monkeypatch, tmp_path):
         """Verification should abort before contacting providers when inputs are missing."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         class DummyAPIClient:
             def list_accounts(self):
@@ -3963,17 +4748,17 @@ class TestVerificationPrompt:
         def _fail_if_called(*_args, **_kwargs):
             raise AssertionError("create_provider should not be called when inputs are missing")
 
-        monkeypatch.setattr("chad.ui.gradio.web_ui.create_provider", _fail_if_called)
+        monkeypatch.setattr("chad.ui.gradio.gradio_ui.create_provider", _fail_if_called)
 
-        web_ui = ChadWebUI(DummyAPIClient())
+        gradio_ui = ChadWebUI(DummyAPIClient())
 
-        verified, feedback = web_ui._run_verification(
+        verified, feedback = gradio_ui._run_verification(
             str(tmp_path), "output present", "", "verifier"
         )
         assert verified is None
         assert "missing task description" in feedback
 
-        verified, feedback = web_ui._run_verification(
+        verified, feedback = gradio_ui._run_verification(
             str(tmp_path), "", "Task here", "verifier"
         )
         assert verified is None
@@ -3981,8 +4766,8 @@ class TestVerificationPrompt:
 
     def test_run_verification_returns_rich_feedback(self, monkeypatch, tmp_path):
         """Verification failures should include lint details (tests no longer run)."""
-        from chad.ui.gradio.web_ui import ChadWebUI
-        import chad.ui.gradio.web_ui as web_ui
+        from chad.ui.gradio.gradio_ui import ChadWebUI
+        import chad.ui.gradio.gradio_ui as gradio_ui
         import chad.ui.gradio.verification.tools as verification_tools
 
         class DummyAPIClient:
@@ -4023,12 +4808,12 @@ class TestVerificationPrompt:
             def stop_session(self):
                 return None
 
-        monkeypatch.setattr(web_ui, "create_provider", lambda *_args, **_kwargs: DummyVerifier())
-        monkeypatch.setattr(web_ui, "check_verification_mentioned", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(gradio_ui, "create_provider", lambda *_args, **_kwargs: DummyVerifier())
+        monkeypatch.setattr(gradio_ui, "check_verification_mentioned", lambda *_args, **_kwargs: False)
         monkeypatch.setattr(verification_tools, "verify", fake_verify)
 
-        web_ui = ChadWebUI(DummyAPIClient())
-        verified, feedback = web_ui._run_verification(str(tmp_path), "output", "Task", "verifier")
+        gradio_ui = ChadWebUI(DummyAPIClient())
+        verified, feedback = gradio_ui._run_verification(str(tmp_path), "output", "Task", "verifier")
 
         assert verified is False
         assert "Verification failed" in feedback
@@ -4103,8 +4888,8 @@ class TestVerificationPrompt:
 
     def test_run_verification_emits_parse_failure_status(self, monkeypatch, tmp_path):
         """Verification should surface parse failures while retrying."""
-        from chad.ui.gradio.web_ui import ChadWebUI
-        import chad.ui.gradio.web_ui as web_ui
+        from chad.ui.gradio.gradio_ui import ChadWebUI
+        import chad.ui.gradio.gradio_ui as gradio_ui
 
         class DummyAPIClient:
             def get_account(self, name):
@@ -4132,7 +4917,7 @@ class TestVerificationPrompt:
             def stop_session(self):
                 return None
 
-        monkeypatch.setattr(web_ui, "create_provider", lambda *_args, **_kwargs: DummyVerifier())
+        monkeypatch.setattr(gradio_ui, "create_provider", lambda *_args, **_kwargs: DummyVerifier())
 
         activities = []
 
@@ -4152,7 +4937,7 @@ class TestVerificationPrompt:
 
     def test_run_verification_mock_provider_two_phase_fail_then_pass(self, monkeypatch, tmp_path):
         """Mock provider should fail first verification attempt, then pass after revision."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
         from chad.util.config_manager import ConfigManager
         from chad.util.providers import MockProvider
 
@@ -4182,8 +4967,8 @@ class TestVerificationPrompt:
 
     def test_run_verification_recovers_after_one_parse_failure(self, monkeypatch, tmp_path):
         """Verifier should retry once and succeed when second response is valid."""
-        from chad.ui.gradio.web_ui import ChadWebUI
-        import chad.ui.gradio.web_ui as web_ui
+        from chad.ui.gradio.gradio_ui import ChadWebUI
+        import chad.ui.gradio.gradio_ui as gradio_ui
 
         class DummyAPIClient:
             def get_account(self, name):
@@ -4219,8 +5004,8 @@ class TestVerificationPrompt:
             create_calls["count"] += 1
             return DummyVerifier(responses[min(idx, len(responses) - 1)])
 
-        monkeypatch.setattr(web_ui, "create_provider", create_provider_stub)
-        monkeypatch.setattr(web_ui, "check_verification_mentioned", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(gradio_ui, "create_provider", create_provider_stub)
+        monkeypatch.setattr(gradio_ui, "check_verification_mentioned", lambda *_args, **_kwargs: True)
 
         ui = ChadWebUI(DummyAPIClient())
         verified, feedback = ui._run_verification(
@@ -4233,8 +5018,8 @@ class TestVerificationPrompt:
 
     def test_run_verification_retry_uses_fresh_provider_session(self, monkeypatch, tmp_path):
         """Retry should create a new verifier instance instead of reusing prior session state."""
-        from chad.ui.gradio.web_ui import ChadWebUI
-        import chad.ui.gradio.web_ui as web_ui
+        from chad.ui.gradio.gradio_ui import ChadWebUI
+        import chad.ui.gradio.gradio_ui as gradio_ui
 
         class DummyAPIClient:
             def get_account(self, name):
@@ -4270,8 +5055,8 @@ class TestVerificationPrompt:
             create_calls["count"] += 1
             return DummyVerifier(responses[min(idx, len(responses) - 1)])
 
-        monkeypatch.setattr(web_ui, "create_provider", create_provider_stub)
-        monkeypatch.setattr(web_ui, "check_verification_mentioned", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(gradio_ui, "create_provider", create_provider_stub)
+        monkeypatch.setattr(gradio_ui, "check_verification_mentioned", lambda *_args, **_kwargs: True)
 
         ui = ChadWebUI(DummyAPIClient())
         verified, feedback = ui._run_verification(
@@ -4284,8 +5069,8 @@ class TestVerificationPrompt:
 
     def test_run_verification_uses_two_phase_prompts(self, monkeypatch, tmp_path):
         """Verification should run exploration first, then a strict conclusion JSON prompt."""
-        from chad.ui.gradio.web_ui import ChadWebUI
-        import chad.ui.gradio.web_ui as web_ui
+        from chad.ui.gradio.gradio_ui import ChadWebUI
+        import chad.ui.gradio.gradio_ui as gradio_ui
 
         class DummyAPIClient:
             def get_account(self, name):
@@ -4317,8 +5102,8 @@ class TestVerificationPrompt:
             def stop_session(self):
                 return None
 
-        monkeypatch.setattr(web_ui, "create_provider", lambda *_args, **_kwargs: DummyVerifier())
-        monkeypatch.setattr(web_ui, "check_verification_mentioned", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(gradio_ui, "create_provider", lambda *_args, **_kwargs: DummyVerifier())
+        monkeypatch.setattr(gradio_ui, "check_verification_mentioned", lambda *_args, **_kwargs: True)
 
         ui = ChadWebUI(DummyAPIClient())
         verified, feedback = ui._run_verification(
@@ -4330,12 +5115,219 @@ class TestVerificationPrompt:
         assert len(sent_messages) == 2
 
 
+class TestElevatedVerificationCriteria:
+    """Test that verification prompts include elevated criteria on retry."""
+
+    def test_first_attempt_has_no_elevated_criteria(self):
+        """First verification attempt should not include elevated criteria."""
+        from chad.util.prompts import get_verification_exploration_prompt
+
+        prompt = get_verification_exploration_prompt("output", "task", attempt=1)
+        assert "Elevated Review" not in prompt
+        assert "Durability" not in prompt
+        assert "Root cause" not in prompt
+
+    def test_second_attempt_includes_elevated_criteria(self):
+        """Second verification attempt should include all four elevated criteria."""
+        from chad.util.prompts import get_verification_exploration_prompt
+
+        prompt = get_verification_exploration_prompt("output", "task", attempt=2)
+        assert "Elevated Review (Attempt 2)" in prompt
+        assert "Durability" in prompt
+        assert "Root cause" in prompt
+        assert "Structural improvement" in prompt
+        assert "Dead code" in prompt
+
+    def test_third_attempt_shows_correct_attempt_number(self):
+        """Third attempt should show attempt=3 in the elevated criteria."""
+        from chad.util.prompts import get_verification_exploration_prompt
+
+        prompt = get_verification_exploration_prompt("output", "task", attempt=3)
+        assert "Attempt 3" in prompt
+        assert "retry attempt 3" in prompt
+
+    def test_elevated_criteria_constant_has_all_questions(self):
+        """The ELEVATED_VERIFICATION_CRITERIA template should contain all four questions."""
+        from chad.util.prompts import ELEVATED_VERIFICATION_CRITERIA
+
+        text = ELEVATED_VERIFICATION_CRITERIA.format(attempt=2)
+        assert "Durability" in text
+        assert "Root cause" in text
+        assert "Structural improvement" in text
+        assert "Dead code" in text
+
+    def test_default_attempt_has_no_elevated_criteria(self):
+        """Calling without attempt parameter should default to attempt=1 (no elevated)."""
+        from chad.util.prompts import get_verification_exploration_prompt
+
+        prompt = get_verification_exploration_prompt("output", "task")
+        assert "Elevated Review" not in prompt
+
+    def test_verification_loop_increments_attempt(self, monkeypatch, tmp_path):
+        """The verification loop should pass increasing attempt numbers to run_verification."""
+        from chad.server.services.session_event_loop import SessionEventLoop
+        from chad.util.event_log import EventLog
+
+        attempts_seen = []
+
+        def fake_run_verification(**kwargs):
+            attempts_seen.append(kwargs.get("attempt"))
+            return False, "Issues found"
+
+        def fake_run_phase_fn(**kwargs):
+            return 0, "revision output"
+
+        def fake_emit(*args, **kwargs):
+            pass
+
+        event_log = EventLog(session_id="test", base_dir=tmp_path)
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=type("Task", (), {"cancel_requested": False, "stream_id": None})(),
+            run_phase_fn=fake_run_phase_fn,
+            emit_fn=fake_emit,
+            worktree_path="/tmp/test",
+            max_verification_attempts=3,
+        )
+        loop.accumulated_output = "some output"
+
+        monkeypatch.setattr(
+            "chad.server.services.verification.run_verification",
+            fake_run_verification,
+        )
+
+        loop._run_verification_loop(
+            session=None,
+            task_description="test task",
+            coding_account="test",
+            coding_provider="mock",
+            rows=80,
+            cols=200,
+            git_mgr=None,
+            verification_config={"verification_account": "test"},
+        )
+
+        assert attempts_seen == [1, 2, 3]
+
+    def test_revision_prompt_normal_on_early_attempts(self):
+        """Revision prompt for attempts 1-2 should use the standard template."""
+        from chad.util.prompts import get_revision_prompt
+
+        prompt = get_revision_prompt("some feedback", attempt=1)
+        assert "Verification found issues" in prompt
+        assert "some feedback" in prompt
+        assert "Session history" not in prompt
+        assert "Current disk state" not in prompt
+
+        prompt2 = get_revision_prompt("feedback", attempt=2)
+        assert "Verification found issues" in prompt2
+        assert "Session history" not in prompt2
+
+    def test_revision_prompt_escalated_on_attempt_3(self):
+        """Revision prompt for attempt >= 3 should use the escalated audit template."""
+        from chad.util.prompts import get_revision_prompt
+
+        prompt = get_revision_prompt("still broken", attempt=3)
+        assert "failed 3 times" in prompt
+        assert "Session history" in prompt
+        assert "Current disk state" in prompt
+        assert "Git history" in prompt
+        assert "Assess" in prompt
+        assert "New plan" in prompt
+        assert "still broken" in prompt
+
+    def test_revision_prompt_escalated_on_attempt_4(self):
+        """Higher attempts should also get the escalated template with correct count."""
+        from chad.util.prompts import get_revision_prompt
+
+        prompt = get_revision_prompt("feedback", attempt=4)
+        assert "failed 4 times" in prompt
+        assert "Session history" in prompt
+
+    def test_revision_prompt_default_attempt_is_normal(self):
+        """Default attempt parameter should produce the standard revision prompt."""
+        from chad.util.prompts import get_revision_prompt
+
+        prompt = get_revision_prompt("feedback")
+        assert "Verification found issues" in prompt
+        assert "Session history" not in prompt
+
+    def test_escalated_revision_constant_has_all_steps(self):
+        """The ESCALATED_REVISION_PROMPT should contain all five audit steps."""
+        from chad.util.prompts import ESCALATED_REVISION_PROMPT
+
+        text = ESCALATED_REVISION_PROMPT.format(feedback="x", attempt=3)
+        assert "Session history" in text
+        assert "Current disk state" in text
+        assert "Git history" in text
+        assert "Assess" in text
+        assert "New plan" in text
+
+    def test_verification_loop_passes_attempt_to_revision(self, monkeypatch, tmp_path):
+        """The revision phase should receive the current attempt number."""
+        from chad.server.services.session_event_loop import SessionEventLoop
+        from chad.util.event_log import EventLog
+
+        revision_attempts_seen = []
+
+        def fake_run_verification(**kwargs):
+            return False, "Issues found"
+
+        def fake_run_phase_fn(**kwargs):
+            override = kwargs.get("override_prompt", "")
+            if kwargs.get("phase") == "revision" and override:
+                # Extract attempt info from the prompt
+                if "failed" in override and "times" in override:
+                    revision_attempts_seen.append("escalated")
+                else:
+                    revision_attempts_seen.append("normal")
+            return 0, "output"
+
+        def fake_emit(*args, **kwargs):
+            pass
+
+        event_log = EventLog(session_id="test", base_dir=tmp_path)
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=type("Task", (), {"cancel_requested": False, "stream_id": None})(),
+            run_phase_fn=fake_run_phase_fn,
+            emit_fn=fake_emit,
+            worktree_path="/tmp/test",
+            max_verification_attempts=4,
+        )
+        loop.accumulated_output = "some output"
+
+        monkeypatch.setattr(
+            "chad.server.services.verification.run_verification",
+            fake_run_verification,
+        )
+
+        loop._run_verification_loop(
+            session=None,
+            task_description="test task",
+            coding_account="test",
+            coding_provider="mock",
+            rows=80,
+            cols=200,
+            git_mgr=None,
+            verification_config={"verification_account": "test"},
+        )
+
+        # Attempts: 0,1,2,3 (0-indexed). Revision runs for 0,1,2 (not last).
+        # attempt+1 passed to revision: 1,2,3. Escalated at >=3.
+        assert revision_attempts_seen == ["normal", "normal", "escalated"]
+
+
 class TestAnsiToHtml:
     """Test that ANSI escape codes are properly converted to HTML spans."""
 
     def test_converts_basic_color_codes_to_html(self):
         """Basic SGR color codes should be converted to HTML spans."""
-        from chad.ui.gradio.web_ui import ansi_to_html
+        from chad.ui.gradio.gradio_ui import ansi_to_html
 
         # Purple/magenta color code
         text = "\x1b[35mPurple text\x1b[0m"
@@ -4347,7 +5339,7 @@ class TestAnsiToHtml:
 
     def test_converts_256_color_codes(self):
         """256-color codes should be converted to HTML spans."""
-        from chad.ui.gradio.web_ui import ansi_to_html
+        from chad.ui.gradio.gradio_ui import ansi_to_html
 
         # 256-color purple
         text = "\x1b[38;5;141mColored\x1b[0m"
@@ -4357,7 +5349,7 @@ class TestAnsiToHtml:
 
     def test_converts_rgb_color_codes(self):
         """RGB true-color codes should be converted to HTML spans."""
-        from chad.ui.gradio.web_ui import ansi_to_html
+        from chad.ui.gradio.gradio_ui import ansi_to_html
 
         # RGB purple
         text = "\x1b[38;2;198;120;221mRGB color\x1b[0m"
@@ -4367,7 +5359,7 @@ class TestAnsiToHtml:
 
     def test_strips_cursor_codes(self):
         """Cursor control sequences with ? should be stripped."""
-        from chad.ui.gradio.web_ui import ansi_to_html
+        from chad.ui.gradio.gradio_ui import ansi_to_html
 
         # Show/hide cursor - these use different ending chars, should be skipped
         text = "\x1b[?25hVisible\x1b[?25l"
@@ -4376,7 +5368,7 @@ class TestAnsiToHtml:
 
     def test_strips_osc_sequences(self):
         """OSC sequences (like terminal title) should be stripped."""
-        from chad.ui.gradio.web_ui import ansi_to_html
+        from chad.ui.gradio.gradio_ui import ansi_to_html
 
         # Set terminal title - uses different format, should be skipped
         text = "\x1b]0;My Title\x07Content here"
@@ -4385,7 +5377,7 @@ class TestAnsiToHtml:
 
     def test_preserves_newlines(self):
         """Newlines should be preserved."""
-        from chad.ui.gradio.web_ui import ansi_to_html
+        from chad.ui.gradio.gradio_ui import ansi_to_html
 
         text = "Line 1\n\nLine 3"
         result = ansi_to_html(text)
@@ -4393,7 +5385,7 @@ class TestAnsiToHtml:
 
     def test_escapes_html_entities(self):
         """HTML entities should be escaped."""
-        from chad.ui.gradio.web_ui import ansi_to_html
+        from chad.ui.gradio.gradio_ui import ansi_to_html
 
         text = "<script>alert('xss')</script>"
         result = ansi_to_html(text)
@@ -4402,7 +5394,7 @@ class TestAnsiToHtml:
 
     def test_converts_unclosed_color_codes(self):
         """Unclosed color codes should generate HTML span that closes at end."""
-        from chad.ui.gradio.web_ui import ansi_to_html
+        from chad.ui.gradio.gradio_ui import ansi_to_html
 
         # Color without reset
         text = "\x1b[35mPurple start\n\nText after blank line"
@@ -4416,7 +5408,7 @@ class TestAnsiToHtml:
 
     def test_handles_stray_escape_characters(self):
         """Stray escape characters in non-m sequences should be handled."""
-        from chad.ui.gradio.web_ui import ansi_to_html
+        from chad.ui.gradio.gradio_ui import ansi_to_html
 
         # Stray escape that doesn't match known patterns - skipped
         text = "Before\x1b[999zAfter"
@@ -4427,7 +5419,7 @@ class TestAnsiToHtml:
 
     def test_strips_background_colors(self):
         """Background colors (40-47) should be stripped to prevent white-on-dark issues."""
-        from chad.ui.gradio.web_ui import ansi_to_html
+        from chad.ui.gradio.gradio_ui import ansi_to_html
 
         # White background (47) - would make text unreadable on dark theme
         text = "\x1b[47mWhite bg text\x1b[0m"
@@ -4469,22 +5461,22 @@ class TestPreferredVerificationModel:
         return client
 
     @pytest.fixture
-    def web_ui(self, mock_api_client):
+    def gradio_ui(self, mock_api_client):
         """Create a ChadWebUI instance."""
-        from chad.ui.gradio.web_ui import ChadWebUI
+        from chad.ui.gradio.gradio_ui import ChadWebUI
 
         return ChadWebUI(mock_api_client)
 
-    def test_build_verification_dropdown_uses_stored_model(self, web_ui, mock_api_client, monkeypatch):
+    def test_build_verification_dropdown_uses_stored_model(self, gradio_ui, mock_api_client, monkeypatch):
         """Test that _build_verification_dropdown_state uses the stored preferred model."""
         # Mock model catalog to return model choices
         monkeypatch.setattr(
-            web_ui.model_catalog, "get_models",
+            gradio_ui.model_catalog, "get_models",
             lambda provider, acct=None: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "default"]
         )
 
         # Build dropdown state with a stored preferred model
-        state = web_ui._build_verification_dropdown_state(
+        state = gradio_ui._build_verification_dropdown_state(
             coding_agent="claude",
             verification_agent="claude-verifier",
             coding_model_value="claude-sonnet-4-20250514",
@@ -4495,19 +5487,19 @@ class TestPreferredVerificationModel:
         # The model value should be the stored preferred model
         assert state.model_value == "claude-opus-4-20250514"
 
-    def test_build_verification_dropdown_falls_back_to_account_model(self, web_ui, mock_api_client, monkeypatch):
+    def test_build_verification_dropdown_falls_back_to_account_model(self, gradio_ui, mock_api_client, monkeypatch):
         """Test fallback to account model when no preferred model is stored."""
         # Set a specific model on the account
         mock_api_client.get_account.return_value = MockAccount(
             name="claude-verifier", provider="anthropic", model="claude-sonnet-4-20250514", reasoning="default"
         )
         monkeypatch.setattr(
-            web_ui.model_catalog, "get_models",
+            gradio_ui.model_catalog, "get_models",
             lambda provider, acct=None: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "default"]
         )
 
         # Build dropdown state without a preferred model
-        state = web_ui._build_verification_dropdown_state(
+        state = gradio_ui._build_verification_dropdown_state(
             coding_agent="claude",
             verification_agent="claude-verifier",
             coding_model_value="claude-sonnet-4-20250514",
@@ -4518,7 +5510,7 @@ class TestPreferredVerificationModel:
         # Should fall back to the account's stored model
         assert state.model_value == "claude-sonnet-4-20250514"
 
-    def test_build_verification_dropdown_same_as_mock_filters_foreign_model(self, web_ui, mock_api_client):
+    def test_build_verification_dropdown_same_as_mock_filters_foreign_model(self, gradio_ui, mock_api_client):
         """SAME_AS_CODING should not retain a model that belongs to a different provider."""
         mock_account = MockAccount(
             name="testy",
@@ -4530,9 +5522,9 @@ class TestPreferredVerificationModel:
         mock_api_client.list_accounts.return_value = [mock_account]
         mock_api_client.get_account.side_effect = lambda _: mock_account
 
-        state = web_ui._build_verification_dropdown_state(
+        state = gradio_ui._build_verification_dropdown_state(
             coding_agent="testy",
-            verification_agent=web_ui.SAME_AS_CODING,
+            verification_agent=gradio_ui.SAME_AS_CODING,
             coding_model_value="claude-sonnet-4-20250514",
             coding_reasoning_value="default",
         )
@@ -4540,10 +5532,10 @@ class TestPreferredVerificationModel:
         assert state.model_choices == ["default"]
         assert state.model_value == "default"
 
-    def test_resolve_verification_preferences_persists_model(self, web_ui, mock_api_client):
+    def test_resolve_verification_preferences_persists_model(self, gradio_ui, mock_api_client):
         """Test that _resolve_verification_preferences persists the verification model to config."""
         # Call with an explicit verification model
-        web_ui._resolve_verification_preferences(
+        gradio_ui._resolve_verification_preferences(
             coding_account="claude",
             coding_model="claude-sonnet-4-20250514",
             coding_reasoning="default",
@@ -4556,15 +5548,15 @@ class TestPreferredVerificationModel:
         mock_api_client.set_account_model.assert_called_once_with("claude-verifier", "claude-opus-4-20250514")
         mock_api_client.set_preferred_verification_model.assert_called_once_with("claude-opus-4-20250514")
 
-    def test_resolve_verification_preferences_skips_same_as_coding(self, web_ui, mock_api_client):
+    def test_resolve_verification_preferences_skips_same_as_coding(self, gradio_ui, mock_api_client):
         """Test that SAME_AS_CODING model value doesn't persist to config."""
         # Call with SAME_AS_CODING as the model value
-        web_ui._resolve_verification_preferences(
+        gradio_ui._resolve_verification_preferences(
             coding_account="claude",
             coding_model="claude-sonnet-4-20250514",
             coding_reasoning="default",
             verification_agent="claude-verifier",
-            verification_model=web_ui.SAME_AS_CODING,
+            verification_model=gradio_ui.SAME_AS_CODING,
             verification_reasoning="default",
         )
 
@@ -4581,11 +5573,10 @@ class TestPromptPreviews:
         from chad.util.prompts import build_prompt_previews
 
         previews = build_prompt_previews(None)
-        assert "{task}" in previews.exploration
-        assert "{task}" in previews.implementation
+        assert "{task}" in previews.coding
         assert "{task}" in previews.verification
-        assert "{exploration_output}" in previews.implementation
-        assert "Project Documentation" not in previews.exploration
+        assert "EXPLORATION_RESULT:" in previews.coding
+        assert "Project Documentation" not in previews.coding
 
     def test_previews_with_project_path(self, tmp_path):
         """Previews with a project path should include docs and verification instructions."""
@@ -4597,18 +5588,17 @@ class TestPromptPreviews:
 
         previews = build_prompt_previews(tmp_path)
         # Should still have {task} placeholder
-        assert "{task}" in previews.exploration
-        assert "{task}" in previews.implementation
+        assert "{task}" in previews.coding
         # Should have project docs filled in (reference to AGENTS.md)
-        assert "AGENTS.md" in previews.exploration
-        assert "AGENTS.md" in previews.implementation
+        assert "AGENTS.md" in previews.coding
 
-    def test_previews_keep_exploration_output_placeholder(self):
-        """Implementation preview should keep {exploration_output} as placeholder."""
+    def test_previews_legacy_aliases(self):
+        """Legacy exploration/implementation aliases should map to coding prompt."""
         from chad.util.prompts import build_prompt_previews
 
         previews = build_prompt_previews(None)
-        assert "{exploration_output}" in previews.implementation
+        assert previews.exploration == previews.coding
+        assert previews.implementation == previews.coding
 
     def test_previews_verification_has_coding_output_placeholder(self):
         """Verification preview should keep {coding_output} as placeholder."""
@@ -4621,9 +5611,9 @@ class TestPromptPreviews:
 class TestScreenshotUpload:
     """Tests for screenshot upload functionality."""
 
-    def test_exploration_prompt_includes_screenshot_paths(self, tmp_path):
-        """build_exploration_prompt should include screenshot file paths when provided."""
-        from chad.util.prompts import build_exploration_prompt
+    def test_coding_prompt_includes_screenshot_paths(self, tmp_path):
+        """build_prompt should include screenshot file paths when provided."""
+        from chad.util.prompts import build_prompt
 
         # Create test screenshot files
         screenshot1 = tmp_path / "screenshot1.png"
@@ -4631,7 +5621,7 @@ class TestScreenshotUpload:
         screenshot1.write_bytes(b"PNG mock data 1")
         screenshot2.write_bytes(b"PNG mock data 2")
 
-        prompt = build_exploration_prompt(
+        prompt = build_prompt(
             task="Fix the UI layout",
             screenshots=[str(screenshot1), str(screenshot2)],
         )
@@ -4642,29 +5632,25 @@ class TestScreenshotUpload:
         # Should have a screenshots section
         assert "Screenshot" in prompt or "screenshot" in prompt
 
-    def test_exploration_prompt_works_without_screenshots(self):
-        """build_exploration_prompt should work without screenshots (backwards compatible)."""
-        from chad.util.prompts import build_exploration_prompt
+    def test_coding_prompt_works_without_screenshots(self):
+        """build_prompt should work without screenshots."""
+        from chad.util.prompts import build_prompt
 
-        prompt = build_exploration_prompt(task="Simple task")
+        prompt = build_prompt(task="Simple task")
 
         assert "Simple task" in prompt
         # No screenshot references should be present
         assert "Screenshot" not in prompt
 
-    def test_exploration_prompt_includes_phase_info(self):
-        """Exploration prompt should include phase info, class-map guidance, and progress JSON requirement."""
-        from chad.util.prompts import build_exploration_prompt
+    def test_coding_prompt_includes_exploration_markers(self):
+        """Coding prompt should include EXPLORATION_RESULT markers and completion JSON requirement."""
+        from chad.util.prompts import build_prompt
 
-        prompt = build_exploration_prompt(task="Do thing")
-        # Should have Phase 1 marker
-        assert "Phase 1" in prompt
-        # Exploration should steer agents toward using the class map when present
-        assert "Class Map" in prompt
-        # Progress update requirement should be present
-        assert "progress" in prompt.lower()
-        # Time constraint should be present (60 seconds for exploration)
-        assert "60 seconds" in prompt or "within" in prompt.lower()
+        prompt = build_prompt(task="Do thing")
+        # Should have EXPLORATION_RESULT marker instruction
+        assert "EXPLORATION_RESULT:" in prompt
+        # Completion JSON requirement should be present
+        assert "change_summary" in prompt
 
     def test_progress_is_extracted_correctly(self):
         """Progress JSON should be correctly extracted from agent output.
@@ -4762,31 +5748,30 @@ class TestScreenshotUpload:
             assert request_data["screenshots"] == ["/tmp/screenshot1.png"]
 
 
-class TestFollowupEventLogging:
-    """Test that send_followup() logs events to the session event log."""
+class TestFollowupAPIRouting:
+    """Test that send_followup() routes through run_task_via_api."""
 
     @pytest.fixture
-    def web_ui(self):
-        from chad.ui.gradio.web_ui import ChadWebUI
+    def gradio_ui(self):
+        from chad.ui.gradio.gradio_ui import ChadWebUI
         client = Mock()
         claude_account = MockAccount(name="claude", provider="mock", role="CODING")
         client.list_accounts.return_value = [claude_account]
         client.get_account.return_value = claude_account
         client.get_verification_agent.return_value = None
-        client.get_preferences.return_value = Mock(last_project_path=None, dark_mode=True, ui_mode="gradio")
+        client.get_preferences.return_value = Mock(last_project_path=None, ui_mode="gradio")
         client.get_cleanup_settings.return_value = Mock(retention_days=7, auto_cleanup=True)
         client.get_max_verification_attempts.return_value = 3
         ui = ChadWebUI(client)
         ui.provider_ui.installer.ensure_tool = Mock(return_value=(True, "/tmp/codex"))
         return ui
 
-    def _setup_session(self, web_ui, session_id, git_repo, monkeypatch):
-        """Set up a session with a MockProvider and EventLog."""
-        from chad.util.event_log import EventLog
+    def _setup_session(self, gradio_ui, session_id, git_repo, monkeypatch):
+        """Set up a session with mocked run_task_via_api."""
         git_mgr = GitWorktreeManager(git_repo)
         worktree_path, base_commit = git_mgr.create_worktree(session_id)
 
-        session = web_ui.get_session(session_id)
+        session = gradio_ui.get_session(session_id)
         session.project_path = str(git_repo)
         session.worktree_path = worktree_path
         session.worktree_branch = git_mgr._branch_name(session_id)
@@ -4794,173 +5779,86 @@ class TestFollowupEventLogging:
         session.active = True
         session.chat_history = [{"role": "user", "content": "**Task**\n\nInitial task"}]
         session.task_description = "Initial task"
-
-        monkeypatch.setattr(MockProvider, "_simulate_delay", lambda *args, **kwargs: None)
-        config = ModelConfig(provider="mock", model_name="default", account_name="claude")
-        provider = MockProvider(config)
-        provider._get_remaining_usage = lambda: 0.5
-        provider._decrement_usage = lambda amount=None: None
-        provider.start_session(str(worktree_path))
-        session.provider = provider
         session.coding_account = "claude"
-        session.config = config
+        session.config = ModelConfig(provider="mock", model_name="default", account_name="claude")
 
-        # Set up event log (remove any stale log from previous runs)
-        session.event_log = EventLog(session_id)
-        if session.event_log.log_path.exists():
-            session.event_log.log_path.unlink()
-            session.event_log = EventLog(session_id)
-        session.event_log.start_turn()
-        return session
+        api_call_args = {}
 
-    def _get_events(self, session):
-        """Read all events from the session's event log."""
-        import json
-        events = []
-        log_path = session.event_log.log_path
-        if log_path.exists():
-            for line in log_path.read_text().splitlines():
-                if line.strip():
-                    events.append(json.loads(line))
-        return events
+        def mock_run_task_via_api(**kwargs):
+            api_call_args.update(kwargs)
+            return (True, "Task completed", "srv-123", None)
 
-    def test_followup_logs_user_and_assistant_events(self, web_ui, git_repo, monkeypatch):
-        """Follow-up should log UserMessageEvent and AssistantMessageEvent."""
-        session = self._setup_session(web_ui, "event-log-basic", git_repo, monkeypatch)
+        monkeypatch.setattr(gradio_ui, "run_task_via_api", mock_run_task_via_api)
 
-        list(web_ui.send_followup(
-            "event-log-basic",
+        return session, api_call_args
+
+    def test_followup_routes_through_api_with_is_followup(self, gradio_ui, git_repo, monkeypatch):
+        """Follow-up should call run_task_via_api with is_followup=True."""
+        session, api_call_args = self._setup_session(gradio_ui, "api-route-test", git_repo, monkeypatch)
+
+        list(gradio_ui.send_followup(
+            "api-route-test",
             "Fix the button color",
             session.chat_history,
             coding_agent="claude",
-            verification_agent=web_ui.VERIFICATION_NONE,
+            verification_agent=gradio_ui.VERIFICATION_NONE,
         ))
 
-        events = self._get_events(session)
-        event_types = [e["type"] for e in events]
-        assert "user_message" in event_types, f"Expected user_message event, got: {event_types}"
-        assert "assistant_message" in event_types, f"Expected assistant_message event, got: {event_types}"
+        assert api_call_args.get("is_followup") is True
+        assert api_call_args.get("coding_account") == "claude"
+        assert api_call_args.get("task_description") == "Fix the button color"
 
-        # Check sequence numbers are monotonically increasing
-        sequences = [e["seq"] for e in events if e["type"] in ("user_message", "assistant_message")]
-        assert sequences == sorted(sequences), f"Sequences not monotonic: {sequences}"
-
-    def test_followup_logs_raw_message_not_resume_prompt(self, web_ui, git_repo, monkeypatch):
-        """Logged UserMessageEvent should contain the raw user message, not modified versions."""
-        session = self._setup_session(web_ui, "event-log-raw", git_repo, monkeypatch)
-
-        raw_message = "Please change the font size"
-        list(web_ui.send_followup(
-            "event-log-raw",
-            raw_message,
-            session.chat_history,
-            coding_agent="claude",
-            verification_agent=web_ui.VERIFICATION_NONE,
-            screenshots=["/tmp/fake_screenshot.png"],
-        ))
-
-        events = self._get_events(session)
-        user_events = [e for e in events if e["type"] == "user_message"]
-        assert len(user_events) >= 1
-        # The logged content should be the raw message, not the screenshot-appended version
-        assert user_events[0]["content"] == raw_message
-
-    def test_followup_with_verification_logs_verification_events(self, web_ui, git_repo, monkeypatch):
-        """Follow-up with verification should log VerificationAttemptEvent."""
-        session = self._setup_session(web_ui, "event-log-verify", git_repo, monkeypatch)
-
-        # Mock _run_verification to return success
-        monkeypatch.setattr(
-            web_ui, "_run_verification",
-            lambda *args, **kwargs: (True, "All checks passed"),
-        )
-
-        list(web_ui.send_followup(
-            "event-log-verify",
-            "Add a test",
-            session.chat_history,
-            coding_agent="claude",
-            verification_agent="claude",
-        ))
-
-        events = self._get_events(session)
-        event_types = [e["type"] for e in events]
-        assert "user_message" in event_types
-        assert "assistant_message" in event_types
-        assert "verification_attempt" in event_types
-
-        verify_events = [e for e in events if e["type"] == "verification_attempt"]
-        assert verify_events[0]["passed"] is True
-
-    def test_followup_verification_revision_logs_all_events(self, web_ui, git_repo, monkeypatch):
-        """Verification fail + revision should log the full event sequence."""
-        session = self._setup_session(web_ui, "event-log-revision", git_repo, monkeypatch)
-
-        # First call fails verification, second passes
-        verification_calls = {"count": 0}
-
-        def mock_verification(*args, **kwargs):
-            verification_calls["count"] += 1
-            if verification_calls["count"] == 1:
-                return (False, "Tests are failing")
-            return (True, "All good now")
-
-        monkeypatch.setattr(web_ui, "_run_verification", mock_verification)
-
-        list(web_ui.send_followup(
-            "event-log-revision",
-            "Fix the layout",
-            session.chat_history,
-            coding_agent="claude",
-            verification_agent="claude",
-        ))
-
-        events = self._get_events(session)
-        event_types = [e["type"] for e in events]
-
-        # Should have: user_message (followup), assistant_message (coding),
-        # verification_attempt (fail), user_message (revision), assistant_message (revision),
-        # verification_attempt (pass)
-        assert event_types.count("user_message") >= 2, f"Expected >=2 user_message events, got: {event_types}"
-        assert event_types.count("assistant_message") >= 2, f"Expected >=2 assistant_message events, got: {event_types}"
-        assert event_types.count("verification_attempt") == 2, f"Expected 2 verification_attempt events, got: {event_types}"
-
-        # First verification should be failed, second should pass
-        verify_events = [e for e in events if e["type"] == "verification_attempt"]
-        assert verify_events[0]["passed"] is False
-        assert verify_events[1]["passed"] is True
-
-    def test_followup_verification_uses_followup_message_as_task_description(
-        self, web_ui, git_repo, monkeypatch
-    ):
-        """Follow-up after merge (empty task_description) should use the follow-up message for verification."""
-        session = self._setup_session(web_ui, "event-log-empty-desc", git_repo, monkeypatch)
-
-        # Simulate post-merge state: task_description cleared
+    def test_followup_sets_task_description_on_session(self, gradio_ui, git_repo, monkeypatch):
+        """Follow-up should update session.task_description to the follow-up message."""
+        session, _ = self._setup_session(gradio_ui, "task-desc-test", git_repo, monkeypatch)
         session.task_description = ""
 
-        # Track what task_description is passed to _run_verification
-        captured_args = {}
-
-        def mock_verification(*args, **kwargs):
-            # _run_verification(path, coding_output, task_description, ...)
-            captured_args["task_description"] = args[2] if len(args) > 2 else kwargs.get("task_description")
-            return (True, "All checks passed")
-
-        monkeypatch.setattr(web_ui, "_run_verification", mock_verification)
-
         followup_msg = "Refactor the database layer"
-        list(web_ui.send_followup(
-            "event-log-empty-desc",
+        list(gradio_ui.send_followup(
+            "task-desc-test",
             followup_msg,
             session.chat_history,
             coding_agent="claude",
-            verification_agent="claude",
+            verification_agent=gradio_ui.VERIFICATION_NONE,
         ))
 
-        # Verification must receive the follow-up message, not an empty string
-        assert captured_args.get("task_description") == followup_msg, (
-            f"Expected task_description='{followup_msg}', got '{captured_args.get('task_description')}'"
-        )
-        # session.task_description should also be updated
         assert session.task_description == followup_msg
+
+    def test_followup_displays_raw_message_not_resume_prompt(self, gradio_ui, git_repo, monkeypatch):
+        """Chat history should show the raw user message, not the resume prompt XML."""
+        from chad.util.event_log import EventLog, UserMessageEvent, AssistantMessageEvent
+        session, _ = self._setup_session(gradio_ui, "display-test", git_repo, monkeypatch)
+
+        # Add event log with prior conversation so build_resume_prompt has content
+        session.event_log = EventLog("display-test")
+        if session.event_log.log_path.exists():
+            session.event_log.log_path.unlink()
+            session.event_log = EventLog("display-test")
+        session.event_log.start_turn()
+        session.event_log.log(UserMessageEvent(content="Initial task"))
+        session.event_log.log(
+            AssistantMessageEvent(blocks=[{"kind": "text", "content": "Done with initial task."}])
+        )
+
+        # Simulate session ended
+        session.active = False
+        session.provider = None
+
+        followup_msg = "Now fix the tests"
+        list(gradio_ui.send_followup(
+            "display-test",
+            followup_msg,
+            session.chat_history,
+            coding_agent="claude",
+            verification_agent=gradio_ui.VERIFICATION_NONE,
+        ))
+
+        user_messages = [
+            msg for msg in session.chat_history
+            if msg.get("role") == "user" and "Follow-up" in msg.get("content", "")
+        ]
+        assert user_messages, "Expected a follow-up user message in chat history"
+
+        last_followup = user_messages[-1]["content"]
+        assert followup_msg in last_followup
+        assert "<previous_session>" not in last_followup

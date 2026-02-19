@@ -763,6 +763,41 @@ class TestClaudeCodeProvider:
 
         assert result == "Final result"
 
+    def test_get_response_reader_thread_handles_stop_iteration(self):
+        """Reader thread should treat StopIteration as clean EOF, not a thread error."""
+        import json
+        import threading
+
+        config = ModelConfig(provider="anthropic", model_name="claude-3")
+        provider = ClaudeCodeProvider(config)
+
+        mock_process = Mock()
+        mock_stdout = Mock()
+        mock_process.stdout = mock_stdout
+        mock_process.poll.return_value = None
+        provider.process = mock_process
+
+        messages = [
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Hi"}]}}),
+            json.dumps({"type": "result", "result": "Final result"}),
+        ]
+        mock_stdout.readline.side_effect = messages + [""]
+
+        thread_exceptions: list[type[BaseException]] = []
+        original_excepthook = threading.excepthook
+
+        def capture_excepthook(args: threading.ExceptHookArgs) -> None:
+            thread_exceptions.append(args.exc_type)
+
+        threading.excepthook = capture_excepthook
+        try:
+            result = provider.get_response(timeout=5.0)
+        finally:
+            threading.excepthook = original_excepthook
+
+        assert result == "Final result"
+        assert thread_exceptions == []
+
     def test_send_message_with_broken_pipe_error(self):
         """Test that BrokenPipeError is silently caught in send_message."""
         config = ModelConfig(provider="anthropic", model_name="claude-3")
@@ -2493,7 +2528,7 @@ class TestProviderUsageReporting:
         config = ModelConfig(provider="anthropic", model_name="claude-sonnet-4")
         provider = ClaudeCodeProvider(config)
         assert provider.supports_usage_reporting() is True
-        # get_usage_percentage returns None when credentials not available
+        # get_session_usage_percentage returns None when credentials not available
         # (we can't test actual API calls in unit tests)
 
     def test_codex_provider_supports_usage_reporting(self):
@@ -2501,7 +2536,7 @@ class TestProviderUsageReporting:
         config = ModelConfig(provider="openai", model_name="gpt-4")
         provider = OpenAICodexProvider(config)
         assert provider.supports_usage_reporting() is True
-        # get_usage_percentage returns None when session files not available
+        # get_session_usage_percentage returns None when session files not available
 
     def test_gemini_provider_supports_usage_reporting(self):
         """Gemini provider supports usage percentage reporting via local session files."""
@@ -2534,8 +2569,270 @@ class TestProviderUsageReporting:
         assert provider.supports_usage_reporting() is True
 
 
+class TestProviderQuotaDetection:
+    """Tests for is_quota_exhausted() on each provider."""
+
+    def test_claude_detects_hit_limit(self):
+        """Claude's is_quota_exhausted recognizes 'You've hit your limit'."""
+        config = ModelConfig(provider="anthropic", model_name="claude-sonnet-4", account_name="test")
+        provider = ClaudeCodeProvider(config)
+        # Without real API access, weekly check returns None so it defaults to session
+        result = provider.is_quota_exhausted("You've hit your limit · resets 4pm")
+        assert result == "session_limit_reached"
+
+    def test_claude_returns_none_for_normal_output(self):
+        """Claude's is_quota_exhausted returns None for normal output."""
+        config = ModelConfig(provider="anthropic", model_name="claude-sonnet-4", account_name="test")
+        provider = ClaudeCodeProvider(config)
+        result = provider.is_quota_exhausted("Working on the task, reading files...")
+        assert result is None
+
+    def test_codex_detects_quota_error(self):
+        """Codex's is_quota_exhausted recognizes quota exhaustion patterns."""
+        config = ModelConfig(provider="openai", model_name="gpt-4", account_name="test")
+        provider = OpenAICodexProvider(config)
+        result = provider.is_quota_exhausted("Error: you exceeded your current quota")
+        assert result == "session_limit_reached"
+
+    def test_codex_returns_none_for_normal_output(self):
+        """Codex's is_quota_exhausted returns None for normal output."""
+        config = ModelConfig(provider="openai", model_name="gpt-4", account_name="test")
+        provider = OpenAICodexProvider(config)
+        result = provider.is_quota_exhausted("Running command: pytest tests/")
+        assert result is None
+
+    def test_base_provider_detects_generic_patterns(self):
+        """Base AIProvider.is_quota_exhausted uses handoff patterns."""
+        config = ModelConfig(provider="gemini", model_name="default")
+        provider = GeminiCodeAssistProvider(config)
+        result = provider.is_quota_exhausted("Error: insufficient credits")
+        assert result == "session_limit_reached"
+
+    def test_base_provider_returns_none_for_normal_output(self):
+        """Base AIProvider.is_quota_exhausted returns None for normal text."""
+        config = ModelConfig(provider="gemini", model_name="default")
+        provider = GeminiCodeAssistProvider(config)
+        result = provider.is_quota_exhausted("Analyzing the codebase structure...")
+        assert result is None
+
+    def test_all_providers_have_is_quota_exhausted(self):
+        """Every provider class has an is_quota_exhausted method."""
+        from chad.util.providers import (
+            ClaudeCodeProvider, OpenAICodexProvider, GeminiCodeAssistProvider,
+            QwenCodeProvider, OpenCodeProvider, KimiCodeProvider,
+            MistralVibeProvider, MockProvider,
+        )
+        provider_classes = [
+            ClaudeCodeProvider, OpenAICodexProvider, GeminiCodeAssistProvider,
+            QwenCodeProvider, OpenCodeProvider, KimiCodeProvider,
+            MistralVibeProvider, MockProvider,
+        ]
+        for cls in provider_classes:
+            assert hasattr(cls, "is_quota_exhausted"), f"{cls.__name__} missing is_quota_exhausted"
+
+    def test_all_providers_have_weekly_usage(self):
+        """Every provider class has a get_weekly_usage_percentage method."""
+        from chad.util.providers import (
+            ClaudeCodeProvider, OpenAICodexProvider, GeminiCodeAssistProvider,
+            QwenCodeProvider, OpenCodeProvider, KimiCodeProvider,
+            MistralVibeProvider, MockProvider,
+        )
+        provider_classes = [
+            ClaudeCodeProvider, OpenAICodexProvider, GeminiCodeAssistProvider,
+            QwenCodeProvider, OpenCodeProvider, KimiCodeProvider,
+            MistralVibeProvider, MockProvider,
+        ]
+        for cls in provider_classes:
+            assert hasattr(cls, "get_weekly_usage_percentage"), f"{cls.__name__} missing get_weekly_usage_percentage"
+
+    def test_providers_without_weekly_return_none(self):
+        """Providers that don't have weekly data return None."""
+        providers = [
+            GeminiCodeAssistProvider(ModelConfig(provider="gemini", model_name="default")),
+            QwenCodeProvider(ModelConfig(provider="qwen", model_name="default")),
+            MistralVibeProvider(ModelConfig(provider="mistral", model_name="default")),
+            OpenCodeProvider(ModelConfig(provider="opencode", model_name="default")),
+            KimiCodeProvider(ModelConfig(provider="kimi", model_name="default")),
+            MockProvider(ModelConfig(provider="mock", model_name="default")),
+        ]
+        for p in providers:
+            assert p.get_weekly_usage_percentage() is None, f"{type(p).__name__} should return None"
+
+
 class TestUsagePercentageCalculation:
     """Tests for usage percentage calculation from local session files."""
+
+    def _write_claude_creds(self, base_dir: Path, account: str) -> Path:
+        """Helper to create Claude credential file in a temp home."""
+        cred_dir = base_dir / ".chad" / "claude-configs" / account
+        cred_dir.mkdir(parents=True, exist_ok=True)
+        cred_path = cred_dir / ".credentials.json"
+        cred_path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "test-token"}}))
+        return cred_path
+
+    def test_claude_usage_percentage_scales_fractional_utilization(self, tmp_path):
+        """Claude usage API returns fractions (0-1); function should convert to percent."""
+        from chad.util.providers import _get_claude_usage_percentage
+
+        account = "claude-fractional"
+        self._write_claude_creds(tmp_path, account)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"five_hour": {"utilization": 0.32}}
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path), \
+                patch("requests.get", return_value=mock_response):
+            pct = _get_claude_usage_percentage(account)
+
+        assert pct == pytest.approx(32.0)
+
+    def test_claude_usage_percentage_preserves_percent_inputs(self, tmp_path):
+        """Claude usage function should keep already-percentage values unchanged."""
+        from chad.util.providers import _get_claude_usage_percentage
+
+        account = "claude-percent"
+        self._write_claude_creds(tmp_path, account)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"five_hour": {"utilization": 87}}
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path), \
+                patch("requests.get", return_value=mock_response):
+            pct = _get_claude_usage_percentage(account)
+
+        assert pct == pytest.approx(87.0)
+
+    def test_claude_weekly_usage_percentage_scales_fractional_utilization(self, tmp_path):
+        """Weekly usage should also scale fractional utilization to percentage."""
+        from chad.util.providers import _get_claude_weekly_usage_percentage
+
+        account = "claude-weekly"
+        self._write_claude_creds(tmp_path, account)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"seven_day": {"utilization": 0.5}}
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path), \
+                patch("requests.get", return_value=mock_response):
+            pct = _get_claude_weekly_usage_percentage(account)
+
+        assert pct == pytest.approx(50.0)
+
+    def test_claude_provider_makes_single_http_call_for_all_usage_methods(self, tmp_path):
+        """All four usage methods on ClaudeCodeProvider share a single HTTP request."""
+        from chad.util.providers import ClaudeCodeProvider, ModelConfig
+
+        account = "claude-cached"
+        self._write_claude_creds(tmp_path, account)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "five_hour": {"utilization": 0.45, "resets_at": "2099-01-01T12:00:00Z"},
+            "seven_day": {"utilization": 0.7, "resets_at": "2099-01-08T00:00:00Z"},
+        }
+
+        provider = ClaudeCodeProvider(ModelConfig(provider="anthropic", model_name="default", account_name=account))
+        with patch("chad.util.providers.safe_home", return_value=tmp_path), \
+                patch("requests.get", return_value=mock_response) as mock_get:
+            session_pct = provider.get_session_usage_percentage()
+            weekly_pct = provider.get_weekly_usage_percentage()
+            session_eta = provider.get_session_reset_eta()
+            weekly_eta = provider.get_weekly_reset_eta()
+
+        assert mock_get.call_count == 1, "Expected exactly 1 HTTP request for all usage methods"
+        assert session_pct == pytest.approx(45.0)
+        assert weekly_pct == pytest.approx(70.0)
+        assert session_eta is not None
+        assert weekly_eta is not None
+
+    def test_claude_provider_usage_refreshes_after_ttl(self, tmp_path):
+        """Usage data is re-fetched after the cache TTL so threshold checks see current values."""
+        from chad.util.providers import ClaudeCodeProvider, ModelConfig
+
+        account = "claude-ttl-test"
+        self._write_claude_creds(tmp_path, account)
+
+        call_count = [0]
+
+        def mock_get_response(*args, **kwargs):
+            call_count[0] += 1
+            r = Mock()
+            r.status_code = 200
+            # Return increasing utilization to simulate usage rising over time
+            r.json.return_value = {
+                "five_hour": {"utilization": call_count[0] * 0.1},
+                "seven_day": {"utilization": 0.5},
+            }
+            return r
+
+        provider = ClaudeCodeProvider(ModelConfig(provider="anthropic", model_name="default", account_name=account))
+        with patch("chad.util.providers.safe_home", return_value=tmp_path), \
+                patch("requests.get", side_effect=mock_get_response):
+            pct1 = provider.get_session_usage_percentage()   # first fetch (call 1 → 10%)
+            pct1b = provider.get_session_usage_percentage()  # within TTL → uses cache
+
+            # Expire the cache by rewinding the fetch timestamp
+            provider._usage_data_fetched_at -= provider._USAGE_CACHE_TTL + 1
+
+            pct2 = provider.get_session_usage_percentage()   # TTL expired → re-fetch (call 2 → 20%)
+
+        assert call_count[0] == 2, "Expected exactly 2 HTTP requests (initial + post-TTL refresh)"
+        assert pct1 == pytest.approx(10.0)
+        assert pct1b == pytest.approx(10.0)   # cached, not re-fetched
+        assert pct2 == pytest.approx(20.0)    # fresh data after TTL
+
+    def test_claude_provider_usage_reset_eta_format(self, tmp_path):
+        """Reset ETA is formatted correctly for hours and minutes."""
+        from datetime import datetime, timezone, timedelta
+        from chad.util.providers import ClaudeCodeProvider, ModelConfig
+
+        account = "claude-eta"
+        self._write_claude_creds(tmp_path, account)
+
+        future = datetime.now(timezone.utc) + timedelta(hours=2, minutes=15)
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "five_hour": {"utilization": 0.5, "resets_at": future.isoformat()},
+            "seven_day": {"utilization": 0.5},
+        }
+
+        provider = ClaudeCodeProvider(ModelConfig(provider="anthropic", model_name="default", account_name=account))
+        with patch("chad.util.providers.safe_home", return_value=tmp_path), \
+                patch("requests.get", return_value=mock_response):
+            eta = provider.get_session_reset_eta()
+
+        assert eta is not None
+        assert "h" in eta  # e.g. "2h 15m"
+
+    def test_claude_provider_handles_null_period_fields(self, tmp_path):
+        """API response with null period values (e.g. seven_day: null) returns None safely."""
+        from chad.util.providers import ClaudeCodeProvider, ModelConfig
+
+        account = "claude-null-fields"
+        self._write_claude_creds(tmp_path, account)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "five_hour": {"utilization": 0.5, "resets_at": "2099-01-01T12:00:00Z"},
+            "seven_day": None,  # explicitly null - must not raise AttributeError
+        }
+
+        provider = ClaudeCodeProvider(ModelConfig(provider="anthropic", model_name="default", account_name=account))
+        with patch("chad.util.providers.safe_home", return_value=tmp_path), \
+                patch("requests.get", return_value=mock_response):
+            session_pct = provider.get_session_usage_percentage()
+            weekly_pct = provider.get_weekly_usage_percentage()
+            weekly_eta = provider.get_weekly_reset_eta()
+
+        assert session_pct == pytest.approx(50.0)
+        assert weekly_pct is None  # null value → None, not an error
+        assert weekly_eta is None
 
     def test_gemini_usage_not_logged_in(self, tmp_path):
         """Gemini returns None when oauth credentials don't exist."""
@@ -2677,7 +2974,7 @@ class TestUsagePercentageCalculation:
 
         vibe_dir = tmp_path / ".vibe"
         vibe_dir.mkdir()
-        (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"')
+        (vibe_dir / ".env").write_text("MISTRAL_API_KEY=test-key\n")
 
         with patch("chad.util.providers.safe_home", return_value=str(tmp_path)):
             result = _get_mistral_usage_percentage("")
@@ -2690,7 +2987,7 @@ class TestUsagePercentageCalculation:
 
         vibe_dir = tmp_path / ".vibe"
         vibe_dir.mkdir()
-        (vibe_dir / "config.toml").write_text('[general]\napi_key = "test"')
+        (vibe_dir / ".env").write_text("MISTRAL_API_KEY=test-key\n")
 
         # Create session directory
         session_dir = vibe_dir / "logs" / "session"
@@ -3100,3 +3397,39 @@ class TestMockProviderQuotaSimulation:
         # Should use default 0.5 usage and work normally
         response = provider.get_response()
         assert response
+
+
+class TestMockProviderUsageReporting:
+    """Tests for MockProvider's usage reporting (supports_usage_reporting, get_*_usage_percentage)."""
+
+    def test_mock_provider_reports_usage(self, tmp_path):
+        """MockProvider.supports_usage_reporting() returns True and usage percentages are correct."""
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-usage",
+        )
+        provider = MockProvider(model_config)
+        provider._get_remaining_usage = lambda: 0.55
+
+        assert provider.supports_usage_reporting() is True
+        # Usage = (1.0 - 0.55) * 100 = 45.0
+        assert abs(provider.get_session_usage_percentage() - 45.0) < 0.01
+        assert abs(provider.get_context_usage_percentage() - 45.0) < 0.01
+
+    def test_mock_provider_usage_at_boundaries(self, tmp_path):
+        """MockProvider usage reporting at 0% and 100%."""
+        model_config = ModelConfig(
+            provider="mock",
+            model_name="default",
+            account_name="test-bounds",
+        )
+        provider = MockProvider(model_config)
+
+        # Full capacity remaining → 0% used
+        provider._get_remaining_usage = lambda: 1.0
+        assert provider.get_session_usage_percentage() == 0.0
+
+        # No capacity remaining → 100% used
+        provider._get_remaining_usage = lambda: 0.0
+        assert provider.get_session_usage_percentage() == 100.0

@@ -7,10 +7,19 @@ from chad.server.api.schemas import (
     VerificationSettings,
     CleanupSettings,
     UserPreferences,
+    SlackSettingsResponse,
+    SlackSettingsUpdate,
 )
 from chad.server.state import get_config_manager
 
 router = APIRouter()
+
+
+class VerificationSettingsUpdate(BaseModel):
+    """Partial update model for verification settings."""
+
+    enabled: bool | None = Field(default=None, description="Whether verification is enabled")
+    auto_run: bool | None = Field(default=None, description="Whether to auto-run verification after coding")
 
 
 class VerificationAgentResponse(BaseModel):
@@ -37,39 +46,25 @@ class PreferredVerificationModelUpdate(BaseModel):
     model: str | None = Field(description="Model name to set, or null to clear")
 
 
-class ProviderFallbackOrderResponse(BaseModel):
-    """Response for provider fallback order endpoint."""
+class ActionSettingItem(BaseModel):
+    """A single action setting entry."""
 
-    order: list[str] = Field(
-        default_factory=list,
-        description="Ordered list of account names for auto-switching on quota exhaustion",
-    )
-
-
-class ProviderFallbackOrderUpdate(BaseModel):
-    """Request to set provider fallback order."""
-
-    order: list[str] = Field(
-        description="Ordered list of account names for auto-switching",
-    )
+    event: str = Field(description="Event type: session_usage, weekly_usage, or context_usage")
+    threshold: int = Field(ge=0, le=100, description="Percentage threshold (0-100)")
+    action: str = Field(description="Action: notify, switch_provider, or await_reset")
+    target_account: str | None = Field(default=None, description="Target account for switch_provider")
 
 
-class UsageSwitchThresholdResponse(BaseModel):
-    """Response for usage switch threshold endpoint."""
+class ActionSettingsResponse(BaseModel):
+    """Response for action settings endpoint."""
 
-    threshold: int = Field(
-        description="Percentage threshold (0-100) for triggering provider switch based on usage",
-    )
+    settings: list[ActionSettingItem]
 
 
-class UsageSwitchThresholdUpdate(BaseModel):
-    """Request to set usage switch threshold."""
+class ActionSettingsUpdate(BaseModel):
+    """Request to update action settings."""
 
-    threshold: int = Field(
-        ge=0,
-        le=100,
-        description="Percentage threshold (0-100). Use 100 to disable usage-based switching.",
-    )
+    settings: list[ActionSettingItem]
 
 
 class MockRemainingUsageResponse(BaseModel):
@@ -110,26 +105,28 @@ class MockRunDurationUpdate(BaseModel):
 
 @router.get("/verification", response_model=VerificationSettings)
 async def get_verification_settings() -> VerificationSettings:
-    """Get verification agent settings."""
-    # Verification is always enabled; the actual account is set via role assignment
-    # auto_run defaults to True (the UI controls this behavior)
-    return VerificationSettings(
-        enabled=True,
-        auto_run=True,
-    )
+    """Get verification agent settings.
+
+    Defaults are enabled=True, auto_run=True.
+    """
+    config_mgr = get_config_manager()
+    enabled, auto_run = config_mgr.get_runtime_verification_settings()
+    return VerificationSettings(enabled=enabled, auto_run=auto_run)
 
 
 @router.put("/verification", response_model=VerificationSettings)
-async def update_verification_settings(request: VerificationSettings) -> VerificationSettings:
-    """Update verification agent settings.
+async def update_verification_settings(request: VerificationSettingsUpdate) -> VerificationSettings:
+    """Update verification flags (persisted across restarts).
 
-    Note: The account used for verification is set via the account role
-    assignment, not through this endpoint.
+    Supports partial updates; unspecified fields keep their previous values.
+    The verification agent account is configured separately via /verification-agent.
     """
-    # VerificationSettings contains enabled/auto_run which are runtime flags
-    # The actual verification agent account is set via role assignment
-    # For now, just return the request as acknowledgement
-    return request
+    config_mgr = get_config_manager()
+    enabled, auto_run = config_mgr.set_runtime_verification_settings(
+        enabled=request.enabled,
+        auto_run=request.auto_run,
+    )
+    return VerificationSettings(enabled=enabled, auto_run=auto_run)
 
 
 @router.get("/cleanup", response_model=CleanupSettings)
@@ -166,7 +163,6 @@ async def get_preferences() -> UserPreferences:
 
     return UserPreferences(
         last_project_path=prefs.get("project_path") if prefs else None,
-        dark_mode=True,  # Default, not persisted in ConfigManager
         ui_mode=config_mgr.get_ui_mode(),
     )
 
@@ -187,7 +183,6 @@ async def update_preferences(request: UserPreferences) -> UserPreferences:
 
     return UserPreferences(
         last_project_path=prefs.get("project_path") if prefs else None,
-        dark_mode=request.dark_mode,
         ui_mode=config_mgr.get_ui_mode(),
     )
 
@@ -234,61 +229,24 @@ async def set_preferred_verification_model(
     return PreferredVerificationModelResponse(model=request.model)
 
 
-@router.get("/provider-fallback-order", response_model=ProviderFallbackOrderResponse)
-async def get_provider_fallback_order() -> ProviderFallbackOrderResponse:
-    """Get the ordered list of provider accounts for auto-switching on quota exhaustion.
-
-    When a provider runs out of credits/quota, the system will automatically
-    switch to the next provider in this list.
-    """
+@router.get("/action-settings", response_model=ActionSettingsResponse)
+async def get_action_settings() -> ActionSettingsResponse:
+    """Get usage action settings for all event types."""
     config_mgr = get_config_manager()
-    order = config_mgr.get_provider_fallback_order()
+    settings = config_mgr.get_action_settings()
+    return ActionSettingsResponse(settings=[ActionSettingItem(**s) for s in settings])
 
-    return ProviderFallbackOrderResponse(order=order)
 
-
-@router.put("/provider-fallback-order", response_model=ProviderFallbackOrderResponse)
-async def set_provider_fallback_order(
-    request: ProviderFallbackOrderUpdate,
-) -> ProviderFallbackOrderResponse:
-    """Set the ordered list of provider accounts for auto-switching.
-
-    Accounts not in this list will not be used for automatic switching.
-    """
+@router.put("/action-settings", response_model=ActionSettingsResponse)
+async def set_action_settings(request: ActionSettingsUpdate) -> ActionSettingsResponse:
+    """Set usage action settings."""
     config_mgr = get_config_manager()
+    raw = [s.model_dump(exclude_none=True) for s in request.settings]
     try:
-        config_mgr.set_provider_fallback_order(request.order)
+        config_mgr.set_action_settings(raw)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return ProviderFallbackOrderResponse(order=request.order)
-
-
-@router.get("/usage-switch-threshold", response_model=UsageSwitchThresholdResponse)
-async def get_usage_switch_threshold() -> UsageSwitchThresholdResponse:
-    """Get the usage percentage threshold for auto-switching providers.
-
-    When a provider reports usage above this percentage, the system will
-    automatically switch to the next fallback provider.
-    """
-    config_mgr = get_config_manager()
-    threshold = config_mgr.get_usage_switch_threshold()
-
-    return UsageSwitchThresholdResponse(threshold=threshold)
-
-
-@router.put("/usage-switch-threshold", response_model=UsageSwitchThresholdResponse)
-async def set_usage_switch_threshold(
-    request: UsageSwitchThresholdUpdate,
-) -> UsageSwitchThresholdResponse:
-    """Set the usage percentage threshold for auto-switching providers.
-
-    Set to 100 to disable usage-based switching (only error-based switching).
-    """
-    config_mgr = get_config_manager()
-    config_mgr.set_usage_switch_threshold(request.threshold)
-
-    return UsageSwitchThresholdResponse(threshold=request.threshold)
+    return ActionSettingsResponse(settings=request.settings)
 
 
 @router.get("/mock-remaining-usage/{account_name}", response_model=MockRemainingUsageResponse)
@@ -390,3 +348,124 @@ async def set_max_verification_attempts(
     config_mgr.set_max_verification_attempts(request.attempts)
 
     return MaxVerificationAttemptsResponse(attempts=request.attempts)
+
+
+@router.get("/slack", response_model=SlackSettingsResponse)
+async def get_slack_settings() -> SlackSettingsResponse:
+    """Get Slack integration settings."""
+    config_mgr = get_config_manager()
+    return SlackSettingsResponse(
+        enabled=config_mgr.get_slack_enabled(),
+        channel=config_mgr.get_slack_channel(),
+        has_token=bool(config_mgr.get_slack_bot_token()),
+        has_signing_secret=bool(config_mgr.get_slack_signing_secret()),
+    )
+
+
+@router.put("/slack", response_model=SlackSettingsResponse)
+async def set_slack_settings(request: SlackSettingsUpdate) -> SlackSettingsResponse:
+    """Update Slack integration settings."""
+    config_mgr = get_config_manager()
+    if request.enabled is not None:
+        config_mgr.set_slack_enabled(request.enabled)
+    if request.channel is not None:
+        config_mgr.set_slack_channel(request.channel)
+    if request.bot_token is not None:
+        config_mgr.set_slack_bot_token(request.bot_token)
+    if request.signing_secret is not None:
+        config_mgr.set_slack_signing_secret(request.signing_secret)
+    return SlackSettingsResponse(
+        enabled=config_mgr.get_slack_enabled(),
+        channel=config_mgr.get_slack_channel(),
+        has_token=bool(config_mgr.get_slack_bot_token()),
+        has_signing_secret=bool(config_mgr.get_slack_signing_secret()),
+    )
+
+
+class ProjectSettingsResponse(BaseModel):
+    """Response for project settings endpoint."""
+
+    project_path: str = Field(description="Path to the project")
+    project_type: str | None = Field(description="Detected project type")
+    lint_command: str | None = Field(description="Lint command for the project")
+    test_command: str | None = Field(description="Test command for the project")
+    instructions_path: str | None = Field(description="Path to agent instructions file")
+    architecture_path: str | None = Field(description="Path to architecture docs")
+
+
+class ProjectSettingsUpdate(BaseModel):
+    """Request to update project settings."""
+
+    project_path: str = Field(description="Path to the project")
+    lint_command: str | None = Field(default=None, description="Lint command")
+    test_command: str | None = Field(default=None, description="Test command")
+    instructions_path: str | None = Field(default=None, description="Agent instructions path")
+    architecture_path: str | None = Field(default=None, description="Architecture docs path")
+
+
+@router.get("/project", response_model=ProjectSettingsResponse)
+async def get_project_settings(
+    project_path: str | None = None,
+) -> ProjectSettingsResponse:
+    """Get project settings for a specific project path.
+
+    Project settings include lint/test commands and documentation paths.
+    If no settings exist, returns defaults (possibly with auto-detected values).
+    """
+    if not project_path:
+        raise HTTPException(status_code=400, detail="project_path parameter required")
+
+    from pathlib import Path
+    from chad.util.project_setup import load_project_config, detect_project_type
+
+    path = Path(project_path).expanduser().resolve()
+    config = load_project_config(path)
+
+    if config:
+        return ProjectSettingsResponse(
+            project_path=str(path),
+            project_type=config.project_type,
+            lint_command=config.verification.lint_command,
+            test_command=config.verification.test_command,
+            instructions_path=config.docs.instructions_path if config.docs else None,
+            architecture_path=config.docs.architecture_path if config.docs else None,
+        )
+
+    # Return defaults for new project
+    project_type = detect_project_type(path) if path.exists() else None
+    return ProjectSettingsResponse(
+        project_path=str(path),
+        project_type=project_type,
+        lint_command=None,
+        test_command=None,
+        instructions_path=None,
+        architecture_path=None,
+    )
+
+
+@router.put("/project", response_model=ProjectSettingsResponse)
+async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSettingsResponse:
+    """Update project settings.
+
+    Saves lint/test commands and documentation paths for a project.
+    """
+    from pathlib import Path
+    from chad.util.project_setup import save_project_settings
+
+    path = Path(request.project_path).expanduser().resolve()
+    config = save_project_settings(
+        path,
+        lint_command=request.lint_command,
+        test_command=request.test_command,
+        instructions_path=request.instructions_path,
+        architecture_path=request.architecture_path,
+    )
+
+    return ProjectSettingsResponse(
+        project_path=str(path),
+        project_type=config.project_type,
+        lint_command=config.verification.lint_command,
+        test_command=config.verification.test_command,
+        instructions_path=config.docs.instructions_path if config.docs else None,
+        architecture_path=config.docs.architecture_path if config.docs else None,
+    )

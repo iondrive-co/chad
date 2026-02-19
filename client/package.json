@@ -1,0 +1,24 @@
+{
+  "name": "chad-client",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "vite build && tsc --emitDeclarationOnly",
+    "dev": "vite build --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0",
+    "vite-plugin-dts": "^4.0.0"
+  }
+}

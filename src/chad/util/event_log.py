@@ -31,6 +31,7 @@ EventType = Literal[
     "verification_attempt",
     "context_condensed",
     "terminal_output",
+    "milestone",
     "session_ended",
 ]
 
@@ -249,6 +250,19 @@ class TerminalOutputEvent(EventBase):
     """
 
     data: str = ""  # Human-readable screen text (processed by terminal emulator)
+
+
+@dataclass
+class MilestoneEvent(EventBase):
+    """Logged when a task reaches a significant milestone."""
+
+    milestone_type: str = ""
+    # Types: exploration, coding_complete, verification_started,
+    # verification_passed, verification_failed, revision_started,
+    # session_limit_reached, weekly_limit_reached, usage_threshold
+    title: str = ""  # Display-ready title for UIs (e.g. "Discovery", "Session Limit")
+    summary: str = ""
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

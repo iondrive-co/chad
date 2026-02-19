@@ -822,184 +822,136 @@ class TestProjectConfig:
         assert result["project_type"] == "go"
 
 
-class TestProviderFallbackOrder:
-    """Test cases for provider fallback order configuration."""
+class TestActionSettings:
+    """Test cases for unified action settings configuration."""
 
-    def test_get_fallback_order_empty(self, tmp_path):
-        """Test getting fallback order when none is set."""
+    def _make_mgr(self, tmp_path, accounts=None):
         config_path = tmp_path / "test.conf"
         mgr = ConfigManager(config_path)
-
-        order = mgr.get_provider_fallback_order()
-        assert order == []
-
-    def test_set_and_get_fallback_order(self, tmp_path):
-        """Test setting and getting fallback order."""
-        config_path = tmp_path / "test.conf"
-        mgr = ConfigManager(config_path)
-
-        # Need to set up accounts first
+        accts = accounts or {
+            "work-claude": {"provider": "anthropic", "key": "xxx"},
+            "backup-gpt": {"provider": "openai", "key": "xxx"},
+        }
         mgr.save_config({
             "password_hash": mgr.hash_password("test"),
             "encryption_salt": "dGVzdHNhbHQ=",
-            "accounts": {
-                "work-claude": {"provider": "anthropic", "key": "xxx"},
-                "personal-gpt": {"provider": "openai", "key": "xxx"},
-                "backup-gemini": {"provider": "gemini", "key": "xxx"},
-            },
+            "accounts": accts,
         })
+        return mgr
 
-        mgr.set_provider_fallback_order(["work-claude", "personal-gpt", "backup-gemini"])
-        order = mgr.get_provider_fallback_order()
+    def test_get_default_action_settings(self, tmp_path):
+        """Default settings are 3 notify at 90%."""
+        mgr = self._make_mgr(tmp_path)
+        settings = mgr.get_action_settings()
+        assert len(settings) == 3
+        for s in settings:
+            assert s["threshold"] == 90
+            assert s["action"] == "notify"
+        events = {s["event"] for s in settings}
+        assert events == {"session_usage", "weekly_usage", "context_usage"}
 
-        assert order == ["work-claude", "personal-gpt", "backup-gemini"]
-
-    def test_fallback_order_filters_invalid_accounts(self, tmp_path):
-        """Test that fallback order filters out accounts that no longer exist."""
+    def test_migration_from_old_config(self, tmp_path):
+        """Legacy usage_switch_threshold is migrated at startup."""
         config_path = tmp_path / "test.conf"
+        # Write legacy config directly (before ConfigManager init triggers migration)
+        import json
+        config_path.write_text(json.dumps({
+            "accounts": {"a": {"provider": "anthropic", "key": "x"}},
+            "usage_switch_threshold": 75,
+        }))
+        # Creating ConfigManager triggers migration
         mgr = ConfigManager(config_path)
+        settings = mgr.get_action_settings()
+        assert all(s["threshold"] == 75 for s in settings)
+        # Legacy keys are removed
+        config = mgr.load_config()
+        assert "usage_switch_threshold" not in config
+        assert "action_settings" in config
 
-        # Set up with some accounts
-        mgr.save_config({
-            "password_hash": mgr.hash_password("test"),
-            "encryption_salt": "dGVzdHNhbHQ=",
-            "accounts": {
-                "work-claude": {"provider": "anthropic", "key": "xxx"},
-            },
-            "provider_fallback_order": ["work-claude", "deleted-account", "also-deleted"],
-        })
+    def test_set_and_get_action_settings(self, tmp_path):
+        """Round-trip with all action types."""
+        mgr = self._make_mgr(tmp_path)
+        settings = [
+            {"event": "session_usage", "threshold": 85, "action": "switch_provider", "target_account": "backup-gpt"},
+            {"event": "weekly_usage", "threshold": 95, "action": "await_reset"},
+            {"event": "context_usage", "threshold": 90, "action": "notify"},
+        ]
+        mgr.set_action_settings(settings)
+        result = mgr.get_action_settings()
+        assert result == settings
 
-        order = mgr.get_provider_fallback_order()
-        assert order == ["work-claude"]
+    def test_await_reset_invalid_for_context(self, tmp_path):
+        """await_reset is rejected for context_usage."""
+        mgr = self._make_mgr(tmp_path)
+        with pytest.raises(ValueError, match="await_reset.*not valid.*context"):
+            mgr.set_action_settings([
+                {"event": "context_usage", "threshold": 90, "action": "await_reset"},
+            ])
 
-    def test_set_fallback_order_validates_accounts(self, tmp_path):
-        """Test that setting fallback order validates account names."""
+    def test_switch_provider_requires_valid_account(self, tmp_path):
+        """switch_provider with missing/invalid account is rejected."""
+        mgr = self._make_mgr(tmp_path)
+        with pytest.raises(ValueError, match="valid target_account"):
+            mgr.set_action_settings([
+                {"event": "session_usage", "threshold": 90, "action": "switch_provider", "target_account": "nonexistent"},
+            ])
+        with pytest.raises(ValueError, match="valid target_account"):
+            mgr.set_action_settings([
+                {"event": "session_usage", "threshold": 90, "action": "switch_provider"},
+            ])
+
+    def test_startup_migration_cleans_up_old_keys(self, tmp_path):
+        """Legacy keys are removed on ConfigManager startup."""
         config_path = tmp_path / "test.conf"
+        import json
+        config_path.write_text(json.dumps({
+            "accounts": {"a": {"provider": "anthropic", "key": "x"}},
+            "provider_fallback_order": ["a"],
+            "usage_switch_threshold": 80,
+        }))
         mgr = ConfigManager(config_path)
+        config = mgr.load_config()
+        assert "provider_fallback_order" not in config
+        assert "usage_switch_threshold" not in config
+        assert "action_settings" in config
 
-        # Set up with one account
-        mgr.save_config({
-            "password_hash": mgr.hash_password("test"),
-            "encryption_salt": "dGVzdHNhbHQ=",
-            "accounts": {
-                "work-claude": {"provider": "anthropic", "key": "xxx"},
-            },
-        })
+    def test_get_action_for_event(self, tmp_path):
+        """Convenience method returns correct entry."""
+        mgr = self._make_mgr(tmp_path)
+        settings = [
+            {"event": "session_usage", "threshold": 80, "action": "notify"},
+            {"event": "weekly_usage", "threshold": 95, "action": "await_reset"},
+        ]
+        mgr.set_action_settings(settings)
+        assert mgr.get_action_for_event("weekly_usage")["action"] == "await_reset"
+        assert mgr.get_action_for_event("context_usage") is None
 
-        with pytest.raises(ValueError, match="Unknown account"):
-            mgr.set_provider_fallback_order(["work-claude", "nonexistent"])
-
-    def test_get_next_fallback_provider(self, tmp_path):
-        """Test getting the next provider in fallback order."""
+    def test_settings_persist_across_instances(self, tmp_path):
+        """Settings survive ConfigManager reinstantiation."""
         config_path = tmp_path / "test.conf"
-        mgr = ConfigManager(config_path)
-
-        mgr.save_config({
-            "password_hash": mgr.hash_password("test"),
-            "encryption_salt": "dGVzdHNhbHQ=",
-            "accounts": {
-                "first": {"provider": "anthropic", "key": "xxx"},
-                "second": {"provider": "openai", "key": "xxx"},
-                "third": {"provider": "gemini", "key": "xxx"},
-            },
-            "provider_fallback_order": ["first", "second", "third"],
-        })
-
-        assert mgr.get_next_fallback_provider("first") == "second"
-        assert mgr.get_next_fallback_provider("second") == "third"
-        assert mgr.get_next_fallback_provider("third") is None
-
-    def test_get_next_fallback_provider_not_in_order(self, tmp_path):
-        """Test getting next fallback when current is not in order."""
-        config_path = tmp_path / "test.conf"
-        mgr = ConfigManager(config_path)
-
-        mgr.save_config({
-            "password_hash": mgr.hash_password("test"),
-            "encryption_salt": "dGVzdHNhbHQ=",
-            "accounts": {
-                "first": {"provider": "anthropic", "key": "xxx"},
-                "second": {"provider": "openai", "key": "xxx"},
-                "other": {"provider": "gemini", "key": "xxx"},
-            },
-            "provider_fallback_order": ["first", "second"],
-        })
-
-        # When current account is not in order, return first in order
-        assert mgr.get_next_fallback_provider("other") == "first"
-
-    def test_get_next_fallback_provider_empty_order(self, tmp_path):
-        """Test getting next fallback when order is empty."""
-        config_path = tmp_path / "test.conf"
-        mgr = ConfigManager(config_path)
-
-        assert mgr.get_next_fallback_provider("anything") is None
-
-    def test_fallback_order_persists(self, tmp_path):
-        """Test that fallback order persists across instances."""
-        config_path = tmp_path / "test.conf"
-
         mgr1 = ConfigManager(config_path)
         mgr1.save_config({
             "password_hash": mgr1.hash_password("test"),
             "encryption_salt": "dGVzdHNhbHQ=",
-            "accounts": {
-                "a": {"provider": "anthropic", "key": "xxx"},
-                "b": {"provider": "openai", "key": "xxx"},
-            },
+            "accounts": {"a": {"provider": "anthropic", "key": "x"}},
         })
-        mgr1.set_provider_fallback_order(["a", "b"])
-
+        mgr1.set_action_settings([
+            {"event": "session_usage", "threshold": 70, "action": "notify"},
+        ])
         mgr2 = ConfigManager(config_path)
-        assert mgr2.get_provider_fallback_order() == ["a", "b"]
+        result = mgr2.get_action_settings()
+        assert len(result) == 1
+        assert result[0]["threshold"] == 70
 
-
-class TestUsageSwitchThreshold:
-    """Test cases for usage switch threshold configuration."""
-
-    def test_get_usage_threshold_default(self, tmp_path):
-        """Test that default threshold is 90%."""
-        config_path = tmp_path / "test.conf"
-        mgr = ConfigManager(config_path)
-
-        assert mgr.get_usage_switch_threshold() == 90
-
-    def test_set_and_get_usage_threshold(self, tmp_path):
-        """Test setting and getting the usage threshold."""
-        config_path = tmp_path / "test.conf"
-        mgr = ConfigManager(config_path)
-
-        mgr.set_usage_switch_threshold(75)
-        assert mgr.get_usage_switch_threshold() == 75
-
-    def test_set_threshold_to_100_disables_usage_switching(self, tmp_path):
-        """Test that 100% threshold effectively disables usage-based switching."""
-        config_path = tmp_path / "test.conf"
-        mgr = ConfigManager(config_path)
-
-        mgr.set_usage_switch_threshold(100)
-        assert mgr.get_usage_switch_threshold() == 100
-
-    def test_set_threshold_validates_range(self, tmp_path):
-        """Test that threshold must be between 0 and 100."""
-        config_path = tmp_path / "test.conf"
-        mgr = ConfigManager(config_path)
-
-        with pytest.raises(ValueError, match="must be between 0 and 100"):
-            mgr.set_usage_switch_threshold(-1)
-
-        with pytest.raises(ValueError, match="must be between 0 and 100"):
-            mgr.set_usage_switch_threshold(101)
-
-    def test_threshold_persists(self, tmp_path):
-        """Test that threshold persists across instances."""
-        config_path = tmp_path / "test.conf"
-
-        mgr1 = ConfigManager(config_path)
-        mgr1.set_usage_switch_threshold(80)
-
-        mgr2 = ConfigManager(config_path)
-        assert mgr2.get_usage_switch_threshold() == 80
+    def test_duplicate_event_types_allowed(self, tmp_path):
+        """Multiple rules for the same event type are allowed."""
+        mgr = self._make_mgr(tmp_path)
+        settings = [
+            {"event": "session_usage", "threshold": 80, "action": "notify"},
+            {"event": "session_usage", "threshold": 95, "action": "await_reset"},
+        ]
+        mgr.set_action_settings(settings)
+        assert mgr.get_action_settings() == settings
 
 
 class TestMockRemainingUsage:
@@ -1090,6 +1042,60 @@ class TestMockRunDuration:
         assert mgr2.get_mock_run_duration_seconds("test-mock") == 75
 
 
+class TestVerificationSettings:
+    """Test cases for verification settings persistence."""
+
+    def _make_mgr(self, tmp_path):
+        config_path = tmp_path / "test.conf"
+        return ConfigManager(config_path)
+
+    def test_defaults_are_enabled_and_auto_run(self, tmp_path):
+        """Fresh config returns enabled=True, auto_run=True."""
+        mgr = self._make_mgr(tmp_path)
+        enabled, auto_run = mgr.get_runtime_verification_settings()
+        assert enabled is True
+        assert auto_run is True
+
+    def test_set_enabled_false_persists(self, tmp_path):
+        """Setting enabled=False is persisted to disk."""
+        config_path = tmp_path / "test.conf"
+        mgr1 = ConfigManager(config_path)
+        mgr1.set_runtime_verification_settings(enabled=False)
+
+        mgr2 = ConfigManager(config_path)
+        enabled, auto_run = mgr2.get_runtime_verification_settings()
+        assert enabled is False
+        assert auto_run is True  # unchanged
+
+    def test_set_auto_run_false_persists(self, tmp_path):
+        """Setting auto_run=False is persisted to disk."""
+        config_path = tmp_path / "test.conf"
+        mgr1 = ConfigManager(config_path)
+        mgr1.set_runtime_verification_settings(auto_run=False)
+
+        mgr2 = ConfigManager(config_path)
+        enabled, auto_run = mgr2.get_runtime_verification_settings()
+        assert enabled is True  # unchanged
+        assert auto_run is False
+
+    def test_partial_update_preserves_other_field(self, tmp_path):
+        """Updating one field does not reset the other."""
+        mgr = self._make_mgr(tmp_path)
+        mgr.set_runtime_verification_settings(enabled=False, auto_run=False)
+        mgr.set_runtime_verification_settings(enabled=True)
+        enabled, auto_run = mgr.get_runtime_verification_settings()
+        assert enabled is True
+        assert auto_run is False
+
+    def test_settings_survive_restart(self, tmp_path):
+        """Both fields survive a full ConfigManager reinstantiation."""
+        config_path = tmp_path / "test.conf"
+        ConfigManager(config_path).set_runtime_verification_settings(enabled=False, auto_run=False)
+        enabled, auto_run = ConfigManager(config_path).get_runtime_verification_settings()
+        assert enabled is False
+        assert auto_run is False
+
+
 class TestConfigUIParity:
     """Test that both Gradio and CLI UIs expose all required config options.
 
@@ -1101,7 +1107,7 @@ class TestConfigUIParity:
     1. Add getter/setter to ConfigManager
     2. Add API endpoint in routes/config.py
     3. Add APIClient method in api_client.py
-    4. Add UI element in web_ui.py (Gradio)
+    4. Add UI element in gradio_ui.py (Gradio)
     5. Add menu option in cli/app.py (CLI)
     6. Add the key to REQUIRED_UI_CONFIG_KEYS below (or INTERNAL_KEYS if not user-editable)
 
@@ -1121,6 +1127,9 @@ class TestConfigUIParity:
         "projects",           # Per-project settings, not global config
         "mock_remaining_usage",    # Testing only - per-account mock via provider cards
         "mock_run_duration_seconds",  # Testing only - per-account mock via provider cards
+        "mock_session_reset_time",  # Testing only - per-account mock reset time
+        "verification_enabled",   # Managed via API/React UI (not Gradio/CLI config panel)
+        "verification_auto_run",  # Managed via API/React UI (not Gradio/CLI config panel)
     }
 
     # Config keys that MUST be editable in both Gradio and CLI UIs
@@ -1128,9 +1137,12 @@ class TestConfigUIParity:
         "verification_agent",
         "preferred_verification_model",
         "cleanup_days",
-        "provider_fallback_order",
-        "usage_switch_threshold",
+        "action_settings",
         "max_verification_attempts",
+        "slack_enabled",
+        "slack_bot_token",
+        "slack_channel",
+        "slack_signing_secret",
     }
 
     # Keys that are only in Gradio UI (makes sense for web-only settings)
@@ -1171,18 +1183,21 @@ class TestConfigUIParity:
         "verification_agent": ["verification_agent", "verification_pref"],
         "preferred_verification_model": ["verification_model", "preferred_verification_model"],
         "cleanup_days": ["cleanup_days", "retention_days", "cleanup_settings", "retention_input"],
-        "provider_fallback_order": ["fallback_order"],
-        "usage_switch_threshold": ["usage_threshold", "usage_switch"],
+        "action_settings": ["action_settings", "action_setting", "action_rule"],
         "max_verification_attempts": ["max_verification_attempts", "verification_attempts"],
         "ui_mode": ["ui_mode"],
+        "slack_enabled": ["slack_enabled", "slack_enable", "slack_settings", "slack integration"],
+        "slack_bot_token": ["slack_bot_token", "slack_token", "bot_token", "slack_settings"],
+        "slack_channel": ["slack_channel", "slack_settings", "channel id"],
+        "slack_signing_secret": ["slack_signing_secret", "signing secret", "slack_settings"],
     }
 
     def test_gradio_ui_exposes_all_required_keys(self):
-        """Verify Gradio web_ui.py references all required config keys."""
+        """Verify Gradio gradio_ui.py references all required config keys."""
         import pathlib
         import re
 
-        web_ui_path = pathlib.Path(__file__).parent.parent / "src" / "chad" / "ui" / "gradio" / "web_ui.py"
+        web_ui_path = pathlib.Path(__file__).parent.parent / "src" / "chad" / "ui" / "gradio" / "gradio_ui.py"
         content = web_ui_path.read_text()
 
         all_gradio_keys = self.REQUIRED_UI_CONFIG_KEYS | self.GRADIO_ONLY_KEYS
@@ -1213,7 +1228,7 @@ class TestConfigUIParity:
                 missing_keys.append(key)
 
         assert not missing_keys, (
-            f"Gradio web_ui.py is missing UI elements for config keys: {missing_keys}. "
+            f"Gradio gradio_ui.py is missing UI elements for config keys: {missing_keys}. "
             f"Add UI elements (input fields, sliders, etc.) and change handlers for these keys."
         )
 

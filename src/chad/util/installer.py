@@ -124,6 +124,8 @@ class AIToolInstaller:
 
         existing = self.resolve_tool_path(spec.binary)
         if existing:
+            if tool_key == "vibe":
+                self._repair_vibe_install(Path(existing))
             return True, str(existing)
 
         if spec.installer == "npm":
@@ -210,11 +212,16 @@ class AIToolInstaller:
             err = stderr.strip() or stdout.strip() or f"pip exited with code {code}"
             return False, f"pip install failed for {spec.name}: {err}"
 
+        # After pip install, we need to ensure the binary script has proper PYTHONPATH
+        # Pip installs packages to <prefix>/lib/pythonX.Y/site-packages
         resolved = self.resolve_tool_path(spec.binary)
-        if not resolved:
-            return False, f"{spec.name} installation succeeded but '{spec.binary}' was not found."
+        if resolved:
+            # Check if it's a pip-installed script in our managed directory
+            if str(resolved).startswith(str(self.tools_dir)):
+                self._fix_pip_script_pythonpath(resolved)
+            return True, str(resolved)
 
-        return True, str(resolved)
+        return False, f"{spec.name} installation succeeded but '{spec.binary}' was not found."
 
     def _check_node_npm(self) -> bool:
         return is_tool_installed("node") and is_tool_installed("npm")
@@ -293,3 +300,109 @@ class AIToolInstaller:
             return False, f"{spec.name} installation succeeded but '{spec.binary}' was not found."
 
         return True, str(resolved)
+
+    def _fix_pip_script_pythonpath(self, script_path: Path) -> None:
+        """Ensure pip-installed scripts can find their modules."""
+        import stat
+
+        # Calculate the site-packages directory where pip installed the modules
+        python_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        site_packages = self.tools_dir / "lib" / python_version / "site-packages"
+
+        if not site_packages.exists():
+            return
+
+        try:
+            # Read the current script
+            content = script_path.read_text()
+
+            # Check if it already has our path fix
+            if "# CHAD_PYTHONPATH_FIX" in content:
+                return
+
+            # Find the shebang line
+            lines = content.splitlines(keepends=True)
+            if not lines or not lines[0].startswith("#!"):
+                return
+
+            # Insert our path fix after the shebang
+            path_fix = f"""# CHAD_PYTHONPATH_FIX
+import sys
+sys.path.insert(0, r'{site_packages}')
+"""
+            new_lines = [lines[0], path_fix] + lines[1:]
+            new_content = "".join(new_lines)
+
+            # Write the modified script
+            script_path.write_text(new_content)
+
+            # Ensure it remains executable
+            current_mode = script_path.stat().st_mode
+            script_path.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+        except (OSError, IOError):
+            # If we can't modify the script, continue anyway
+            pass
+
+    def _normalize_python_shebang(self, script_path: Path) -> None:
+        """Rewrite shebang to a stable python3 interpreter for managed scripts."""
+        import stat
+
+        if not script_path.exists():
+            return
+
+        resolved_path = script_path.resolve()
+        if not str(script_path).startswith(str(self.tools_dir)) and not str(resolved_path).startswith(str(self.tools_dir)):
+            return  # Only touch managed installs
+
+        try:
+            lines = script_path.read_text().splitlines()
+        except (OSError, UnicodeDecodeError):
+            return
+
+        if not lines:
+            return
+
+        lines[0] = "#!/usr/bin/env python3"
+        new_content = "\n".join(lines)
+        if not new_content.endswith("\n"):
+            new_content += "\n"
+
+        try:
+            script_path.write_text(new_content)
+            # Keep it executable
+            mode = script_path.stat().st_mode
+            script_path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        except OSError:
+            return
+
+    def _repair_vibe_install(self, resolved: Path) -> None:
+        """Repair stale Mistral Vibe scripts created by pip in our tools dir."""
+        try:
+            if not resolved.exists():
+                return
+            resolved_real = resolved.resolve()
+            if not str(resolved).startswith(str(self.tools_dir)) and not str(resolved_real).startswith(str(self.tools_dir)):
+                return
+
+            bin_dir = resolved.parent
+            orig_script = bin_dir / "vibe.orig"
+
+            # Prefer repairing the underlying python script; wrapper stays as-is
+            targets: list[Path] = []
+            try:
+                first_line = resolved.read_text().splitlines()[0]
+            except Exception:
+                first_line = ""
+
+            if first_line.startswith("#!") and "python" in first_line:
+                targets.append(resolved)
+
+            if orig_script.exists():
+                targets.append(orig_script)
+
+            for script in targets:
+                self._normalize_python_shebang(script)
+                self._fix_pip_script_pythonpath(script)
+        except OSError:
+            return
