@@ -89,7 +89,6 @@ class TestCLIFlow:
         ]
         client.get_preferences.return_value = Preferences(
             last_project_path="",
-            dark_mode=True,
             ui_mode="cli",
         )
         client.get_cleanup_settings.return_value = CleanupSettings(
@@ -173,7 +172,6 @@ class TestCLITaskFlow:
         ]
         client.get_preferences.return_value = Preferences(
             last_project_path="",
-            dark_mode=True,
             ui_mode="cli",
         )
         client.get_cleanup_settings.return_value = CleanupSettings(
@@ -210,7 +208,6 @@ class TestCLITaskFlow:
 
         mock_client.get_preferences.return_value = Preferences(
             last_project_path=str(git_repo),
-            dark_mode=True,
             ui_mode="cli",
         )
 
@@ -265,7 +262,6 @@ class TestCLITaskFlow:
 
         mock_client.get_preferences.return_value = Preferences(
             last_project_path=str(git_repo),
-            dark_mode=True,
             ui_mode="cli",
         )
 
@@ -323,7 +319,6 @@ class TestCLITaskFlow:
 
         mock_client.get_preferences.return_value = Preferences(
             last_project_path=str(git_repo),
-            dark_mode=True,
             ui_mode="cli",
         )
 

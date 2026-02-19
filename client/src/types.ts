@@ -147,7 +147,6 @@ export interface CleanupSettings {
 
 export interface UserPreferences {
   last_project_path: string | null;
-  dark_mode: boolean;
   ui_mode: string;
 }
 

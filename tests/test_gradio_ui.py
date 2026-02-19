@@ -86,7 +86,7 @@ class TestChadWebUI:
         }.get(name, Mock(name=name, provider="unknown", model="default", reasoning="default", role=None))
         client.get_verification_agent.return_value = None
         client.get_milestones.return_value = []
-        client.get_preferences.return_value = Mock(last_project_path=None, dark_mode=True, ui_mode="gradio")
+        client.get_preferences.return_value = Mock(last_project_path=None, ui_mode="gradio")
         client.get_cleanup_settings.return_value = Mock(retention_days=7, auto_cleanup=True)
         return client
 
@@ -2345,7 +2345,7 @@ class TestVerificationApiForwarding:
         }.get(name, Mock(name=name, provider="unknown", model="default", reasoning="default", role=None))
         client.get_verification_agent.return_value = None
         client.get_milestones.return_value = []
-        client.get_preferences.return_value = Mock(last_project_path=None, dark_mode=True, ui_mode="gradio")
+        client.get_preferences.return_value = Mock(last_project_path=None, ui_mode="gradio")
         client.get_cleanup_settings.return_value = Mock(retention_days=7, auto_cleanup=True)
         return client
 
@@ -5759,7 +5759,7 @@ class TestFollowupAPIRouting:
         client.list_accounts.return_value = [claude_account]
         client.get_account.return_value = claude_account
         client.get_verification_agent.return_value = None
-        client.get_preferences.return_value = Mock(last_project_path=None, dark_mode=True, ui_mode="gradio")
+        client.get_preferences.return_value = Mock(last_project_path=None, ui_mode="gradio")
         client.get_cleanup_settings.return_value = Mock(retention_days=7, auto_cleanup=True)
         client.get_max_verification_attempts.return_value = 3
         ui = ChadWebUI(client)

@@ -59,7 +59,7 @@ Base path `/api/v1` (except `/status`).
 **Configuration**
 - `GET/PUT /config/verification` — enabled/auto_run flags
 - `GET/PUT /config/cleanup` — `cleanup_days`, `auto_cleanup`
-- `GET/PUT /config/preferences` — `last_project_path`, `dark_mode`, `ui_mode`
+- `GET/PUT /config/preferences` — `last_project_path`, `ui_mode`
 - `GET/PUT /config/verification-agent`
 - `GET/PUT /config/preferred-verification-model`
 - `GET/PUT /config/action-settings` — per-event-type usage actions (thresholds + notify/switch behavior)
