@@ -815,13 +815,16 @@ def _get_codex_weekly_usage_percentage(account_name: str) -> float | None:
     """
     base_home = safe_home()
     if account_name:
-        codex_home = Path(base_home) / ".chad" / "codex_homes" / account_name
+        codex_home = Path(base_home) / ".chad" / "codex-homes" / account_name
     else:
         codex_home = Path(base_home)
 
+    if account_name and not codex_home.exists():
+        return None
+
     sessions_dir = codex_home / ".codex" / "sessions"
     if not sessions_dir.exists():
-        return None
+        return 0.0
 
     # Find the most recent session file
     session_files: list[tuple[float, Path]] = []
@@ -835,7 +838,7 @@ def _get_codex_weekly_usage_percentage(account_name: str) -> float | None:
                     pass
 
     if not session_files:
-        return None
+        return 0.0
 
     session_files.sort(reverse=True)
     latest_session = session_files[0][1]
@@ -864,7 +867,7 @@ def _get_codex_weekly_usage_percentage(account_name: str) -> float | None:
     except Exception:
         pass
 
-    return None
+    return 0.0
 
 
 def _get_codex_usage_percentage(account_name: str) -> float | None:
@@ -879,13 +882,16 @@ def _get_codex_usage_percentage(account_name: str) -> float | None:
     # Get the isolated home directory for this account
     base_home = safe_home()
     if account_name:
-        codex_home = Path(base_home) / ".chad" / "codex_homes" / account_name
+        codex_home = Path(base_home) / ".chad" / "codex-homes" / account_name
     else:
         codex_home = Path(base_home)
 
+    if account_name and not codex_home.exists():
+        return None
+
     sessions_dir = codex_home / ".codex" / "sessions"
     if not sessions_dir.exists():
-        return None
+        return 0.0
 
     # Find the most recent session file
     session_files: list[tuple[float, Path]] = []
@@ -899,7 +905,7 @@ def _get_codex_usage_percentage(account_name: str) -> float | None:
                     pass
 
     if not session_files:
-        return None
+        return 0.0
 
     session_files.sort(reverse=True)
     latest_session = session_files[0][1]
@@ -928,7 +934,7 @@ def _get_codex_usage_percentage(account_name: str) -> float | None:
     except Exception:
         pass
 
-    return None
+    return 0.0
 
 
 def _gemini_usage_path() -> Path:
@@ -1660,14 +1666,16 @@ class ClaudeCodeProvider(AIProvider):
         """Get Claude session (5-hour) usage percentage from Anthropic API."""
         data = self._get_usage_data()
         if data is None:
-            return None
+            # Return 0.0 (not None) if credentials exist but API call failed,
+            # so the UI shows a bar at 0% rather than hiding usage entirely.
+            return 0.0 if _find_claude_credentials(self.config.account_name) else None
         return _normalize_usage_percentage((data.get("five_hour") or {}).get("utilization"))
 
     def get_weekly_usage_percentage(self) -> float | None:
         """Get Claude weekly (7-day) usage percentage from Anthropic API."""
         data = self._get_usage_data()
         if data is None:
-            return None
+            return 0.0 if _find_claude_credentials(self.config.account_name) else None
         return _normalize_usage_percentage((data.get("seven_day") or {}).get("utilization"))
 
     def get_session_reset_eta(self) -> str | None:
