@@ -56,6 +56,19 @@ export function SessionList({
     [deleteSession, onRefresh],
   );
 
+  const handleResume = useCallback(
+    async (e: React.MouseEvent, id: string) => {
+      e.stopPropagation();
+      try {
+        await api.resumeSession(id);
+        onRefresh();
+      } catch (err) {
+        console.error("Failed to resume session:", err);
+      }
+    },
+    [api, onRefresh],
+  );
+
   return (
     <div className="session-list">
       <div className="session-create">
@@ -82,8 +95,18 @@ export function SessionList({
             onClick={() => onSelect(s.id)}
           >
             <span className="session-name">{s.name}</span>
-            {s.active && <span className="badge running-badge">running</span>}
+            {s.active && !s.paused && <span className="badge running-badge">running</span>}
+            {s.paused && <span className="badge paused-badge">paused</span>}
             {s.has_changes && !s.active && <span className="badge changes-badge">changes</span>}
+            {s.paused && (
+              <button
+                className="resume-btn"
+                onClick={(e) => handleResume(e, s.id)}
+                title="Resume session"
+              >
+                resume
+              </button>
+            )}
             <button
               className="delete-btn"
               onClick={(e) => handleDelete(e, s.id)}

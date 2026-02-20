@@ -795,22 +795,37 @@ class SessionEventLoop:
             f"Paused, waiting for {label} reset{eta_str}",
         )
 
-        # Poll until usage drops below threshold
+        # Set paused flag on session if available
+        if session is not None:
+            session.paused = True
+
+        # Poll until usage drops below threshold or resume is requested
+        resume_reason = None
         while self._running and not getattr(self.task, "cancel_requested", False):
+            # Check if user requested resume
+            if session is not None and getattr(session, "resume_requested", False):
+                session.resume_requested = False  # Clear the flag
+                resume_reason = "user requested resume"
+                break
             time.sleep(10)
             try:
                 current = usage_fn()
             except Exception:
                 continue
             if current is not None and current < threshold:
+                resume_reason = f"{label.title()} reset detected"
                 break
+
+        # Clear paused flag
+        if session is not None:
+            session.paused = False
 
         if not self._running or getattr(self.task, "cancel_requested", False):
             return ""
 
         self._emit_milestone(
             "usage_threshold",
-            f"{label.title()} reset detected, resuming",
+            f"{resume_reason}, resuming",
         )
 
         self._emit_fn("status", status="Resuming after reset...")

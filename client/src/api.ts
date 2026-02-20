@@ -15,6 +15,7 @@ import type {
   SessionCancel,
   SessionCreate,
   SessionList,
+  SessionResume,
   TaskCreate,
   TaskStatus,
   UserPreferences,
@@ -101,6 +102,10 @@ export class ChadAPI {
 
   cancelSession(sessionId: string): Promise<SessionCancel> {
     return this.post(`/api/v1/sessions/${sessionId}/cancel`);
+  }
+
+  resumeSession(sessionId: string): Promise<SessionResume> {
+    return this.post(`/api/v1/sessions/${sessionId}/resume`);
   }
 
   // ── Tasks ──

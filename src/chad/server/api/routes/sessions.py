@@ -10,6 +10,7 @@ from chad.server.api.schemas import (
     SessionResponse,
     SessionListResponse,
     SessionCancelResponse,
+    SessionResumeResponse,
     TaskCreate,
     TaskStatusResponse,
     TaskStatus,
@@ -34,6 +35,7 @@ def _session_to_response(session: Session) -> SessionResponse:
         name=session.name,
         project_path=session.project_path,
         active=session.active,
+        paused=getattr(session, "paused", False),
         has_worktree=session.worktree_path is not None,
         has_changes=session.has_worktree_changes,
         coding_account=getattr(session, "coding_account", None),
@@ -141,6 +143,33 @@ async def cancel_session(session_id: str) -> SessionCancelResponse:
         session_id=session_id,
         cancel_requested=True,
         message="Cancellation requested",
+    )
+
+
+@router.post("/{session_id}/resume", response_model=SessionResumeResponse)
+async def resume_session(session_id: str) -> SessionResumeResponse:
+    """Request resumption of a paused session.
+
+    Sessions may be paused when waiting for usage limits to reset.
+    This endpoint forces the session to resume immediately.
+    """
+    manager = get_session_manager()
+    session = manager.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+    if not getattr(session, "paused", False):
+        return SessionResumeResponse(
+            session_id=session_id,
+            resumed=False,
+            message="Session is not paused",
+        )
+
+    manager.set_resume_requested(session_id, True)
+    return SessionResumeResponse(
+        session_id=session_id,
+        resumed=True,
+        message="Resume requested",
     )
 
 

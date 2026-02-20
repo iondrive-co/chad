@@ -117,3 +117,4 @@ class BranchesResponse(BaseModel):
 
     branches: list[str] = Field(description="List of branch names")
     default: str = Field(description="Name of the default/main branch")
+    current: str = Field(description="Name of the current worktree branch")

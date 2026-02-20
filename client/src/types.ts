@@ -5,6 +5,7 @@ export interface Session {
   name: string;
   project_path: string | null;
   active: boolean;
+  paused: boolean;
   has_worktree: boolean;
   has_changes: boolean;
   coding_account: string | null;
@@ -25,6 +26,12 @@ export interface SessionList {
 export interface SessionCancel {
   session_id: string;
   cancel_requested: boolean;
+  message: string;
+}
+
+export interface SessionResume {
+  session_id: string;
+  resumed: boolean;
   message: string;
 }
 
@@ -231,6 +238,7 @@ export interface MergeResult {
 export interface BranchesResponse {
   branches: string[];
   default: string;
+  current: string;
 }
 
 // ── Streaming types ──

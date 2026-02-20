@@ -54,6 +54,7 @@ class TestSessionEndpoints:
         assert "id" in data
         assert data["name"] == "Test Session"
         assert data["active"] is False
+        assert data["paused"] is False  # New paused field
 
     def test_create_session_with_project_path(self, client):
         """Can create session with project path."""
@@ -105,6 +106,25 @@ class TestSessionEndpoints:
 
         # Verify it's gone
         response = client.get(f"/api/v1/sessions/{session_id}")
+        assert response.status_code == 404
+
+    def test_resume_session_not_paused(self, client):
+        """Resume endpoint returns resumed=False if session is not paused."""
+        # Create a session
+        create_resp = client.post("/api/v1/sessions", json={"name": "Test"})
+        session_id = create_resp.json()["id"]
+
+        # Try to resume when not paused
+        response = client.post(f"/api/v1/sessions/{session_id}/resume")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["session_id"] == session_id
+        assert data["resumed"] is False
+        assert "not paused" in data["message"]
+
+    def test_resume_session_not_found(self, client):
+        """Resume endpoint returns 404 for non-existent session."""
+        response = client.post("/api/v1/sessions/nonexistent/resume")
         assert response.status_code == 404
 
 
@@ -365,7 +385,11 @@ class TestWorktreeEndpoints:
         data = response.json()
         assert "branches" in data
         assert "default" in data
+        assert "current" in data  # Current worktree branch
         assert isinstance(data["branches"], list)
+        # Current branch is the worktree branch - it might be a chad-task-* branch
+        # that isn't in the main branches list if it was just created for the worktree
+        assert data["current"]  # Just verify it's not empty
 
     def test_resolve_conflicts_endpoint(self, client, tmp_path):
         """POST /worktree/resolve-conflicts should exist."""

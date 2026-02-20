@@ -18,7 +18,9 @@ class Session:
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     name: str = "New Session"
     cancel_requested: bool = False
+    resume_requested: bool = False  # Set to force resume from paused state
     active: bool = False
+    paused: bool = False  # Set when waiting for usage reset
     provider: Any = None
     config: Any = None
     log_path: Path | None = None
@@ -150,6 +152,40 @@ class SessionManager:
             session = self._sessions.get(session_id)
             if session:
                 session.cancel_requested = value
+                return True
+            return False
+
+    def set_paused(self, session_id: str, value: bool = True) -> bool:
+        """Set the paused flag for a session.
+
+        Args:
+            session_id: The session ID
+            value: The flag value (default True)
+
+        Returns:
+            True if session was found and updated
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session:
+                session.paused = value
+                return True
+            return False
+
+    def set_resume_requested(self, session_id: str, value: bool = True) -> bool:
+        """Set the resume_requested flag for a session.
+
+        Args:
+            session_id: The session ID
+            value: The flag value (default True)
+
+        Returns:
+            True if session was found and updated
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session:
+                session.resume_requested = value
                 return True
             return False
 
