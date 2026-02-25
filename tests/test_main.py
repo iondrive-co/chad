@@ -2,7 +2,6 @@
 
 import os
 import sys
-import threading
 import time
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -261,37 +260,26 @@ class TestParentWatchdog:
         """Watchdog thread should not start without CHAD_PARENT_PID."""
         monkeypatch.delenv("CHAD_PARENT_PID", raising=False)
 
-        thread_count_before = threading.active_count()
-        _start_parent_watchdog()
-        thread_count_after = threading.active_count()
-
-        # Should not have started a new thread
-        assert thread_count_after == thread_count_before
+        thread = _start_parent_watchdog()
+        assert thread is None
 
     def test_watchdog_not_started_with_invalid_pid(self, monkeypatch):
         """Watchdog thread should not start with invalid PID."""
         monkeypatch.setenv("CHAD_PARENT_PID", "not_a_number")
 
-        thread_count_before = threading.active_count()
-        _start_parent_watchdog()
-        thread_count_after = threading.active_count()
-
-        # Should not have started a new thread
-        assert thread_count_after == thread_count_before
+        thread = _start_parent_watchdog()
+        assert thread is None
 
     def test_watchdog_starts_with_valid_pid(self, monkeypatch):
         """Watchdog thread should start with valid parent PID."""
         # Use current process as parent (it exists, so watchdog won't kill us)
         monkeypatch.setenv("CHAD_PARENT_PID", str(os.getpid()))
 
-        thread_count_before = threading.active_count()
-        _start_parent_watchdog()
+        thread = _start_parent_watchdog()
+        assert thread is not None
         # Give thread time to start
-        time.sleep(0.1)
-        thread_count_after = threading.active_count()
-
-        # Should have started a new thread
-        assert thread_count_after == thread_count_before + 1
+        time.sleep(0.05)
+        assert thread.is_alive()
 
 
 class TestServerPortAutodiscovery:

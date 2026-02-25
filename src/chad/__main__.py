@@ -21,7 +21,7 @@ from .util.config import ensure_project_root_env
 RunMode = Literal["unified", "server", "ui"]
 
 
-def _start_parent_watchdog() -> None:
+def _start_parent_watchdog() -> threading.Thread | None:
     """Start a watchdog thread that terminates this process if parent dies.
 
     This is used when chad is spawned by tests - if the test process crashes,
@@ -29,12 +29,12 @@ def _start_parent_watchdog() -> None:
     """
     parent_pid_str = os.environ.get("CHAD_PARENT_PID")
     if not parent_pid_str:
-        return
+        return None
 
     try:
         parent_pid = int(parent_pid_str)
     except ValueError:
-        return
+        return None
 
     def watchdog() -> None:
         while True:
@@ -48,8 +48,9 @@ def _start_parent_watchdog() -> None:
                 os.kill(os.getpid(), signal.SIGTERM)
                 break
 
-    thread = threading.Thread(target=watchdog, daemon=True)
+    thread = threading.Thread(target=watchdog, daemon=True, name="parent-watchdog")
     thread.start()
+    return thread
 
 
 def _check_chad_import_path() -> None:
