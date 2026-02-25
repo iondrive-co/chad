@@ -227,6 +227,68 @@ class TestGitWorktreeManager:
         assert result is True
         assert not worktree_path.exists()
 
+    def test_create_worktree_recovers_from_stale_branch_registration(self, git_repo):
+        """create_worktree must succeed even when the branch exists but the directory was
+        deleted without proper cleanup (e.g. server crash).
+
+        Previously this would fail with:
+            fatal: 'chad-task-X' is already used by worktree at '...'
+        because worktree_exists only checked the directory, not the git branch registration.
+        """
+        import shutil
+
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-stale-branch"
+
+        # Create a worktree normally
+        worktree_path, _ = mgr.create_worktree(task_id)
+        assert worktree_path.exists()
+
+        # Simulate a crash: delete the directory without running git worktree remove
+        shutil.rmtree(worktree_path)
+        assert not worktree_path.exists()
+
+        # The git branch registration still exists — verify
+        branch_name = mgr._branch_name(task_id)
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", branch_name],
+            cwd=git_repo,
+            capture_output=True,
+        )
+        assert result.returncode == 0, "branch should still be registered"
+
+        # Creating the worktree again should NOT raise "already used by worktree"
+        new_path, _ = mgr.create_worktree(task_id)
+        assert new_path.exists()
+
+    def test_merge_rejects_worktree_branch_as_target(self, git_repo):
+        """merge_to_main must refuse when the target branch is a worktree branch.
+
+        Attempting git checkout on a branch checked out in a worktree raises:
+            fatal: 'chad-task-X' is already used by worktree at '...'
+        """
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-bad-target"
+
+        worktree_path, _ = mgr.create_worktree(task_id)
+        (worktree_path / "feature.txt").write_text("feature\n")
+        subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Add feature"],
+            cwd=worktree_path,
+            check=True,
+            capture_output=True,
+        )
+
+        # Passing the worktree branch itself as the target must fail cleanly
+        branch_name = mgr._branch_name(task_id)
+        success, conflicts, error = mgr.merge_to_main(task_id, target_branch=branch_name)
+
+        assert success is False
+        assert conflicts is None
+        assert error is not None
+        assert "chad-task-" in error or "Cannot merge" in error
+
     def test_reset_worktree_resets_changes(self, git_repo):
         """Test resetting a worktree back to its base commit."""
         mgr = GitWorktreeManager(git_repo)

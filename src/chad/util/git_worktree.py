@@ -227,9 +227,19 @@ class GitWorktreeManager:
         worktree_path = self._worktree_path(task_id)
         branch_name = self._branch_name(task_id)
 
-        # Clean up any existing worktree/branch from previous runs
-        if self.worktree_exists(task_id):
+        # Clean up any existing worktree/branch from previous runs.
+        # Also check if the branch exists even when the directory doesn't — a crash
+        # can leave a stale git registration that causes "already used by worktree"
+        # on the next create attempt.
+        branch_registered = (
+            self._run_git("rev-parse", "--verify", branch_name, check=False).returncode == 0
+        )
+        if self.worktree_exists(task_id) or branch_registered:
             self.delete_worktree(task_id)
+
+        # Prune any lingering stale worktree entries (e.g. from server crashes)
+        # so git doesn't block the upcoming add with "already used by worktree".
+        self._run_git("worktree", "prune", check=False)
 
         # Ensure worktree base directory exists
         self.worktree_base.mkdir(parents=True, exist_ok=True)
@@ -272,11 +282,12 @@ class GitWorktreeManager:
         if worktree_path.exists():
             result = self._run_git("worktree", "remove", "--force", str(worktree_path), check=False)
             if result.returncode != 0:
-                # Try to prune and remove directory manually
-                self._run_git("worktree", "prune", check=False)
                 import shutil
-
                 shutil.rmtree(worktree_path, ignore_errors=True)
+
+        # Prune stale registrations so git won't block branch deletion with
+        # "already used by worktree" (e.g. directory was deleted without cleanup).
+        self._run_git("worktree", "prune", check=False)
 
         # Clean up any .pth files that reference this worktree
         main_venv = find_main_venv(self.project_path)
@@ -583,6 +594,13 @@ class GitWorktreeManager:
 
             if not worktree_path.exists():
                 return False, None, "Worktree not found"
+
+            # Refuse to merge into the worktree's own branch — that would produce
+            # a "already used by worktree" error from git checkout.
+            if merge_target == branch_name or merge_target.startswith("chad-task-"):
+                return False, None, (
+                    f"Cannot merge into '{merge_target}': target must be a regular branch"
+                )
 
             # If there is nothing to merge, surface a clear error early
             if not self.has_changes(task_id):

@@ -674,7 +674,17 @@ def _stream_pty_output(
 
 
 def _normalize_usage_percentage(util_value: float | int | None) -> float | None:
-    """Convert utilization values to 0-100 percentage, scaling fractional inputs."""
+    """Convert utilization values to 0-100 percentage, scaling fractional inputs.
+
+    The Anthropic usage API can return either:
+    - Fractions (0.0-1.0) representing 0-100%
+    - Direct percentages (0-100)
+
+    To distinguish: values strictly between 0 and 1 (exclusive of 1) are treated
+    as fractions and scaled by 100. The value 1.0 is ambiguous but treated as
+    1% (not 100%) since actual 100% usage typically triggers quota errors and
+    wouldn't be reported as a numeric value.
+    """
     try:
         pct = float(util_value)
     except (TypeError, ValueError):
@@ -683,8 +693,9 @@ def _normalize_usage_percentage(util_value: float | int | None) -> float | None:
     if math.isnan(pct) or math.isinf(pct):
         return None
 
-    # Anthropic usage APIs sometimes return 0.0-1.0 fractions; scale those.
-    if 0.0 <= pct <= 1.0:
+    # Scale fractional values (strictly less than 1.0) to percentages.
+    # Values >= 1.0 are assumed to already be percentages.
+    if 0.0 <= pct < 1.0:
         pct *= 100.0
 
     return max(0.0, min(100.0, pct))
