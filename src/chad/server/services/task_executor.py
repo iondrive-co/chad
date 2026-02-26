@@ -1221,10 +1221,16 @@ class TaskExecutor:
             time.sleep(0.1)
             pty_session = pty_service.get_session(stream_id)
 
-        # Get final exit code
+        # Get final exit code.  The reader thread sets exit_code after
+        # _proc.wait(), but terminate() sets active=False first.  Wait briefly
+        # for the reader thread to populate exit_code to avoid a race.
         exit_code = 0
         if pty_session:
-            exit_code = pty_session.exit_code or 0
+            for _ in range(20):  # up to 2 seconds
+                if pty_session.exit_code is not None:
+                    break
+                time.sleep(0.1)
+            exit_code = pty_session.exit_code if pty_session.exit_code is not None else 0
 
         # Flush any remaining Codex output buffer that wasn't emitted
         if codex_output_buffer:

@@ -583,16 +583,16 @@ class SessionEventLoop:
         if getattr(self.task, "cancel_requested", False):
             return -1, output
 
-        if exit_code < 0:
-            return exit_code, output
-
         # Final threshold check: catches cases where the task completed before
         # the 10s periodic tick fired, or usage was already above threshold at
         # session start (the first periodic check would have seeded prev without
         # detecting the crossing).
         self._check_usage_thresholds()
 
-        # Check for pending action from background threshold check (or final check above)
+        # Check for pending action from background threshold check (or final check above).
+        # This MUST run before the exit_code < 0 check because _terminate_pty_fn()
+        # kills the agent (negative exit code) when a usage threshold is crossed.
+        # Without this, await_reset/switch_provider actions are silently skipped.
         with self._pending_action_lock:
             pending = self._pending_action
             self._pending_action = None
@@ -613,6 +613,11 @@ class SessionEventLoop:
                     coding_account, coding_provider, coding_model, coding_reasoning,
                 )
                 return 0, output + "\n" + action_output
+
+        # Now safe to bail on signal-killed agents (negative exit code).
+        # Pending actions were already handled above.
+        if exit_code < 0:
+            return exit_code, output
 
         # Check if coding completed
         summary = extract_coding_summary(output)
@@ -761,93 +766,126 @@ class SessionEventLoop:
         coding_model: str | None,
         coding_reasoning: str | None,
     ) -> str:
-        """Handle await_reset action: poll until usage drops, then resume."""
-        event_type = action.get("event")
-        threshold = action.get("threshold", 90)
-        label = action.get("label", "usage")
+        """Handle await_reset action: poll until usage drops, then resume.
 
-        # Determine which ETA and usage functions to use
-        eta_fn = None
-        mapping = self._EVENT_USAGE_MAP.get(event_type)
-        if not mapping:
-            return ""
-        fn_attr = mapping[0]
-        usage_fn = getattr(self, fn_attr, None)
-        if usage_fn is None:
-            return ""
+        Loops to handle repeated usage hits — if the continuation phase hits
+        the limit again, we pause and wait a second time rather than dropping
+        the pending action.
+        """
+        accumulated = ""
 
-        if event_type == "session_usage":
-            eta_fn = self._get_session_reset_eta_fn
-        elif event_type == "weekly_usage":
-            eta_fn = self._get_weekly_reset_eta_fn
+        while True:
+            event_type = action.get("event")
+            threshold = action.get("threshold", 90)
+            label = action.get("label", "usage")
 
-        eta_str = ""
-        if eta_fn:
-            try:
-                eta = eta_fn()
-                if eta:
-                    eta_str = f" (ETA: {eta})"
-            except Exception:
-                pass
+            # Determine which ETA and usage functions to use
+            eta_fn = None
+            mapping = self._EVENT_USAGE_MAP.get(event_type)
+            if not mapping:
+                return accumulated
+            fn_attr = mapping[0]
+            usage_fn = getattr(self, fn_attr, None)
+            if usage_fn is None:
+                return accumulated
 
-        self._emit_milestone(
-            "usage_threshold",
-            f"Paused, waiting for {label} reset{eta_str}",
-        )
+            if event_type == "session_usage":
+                eta_fn = self._get_session_reset_eta_fn
+            elif event_type == "weekly_usage":
+                eta_fn = self._get_weekly_reset_eta_fn
 
-        # Set paused flag on session if available
-        if session is not None:
-            session.paused = True
+            eta_str = ""
+            if eta_fn:
+                try:
+                    eta = eta_fn()
+                    if eta:
+                        eta_str = f" (ETA: {eta})"
+                except Exception:
+                    pass
 
-        # Poll until usage drops below threshold or resume is requested
-        resume_reason = None
-        while self._running and not getattr(self.task, "cancel_requested", False):
-            # Check if user requested resume
-            if session is not None and getattr(session, "resume_requested", False):
-                session.resume_requested = False  # Clear the flag
-                resume_reason = "user requested resume"
-                break
-            time.sleep(10)
-            try:
-                current = usage_fn()
-            except Exception:
+            self._emit_milestone(
+                "usage_threshold",
+                f"Paused, waiting for {label} reset{eta_str}",
+            )
+
+            # Set paused flag on session if available
+            if session is not None:
+                session.paused = True
+
+            # Poll until usage drops below threshold or resume is requested
+            resume_reason = None
+            while self._running and not getattr(self.task, "cancel_requested", False):
+                # Check if user requested resume
+                if session is not None and getattr(session, "resume_requested", False):
+                    session.resume_requested = False  # Clear the flag
+                    resume_reason = "user requested resume"
+                    break
+                time.sleep(10)
+                try:
+                    current = usage_fn()
+                except Exception:
+                    continue
+                if current is not None and current < threshold:
+                    resume_reason = f"{label.title()} reset detected"
+                    break
+
+            # Clear paused flag
+            if session is not None:
+                session.paused = False
+
+            if not self._running or getattr(self.task, "cancel_requested", False):
+                return accumulated
+
+            self._emit_milestone(
+                "usage_threshold",
+                f"{resume_reason}, resuming",
+            )
+
+            self._emit_fn("status", status="Resuming after reset...")
+            exit_code, cont_output = self._run_phase_fn(
+                task=self.task,
+                session=session,
+                worktree_path=self.worktree_path,
+                task_description=task_description,
+                coding_account=coding_account,
+                coding_provider=coding_provider,
+                screenshots=None,
+                phase="continuation",
+                exploration_output=previous_output,
+                rows=rows,
+                cols=cols,
+                emit=self._emit_fn,
+                git_mgr=git_mgr,
+                coding_model=coding_model,
+                coding_reasoning=coding_reasoning,
+            )
+            self._analyze_output(finalize=True)
+            accumulated += "\n" + cont_output if accumulated else cont_output
+            previous_output = cont_output
+
+            # Check if the continuation hit another usage threshold.
+            # The tick thread may have set a new pending action during the run.
+            with self._pending_action_lock:
+                new_pending = self._pending_action
+                self._pending_action = None
+
+            if not new_pending:
+                return accumulated
+
+            new_action = new_pending.get("action")
+            if new_action == "await_reset":
+                # Loop back to wait again
+                action = new_pending
                 continue
-            if current is not None and current < threshold:
-                resume_reason = f"{label.title()} reset detected"
-                break
+            elif new_action == "switch_provider":
+                switch_output = self._handle_switch_provider(
+                    new_pending, session, task_description, accumulated,
+                    screenshots, rows, cols, git_mgr,
+                    coding_account, coding_provider, coding_model, coding_reasoning,
+                )
+                return accumulated + "\n" + switch_output
 
-        # Clear paused flag
-        if session is not None:
-            session.paused = False
-
-        if not self._running or getattr(self.task, "cancel_requested", False):
-            return ""
-
-        self._emit_milestone(
-            "usage_threshold",
-            f"{resume_reason}, resuming",
-        )
-
-        self._emit_fn("status", status="Resuming after reset...")
-        exit_code, cont_output = self._run_phase_fn(
-            task=self.task,
-            session=session,
-            worktree_path=self.worktree_path,
-            task_description=task_description,
-            coding_account=coding_account,
-            coding_provider=coding_provider,
-            screenshots=None,
-            phase="continuation",
-            exploration_output=previous_output,
-            rows=rows,
-            cols=cols,
-            emit=self._emit_fn,
-            git_mgr=git_mgr,
-            coding_model=coding_model,
-            coding_reasoning=coding_reasoning,
-        )
-        self._analyze_output(finalize=True)
-        return cont_output
+            return accumulated
 
     def _run_verification_loop(
         self,

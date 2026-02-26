@@ -1107,14 +1107,14 @@ def run_cli(client: APIClient) -> None:
                 print("Creating session...")
                 session = client.create_session(
                     project_path=project_path,
-                    name=f"Task: {task_description[:30]}...",
+                    name=f"Task: {task_description[:80]}",
                 )
 
                 # Run with streaming
                 clear_screen()
                 print(f"Starting {coding_provider} agent...")
                 print(f"Project: {project_path}")
-                print(f"Task: {task_description[:80]}...")
+                print(f"Task: {task_description}")
                 print("-" * 60)
                 print()
 
