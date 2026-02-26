@@ -23,9 +23,9 @@ else
 fi
 
 $PYTHON -c "
-from chad.ui.gradio.verification.tools import verify
+from chad.util.verification.tools import verify
 result = verify()
-print('✓ Verification passed' if result['success'] else f'✗ Failed at {result.get(\"failed_phase\", \"unknown\")}')
+print('✓ Verification passed' if result['success'] else '✗ Verification failed')
 exit(0 if result['success'] else 1)
 "
 ```
@@ -50,7 +50,7 @@ fi
 
 # Run verification commands
 $PYTHON -m flake8 src/chad
-$PYTHON -m pytest tests/ -v --tb=short -n auto
+$PYTHON -m pytest tests/ -v --tb=short
 ```
 
 **Success**: Both commands exit 0

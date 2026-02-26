@@ -1,7 +1,7 @@
 """Server-side verification service.
 
 Runs automated (flake8/tests) and LLM-based verification of coding agent work.
-Extracted from gradio_ui._run_verification to enable server-side orchestration.
+Runs verification services for coding agent work.
 """
 
 from typing import Any, Callable
@@ -46,7 +46,7 @@ def _run_automated_verification(
         (passed, feedback) - feedback is None on success, error string on failure
     """
     try:
-        from chad.ui.gradio.verification.tools import verify as run_verify
+        from chad.util.verification.tools import verify as run_verify
         if on_activity:
             on_activity("system", "Running verification (flake8)...")
 

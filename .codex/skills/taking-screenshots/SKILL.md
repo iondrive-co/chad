@@ -1,61 +1,50 @@
 ---
 name: taking-screenshots
-description: Captures UI screenshots with Playwright. Use for before/after visual verification or debugging UI. Works for both Gradio web UI AND CLI terminal interface.
+description: Captures UI screenshots with Playwright. Use for before/after visual verification or debugging UI. Works for React web UI and CLI terminal interface.
 metadata:
   short-description: Capture UI screenshots
 ---
 
 # Taking Screenshots
 
-This skill covers screenshots for the React UI, the Gradio web UI, **and** the CLI terminal interface.
+This skill covers screenshots for the React web UI and the CLI terminal interface.
 
-**IMPORTANT**: ALWAYS use the project's screenshot scripts (`screenshot_ui.py` for Gradio, `screenshot_cli.py` for CLI).
-DO NOT write custom screenshot code using PIL, Pillow, pyautogui, or any other library. The project scripts handle all
-the complexity including headless browser automation, proper rendering, and terminal emulation.
+**IMPORTANT**: ALWAYS use the project's screenshot infrastructure. DO NOT write custom screenshot code using PIL, Pillow,
+pyautogui, or any other library. The project tools handle all the complexity including headless browser automation,
+proper rendering, and terminal emulation.
 
-## React UI Screenshots (Vite app in `ui/`)
+## React UI Screenshots
 
-```bash
-# Default chat tab
-./.venv/bin/python scripts/screenshot_react_ui.py --headless
+Use the `ui_runner` module to start the API server (which serves the React UI from `ui/dist/`) and capture with Playwright:
 
-# Providers or Settings tab
-./.venv/bin/python scripts/screenshot_react_ui.py --tab providers --output /tmp/chad/react-providers.png
-./.venv/bin/python scripts/screenshot_react_ui.py --tab settings --output /tmp/chad/react-settings.png
+```python
+from chad.util.verification.ui_runner import create_temp_env, start_chad, stop_chad, open_playwright_page
 
-# Open after capture
-./.venv/bin/python scripts/screenshot_react_ui.py --tab chat --open
+env = create_temp_env()
+instance = start_chad(env)
+with open_playwright_page(instance.port, tab="chat", headless=True) as page:
+    page.screenshot(path="/tmp/chad/screenshot.png")
+stop_chad(instance)
+env.cleanup()
 ```
 
-- Starts the Chad API server and the React Vite dev server automatically, waits for readiness, then uses Playwright to capture.
-- Options: `--tab chat|providers|settings`, `--width/--height`, `--output`, `--open`.
-- Requires `playwright` and browser deps (`pip install playwright && playwright install chromium`) and Node deps (`npm install` already committed in `ui/`).
-
-## Gradio UI Screenshots
-
+Or use `scripts/release_screenshots.py` for the standard release screenshots:
 ```bash
-# Capture silently (default – light mode only, does not open browser)
-./.venv/bin/python scripts/screenshot_ui.py --tab run --headless
-
-# Capture both color schemes - this is only needed if changing something dark mode related
-./.venv/bin/python scripts/screenshot_ui.py --tab run --headless --color-scheme both
-
-# If you want the saved image to pop open after capture, this is only needed if showing the user something
-./.venv/bin/python scripts/screenshot_ui.py --tab run --headless --open
+./.venv/bin/python scripts/release_screenshots.py
 ```
 
-### Gradio Options
+### React Tab Names
 
-- `--tab run|providers` - Which tab
-- `--selector "CSS"` - Specific element
-- `--output path` - Save location
+- `chat` - Main chat/task interface (default)
+- `providers` - Provider/account management
+- `settings` - Settings panel
 
-### Gradio Selectors
+### React CSS Selectors
 
-- `#run-top-row` - Dropdowns
-- `#agent-chatbot` - Chat
-- `#live-stream-box` - Activity
-- `#provider-summary-panel` - Providers
+- `.app-header` - Top header with tabs
+- `.sidebar` - Session list sidebar
+- `.main` - Main content area
+- `.chat-view` - Chat view container
 
 ## CLI Terminal Screenshots
 
@@ -85,22 +74,7 @@ CLI interfaces CAN be screenshotted using `screenshot_cli.py`. This renders term
 
 1. Take a screenshot of the part of the app you will be modifying before making any changes
 2. Examine the screenshot image file and describe what it shows
-   - Quick console peek (no GUI):
-     ```bash
-     ./.venv/bin/python - <<'PY'
-     from PIL import Image
-     img = Image.open("/tmp/chad/screenshot.png")
-     print(img.size, img.mode)
-     # Example: inspect a specific element height (y-range with non-white pixels)
-     pix = img.convert("RGB").load()
-     w,h = img.size
-     rows = [any(pix[x,y] != (255,255,255) for x in range(w)) for y in range(h)]
-     first = rows.index(True); last = len(rows)-1-rows[::-1].index(True)
-     print("content rows:", first, last, "height:", last-first+1)
-     PY
-     ```
-3. Check if this description matches what you expect. If not either adjust your plan, or work out if you need to write a
-new test to capture what you expect to see, and do these until the description matches what you expect.
+3. Check if this description matches what you expect. If not, adjust your plan.
 4. Make changes
 5. Screenshot after with same options
 6. Compare visually

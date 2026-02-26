@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Integration test for Codex provider with real API.
 
-This script tests the full flow: Codex CLI → PTY → EventMux → SSE → Gradio client.
+This script tests the full flow: Codex CLI → PTY → EventMux → SSE → Client.
 It verifies that prompt echo filtering works correctly.
 
 Usage:

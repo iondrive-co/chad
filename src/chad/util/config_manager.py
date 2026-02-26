@@ -81,6 +81,12 @@ class ConfigManager:
             if key in config:
                 del config[key]
                 changed = True
+
+        # Normalize legacy ui_mode values to the only supported option.
+        if config.get("ui_mode") and config.get("ui_mode") != "cli":
+            config["ui_mode"] = "cli"
+            changed = True
+
         if changed:
             self.save_config(config)
 
@@ -285,7 +291,7 @@ class ConfigManager:
         # Generate a salt for encryption (different from bcrypt salt)
         encryption_salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
 
-        config = {"password_hash": password_hash, "encryption_salt": encryption_salt, "accounts": {}, "ui_mode": "gradio"}
+        config = {"password_hash": password_hash, "encryption_salt": encryption_salt, "accounts": {}, "ui_mode": "cli"}
         self.save_config(config)
 
         print("\nMain password configured successfully!")
@@ -343,7 +349,7 @@ class ConfigManager:
                 new_password_hash = self.hash_password(password)
                 encryption_salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
 
-                config = {"password_hash": new_password_hash, "encryption_salt": encryption_salt, "accounts": {}, "ui_mode": "gradio"}
+                config = {"password_hash": new_password_hash, "encryption_salt": encryption_salt, "accounts": {}, "ui_mode": "cli"}
                 self.save_config(config)
 
                 print("\nMain password reset complete. All stored accounts have been deleted.")
@@ -708,22 +714,22 @@ class ConfigManager:
         """Get the UI mode preference.
 
         Returns:
-            UI mode: "gradio" (default) or "cli"
+            UI mode: "cli" (only supported mode)
         """
         config = self.load_config()
-        return config.get("ui_mode", "gradio")
+        return config.get("ui_mode", "cli")
 
     def set_ui_mode(self, mode: str) -> None:
         """Set the UI mode preference.
 
         Args:
-            mode: "gradio" or "cli"
+            mode: "cli" (only supported mode)
 
         Raises:
             ValueError: If mode is not valid
         """
-        if mode not in ("gradio", "cli"):
-            raise ValueError(f"Invalid ui_mode: {mode}. Must be 'gradio' or 'cli'")
+        if mode != "cli":
+            raise ValueError(f"Invalid ui_mode: {mode}. Only 'cli' is supported")
         config = self.load_config()
         config["ui_mode"] = mode
         self.save_config(config)

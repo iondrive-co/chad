@@ -1,10 +1,12 @@
 """FastAPI application factory for Chad server."""
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .state import init_start_time
@@ -69,6 +71,20 @@ def create_app(
     app.include_router(config.router, prefix="/api/v1/config", tags=["Config"])
     app.include_router(ws.router, prefix="/api/v1", tags=["WebSocket"])
     app.include_router(slack.router, prefix="/api/v1", tags=["Slack"])
+
+    # Serve React UI static files if the dist directory exists.
+    # This allows the API server to serve both the API and the UI on a single port
+    # (used by release_screenshots.py and production deployments).
+    ui_dist = Path(__file__).resolve().parents[3] / "ui" / "dist"
+    if ui_dist.is_dir():
+        from fastapi.responses import FileResponse
+
+        # Serve index.html for the root path (SPA fallback)
+        @app.get("/", include_in_schema=False)
+        async def serve_index():
+            return FileResponse(ui_dist / "index.html")
+
+        app.mount("/assets", StaticFiles(directory=ui_dist / "assets"), name="ui-assets")
 
     return app
 

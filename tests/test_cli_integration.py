@@ -106,12 +106,6 @@ class TestSetupScreenConfig:
         config_manager.set_ui_mode("cli")
         assert config_manager.get_ui_mode() == "cli"
 
-    def test_save_ui_mode_gradio(self, config_manager, mock_app):
-        """Saving UI mode to gradio persists in config."""
-        config_manager.set_ui_mode("cli")  # First set to cli
-        config_manager.set_ui_mode("gradio")  # Then back to gradio
-        assert config_manager.get_ui_mode() == "gradio"
-
     def test_save_cleanup_days(self, config_manager, mock_app):
         """Saving cleanup days persists in config."""
         config_manager.set_cleanup_days(7)
@@ -331,15 +325,15 @@ class TestConfigPersistence:
 class TestUIModeSwitching:
     """Tests for UI mode switching behavior."""
 
-    def test_default_ui_mode_is_gradio(self, tmp_path, monkeypatch):
-        """Default UI mode is gradio."""
+    def test_default_ui_mode_is_cli(self, tmp_path, monkeypatch):
+        """Default UI mode is cli."""
         from chad.util.config_manager import ConfigManager
 
         config_file = tmp_path / "fresh.conf"
         monkeypatch.setenv("CHAD_CONFIG", str(config_file))
 
         cm = ConfigManager()
-        assert cm.get_ui_mode() == "gradio"
+        assert cm.get_ui_mode() == "cli"
 
     def test_cli_mode_persists_across_restarts(self, tmp_path, monkeypatch):
         """CLI mode setting persists across ConfigManager instances."""

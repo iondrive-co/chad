@@ -553,7 +553,7 @@ class APIClient:
         data = resp.json()
         return Preferences(
             last_project_path=data.get("last_project_path"),
-            ui_mode=data.get("ui_mode", "gradio"),
+            ui_mode=data.get("ui_mode", "cli"),
         )
 
     def set_preferences(
@@ -573,7 +573,7 @@ class APIClient:
         result = resp.json()
         return Preferences(
             last_project_path=result.get("last_project_path"),
-            ui_mode=result.get("ui_mode", "gradio"),
+            ui_mode=result.get("ui_mode", "cli"),
         )
 
     # Providers

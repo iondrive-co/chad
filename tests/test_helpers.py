@@ -355,10 +355,10 @@ def cli_config_parity_check() -> ConfigParityResult:
         "mock_remaining_usage",
     }
 
-    # Gradio-only keys
-    gradio_only = {"ui_mode"}
+    # Web-only keys
+    web_only = {"ui_mode"}
 
-    api_keys = CONFIG_BASE_KEYS - internal_keys - gradio_only
+    api_keys = CONFIG_BASE_KEYS - internal_keys - web_only
 
     # Pattern map matching TestConfigUIParity.KEY_PATTERNS
     key_patterns: dict[str, list[str]] = {

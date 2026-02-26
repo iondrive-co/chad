@@ -26,11 +26,7 @@ dependencies = [
     "requests>=2.31.0",
     "bcrypt>=4.0.0",
     "cryptography>=41.0.0",
-    "gradio>=4.0.0",
     "pexpect>=4.9.0; platform_system != 'Windows'",
-    "cffi>=2.0.0,<3.0.0",
-    "hf-xet==1.1.0",
-    "huggingface-hub>=0.16.4,<1.0.0",
     "filelock>=3.0.0",
     # Server API dependencies
     "fastapi>=0.100.0",
@@ -38,9 +34,7 @@ dependencies = [
     "websockets>=11.0",
     "httpx>=0.24.0",
     "pydantic>=2.0.0",
-    # CLI UI dependencies
-    "textual>=0.50.0",
-    # Terminal emulation for Gradio
+    # Terminal emulation
     "pyte>=0.8.0",
 ]
 
@@ -77,7 +71,6 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v"
 markers = [
-    "visual: marks tests as visual/UI tests requiring Playwright (deselect with '-m \"not visual\"')",
     "api: marks tests as API endpoint tests",
 ]
 filterwarnings = [

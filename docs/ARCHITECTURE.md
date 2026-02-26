@@ -1,7 +1,7 @@
 # Chad Architecture
 
 ## Overview
-Chad pairs a FastAPI backend with shared streaming clients used by both the Gradio web UI and the CLI. Coding “agents” are external provider CLIs launched in PTYs; the backend streams their output to the UIs over SSE or WebSocket.
+Chad pairs a FastAPI backend with a CLI interface. Coding "agents" are external provider CLIs launched in PTYs; the backend streams their output to the UI over SSE or WebSocket.
 
 ## Backend (FastAPI)
 - Entry point: `src/chad/server/main.py:create_app` — health lives at `GET /status`; all other endpoints are under `/api/v1`.
@@ -116,7 +116,7 @@ The fix (using markdown) was validated by running reproduction tests:
 - JSON progress: Codex exits immediately, no files created
 - Markdown progress: Codex completes full task
 
-**DO NOT reintroduce JSON format for progress updates** without testing against all providers, especially Codex. Future multi-step progress updates should also use markdown. See `tests/test_gradio_ui.py::TestProgressUpdateExtraction` for format examples.
+**DO NOT reintroduce JSON format for progress updates** without testing against all providers, especially Codex. Future multi-step progress updates should also use markdown.
 
 Related files:
 - `chad.util.prompts.CODING_AGENT_PROMPT`: The prompt template
@@ -193,11 +193,11 @@ When switching providers (due to quota exhaustion or user preference), Chad pres
 
 **CRITICAL: These principles are fundamental to Chad's architecture and must be followed:**
 
-1. **View-Only UI Code**: All UI implementations (React, Gradio, CLI) contain ONLY view logic. They must not contain business logic, validation, or state management beyond display state.
+1. **View-Only UI Code**: All UI implementations (CLI) contain ONLY view logic. They must not contain business logic, validation, or state management beyond display state.
 
 2. **Business Logic in Server**: ALL business logic, validation, calculations, and persistent state management MUST live in the server (`src/chad/server`). The server is the single source of truth for all operations.
 
-3. **No UI-Specific Server Code**: The server must not contain UI-specific code paths. Avoid patterns like "if ui_mode == 'gradio'". The server provides a uniform API consumed by all UIs equally.
+3. **No UI-Specific Server Code**: The server must not contain UI-specific code paths. The server provides a uniform API consumed by all UIs equally.
 
 4. **Complete Session Logging**: All agent output displayed to users MUST also be recorded in the session log (EventLog). This ensures:
    - Provider handoffs have access to complete context
@@ -210,10 +210,9 @@ Examples of proper separation:
 - UI manages only display state (collapsed/expanded, theme)
 
 ## UI Layers
-- Gradio UI (`src/chad/ui/gradio/gradio_ui.py`) drives tasks via the API/SSE using `SyncStreamClient`, renders terminal output with `TerminalEmulator`, and uses provider management components in `provider_ui.py` plus shared state in `ui_state.py`. Visual tooling lives in `ui/gradio/verification/`.
-- CLI UI (`src/chad/ui/cli/app.py`) streams the same SSE feed via `SyncStreamClient`.
+- CLI UI (`src/chad/ui/cli/app.py`) streams the SSE feed via `SyncStreamClient`.
 - Shared clients: `src/chad/ui/client/api_client.py` (REST) and `stream_client.py` (SSE).
-- Terminal rendering: `src/chad/ui/terminal_emulator.py` shared by CLI and Gradio.
+- Terminal rendering: `src/chad/ui/terminal_emulator.py` used by CLI.
 
 ## Worktrees & Git
 - `chad.util.git_worktree.GitWorktreeManager` creates per-session branches, detects changes, parses diffs, merges, resets, and deletes worktrees. TaskExecutor creates a worktree for each task before launching the provider.
@@ -232,7 +231,6 @@ src/chad/
 │   └── services/ {task_executor.py, pty_stream.py, event_mux.py, session_manager.py,
 │                   session_event_loop.py, verification.py, slack_service.py}
 ├── ui/
-│   ├── gradio/ {gradio_ui.py, provider_ui.py, ui_state.py, verification/}
 │   ├── cli/app.py
 │   ├── client/ {api_client.py, stream_client.py}
 │   └── terminal_emulator.py

@@ -24,14 +24,14 @@ else
 fi
 
 $PYTHON -c "
-from chad.ui.gradio.verification.tools import verify
+from chad.util.verification.tools import verify
 result = verify()
-print('✓ Verification passed' if result['success'] else f'✗ Failed at {result.get(\"failed_phase\", \"unknown\")}')
+print('✓ Verification passed' if result['success'] else '✗ Verification failed')
 exit(0 if result['success'] else 1)
 "
 ```
 
-## Fallback: Manual commands with intelligent Python detection
+## Fallback: Manual commands
 
 ```bash
 # Detect Python executable (prefers project venv, falls back to system)
@@ -50,22 +50,8 @@ fi
 # Run lint
 $PYTHON -m flake8 src/chad
 
-# Core/unit/integration (visuals are marker-excluded)
-$PYTHON -m pytest tests/ -v --tb=short -n auto -m "not visual"
-
-# Targeted visual tests (only those mapped to files you changed)
-VTESTS=$($PYTHON - <<'PY'
-import subprocess
-from chad.ui.gradio.verification.visual_test_map import tests_for_paths
-changed = subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines()
-tests = tests_for_paths(changed)
-print(" or ".join(tests))
-PY
-)
-if [ -n "$VTESTS" ]; then
-  $PYTHON -m pytest tests/test_ui_integration.py tests/test_ui_playwright_runner.py -v --tb=short -m "visual" -k "$VTESTS"
-fi
-# If you add/change UI, update src/chad/ui/gradio/verification/visual_test_map.py so this stays accurate.
+# Run tests
+$PYTHON -m pytest tests/ -v --tb=short
 ```
 
 **Success**: Both exit 0

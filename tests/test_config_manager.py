@@ -1097,7 +1097,7 @@ class TestVerificationSettings:
 
 
 class TestConfigUIParity:
-    """Test that both Gradio and CLI UIs expose all required config options.
+    """Test that the CLI UI exposes all required config options.
 
     These tests enforce that any user-editable config key is exposed in BOTH UIs.
     If a new config option is added to CONFIG_BASE_KEYS that should be user-editable,
@@ -1107,7 +1107,7 @@ class TestConfigUIParity:
     1. Add getter/setter to ConfigManager
     2. Add API endpoint in routes/config.py
     3. Add APIClient method in api_client.py
-    4. Add UI element in gradio_ui.py (Gradio)
+    4. Add UI element in CLI
     5. Add menu option in cli/app.py (CLI)
     6. Add the key to REQUIRED_UI_CONFIG_KEYS below (or INTERNAL_KEYS if not user-editable)
 
@@ -1128,11 +1128,11 @@ class TestConfigUIParity:
         "mock_remaining_usage",    # Testing only - per-account mock via provider cards
         "mock_run_duration_seconds",  # Testing only - per-account mock via provider cards
         "mock_session_reset_time",  # Testing only - per-account mock reset time
-        "verification_enabled",   # Managed via API/React UI (not Gradio/CLI config panel)
-        "verification_auto_run",  # Managed via API/React UI (not Gradio/CLI config panel)
+        "verification_enabled",   # Managed via API/React UI (not CLI config panel)
+        "verification_auto_run",  # Managed via API/React UI (not CLI config panel)
     }
 
-    # Config keys that MUST be editable in both Gradio and CLI UIs
+    # Config keys that MUST be editable in the CLI UI
     REQUIRED_UI_CONFIG_KEYS = {
         "verification_agent",
         "preferred_verification_model",
@@ -1145,12 +1145,12 @@ class TestConfigUIParity:
         "slack_signing_secret",
     }
 
-    # Keys that are only in Gradio UI (makes sense for web-only settings)
-    GRADIO_ONLY_KEYS = {"ui_mode"}
+    # Keys that are only in web UI (makes sense for web-only settings)
+    WEB_ONLY_KEYS = {"ui_mode"}
 
     def test_required_keys_subset_of_config_base_keys(self):
         """Ensure all required UI keys are valid CONFIG_BASE_KEYS."""
-        all_required = self.REQUIRED_UI_CONFIG_KEYS | self.GRADIO_ONLY_KEYS
+        all_required = self.REQUIRED_UI_CONFIG_KEYS | self.WEB_ONLY_KEYS
         invalid_keys = all_required - CONFIG_BASE_KEYS
         assert not invalid_keys, (
             f"Keys in REQUIRED_UI_CONFIG_KEYS not in CONFIG_BASE_KEYS: {invalid_keys}. "
@@ -1158,7 +1158,7 @@ class TestConfigUIParity:
         )
 
     def test_all_config_keys_categorized(self):
-        """Ensure every CONFIG_BASE_KEY is categorized as internal, required, or gradio-only.
+        """Ensure every CONFIG_BASE_KEY is categorized as internal, required, or web-only.
 
         This test FAILS if you add a new key to CONFIG_BASE_KEYS without deciding
         whether it needs UI exposure. This forces explicit categorization of all config keys.
@@ -1166,14 +1166,14 @@ class TestConfigUIParity:
         If you add a new config key:
         - Add to INTERNAL_KEYS if it's system-managed (not user-editable)
         - Add to REQUIRED_UI_CONFIG_KEYS if users should edit it in both UIs
-        - Add to GRADIO_ONLY_KEYS if it only makes sense in the web UI
+        - Add to WEB_ONLY_KEYS if it only makes sense in the web UI
         """
-        all_categorized = self.INTERNAL_KEYS | self.REQUIRED_UI_CONFIG_KEYS | self.GRADIO_ONLY_KEYS
+        all_categorized = self.INTERNAL_KEYS | self.REQUIRED_UI_CONFIG_KEYS | self.WEB_ONLY_KEYS
         uncategorized = CONFIG_BASE_KEYS - all_categorized
         assert not uncategorized, (
             f"CONFIG_BASE_KEYS contains uncategorized keys: {uncategorized}. "
             f"Add each key to one of: INTERNAL_KEYS (system-managed), "
-            f"REQUIRED_UI_CONFIG_KEYS (both UIs), or GRADIO_ONLY_KEYS (web UI only). "
+            f"REQUIRED_UI_CONFIG_KEYS (both UIs), or WEB_ONLY_KEYS (web UI only). "
             f"See TestConfigUIParity docstring for details."
         )
 
@@ -1191,46 +1191,6 @@ class TestConfigUIParity:
         "slack_channel": ["slack_channel", "slack_settings", "channel id"],
         "slack_signing_secret": ["slack_signing_secret", "signing secret", "slack_settings"],
     }
-
-    def test_gradio_ui_exposes_all_required_keys(self):
-        """Verify Gradio gradio_ui.py references all required config keys."""
-        import pathlib
-        import re
-
-        web_ui_path = pathlib.Path(__file__).parent.parent / "src" / "chad" / "ui" / "gradio" / "gradio_ui.py"
-        content = web_ui_path.read_text()
-
-        all_gradio_keys = self.REQUIRED_UI_CONFIG_KEYS | self.GRADIO_ONLY_KEYS
-        missing_keys = []
-
-        for key in all_gradio_keys:
-            # Get patterns for this key, or use the key itself as fallback
-            patterns_to_check = self.KEY_PATTERNS.get(key, [key])
-
-            # Check for any of the patterns in various forms
-            found = False
-            for pattern in patterns_to_check:
-                search_patterns = [
-                    rf'"{pattern}"',
-                    rf"'{pattern}'",
-                    rf"get_{pattern}",
-                    rf"set_{pattern}",
-                    rf"{pattern}_input",
-                    rf"{pattern}_pref",
-                    rf"on_{pattern}_change",
-                    pattern,  # Direct reference
-                ]
-                if any(re.search(p, content, re.IGNORECASE) for p in search_patterns):
-                    found = True
-                    break
-
-            if not found:
-                missing_keys.append(key)
-
-        assert not missing_keys, (
-            f"Gradio gradio_ui.py is missing UI elements for config keys: {missing_keys}. "
-            f"Add UI elements (input fields, sliders, etc.) and change handlers for these keys."
-        )
 
     def test_cli_ui_exposes_all_required_keys(self):
         """Verify CLI app.py references all required config keys."""

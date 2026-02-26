@@ -19,7 +19,7 @@ from pathlib import Path
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from chad.verification.ui_playwright_runner import (  # noqa: E402
+from chad.util.verification.ui_runner import (  # noqa: E402
     ChadLaunchError,
     PlaywrightUnavailable,
     create_temp_env,
@@ -53,7 +53,7 @@ def inject_followup_visible(page):
     page.evaluate(
         """
     () => {
-        // Show the follow-up row - handle Gradio's visibility
+        // Show the follow-up row - handle visibility
         const followupRow = document.getElementById('followup-row');
         if (followupRow) {
             followupRow.style.setProperty('display', 'flex', 'important');

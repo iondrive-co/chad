@@ -484,7 +484,7 @@ class PTYStreamService:
         """Detect and respond to cursor position requests (CSI 6n).
 
         prompt_toolkit sends \x1b[6n to ask the terminal for the cursor
-        position. In headless PTYs (Gradio path) there is no real terminal
+        position. In headless PTYs there is no real terminal
         to answer, so real agents would hang and abort. We fake a response
         of ESC[1;1R to unblock them and strip the request from the stream.
         """

@@ -24,8 +24,8 @@ chad
 
 ### How is this better than $Grug?
 
-Chad provides a Gradio UI to switch between coding agents (tokens encrypted with a master password you create and 
-provide for each session), monitors usage quotas, switches between providers, is able to communicate via slack, 
+Chad provides a CLI UI to switch between coding agents (tokens encrypted with a master password you create and
+provide for each session), monitors usage quotas, switches between providers, is able to communicate via slack,
 and runs multiple tasks in parallel with result merging from their worktrees:
 <details open>
 <summary><b>Screenshots</b></summary>

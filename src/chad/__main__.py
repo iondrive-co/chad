@@ -159,7 +159,7 @@ def run_unified(
     ui_port: int,
     api_port: int,
     dev_mode: bool,
-    ui_mode: str = "gradio",
+    ui_mode: str = "cli",
     server_url: str | None = None,
 ) -> None:
     """Run UI, optionally with a local API server.
@@ -169,10 +169,10 @@ def run_unified(
 
     Args:
         main_password: Main password for config encryption
-        ui_port: Port for Gradio UI (0 for ephemeral)
+        ui_port: Port for UI (0 for ephemeral)
         api_port: Port for API server (0 for ephemeral)
         dev_mode: Enable development mode
-        ui_mode: UI mode - "gradio" or "cli"
+        ui_mode: UI mode - "cli" only
         server_url: External server URL to connect to (skips local server)
     """
     if server_url:
@@ -201,12 +201,11 @@ def run_unified(
         print(f"API server running on {api_base_url}")
 
     # Run UI in main thread (blocking)
-    if ui_mode == "cli":
-        from chad.ui.cli import launch_cli_ui
-        launch_cli_ui(api_base_url=api_base_url, password=main_password)
-    else:
-        from chad.ui.gradio.gradio_ui import launch_web_ui
-        launch_web_ui(api_base_url=api_base_url, port=ui_port, dev_mode=dev_mode)
+    if ui_mode != "cli":
+        raise ValueError(f"Unsupported UI mode: {ui_mode}. Only 'cli' is available.")
+
+    from chad.ui.cli import launch_cli_ui
+    launch_cli_ui(api_base_url=api_base_url, password=main_password)
 
 
 def main() -> int:
@@ -244,9 +243,9 @@ def main() -> int:
     parser.add_argument(
         "--ui",
         type=str,
-        choices=["gradio", "cli"],
+        choices=["cli"],
         default=None,
-        help="UI mode: gradio (web) or cli (terminal). Overrides config preference.",
+        help="UI mode: cli (terminal). Overrides config preference.",
     )
     args = parser.parse_args()
 

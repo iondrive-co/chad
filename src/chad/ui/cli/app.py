@@ -395,8 +395,7 @@ def run_settings_menu(client: APIClient) -> None:
         print("  [4] Set verification model")
         print("  [5] Set max verification attempts")
         print("  [6] Action rules")
-        print("  [7] Set UI mode")
-        print("  [8] Slack integration")
+        print("  [7] Slack integration")
         print("  [b] Back to main menu")
         print()
 
@@ -603,21 +602,6 @@ def run_settings_menu(client: APIClient) -> None:
             input("Press Enter to continue...")
 
         elif choice == "7":
-            # Set UI mode
-            print()
-            print(f"Current UI mode: {preferences.ui_mode}")
-            options = [
-                ("Gradio (web interface)", "gradio"),
-                ("CLI (terminal interface)", "cli"),
-            ]
-            default_idx = 0 if preferences.ui_mode == "gradio" else 1
-            selected = select_from_list("Select UI mode:", options, default_idx)
-            if selected is not None:
-                client.set_preferences(ui_mode=selected)
-                print(f"UI mode set to: {selected}")
-            input("Press Enter to continue...")
-
-        elif choice == "8":
             # Slack integration
             print()
             print("Slack Integration")
@@ -1107,7 +1091,7 @@ def run_cli(client: APIClient) -> None:
                 print("Creating session...")
                 session = client.create_session(
                     project_path=project_path,
-                    name=f"Task: {task_description[:80]}",
+                    name=f"Task: {task_description[:100]}" + ("..." if len(task_description) > 100 else ""),
                 )
 
                 # Run with streaming

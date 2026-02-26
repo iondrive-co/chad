@@ -237,7 +237,7 @@ async def merge_worktree(session_id: str, request: MergeRequest) -> MergeRespons
     )
 
     if success:
-        # Cleanup worktree after successful merge (mirrors Gradio attempt_merge)
+        # Cleanup worktree after successful merge
         wt_mgr.cleanup_after_merge(session_id)
         session.worktree_path = None
         session.worktree_branch = None

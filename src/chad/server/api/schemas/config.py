@@ -21,7 +21,7 @@ class UserPreferences(BaseModel):
     """User preferences."""
 
     last_project_path: str | None = Field(default=None, description="Last used project path")
-    ui_mode: str = Field(default="gradio", description="UI mode: gradio or cli")
+    ui_mode: str = Field(default="cli", description="UI mode: cli only")
 
 
 class SlackSettingsResponse(BaseModel):

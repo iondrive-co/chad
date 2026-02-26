@@ -25,7 +25,7 @@ class TestMain:
         mock_config.is_first_run.return_value = False
         mock_config.verify_main_password.return_value = "verified-password"
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         with patch.object(sys, "argv", ["chad"]):
@@ -48,7 +48,7 @@ class TestMain:
         mock_config.is_first_run.return_value = True
         mock_config.setup_main_password.return_value = "new-password"
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         with patch.object(sys, "argv", ["chad"]):
@@ -69,7 +69,7 @@ class TestMain:
         mock_config = Mock()
         mock_config.is_first_run.return_value = False
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         with patch.object(sys, "argv", ["chad"]):
@@ -92,7 +92,7 @@ class TestMain:
         mock_config.is_first_run.return_value = False
         mock_config.verify_main_password.return_value = "password"
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         mock_run_unified.side_effect = ValueError("Invalid password")
@@ -112,7 +112,7 @@ class TestMain:
         mock_config.is_first_run.return_value = False
         mock_config.verify_main_password.return_value = "password"
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         mock_run_unified.side_effect = KeyboardInterrupt()
@@ -170,7 +170,7 @@ class TestMain:
         mock_config.is_first_run.return_value = False
         mock_config.verify_main_password.return_value = "password"
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         # Write a port file for autodiscovery
@@ -193,7 +193,7 @@ class TestMain:
         mock_config = Mock()
         mock_config.is_first_run.return_value = False
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         with patch.object(sys, "argv", ["chad", "--server-url", "http://127.0.0.1:9999"]):
@@ -216,7 +216,7 @@ class TestMain:
         mock_config = Mock()
         mock_config.is_first_run.return_value = False
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         port_file = tmp_path / "server.port"
@@ -242,7 +242,7 @@ class TestMain:
         mock_config.is_first_run.return_value = False
         mock_config.verify_main_password.return_value = "password"
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         with patch.object(sys, "argv", ["chad", "--server-url", "auto"]):

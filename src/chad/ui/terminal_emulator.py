@@ -2,7 +2,7 @@
 
 This module provides a terminal emulator that maintains screen state,
 handling cursor movement, colors, and other terminal sequences properly.
-It's used by the Gradio UI to render agent output with preserved layout.
+It's used by the CLI UI to render agent output with preserved layout.
 """
 
 from __future__ import annotations
@@ -16,9 +16,8 @@ import pyte
 
 
 # Terminal geometry constants - fallback values when client doesn't provide dimensions.
-# In the Gradio UI, terminal width is dynamically calculated from the container width
-# using JavaScript ResizeObserver (see gradio_ui.py). These defaults are used when
-# dynamic calculation is unavailable.
+# In the CLI UI, terminal width is dynamically calculated from the terminal size.
+# These defaults are used when dynamic calculation is unavailable.
 TERMINAL_COLS = 120
 TERMINAL_ROWS = 40
 

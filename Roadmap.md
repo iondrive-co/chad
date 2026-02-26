@@ -6,11 +6,11 @@ Using token-based pairing: Chad registers a short-lived pairing code (e.g., QR c
 URL, and the browser UI resolves the code to connect. This enables accessing Chad from any device by entering a code on 
 the hosted UI page, with no relay server—Cloudflare proxies traffic directly to the user's machine through the tunnel.
 
+
 v0.13 Intentionality Reduction
 
 Planning agent
 Packaging for different platforms
-Remove gradio ui
 
 v0.14 Slip Slop Slap
 
