@@ -1,6 +1,7 @@
 """FastAPI application factory for Chad server."""
 
 from contextlib import asynccontextmanager
+from importlib import resources
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -11,6 +12,23 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .state import init_start_time
 from .api.routes import health, sessions, providers, worktree, config, ws, slack
+
+
+def _resolve_ui_dist() -> Path | None:
+    """Return the path to the packaged React build if available."""
+    # Prefer packaged assets (bundled in wheel)
+    try:
+        package_dist = resources.files("chad.ui_dist")
+        if package_dist.is_dir():
+            return Path(package_dist)
+    except Exception:
+        pass
+
+    # Fallback to repository build (useful in editable installs)
+    repo_dist = Path(__file__).resolve().parents[3] / "ui" / "dist"
+    if repo_dist.is_dir():
+        return repo_dist
+    return None
 
 
 @asynccontextmanager
@@ -72,11 +90,9 @@ def create_app(
     app.include_router(ws.router, prefix="/api/v1", tags=["WebSocket"])
     app.include_router(slack.router, prefix="/api/v1", tags=["Slack"])
 
-    # Serve React UI static files if the dist directory exists.
-    # This allows the API server to serve both the API and the UI on a single port
-    # (used by release_screenshots.py and production deployments).
-    ui_dist = Path(__file__).resolve().parents[3] / "ui" / "dist"
-    if ui_dist.is_dir():
+    # Serve React UI static files if available (packaged or repo build).
+    ui_dist = _resolve_ui_dist()
+    if ui_dist:
         from fastapi.responses import FileResponse
 
         # Serve index.html for the root path (SPA fallback)

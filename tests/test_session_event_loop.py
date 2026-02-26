@@ -1720,7 +1720,7 @@ class TestNegativeExitCodeWithPendingAction:
         result = loop._handle_await_reset(
             action=action,
             session=None,
-            task_description="remove gradio",
+            task_description="cleanup ui",
             previous_output="",
             screenshots=None,
             rows=24, cols=80,

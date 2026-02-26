@@ -159,7 +159,7 @@ def run_unified(
     ui_port: int,
     api_port: int,
     dev_mode: bool,
-    ui_mode: str = "cli",
+    ui_mode: str = "react",
     server_url: str | None = None,
 ) -> None:
     """Run UI, optionally with a local API server.
@@ -172,9 +172,14 @@ def run_unified(
         ui_port: Port for UI (0 for ephemeral)
         api_port: Port for API server (0 for ephemeral)
         dev_mode: Enable development mode
-        ui_mode: UI mode - "cli" only
+        ui_mode: UI mode - "react" (default) or "cli"
         server_url: External server URL to connect to (skips local server)
     """
+    import webbrowser
+
+    if ui_mode not in ("react", "cli"):
+        raise ValueError(f"Unsupported UI mode: {ui_mode}. Use 'react' or 'cli'.")
+
     if server_url:
         # Connect to existing server
         api_base_url = server_url
@@ -201,11 +206,23 @@ def run_unified(
         print(f"API server running on {api_base_url}")
 
     # Run UI in main thread (blocking)
-    if ui_mode != "cli":
-        raise ValueError(f"Unsupported UI mode: {ui_mode}. Only 'cli' is available.")
+    if ui_mode == "cli":
+        from chad.ui.cli import launch_cli_ui
+        launch_cli_ui(api_base_url=api_base_url, password=main_password)
+        return
 
-    from chad.ui.cli import launch_cli_ui
-    launch_cli_ui(api_base_url=api_base_url, password=main_password)
+    web_url = api_base_url
+    print(f"Opening React UI at {web_url}")
+    try:
+        webbrowser.open(web_url)
+    except Exception:
+        print(f"Open your browser to {web_url}")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nShutting down Chad")
 
 
 def main() -> int:
@@ -243,9 +260,9 @@ def main() -> int:
     parser.add_argument(
         "--ui",
         type=str,
-        choices=["cli"],
+        choices=["react", "cli"],
         default=None,
-        help="UI mode: cli (terminal). Overrides config preference.",
+        help="UI mode: react (default) or cli (terminal). Overrides config preference.",
     )
     args = parser.parse_args()
 

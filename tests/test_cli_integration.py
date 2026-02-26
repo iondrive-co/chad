@@ -325,15 +325,15 @@ class TestConfigPersistence:
 class TestUIModeSwitching:
     """Tests for UI mode switching behavior."""
 
-    def test_default_ui_mode_is_cli(self, tmp_path, monkeypatch):
-        """Default UI mode is cli."""
+    def test_default_ui_mode_is_react(self, tmp_path, monkeypatch):
+        """Default UI mode is react."""
         from chad.util.config_manager import ConfigManager
 
         config_file = tmp_path / "fresh.conf"
         monkeypatch.setenv("CHAD_CONFIG", str(config_file))
 
         cm = ConfigManager()
-        assert cm.get_ui_mode() == "cli"
+        assert cm.get_ui_mode() == "react"
 
     def test_cli_mode_persists_across_restarts(self, tmp_path, monkeypatch):
         """CLI mode setting persists across ConfigManager instances."""
