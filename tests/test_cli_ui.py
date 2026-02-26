@@ -174,7 +174,6 @@ class TestCLIStreamingMilestones:
 
     def test_run_task_with_streaming_emits_milestones_from_api_endpoint(self, monkeypatch):
         """CLI should fetch milestones from the dedicated milestones API endpoint."""
-        import termios
         from unittest.mock import Mock
         from chad.ui.client.stream_client import StreamEvent
         from chad.ui.cli.app import run_task_with_streaming
@@ -203,11 +202,8 @@ class TestCLIStreamingMilestones:
             writes.append(data)
             return len(data)
 
-        def fake_tcgetattr(_fd):
-            raise termios.error("not a tty")
-
         monkeypatch.setattr("chad.ui.cli.app.get_terminal_size", lambda: (24, 80))
-        monkeypatch.setattr("chad.ui.cli.app.termios.tcgetattr", fake_tcgetattr)
+        monkeypatch.setattr("chad.ui.cli.app.save_terminal", lambda: None)
         monkeypatch.setattr("chad.ui.cli.app.signal.signal", lambda *_args, **_kwargs: None)
         monkeypatch.setattr("chad.ui.cli.app.os.write", fake_write)
 

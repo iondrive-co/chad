@@ -2,16 +2,19 @@
 
 import json
 import os
-import select
 import shutil
 import signal
 import subprocess
 import sys
-import termios
 import threading
-import tty
 from pathlib import Path
 
+from chad.ui.cli.terminal_io import (
+    save_terminal,
+    restore_terminal,
+    enter_raw_mode,
+    poll_stdin,
+)
 from chad.ui.client import APIClient
 from chad.ui.client.stream_client import SyncStreamClient, decode_terminal_data
 from chad.util.providers import is_mistral_configured
@@ -858,11 +861,7 @@ def run_task_with_streaming(
     milestone_poll_thread.start()
 
     # Save terminal state
-    old_settings = None
-    try:
-        old_settings = termios.tcgetattr(sys.stdin)
-    except termios.error:
-        pass
+    old_settings = save_terminal()
 
     exit_code = 0
 
@@ -884,7 +883,7 @@ def run_task_with_streaming(
     try:
         # Set terminal to raw mode for passthrough
         if old_settings:
-            tty.setraw(sys.stdin.fileno())
+            enter_raw_mode()
 
         # Stream events and relay I/O
         for event in stream_client.stream_events(session_id, include_terminal=True):
@@ -911,22 +910,19 @@ def run_task_with_streaming(
 
             elif event.event_type == "error":
                 # Restore terminal before printing error
-                if old_settings:
-                    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                restore_terminal(old_settings)
                 print(f"\nError: {event.data.get('error', 'Unknown error')}")
                 exit_code = 1
                 break
 
             # Check for user input (non-blocking)
-            if old_settings:
-                rlist, _, _ = select.select([sys.stdin], [], [], 0)
-                if sys.stdin in rlist:
-                    try:
-                        input_data = os.read(sys.stdin.fileno(), 1024)
-                        if input_data:
-                            stream_client.send_input(session_id, input_data)
-                    except OSError:
-                        pass
+            if old_settings and poll_stdin():
+                try:
+                    input_data = os.read(sys.stdin.fileno(), 1024)
+                    if input_data:
+                        stream_client.send_input(session_id, input_data)
+                except OSError:
+                    pass
 
     finally:
         milestone_poll_stop.set()
@@ -941,8 +937,7 @@ def run_task_with_streaming(
                 pass
 
         # Restore terminal state
-        if old_settings:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        restore_terminal(old_settings)
 
     return exit_code
 
