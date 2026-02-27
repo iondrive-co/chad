@@ -161,6 +161,7 @@ def run_unified(
     dev_mode: bool,
     ui_mode: str = "react",
     server_url: str | None = None,
+    tunnel: bool = False,
 ) -> None:
     """Run UI, optionally with a local API server.
 
@@ -174,6 +175,7 @@ def run_unified(
         dev_mode: Enable development mode
         ui_mode: UI mode - "react" (default) or "cli"
         server_url: External server URL to connect to (skips local server)
+        tunnel: Start a Cloudflare tunnel for remote access
     """
     import webbrowser
 
@@ -204,6 +206,16 @@ def run_unified(
         # Write port for autodiscovery by other clients
         write_server_port(api_port)
         print(f"API server running on {api_base_url}")
+
+    if tunnel and not server_url:
+        from chad.server.services.tunnel_service import get_tunnel_service
+        svc = get_tunnel_service()
+        url = svc.start(api_port)
+        if url:
+            print(f"Tunnel URL: {url}")
+            print(f"Pairing code: {svc._subdomain}")
+        else:
+            print(f"Failed to start tunnel: {svc._error}")
 
     # Run UI in main thread (blocking)
     if ui_mode == "cli":
@@ -256,6 +268,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--dev", action="store_true", help="Enable development mode (enables mock provider)"
+    )
+    parser.add_argument(
+        "--tunnel", action="store_true", help="Start a Cloudflare tunnel for remote access"
     )
     parser.add_argument(
         "--ui",
@@ -325,6 +340,7 @@ def main() -> int:
             dev_mode=args.dev,
             ui_mode=ui_mode,
             server_url=server_url,
+            tunnel=args.tunnel,
         )
 
         return 0

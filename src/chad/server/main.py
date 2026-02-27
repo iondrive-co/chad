@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .state import init_start_time
-from .api.routes import health, sessions, providers, worktree, config, ws, slack
+from .api.routes import health, sessions, providers, worktree, config, ws, slack, tunnel
 
 
 def _resolve_ui_dist() -> Path | None:
@@ -89,6 +89,7 @@ def create_app(
     app.include_router(config.router, prefix="/api/v1/config", tags=["Config"])
     app.include_router(ws.router, prefix="/api/v1", tags=["WebSocket"])
     app.include_router(slack.router, prefix="/api/v1", tags=["Slack"])
+    app.include_router(tunnel.router, prefix="/api/v1", tags=["Tunnel"])
 
     # Serve React UI static files if available (packaged or repo build).
     ui_dist = _resolve_ui_dist()

@@ -8,8 +8,9 @@ import { ProvidersPanel } from "./components/ProvidersPanel.tsx";
 type Tab = "chat" | "providers" | "settings";
 
 export function App() {
-  // Use same origin — Vite proxy forwards /api and /ws to Chad server
-  const api = useMemo(() => new ChadAPI(""), []);
+  const [apiBaseUrl, setApiBaseUrl] = useState("");
+  const [pairingCode, setPairingCode] = useState("");
+  const api = useMemo(() => new ChadAPI(apiBaseUrl), [apiBaseUrl]);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
@@ -21,6 +22,8 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
+    setConnected(false);
+    setError(null);
     const tryConnect = async () => {
       try {
         const status = await api.getStatus();
@@ -61,6 +64,13 @@ export function App() {
     setSessionVersion((v) => v + 1);
   }, []);
 
+  const connectToTunnel = useCallback(() => {
+    const code = pairingCode.trim();
+    if (!code) return;
+    setApiBaseUrl(`https://${code}.trycloudflare.com`);
+    setSelectedSession(null);
+  }, [pairingCode]);
+
   if (!connected) {
     return (
       <div className="app">
@@ -70,6 +80,19 @@ export function App() {
           <span className="connect-status">
             {error ?? "Connecting..."}
           </span>
+          <div style={{ marginLeft: "auto", display: "flex", gap: "0.25rem", alignItems: "center" }}>
+            <input
+              type="text"
+              placeholder="Pairing code"
+              value={pairingCode}
+              onChange={(e) => setPairingCode(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && connectToTunnel()}
+              style={{ width: "12rem", padding: "0.2rem 0.4rem", fontSize: "0.85rem" }}
+            />
+            <button onClick={connectToTunnel} style={{ fontSize: "0.85rem", padding: "0.2rem 0.6rem" }}>
+              Connect
+            </button>
+          </div>
         </header>
       </div>
     );
@@ -91,6 +114,11 @@ export function App() {
             Settings
           </button>
         </nav>
+        {apiBaseUrl && (
+          <span style={{ marginLeft: "auto", fontSize: "0.8rem", opacity: 0.7 }}>
+            Remote: {apiBaseUrl.replace("https://", "").replace(".trycloudflare.com", "")}
+          </span>
+        )}
       </header>
 
       <div className="app-body">

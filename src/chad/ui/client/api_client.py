@@ -759,7 +759,6 @@ class APIClient:
         enabled: bool | None = None,
         channel: str | None = None,
         bot_token: str | None = None,
-        signing_secret: str | None = None,
     ) -> dict:
         """Update Slack integration settings.
 
@@ -773,9 +772,38 @@ class APIClient:
             payload["channel"] = channel
         if bot_token is not None:
             payload["bot_token"] = bot_token
-        if signing_secret is not None:
-            payload["signing_secret"] = signing_secret
         resp = self._client.put(self._url("/config/slack"), json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    # Tunnel
+    def get_tunnel_status(self) -> dict:
+        """Get tunnel status.
+
+        Returns:
+            Dict with running, url, subdomain, error
+        """
+        resp = self._client.get(self._url("/tunnel"))
+        resp.raise_for_status()
+        return resp.json()
+
+    def start_tunnel(self) -> dict:
+        """Start a Cloudflare tunnel.
+
+        Returns:
+            Dict with running, url, subdomain, error
+        """
+        resp = self._client.post(self._url("/tunnel/start"))
+        resp.raise_for_status()
+        return resp.json()
+
+    def stop_tunnel(self) -> dict:
+        """Stop the Cloudflare tunnel.
+
+        Returns:
+            Dict with running, url, subdomain, error
+        """
+        resp = self._client.post(self._url("/tunnel/stop"))
         resp.raise_for_status()
         return resp.json()
 

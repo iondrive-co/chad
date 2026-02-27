@@ -30,7 +30,6 @@ class SlackSettingsResponse(BaseModel):
     enabled: bool = Field(default=False, description="Whether Slack integration is active")
     channel: str | None = Field(default=None, description="Slack channel ID")
     has_token: bool = Field(default=False, description="Whether a bot token is stored")
-    has_signing_secret: bool = Field(default=False, description="Whether a signing secret is stored")
 
 
 class SlackSettingsUpdate(BaseModel):
@@ -39,4 +38,3 @@ class SlackSettingsUpdate(BaseModel):
     enabled: bool | None = Field(default=None, description="Enable or disable Slack integration")
     channel: str | None = Field(default=None, description="Slack channel ID")
     bot_token: str | None = Field(default=None, description="Slack bot token (xoxb-...)")
-    signing_secret: str | None = Field(default=None, description="Slack app signing secret")

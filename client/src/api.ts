@@ -360,13 +360,41 @@ export class ChadAPI {
     return this.put("/api/v1/config/action-settings", { settings });
   }
 
+  // ── Tunnel ──
+
+  getTunnelStatus(): Promise<{
+    running: boolean;
+    url: string | null;
+    subdomain: string | null;
+    error: string | null;
+  }> {
+    return this.get("/api/v1/tunnel");
+  }
+
+  startTunnel(): Promise<{
+    running: boolean;
+    url: string | null;
+    subdomain: string | null;
+    error: string | null;
+  }> {
+    return this.post("/api/v1/tunnel/start");
+  }
+
+  stopTunnel(): Promise<{
+    running: boolean;
+    url: string | null;
+    subdomain: string | null;
+    error: string | null;
+  }> {
+    return this.post("/api/v1/tunnel/stop");
+  }
+
   // ── Config: Slack ──
 
   getSlackSettings(): Promise<{
     enabled: boolean;
     channel: string | null;
     has_token: boolean;
-    has_signing_secret: boolean;
   }> {
     return this.get("/api/v1/config/slack");
   }
@@ -376,13 +404,11 @@ export class ChadAPI {
       enabled: boolean;
       channel: string;
       bot_token: string;
-      signing_secret: string;
     }>,
   ): Promise<{
     enabled: boolean;
     channel: string | null;
     has_token: boolean;
-    has_signing_secret: boolean;
   }> {
     return this.put("/api/v1/config/slack", settings);
   }

@@ -1,10 +1,7 @@
-"""Slack integration service for milestone notifications and message forwarding."""
+"""Slack integration service for outgoing milestone notifications."""
 
-import hashlib
-import hmac
 import logging
 import threading
-import time
 
 import httpx
 
@@ -16,7 +13,7 @@ SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
 
 
 class SlackService:
-    """Posts milestone notifications to Slack and forwards incoming messages to sessions."""
+    """Posts milestone notifications to Slack."""
 
     def __init__(self) -> None:
         self._http = httpx.Client(timeout=10)
@@ -24,11 +21,6 @@ class SlackService:
     def _is_enabled(self) -> bool:
         cm = get_config_manager()
         return cm.get_slack_enabled() and bool(cm.get_slack_bot_token()) and bool(cm.get_slack_channel())
-
-    def get_signing_secret(self) -> str | None:
-        """Return the configured Slack signing secret, or None if unset."""
-        cm = get_config_manager()
-        return cm.get_slack_signing_secret()
 
     def post_milestone(
         self,
@@ -81,70 +73,6 @@ class SlackService:
             daemon=True,
         )
         t.start()
-
-    def forward_message_to_session(self, text: str, session_id: str | None = None) -> bool:
-        """Forward a Slack message to an active Chad session.
-
-        If session_id is None, forwards to the most recently active session.
-        Returns True if the message was delivered.
-        """
-        from chad.server.services.session_manager import get_session_manager
-        from chad.server.services.task_executor import get_task_executor
-
-        sm = get_session_manager()
-
-        if session_id:
-            session = sm.get_session(session_id)
-            if not session or not session.active:
-                return False
-            target_sessions = [session]
-        else:
-            target_sessions = sm.get_active_sessions()
-            if not target_sessions:
-                return False
-            target_sessions.sort(key=lambda s: s.last_activity, reverse=True)
-            target_sessions = target_sessions[:1]
-
-        executor = get_task_executor()
-        session = target_sessions[0]
-
-        # Find the active task's event loop for this session
-        task = executor.get_running_task_for_session(session.id)
-        event_loop = task._session_event_loop if task else None
-        if event_loop is None:
-            return False
-
-        event_loop.enqueue_message(f"[Slack] {text}", source="slack")
-        return True
-
-    @staticmethod
-    def verify_webhook_signature(
-        signing_secret: str,
-        timestamp: str,
-        signature: str,
-        body: bytes,
-    ) -> bool:
-        """Verify a Slack webhook request signature (v0).
-
-        Args:
-            signing_secret: The Slack app's signing secret
-            timestamp: X-Slack-Request-Timestamp header
-            signature: X-Slack-Signature header
-            body: Raw request body bytes
-        """
-        try:
-            if abs(time.time() - float(timestamp)) > 300:
-                return False
-        except (ValueError, TypeError):
-            return False
-
-        sig_basestring = f"v0:{timestamp}:{body.decode('utf-8')}"
-        computed = "v0=" + hmac.new(
-            signing_secret.encode(),
-            sig_basestring.encode(),
-            hashlib.sha256,
-        ).hexdigest()
-        return hmac.compare_digest(computed, signature)
 
 
 # Global singleton

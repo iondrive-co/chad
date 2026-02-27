@@ -399,6 +399,7 @@ def run_settings_menu(client: APIClient) -> None:
         print("  [5] Set max verification attempts")
         print("  [6] Action rules")
         print("  [7] Slack integration")
+        print("  [8] Remote access (tunnel)")
         print("  [b] Back to main menu")
         print()
 
@@ -611,12 +612,10 @@ def run_settings_menu(client: APIClient) -> None:
             print("-" * 30)
             print(f"  Enabled:   {slack_settings.get('enabled', False)}")
             print(f"  Token:     {'(set)' if slack_settings.get('has_token') else '(not set)'}")
-            print(f"  Signing:   {'(set)' if slack_settings.get('has_signing_secret') else '(not set)'}")
             print(f"  Channel:   {slack_settings.get('channel') or '(not set)'}")
             print()
             print("  [e] Toggle enabled")
             print("  [t] Set bot token")
-            print("  [g] Set signing secret")
             print("  [c] Set channel ID")
             print("  [s] Send test message")
             print()
@@ -631,11 +630,6 @@ def run_settings_menu(client: APIClient) -> None:
                     if token:
                         client.set_slack_settings(bot_token=token)
                         print("Bot token saved")
-                elif sub == "g":
-                    secret = input("Signing secret: ").strip()
-                    if secret:
-                        client.set_slack_settings(signing_secret=secret)
-                        print("Signing secret saved")
                 elif sub == "c":
                     channel = input("Channel ID (e.g. C0123456789): ").strip()
                     if channel:
@@ -647,6 +641,49 @@ def run_settings_menu(client: APIClient) -> None:
                         print("Test message sent to Slack")
                     else:
                         print(f"Failed: {result.get('error', 'unknown error')}")
+            except (ValueError, EOFError):
+                pass
+            input("Press Enter to continue...")
+
+        elif choice == "8":
+            # Remote access (tunnel)
+            print()
+            print("Remote Access (Tunnel)")
+            print("-" * 30)
+            try:
+                tunnel_status = client.get_tunnel_status()
+            except Exception:
+                tunnel_status = {"running": False, "url": None, "subdomain": None, "error": None}
+            running = tunnel_status.get("running", False)
+            url = tunnel_status.get("url")
+            subdomain = tunnel_status.get("subdomain")
+            error = tunnel_status.get("error")
+            print(f"  Status:    {'Running' if running else 'Stopped'}")
+            if url:
+                print(f"  URL:       {url}")
+            if subdomain:
+                print(f"  Pairing:   {subdomain}")
+            if error:
+                print(f"  Error:     {error}")
+            print()
+            if running:
+                print("  [s] Stop tunnel")
+            else:
+                print("  [s] Start tunnel")
+            print()
+            try:
+                sub = input("Choice (or Enter to skip): ").strip().lower()
+                if sub == "s":
+                    if running:
+                        result = client.stop_tunnel()
+                        print("Tunnel stopped")
+                    else:
+                        result = client.start_tunnel()
+                        if result.get("running"):
+                            print(f"Tunnel started: {result.get('url')}")
+                            print(f"Pairing code: {result.get('subdomain')}")
+                        else:
+                            print(f"Failed: {result.get('error', 'unknown error')}")
             except (ValueError, EOFError):
                 pass
             input("Press Enter to continue...")

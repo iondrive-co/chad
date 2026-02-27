@@ -15,7 +15,11 @@ export function SettingsPanel({ api }: Props) {
   const [slackEnabled, setSlackEnabled] = useState(false);
   const [slackChannel, setSlackChannel] = useState("");
   const [slackHasToken, setSlackHasToken] = useState(false);
-  const [slackHasSecret, setSlackHasSecret] = useState(false);
+  const [tunnelRunning, setTunnelRunning] = useState(false);
+  const [tunnelUrl, setTunnelUrl] = useState<string | null>(null);
+  const [tunnelSubdomain, setTunnelSubdomain] = useState<string | null>(null);
+  const [tunnelError, setTunnelError] = useState<string | null>(null);
+  const [tunnelLoading, setTunnelLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
@@ -34,7 +38,12 @@ export function SettingsPanel({ api }: Props) {
       setSlackEnabled(r.enabled);
       setSlackChannel(r.channel ?? "");
       setSlackHasToken(r.has_token);
-      setSlackHasSecret(r.has_signing_secret);
+    }).catch(() => {});
+    api.getTunnelStatus().then((r) => {
+      setTunnelRunning(r.running);
+      setTunnelUrl(r.url);
+      setTunnelSubdomain(r.subdomain);
+      setTunnelError(r.error);
     }).catch(() => {});
   }, [api]);
 
@@ -90,10 +99,29 @@ export function SettingsPanel({ api }: Props) {
       setSlackEnabled(r.enabled);
       setSlackChannel(r.channel ?? "");
       setSlackHasToken(r.has_token);
-      setSlackHasSecret(r.has_signing_secret);
       flash("Saved");
     } catch { /* */ }
   }, [api, flash]);
+
+  // ── Tunnel ──
+
+  const toggleTunnel = useCallback(async () => {
+    setTunnelLoading(true);
+    setTunnelError(null);
+    try {
+      const r = tunnelRunning
+        ? await api.stopTunnel()
+        : await api.startTunnel();
+      setTunnelRunning(r.running);
+      setTunnelUrl(r.url);
+      setTunnelSubdomain(r.subdomain);
+      setTunnelError(r.error);
+    } catch {
+      setTunnelError("Request failed");
+    } finally {
+      setTunnelLoading(false);
+    }
+  }, [api, tunnelRunning]);
 
   return (
     <div className="settings-panel">
@@ -149,6 +177,39 @@ export function SettingsPanel({ api }: Props) {
         </label>
       </section>
 
+      {/* ── Remote Access (Tunnel) ── */}
+      <section>
+        <h3>Remote Access</h3>
+        <div style={{ marginBottom: "0.5rem" }}>
+          <strong>Status:</strong>{" "}
+          {tunnelRunning ? (
+            <span style={{ color: "#4caf50" }}>Running</span>
+          ) : (
+            <span style={{ color: "#999" }}>Stopped</span>
+          )}
+        </div>
+        {tunnelUrl && (
+          <div style={{ marginBottom: "0.5rem" }}>
+            <strong>URL:</strong>{" "}
+            <a href={tunnelUrl} target="_blank" rel="noopener noreferrer">{tunnelUrl}</a>
+          </div>
+        )}
+        {tunnelSubdomain && (
+          <div style={{ marginBottom: "0.5rem" }}>
+            <strong>Pairing code:</strong>{" "}
+            <code>{tunnelSubdomain}</code>
+          </div>
+        )}
+        {tunnelError && (
+          <div style={{ marginBottom: "0.5rem", color: "#f44336" }}>
+            {tunnelError}
+          </div>
+        )}
+        <button onClick={toggleTunnel} disabled={tunnelLoading}>
+          {tunnelLoading ? "..." : tunnelRunning ? "Stop Tunnel" : "Start Tunnel"}
+        </button>
+      </section>
+
       {/* ── Slack ── */}
       <section>
         <h3>Slack Integration</h3>
@@ -169,14 +230,6 @@ export function SettingsPanel({ api }: Props) {
             onBlur={(e) => {
               if (e.target.value && !e.target.value.startsWith("•"))
                 saveSlack({ bot_token: e.target.value });
-            }} />
-        </label>
-        <label>
-          Signing Secret
-          <input type="password" placeholder={slackHasSecret ? "•••••••••" : "Enter signing secret"}
-            onBlur={(e) => {
-              if (e.target.value && !e.target.value.startsWith("•"))
-                saveSlack({ signing_secret: e.target.value });
             }} />
         </label>
       </section>

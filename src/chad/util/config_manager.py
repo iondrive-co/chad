@@ -36,7 +36,7 @@ CONFIG_BASE_KEYS: set[str] = {
     "slack_enabled",       # Whether Slack integration is active
     "slack_bot_token",     # Encrypted Slack bot token (xoxb-...)
     "slack_channel",       # Slack channel ID to post milestones to
-    "slack_signing_secret",  # Slack app signing secret for webhook verification
+
 }
 
 
@@ -1033,23 +1033,6 @@ class ConfigManager:
             del config["slack_channel"]
         self.save_config(config)
 
-    def get_slack_signing_secret(self) -> str | None:
-        """Get the Slack app signing secret used for webhook verification."""
-        config = self.load_config()
-        return config.get("slack_signing_secret") or None
-
-    def set_slack_signing_secret(self, secret: str | None) -> None:
-        """Store the Slack app signing secret.
-
-        Args:
-            secret: Signing secret string, or None to clear
-        """
-        config = self.load_config()
-        if secret:
-            config["slack_signing_secret"] = secret
-        elif "slack_signing_secret" in config:
-            del config["slack_signing_secret"]
-        self.save_config(config)
 
 
 def validate_config_keys(config: dict[str, Any], *, allow: Iterable[str] | None = None) -> None:
