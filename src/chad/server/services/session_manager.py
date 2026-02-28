@@ -16,7 +16,7 @@ class Session:
     """Per-session state for concurrent task execution."""
 
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
-    name: str = "New Session"
+    name: str = ""
     cancel_requested: bool = False
     resume_requested: bool = False  # Set to force resume from paused state
     active: bool = False
@@ -67,8 +67,9 @@ class SessionManager:
             ConfigManager().ensure_recent_backup()
             session = Session(
                 project_path=project_path,
-                name=name or "New Session",
             )
+            # Default name to session ID if none provided
+            session.name = name or session.id
             self._sessions[session.id] = session
             return session
 
@@ -95,7 +96,7 @@ class SessionManager:
         """
         with self._lock:
             if session_id not in self._sessions:
-                session = Session(id=session_id)
+                session = Session(id=session_id, name=session_id)
                 self._sessions[session_id] = session
             return self._sessions[session_id]
 

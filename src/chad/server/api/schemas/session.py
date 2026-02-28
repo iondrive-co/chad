@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 class SessionCreate(BaseModel):
     """Request model for creating a new session."""
 
-    name: str = Field(default="New Session", description="Human-readable session name")
+    name: str | None = Field(default=None, description="Session name (defaults to session ID)")
     project_path: str | None = Field(
         default=None, description="Path to the project directory"
     )

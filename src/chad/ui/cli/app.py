@@ -1123,7 +1123,6 @@ def run_cli(client: APIClient) -> None:
                 print("Creating session...")
                 session = client.create_session(
                     project_path=project_path,
-                    name=f"Task: {task_description[:100]}" + ("..." if len(task_description) > 100 else ""),
                 )
 
                 # Run with streaming

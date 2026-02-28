@@ -14,6 +14,8 @@ interface Props {
   defaultProjectPath?: string;
   apiBaseUrl?: string;
   token?: string;
+  /** Whether the session is active (from polled session list data). */
+  sessionActive?: boolean;
 }
 
 /** Strip ANSI escape codes for plain-text display. */
@@ -28,6 +30,7 @@ export function ChatView({
   defaultProjectPath = "",
   apiBaseUrl,
   token,
+  sessionActive = false,
 }: Props) {
   const [taskActive, setTaskActive] = useState(false);
   const [followupText, setFollowupText] = useState("");
@@ -47,34 +50,33 @@ export function ChatView({
     token,
   );
 
-  // On mount, check if this session already has an active task and reconnect,
-  // or if there are pending worktree changes that need merging.
+  // React to session becoming active (from polling or on mount).
+  // When another UI starts a task, the polled sessionActive prop flips to true
+  // and this effect connects the WebSocket stream.
   useEffect(() => {
     let cancelled = false;
-    api.getSession(sessionId).then(async (session) => {
-      if (!cancelled && session.active) {
+    if (sessionActive && !taskActive) {
+      (async () => {
         try {
           const data = await api.getEvents(sessionId, 0, "session_started");
-          streamSinceSeqRef.current = data.latest_seq;
+          if (!cancelled) streamSinceSeqRef.current = data.latest_seq;
         } catch {
           // Fall back to streaming all events
         }
         if (!cancelled) setTaskActive(true);
-      } else if (!cancelled) {
-        // Session not active — check for pending worktree changes to merge
-        api.getWorktreeStatus(sessionId).then((status) => {
-          if (!cancelled && status.exists && status.has_changes) {
-            setShowMerge(true);
-          }
-        }).catch(() => {
-          // Ignore errors checking worktree status
-        });
-      }
-    }).catch(() => {
-      // Ignore - session may not exist yet
-    });
+      })();
+    } else if (!sessionActive && !taskActive && !terminalOutput) {
+      // Not active — check for pending worktree changes to merge
+      api.getWorktreeStatus(sessionId).then((status) => {
+        if (!cancelled && status.exists && status.has_changes) {
+          setShowMerge(true);
+        }
+      }).catch(() => {
+        // Ignore errors checking worktree status
+      });
+    }
     return () => { cancelled = true; };
-  }, [api, sessionId]);
+  }, [sessionActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-scroll terminal output
   useEffect(() => {

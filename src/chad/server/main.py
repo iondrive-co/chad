@@ -7,27 +7,31 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .state import init_start_time
 from .api.routes import health, sessions, providers, worktree, config, ws, slack, tunnel
 
 
-def _resolve_ui_dist() -> Path | None:
-    """Return the path to the packaged React build if available."""
+def _resolve_ui_index() -> Path | None:
+    """Return the path to the UI index.html if available.
+
+    The UI is a single self-contained HTML file (portable build) that can be
+    served without any additional asset files.
+    """
     # Prefer packaged assets (bundled in wheel)
     try:
         package_dist = resources.files("chad.ui_dist")
-        if package_dist.is_dir():
-            return Path(package_dist)
+        index = Path(package_dist) / "index.html"
+        if index.is_file():
+            return index
     except Exception:
         pass
 
-    # Fallback to repository build (useful in editable installs)
-    repo_dist = Path(__file__).resolve().parents[3] / "ui" / "dist"
-    if repo_dist.is_dir():
-        return repo_dist
+    # Fallback to portable build in repository (useful in editable installs)
+    repo_portable = Path(__file__).resolve().parents[3] / "ui" / "dist-portable" / "index.html"
+    if repo_portable.is_file():
+        return repo_portable
     return None
 
 
@@ -101,17 +105,14 @@ def create_app(
     app.include_router(slack.router, prefix="/api/v1", tags=["Slack"])
     app.include_router(tunnel.router, prefix="/api/v1", tags=["Tunnel"])
 
-    # Serve React UI static files if available (packaged or repo build).
-    ui_dist = _resolve_ui_dist()
-    if ui_dist:
+    # Serve the single-file React UI if available (packaged or repo build).
+    ui_index = _resolve_ui_index()
+    if ui_index:
         from fastapi.responses import FileResponse
 
-        # Serve index.html for the root path (SPA fallback)
         @app.get("/", include_in_schema=False)
         async def serve_index():
-            return FileResponse(ui_dist / "index.html")
-
-        app.mount("/assets", StaticFiles(directory=ui_dist / "assets"), name="ui-assets")
+            return FileResponse(ui_index)
 
     return app
 

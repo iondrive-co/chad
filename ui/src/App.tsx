@@ -4,6 +4,7 @@ import { SessionList } from "./components/SessionList.tsx";
 import { ChatView } from "./components/ChatView.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { ProvidersPanel } from "./components/ProvidersPanel.tsx";
+import { useSessions } from "./hooks/useSessions.ts";
 
 type Tab = "chat" | "providers" | "settings";
 
@@ -81,14 +82,8 @@ export function App() {
             setDefaultProjectPath(status.cwd);
           }
           const sessionsData = await api.listSessions();
-          if (sessionsData.sessions.length === 0) {
-            const newSession = await api.createSession({
-              name: "Task 1",
-              project_path: status.cwd || null,
-            });
-            setSelectedSession(newSession.id);
-            setSessionVersion((v) => v + 1);
-          } else if (!sessionsData.sessions.some((s) => s.active)) {
+          if (sessionsData.sessions.length > 0) {
+            // Select the most recent session
             setSelectedSession(sessionsData.sessions[0].id);
           }
         }
@@ -102,6 +97,14 @@ export function App() {
     tryConnect();
     return () => { cancelled = true; clearTimeout(timer); };
   }, [api]);
+
+  const { sessions, loading: sessionsLoading, createSession, deleteSession } = useSessions(
+    connected ? api : null,
+    sessionVersion,
+  );
+
+  // Get selected session's active state from polled data
+  const selectedSessionActive = sessions.find(s => s.id === selectedSession)?.active ?? false;
 
   const refreshSessions = useCallback(() => {
     setSessionVersion((v) => v + 1);
@@ -174,9 +177,12 @@ export function App() {
           <aside className="sidebar">
             <SessionList
               api={api}
+              sessions={sessions}
+              loading={sessionsLoading}
+              createSession={createSession}
+              deleteSession={deleteSession}
               selectedId={selectedSession}
               onSelect={setSelectedSession}
-              version={sessionVersion}
               onRefresh={refreshSessions}
               connected={connected}
             />
@@ -195,6 +201,7 @@ export function App() {
                 defaultProjectPath={defaultProjectPath}
                 apiBaseUrl={apiBaseUrl}
                 token={token}
+                sessionActive={selectedSessionActive}
               />
             ) : (
               <div className="placeholder">
