@@ -9,16 +9,11 @@ import sys
 import threading
 import time
 from datetime import datetime
-from typing import Literal
-
 from pathlib import Path
 
 from .util.cleanup import cleanup_on_startup, cleanup_on_shutdown
 from .util.config_manager import ConfigManager
 from .util.config import ensure_project_root_env
-
-# Supported run modes
-RunMode = Literal["unified", "server", "ui"]
 
 
 def _start_parent_watchdog() -> threading.Thread | None:
@@ -133,12 +128,28 @@ def read_server_port() -> int | None:
         return None
 
 
-def run_server(host: str = "0.0.0.0", port: int = 0) -> None:
+def _start_tunnel(port: int, token: str | None = None) -> None:
+    """Start a Cloudflare tunnel and print the URL with pairing code."""
+    from chad.server.services.tunnel_service import get_tunnel_service
+    svc = get_tunnel_service()
+    url = svc.start(port)
+    if url:
+        print(f"Tunnel URL: {url}")
+        if token and svc._subdomain:
+            print(f"Pairing code: {svc._subdomain}:{token}")
+        elif svc._subdomain:
+            print(f"Pairing code: {svc._subdomain}")
+    else:
+        print(f"Failed to start tunnel: {svc._error}")
+
+
+def run_server(host: str = "0.0.0.0", port: int = 0, tunnel: bool = False) -> None:
     """Run the Chad API server.
 
     Args:
         host: Host to bind to
         port: Port to run on (0 for ephemeral)
+        tunnel: Start a Cloudflare tunnel for remote access
     """
     import uvicorn
     from chad.server.main import create_app
@@ -149,7 +160,14 @@ def run_server(host: str = "0.0.0.0", port: int = 0) -> None:
     # Write port for autodiscovery by other clients
     write_server_port(port)
 
-    app = create_app()
+    # Generate auth token when tunnel is active
+    auth_token = None
+    if tunnel:
+        from chad.server.auth import generate_token
+        auth_token = generate_token()
+        _start_tunnel(port, token=auth_token)
+
+    app = create_app(auth_token=auth_token)
     print(f"Starting Chad API server on {host}:{port}")
     uvicorn.run(app, host=host, port=port)
 
@@ -194,7 +212,13 @@ def run_unified(
         if api_port == 0:
             api_port = find_free_port()
 
-        app = create_app()
+        # Generate auth token when tunnel is active
+        auth_token = None
+        if tunnel:
+            from chad.server.auth import generate_token
+            auth_token = generate_token()
+
+        app = create_app(auth_token=auth_token)
         server_config = uvicorn.Config(app, host="127.0.0.1", port=api_port, log_level="warning")
         server = uvicorn.Server(server_config)
 
@@ -208,14 +232,7 @@ def run_unified(
         print(f"API server running on {api_base_url}")
 
     if tunnel and not server_url:
-        from chad.server.services.tunnel_service import get_tunnel_service
-        svc = get_tunnel_service()
-        url = svc.start(api_port)
-        if url:
-            print(f"Tunnel URL: {url}")
-            print(f"Pairing code: {svc._subdomain}")
-        else:
-            print(f"Failed to start tunnel: {svc._error}")
+        _start_tunnel(api_port, token=auth_token)
 
     # Run UI in main thread (blocking)
     if ui_mode == "cli":
@@ -301,9 +318,10 @@ def main() -> int:
     atexit.register(cleanup_on_shutdown)
 
     try:
-        # Server-only mode - no password needed
+        # Server-only mode — no password needed (provider CLIs authenticate
+        # via their own isolated config dirs, not chad's encrypted keys)
         if args.mode == "server":
-            run_server(host=args.api_host, port=args.api_port)
+            run_server(host=args.api_host, port=args.api_port, tunnel=args.tunnel)
             return 0
 
         # Handle server URL autodiscovery early so we can skip password prompt when connecting

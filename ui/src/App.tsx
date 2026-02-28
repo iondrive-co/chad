@@ -10,7 +10,8 @@ type Tab = "chat" | "providers" | "settings";
 export function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState("");
   const [pairingCode, setPairingCode] = useState("");
-  const api = useMemo(() => new ChadAPI(apiBaseUrl), [apiBaseUrl]);
+  const [token, setToken] = useState<string | undefined>(undefined);
+  const api = useMemo(() => new ChadAPI(apiBaseUrl, token), [apiBaseUrl, token]);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
@@ -67,7 +68,17 @@ export function App() {
   const connectToTunnel = useCallback(() => {
     const code = pairingCode.trim();
     if (!code) return;
-    setApiBaseUrl(`https://${code}.trycloudflare.com`);
+    // Pairing code format: "subdomain:token" or just "subdomain" (no auth)
+    const colonIdx = code.indexOf(":");
+    if (colonIdx > 0) {
+      const subdomain = code.slice(0, colonIdx);
+      const pairToken = code.slice(colonIdx + 1);
+      setApiBaseUrl(`https://${subdomain}.trycloudflare.com`);
+      setToken(pairToken);
+    } else {
+      setApiBaseUrl(`https://${code}.trycloudflare.com`);
+      setToken(undefined);
+    }
     setSelectedSession(null);
   }, [pairingCode]);
 
@@ -141,6 +152,8 @@ export function App() {
                 sessionId={selectedSession}
                 onSessionChange={refreshSessions}
                 defaultProjectPath={defaultProjectPath}
+                apiBaseUrl={apiBaseUrl}
+                token={token}
               />
             ) : (
               <div className="placeholder">

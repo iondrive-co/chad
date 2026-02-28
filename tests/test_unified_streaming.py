@@ -606,6 +606,57 @@ class TestWebSocketEndpoint:
             websocket.send_json({"type": "cancel"})
             # May or may not receive response depending on timing
 
+    def test_websocket_since_seq_parameter(self, client):
+        """WebSocket endpoint accepts since_seq query parameter."""
+        create_resp = client.post("/api/v1/sessions", json={"name": "Test"})
+        session_id = create_resp.json()["id"]
+
+        with client.websocket_connect(
+            f"/api/v1/ws/{session_id}?since_seq=5"
+        ) as websocket:
+            websocket.send_json({"type": "ping"})
+            response = websocket.receive_json()
+            assert response["type"] == "pong"
+
+    def test_websocket_streams_mock_task_events(self, client, git_repo):
+        """WebSocket should stream events from a running mock task."""
+        import time
+
+        # Create mock account
+        client.post("/api/v1/accounts", json={"name": "ws-mock", "provider": "mock"})
+
+        # Create session
+        create_resp = client.post("/api/v1/sessions", json={"name": "WS-Stream"})
+        session_id = create_resp.json()["id"]
+
+        # Start a task
+        task_resp = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "test ws streaming",
+                "coding_agent": "ws-mock",
+            },
+        )
+        assert task_resp.status_code in (200, 201)
+
+        # Connect WebSocket and collect events
+        received = []
+        with client.websocket_connect(f"/api/v1/ws/{session_id}") as websocket:
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                try:
+                    msg = websocket.receive_json()
+                    received.append(msg)
+                    if msg["type"] in ("complete", "error"):
+                        break
+                except Exception:
+                    break
+
+        # Should have received at least some events
+        types = [m["type"] for m in received]
+        assert "complete" in types or "terminal" in types or len(received) > 0
+
 
 class TestCancelSession:
     """Tests for session cancellation."""

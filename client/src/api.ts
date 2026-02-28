@@ -34,9 +34,13 @@ export class ChadAPIError extends Error {
 }
 
 export class ChadAPI {
-  constructor(private baseUrl: string) {
+  private baseUrl: string;
+  private token: string | null;
+
+  constructor(baseUrl: string, token?: string) {
     // Strip trailing slash
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.token = token ?? null;
   }
 
   // ── helpers ──
@@ -45,9 +49,16 @@ export class ChadAPI {
     path: string,
     options: RequestInit = {},
   ): Promise<T> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...(options.headers as Record<string, string>),
+    };
+    if (this.token) {
+      headers["Authorization"] = `Bearer ${this.token}`;
+    }
     const res = await fetch(`${this.baseUrl}${path}`, {
-      headers: { "Content-Type": "application/json", ...options.headers },
       ...options,
+      headers,
     });
     if (!res.ok) {
       const body = await res.text().catch(() => null);

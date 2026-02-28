@@ -49,6 +49,7 @@ def create_app(
     title: str = "Chad Server",
     debug: bool = False,
     cors_origins: list[str] | None = None,
+    auth_token: str | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -56,6 +57,7 @@ def create_app(
         title: Application title for OpenAPI docs
         debug: Enable debug mode
         cors_origins: List of allowed CORS origins (None = allow all)
+        auth_token: Bearer token for API authentication (None = no auth)
 
     Returns:
         Configured FastAPI application
@@ -68,10 +70,18 @@ def create_app(
         lifespan=lifespan,
     )
 
+    # Store auth token on app state for WebSocket auth
+    app.state.auth_token = auth_token
+
     # Configure CORS
     if cors_origins is None:
         # Default: allow all origins for development
         cors_origins = ["*"]
+
+    # Add auth middleware before CORS so it runs after CORS (middleware order is LIFO)
+    if auth_token:
+        from .auth import BearerAuthMiddleware
+        app.add_middleware(BearerAuthMiddleware, token=auth_token)
 
     app.add_middleware(
         CORSMiddleware,

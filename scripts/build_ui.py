@@ -64,12 +64,33 @@ def copy_to_package() -> None:
     print(f"Copied {file_count} files to {PACKAGE_DIST.relative_to(ROOT)}")
 
 
+def build_portable() -> None:
+    """Build a portable copy with /chad/ base path for static hosting."""
+    npx = shutil.which("npx")
+    print("Building portable UI with base=/chad/ ...")
+    subprocess.run(
+        [npx, "vite", "build", "--base", "/chad/", "--outDir", "dist-portable", "--emptyOutDir"],
+        cwd=str(UI_DIR), check=True,
+    )
+
+    portable_dist = UI_DIR / "dist-portable"
+    files = list(portable_dist.rglob("*"))
+    file_count = sum(1 for f in files if f.is_file())
+    print(f"Portable UI built: {file_count} files in {portable_dist}")
+    print(f"\nTo deploy: cp -r {portable_dist}/* /path/to/sightseer/public/chad/")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--skip-build",
         action="store_true",
         help="Skip npm build and just copy existing ui/dist/",
+    )
+    parser.add_argument(
+        "--portable",
+        action="store_true",
+        help="Also build a portable copy with /chad/ base path for static hosting",
     )
     args = parser.parse_args()
 
@@ -78,6 +99,9 @@ def main() -> None:
 
     copy_to_package()
     print("Done. The wheel will now include the React UI.")
+
+    if args.portable:
+        build_portable()
 
 
 if __name__ == "__main__":

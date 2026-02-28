@@ -12,6 +12,8 @@ interface Props {
   sessionId: string;
   onSessionChange: () => void;
   defaultProjectPath?: string;
+  apiBaseUrl?: string;
+  token?: string;
 }
 
 /** Strip ANSI escape codes for plain-text display. */
@@ -24,6 +26,8 @@ export function ChatView({
   sessionId,
   onSessionChange,
   defaultProjectPath = "",
+  apiBaseUrl,
+  token,
 }: Props) {
   const [taskActive, setTaskActive] = useState(false);
   const [followupText, setFollowupText] = useState("");
@@ -39,6 +43,8 @@ export function ChatView({
   const { terminalOutput, events, completed, error, reset } = useStream(
     taskActive ? sessionId : null,
     streamSinceSeqRef.current,
+    apiBaseUrl,
+    token,
   );
 
   // On mount, check if this session already has an active task and reconnect,
