@@ -50,9 +50,13 @@ export class ChadAPI {
     options: RequestInit = {},
   ): Promise<T> {
     const headers: Record<string, string> = {
-      "Content-Type": "application/json",
       ...(options.headers as Record<string, string>),
     };
+    // Only set Content-Type when there's a body — setting it on GET/DELETE
+    // forces a CORS preflight which breaks cross-origin access through tunnels.
+    if (options.body != null) {
+      headers["Content-Type"] ??= "application/json";
+    }
     if (this.token) {
       headers["Authorization"] = `Bearer ${this.token}`;
     }
@@ -90,7 +94,14 @@ export class ChadAPI {
   // ── Status ──
 
   getStatus(): Promise<ServerStatus> {
-    return this.get("/status");
+    // /status is the health-check endpoint exempt from auth.  Skip the
+    // Authorization header so the request stays a CORS "simple request"
+    // (no preflight) — critical for first-contact through tunnels.
+    return fetch(`${this.baseUrl}/status`)
+      .then((res) => {
+        if (!res.ok) throw new ChadAPIError(res.status, null);
+        return res.json() as Promise<ServerStatus>;
+      });
   }
 
   // ── Sessions ──

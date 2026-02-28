@@ -65,19 +65,26 @@ def copy_to_package() -> None:
 
 
 def build_portable() -> None:
-    """Build a portable copy with /chad/ base path for static hosting."""
+    """Build a self-contained single HTML file for portable use.
+
+    Uses vite-plugin-singlefile to inline all JS and CSS into index.html.
+    This works when:
+    - Opened directly as a file:// URL in any browser
+    - Deployed on Cloudflare Pages (at root or any subpath)
+    - Served by any static file server
+    """
     npx = shutil.which("npx")
-    print("Building portable UI with base=/chad/ ...")
+    print("Building portable single-file UI ...")
     subprocess.run(
-        [npx, "vite", "build", "--base", "/chad/", "--outDir", "dist-portable", "--emptyOutDir"],
+        [npx, "vite", "build", "--config", "vite.portable.config.ts"],
         cwd=str(UI_DIR), check=True,
     )
 
     portable_dist = UI_DIR / "dist-portable"
-    files = list(portable_dist.rglob("*"))
-    file_count = sum(1 for f in files if f.is_file())
-    print(f"Portable UI built: {file_count} files in {portable_dist}")
-    print(f"\nTo deploy: cp -r {portable_dist}/* /path/to/sightseer/public/chad/")
+    index = portable_dist / "index.html"
+    size_kb = index.stat().st_size / 1024
+    print(f"Portable UI built: {index} ({size_kb:.0f} KB)")
+    print(f"\nOpen {index} in a browser, or deploy to Cloudflare Pages")
 
 
 def main() -> None:

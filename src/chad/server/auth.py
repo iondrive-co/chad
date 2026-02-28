@@ -30,6 +30,11 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
     ) -> Response:
         path = request.url.path
 
+        # Always pass through OPTIONS — CORS preflight requests never carry
+        # auth headers, so blocking them breaks cross-origin access entirely.
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         # Skip auth for health check and static routes
         if path == "/status" or path == "/" or path.startswith("/assets"):
             return await call_next(request)

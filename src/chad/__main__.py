@@ -165,11 +165,33 @@ def run_server(host: str = "0.0.0.0", port: int = 0, tunnel: bool = False) -> No
     if tunnel:
         from chad.server.auth import generate_token
         auth_token = generate_token()
-        _start_tunnel(port, token=auth_token)
 
     app = create_app(auth_token=auth_token)
-    print(f"Starting Chad API server on {host}:{port}")
-    uvicorn.run(app, host=host, port=port)
+
+    if tunnel:
+        # Start uvicorn in a thread so the server is listening before the
+        # tunnel tries to connect.  Without this, cloudflared gets 530s
+        # from the origin until uvicorn finishes starting up.
+        server_config = uvicorn.Config(app, host=host, port=port)
+        server = uvicorn.Server(server_config)
+
+        server_thread = threading.Thread(target=server.run, daemon=True)
+        server_thread.start()
+        time.sleep(0.5)
+        print(f"Chad API server running on {host}:{port}")
+
+        _start_tunnel(port, token=auth_token)
+
+        try:
+            while server_thread.is_alive():
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\nShutting down")
+            server.should_exit = True
+            server_thread.join(timeout=5)
+    else:
+        print(f"Starting Chad API server on {host}:{port}")
+        uvicorn.run(app, host=host, port=port)
 
 
 def run_unified(

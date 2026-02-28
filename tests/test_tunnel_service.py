@@ -31,7 +31,7 @@ class TestTunnelService:
         mock_proc.stderr = iter([url_line, url_line2])
 
         with patch("chad.server.services.tunnel_service.AIToolInstaller", return_value=mock_installer), \
-             patch("chad.server.services.tunnel_service.subprocess.Popen", return_value=mock_proc), \
+             patch("chad.server.services.tunnel_service.subprocess.Popen", return_value=mock_proc) as mock_popen, \
              patch("chad.server.services.tunnel_service.get_global_registry") as mock_registry:
             mock_registry.return_value = MagicMock()
             result = svc.start(8000)
@@ -39,6 +39,11 @@ class TestTunnelService:
         assert result == "https://some-words-here.trycloudflare.com"
         assert svc._subdomain == "some-words-here"
         assert svc.is_running
+
+        # Verify cloudflared is called with --protocol http2
+        args_passed = mock_popen.call_args[0][0]
+        assert "--protocol" in args_passed
+        assert "http2" in args_passed
 
     def test_start_timeout_returns_none(self):
         from chad.server.services.tunnel_service import TunnelService

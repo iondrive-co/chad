@@ -49,7 +49,11 @@ class TunnelService:
 
         try:
             self._proc = subprocess.Popen(
-                [path_or_error, "tunnel", "--url", f"http://localhost:{port}"],
+                [
+                    path_or_error, "tunnel",
+                    "--url", f"http://localhost:{port}",
+                    "--protocol", "http2",
+                ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
