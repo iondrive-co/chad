@@ -96,25 +96,34 @@ class AIToolInstaller:
         """Return a path to the binary if it exists in tools dir or PATH."""
         import os
 
-        candidate = self.bin_dir / binary
-        if candidate.exists():
-            return candidate
-
-        # On Windows, npm creates .cmd wrappers
         if os.name == "nt":
-            candidate_cmd = self.bin_dir / f"{binary}.cmd"
-            if candidate_cmd.exists():
-                return candidate_cmd
+            candidates = [
+                self.bin_dir / f"{binary}.exe",
+                self.bin_dir / f"{binary}.cmd",
+                self.bin_dir / binary,
+            ]
+        else:
+            candidates = [
+                self.bin_dir / binary,
+                self.bin_dir / f"{binary}.exe",
+                self.bin_dir / f"{binary}.cmd",
+            ]
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
 
         npm_bin = self.tools_dir / "node_modules" / ".bin" / binary
         if npm_bin.exists():
             return npm_bin
 
-        # On Windows, check for .cmd in npm bin
         if os.name == "nt":
             npm_bin_cmd = self.tools_dir / "node_modules" / ".bin" / f"{binary}.cmd"
+            npm_bin_exe = self.tools_dir / "node_modules" / ".bin" / f"{binary}.exe"
             if npm_bin_cmd.exists():
                 return npm_bin_cmd
+            if npm_bin_exe.exists():
+                return npm_bin_exe
 
         if is_tool_installed(binary):
             from shutil import which
@@ -322,11 +331,15 @@ class AIToolInstaller:
         system = platform.system().lower()
         machine = platform.machine().lower()
 
-        # Map platform to cloudflared naming convention
         if system == "darwin":
             os_name = "darwin"
+            ext = ""
         elif system == "linux":
             os_name = "linux"
+            ext = ""
+        elif system == "windows":
+            os_name = "windows"
+            ext = ".exe"
         else:
             return False, f"Unsupported platform: {system}"
 
@@ -337,12 +350,15 @@ class AIToolInstaller:
         else:
             return False, f"Unsupported architecture: {machine}"
 
-        url = f"{spec.package}/{spec.binary}-{os_name}-{arch}"
-        target = self.bin_dir / spec.binary
+        asset = f"{spec.binary}-{os_name}-{arch}{ext}"
+        url = f"{spec.package}/{asset}"
+        target_name = f"{spec.binary}{ext}" if ext else spec.binary
+        target = self.bin_dir / target_name
 
         try:
             urllib.request.urlretrieve(url, str(target))
-            target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            if ext != ".exe":
+                target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         except Exception as e:
             return False, (
                 f"Failed to download {spec.name}: {e}\n\n"

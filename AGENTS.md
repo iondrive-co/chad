@@ -145,6 +145,13 @@ that fails before the fix and passes after.
 For all work, write test(s) which should fail until the issue is fixed or feature is implemented. Make these tests
 general enough to cover later work in the area rather than targeting just the current work.
 
+## Windows compatibility
+
+- Treat Windows as a first-class platform. Avoid adding Linux/macOS-only dependencies (pty/fcntl/tty/termios/bash-only scripts) unless guarded and tested for Windows.
+- Prefer cross-platform Python/stdlib for process handling; when in doubt, add a Windows-specific regression test in `tests/test_windows_compat.py`.
+- If you add or modify tool installers, ensure they resolve Windows `.exe`/`.cmd` binaries and include a Windows test case.
+- Don’t ship features that “only work on Unix”; rework them or add a Windows-safe path before merging.
+
 ## During changes
 
 When modifying functions that return tuples (e.g., `make_yield`, generator functions) and adding/removing elements:

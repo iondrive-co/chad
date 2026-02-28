@@ -145,6 +145,18 @@ class TestServerImportChain:
         assert hasattr(mod, "PTYStreamService")
         assert hasattr(mod, "get_pty_stream_service")
 
+    def test_tunnel_service_importable_on_windows(self, monkeypatch):
+        """Tunnel service must import without Unix-only modules on Windows."""
+        _force_reimport("chad.server.services.tunnel_service", monkeypatch)
+        _hide_unix_modules(monkeypatch)
+        monkeypatch.setattr(sys, "platform", "win32")
+
+        mod = importlib.import_module("chad.server.services.tunnel_service")
+        importlib.reload(mod)
+
+        assert hasattr(mod, "TunnelService")
+        assert hasattr(mod, "get_tunnel_service")
+
 
 class TestPipeStreamServiceBasics:
     """Basic tests for the Windows pipe-based PTYStreamService.
