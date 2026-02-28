@@ -3,9 +3,10 @@ import type { ChadAPI, Account, ProviderInfo, AccountUsage } from "chad-client";
 
 interface Props {
   api: ChadAPI;
+  connected: boolean;
 }
 
-export function ProvidersPanel({ api }: Props) {
+export function ProvidersPanel({ api, connected }: Props) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [usageData, setUsageData] = useState<Record<string, AccountUsage>>({});
@@ -131,12 +132,18 @@ export function ProvidersPanel({ api }: Props) {
     return text;
   };
 
+  const dis = !connected;
+
   return (
     <div className="providers-panel">
       <div className="section-header">
         <h2>Providers</h2>
         {status && <span className="save-status">{status}</span>}
       </div>
+
+      {dis && (
+        <p style={{ color: "#999", fontStyle: "italic" }}>Connect to a server to manage providers.</p>
+      )}
 
       {/* Account list */}
       <div className="account-list">
@@ -150,19 +157,20 @@ export function ProvidersPanel({ api }: Props) {
                 <span className={`account-status ${a.ready ? "ready" : ""}`}>
                   {a.ready ? "Ready" : "Not ready"}
                 </span>
-                <button className="delete-rule-btn" onClick={() => handleDelete(a.name)}>x</button>
+                <button className="delete-rule-btn" onClick={() => handleDelete(a.name)} disabled={dis}>x</button>
               </div>
 
               <div className="account-details">
                 <div className="account-field">
                   <span className="field-label">Model:</span>
-                  <button className="link-btn" onClick={() => handleModelClick(a.name)}>
+                  <button className="link-btn" onClick={() => handleModelClick(a.name)} disabled={dis}>
                     {a.model ?? "default"}
                   </button>
                   {editingModel === a.name && (
                     <select
                       value={a.model ?? ""}
                       onChange={(e) => handleSetModel(a.name, e.target.value)}
+                      disabled={dis}
                     >
                       {modelChoices.map((m) => (
                         <option key={m} value={m}>{m}</option>
@@ -176,6 +184,7 @@ export function ProvidersPanel({ api }: Props) {
                   <select
                     value={a.role ?? ""}
                     onChange={(e) => handleSetRole(a.name, e.target.value)}
+                    disabled={dis}
                   >
                     <option value="">None</option>
                     <option value="CODING">Coding</option>
@@ -189,6 +198,7 @@ export function ProvidersPanel({ api }: Props) {
                     <select
                       value={a.reasoning ?? ""}
                       onChange={(e) => handleSetReasoning(a.name, e.target.value)}
+                      disabled={dis}
                     >
                       <option value="">Default</option>
                       <option value="low">Low</option>
@@ -230,8 +240,9 @@ export function ProvidersPanel({ api }: Props) {
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             placeholder="Account name"
+            disabled={dis}
           />
-          <select value={newType} onChange={(e) => setNewType(e.target.value)}>
+          <select value={newType} onChange={(e) => setNewType(e.target.value)} disabled={dis}>
             {providers.map((p) => (
               <option key={p.type} value={p.type}>{p.name}</option>
             ))}
@@ -242,9 +253,10 @@ export function ProvidersPanel({ api }: Props) {
               value={newApiKey}
               onChange={(e) => setNewApiKey(e.target.value)}
               placeholder="API Key"
+              disabled={dis}
             />
           )}
-          <button onClick={handleAdd} disabled={adding || !newName.trim()}>
+          <button onClick={handleAdd} disabled={adding || !newName.trim() || dis}>
             {adding ? "Adding..." : "+ Add"}
           </button>
         </div>

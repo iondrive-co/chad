@@ -4,9 +4,10 @@ import { ActionRules } from "./ActionRules.tsx";
 
 interface Props {
   api: ChadAPI;
+  connected: boolean;
 }
 
-export function SettingsPanel({ api }: Props) {
+export function SettingsPanel({ api, connected }: Props) {
   const [verification, setVerification] = useState<VerificationSettings | null>(null);
   const [maxAttempts, setMaxAttempts] = useState<number>(3);
   const [verificationAgent, setVerificationAgent] = useState<string | null>(null);
@@ -123,12 +124,18 @@ export function SettingsPanel({ api }: Props) {
     }
   }, [api, tunnelRunning]);
 
+  const dis = !connected;
+
   return (
     <div className="settings-panel">
       <div className="section-header">
         <h2>Settings</h2>
         {status && <span className="save-status">{status}</span>}
       </div>
+
+      {dis && (
+        <p style={{ color: "#999", fontStyle: "italic" }}>Connect to a server to change settings.</p>
+      )}
 
       {/* ── Verification ── */}
       <section>
@@ -137,12 +144,12 @@ export function SettingsPanel({ api }: Props) {
           <>
             <label className="toggle-label">
               <input type="checkbox" checked={verification.enabled}
-                onChange={() => toggleVerification("enabled")} disabled={saving} />
+                onChange={() => toggleVerification("enabled")} disabled={saving || dis} />
               Verification enabled
             </label>
             <label className="toggle-label">
               <input type="checkbox" checked={verification.auto_run}
-                onChange={() => toggleVerification("auto_run")} disabled={saving} />
+                onChange={() => toggleVerification("auto_run")} disabled={saving || dis} />
               Auto-run verification
             </label>
           </>
@@ -150,12 +157,12 @@ export function SettingsPanel({ api }: Props) {
         <label>
           Max verification attempts
           <input type="number" min={1} max={20} value={maxAttempts}
-            onChange={(e) => saveMaxAttempts(Number(e.target.value))} />
+            onChange={(e) => saveMaxAttempts(Number(e.target.value))} disabled={dis} />
         </label>
         <label>
           Verification agent
           <select value={verificationAgent ?? ""}
-            onChange={(e) => saveVerificationAgent(e.target.value)}>
+            onChange={(e) => saveVerificationAgent(e.target.value)} disabled={dis}>
             <option value="">Same as coding agent</option>
             {accounts.map((a) => (
               <option key={a.name} value={a.name}>{a.name} ({a.provider})</option>
@@ -165,7 +172,7 @@ export function SettingsPanel({ api }: Props) {
       </section>
 
       {/* ── Action Rules ── */}
-      <ActionRules api={api} />
+      <ActionRules api={api} connected={connected} />
 
       {/* ── Cleanup ── */}
       <section>
@@ -173,7 +180,7 @@ export function SettingsPanel({ api }: Props) {
         <label>
           Retention days
           <input type="number" min={1} value={retentionDays}
-            onChange={(e) => saveRetention(Number(e.target.value))} />
+            onChange={(e) => saveRetention(Number(e.target.value))} disabled={dis} />
         </label>
       </section>
 
@@ -205,7 +212,7 @@ export function SettingsPanel({ api }: Props) {
             {tunnelError}
           </div>
         )}
-        <button onClick={toggleTunnel} disabled={tunnelLoading}>
+        <button onClick={toggleTunnel} disabled={tunnelLoading || dis}>
           {tunnelLoading ? "..." : tunnelRunning ? "Stop Tunnel" : "Start Tunnel"}
         </button>
       </section>
@@ -215,18 +222,19 @@ export function SettingsPanel({ api }: Props) {
         <h3>Slack Integration</h3>
         <label className="toggle-label">
           <input type="checkbox" checked={slackEnabled}
-            onChange={() => saveSlack({ enabled: !slackEnabled })} />
+            onChange={() => saveSlack({ enabled: !slackEnabled })} disabled={dis} />
           Enabled
         </label>
         <label>
           Channel ID
           <input type="text" value={slackChannel} placeholder="C0123456789"
             onBlur={(e) => saveSlack({ channel: e.target.value })}
-            onChange={(e) => setSlackChannel(e.target.value)} />
+            onChange={(e) => setSlackChannel(e.target.value)} disabled={dis} />
         </label>
         <label>
           Bot Token
           <input type="password" placeholder={slackHasToken ? "•••••••••" : "xoxb-..."}
+            disabled={dis}
             onBlur={(e) => {
               if (e.target.value && !e.target.value.startsWith("•"))
                 saveSlack({ bot_token: e.target.value });

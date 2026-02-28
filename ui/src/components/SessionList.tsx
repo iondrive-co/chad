@@ -8,6 +8,7 @@ interface Props {
   onSelect: (id: string) => void;
   version: number;
   onRefresh: () => void;
+  connected: boolean;
 }
 
 export function SessionList({
@@ -16,6 +17,7 @@ export function SessionList({
   onSelect,
   version,
   onRefresh,
+  connected,
 }: Props) {
   const { sessions, loading, createSession, deleteSession } = useSessions(
     api,
@@ -77,8 +79,9 @@ export function SessionList({
           value={projectPath}
           onChange={(e) => setProjectPath(e.target.value)}
           placeholder="Project path (optional)"
+          disabled={!connected}
         />
-        <button onClick={handleCreate} disabled={creating}>
+        <button onClick={handleCreate} disabled={creating || !connected}>
           {creating ? "..." : "New Session"}
         </button>
       </div>

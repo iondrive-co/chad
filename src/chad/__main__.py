@@ -85,12 +85,30 @@ SCS = [
 ]
 
 
+CHAD_DEFAULT_PORT = 3814  # c=3, h=8, a=1, d=4
+
+
 def find_free_port() -> int:
     """Find a free port by binding to port 0."""
     import socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]
+
+
+def resolve_port(port: int) -> int:
+    """Resolve a port, falling back to ephemeral if the requested port is busy."""
+    import socket
+    if port == 0:
+        return find_free_port()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", port))
+            return port
+    except OSError:
+        fallback = find_free_port()
+        print(f"Port {port} is in use, using {fallback}")
+        return fallback
 
 
 def get_chad_dir() -> Path:
@@ -154,8 +172,7 @@ def run_server(host: str = "0.0.0.0", port: int = 0, tunnel: bool = False) -> No
     import uvicorn
     from chad.server.main import create_app
 
-    if port == 0:
-        port = find_free_port()
+    port = resolve_port(port)
 
     # Write port for autodiscovery by other clients
     write_server_port(port)
@@ -231,8 +248,7 @@ def run_unified(
         import uvicorn
         from chad.server.main import create_app
 
-        if api_port == 0:
-            api_port = find_free_port()
+        api_port = resolve_port(api_port)
 
         # Generate auth token when tunnel is active
         auth_token = None
@@ -293,10 +309,10 @@ def main() -> int:
         help="Run mode: unified (default, UI + local server), server (API only)",
     )
     parser.add_argument(
-        "--port", type=int, default=0, help="Port for UI (default: 0 = ephemeral)"
+        "--port", type=int, default=3814, help="Port for UI (default: 3814)"
     )
     parser.add_argument(
-        "--api-port", type=int, default=0, help="Port for API server (default: 0 = ephemeral)"
+        "--api-port", type=int, default=3814, help="Port for API server (default: 3814)"
     )
     parser.add_argument(
         "--api-host", type=str, default="0.0.0.0", help="Host for API server (default: 0.0.0.0)"

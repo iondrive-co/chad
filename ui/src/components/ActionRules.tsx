@@ -28,9 +28,10 @@ function emptyRule(): ActionRule {
 
 interface Props {
   api: ChadAPI;
+  connected: boolean;
 }
 
-export function ActionRules({ api }: Props) {
+export function ActionRules({ api, connected }: Props) {
   const [rules, setRules] = useState<ActionRule[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [status, setStatus] = useState<string | null>(null);
@@ -88,6 +89,7 @@ export function ActionRules({ api }: Props) {
           <select
             value={rule.event}
             onChange={(e) => updateRule(i, "event", e.target.value)}
+            disabled={!connected}
           >
             {EVENT_TYPES.map((t) => (
               <option key={t.value} value={t.value}>{t.label}</option>
@@ -102,6 +104,7 @@ export function ActionRules({ api }: Props) {
               step={5}
               value={rule.threshold}
               onChange={(e) => updateRule(i, "threshold", Number(e.target.value))}
+              disabled={!connected}
             />
             <span className="threshold-value">{rule.threshold}%</span>
           </div>
@@ -109,6 +112,7 @@ export function ActionRules({ api }: Props) {
           <select
             value={rule.action}
             onChange={(e) => updateRule(i, "action", e.target.value)}
+            disabled={!connected}
           >
             {ACTIONS.map((a) => (
               <option key={a.value} value={a.value}>{a.label}</option>
@@ -119,6 +123,7 @@ export function ActionRules({ api }: Props) {
             <select
               value={rule.target_account ?? ""}
               onChange={(e) => updateRule(i, "target_account", e.target.value || null)}
+              disabled={!connected}
             >
               <option value="">Select account...</option>
               {accounts.map((a) => (
@@ -127,12 +132,12 @@ export function ActionRules({ api }: Props) {
             </select>
           )}
 
-          <button className="delete-rule-btn" onClick={() => deleteRule(i)}>x</button>
+          <button className="delete-rule-btn" onClick={() => deleteRule(i)} disabled={!connected}>x</button>
         </div>
       ))}
 
       {rules.length < MAX_RULES && (
-        <button className="add-rule-btn" onClick={addRule}>+ Add Rule</button>
+        <button className="add-rule-btn" onClick={addRule} disabled={!connected}>+ Add Rule</button>
       )}
     </section>
   );

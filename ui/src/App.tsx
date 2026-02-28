@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { ChadAPI } from "chad-client";
 import { SessionList } from "./components/SessionList.tsx";
 import { ChatView } from "./components/ChatView.tsx";
@@ -7,9 +7,46 @@ import { ProvidersPanel } from "./components/ProvidersPanel.tsx";
 
 type Tab = "chat" | "providers" | "settings";
 
+/**
+ * Parse a connection input string into an API base URL and optional auth token.
+ * Handles:
+ *   - Direct URLs: "http://localhost:8000", "https://my.server.com"
+ *   - Host:port shorthand: "localhost:8000", "192.168.1.5:3000"
+ *   - CF tunnel with token: "subdomain:mytoken" (non-numeric suffix)
+ *   - CF tunnel subdomain only: "my-tunnel"
+ */
+function parseConnectionInput(input: string): { url: string; token?: string } {
+  const text = input.trim().replace(/\/+$/, "");
+  if (!text) return { url: "" };
+
+  // Direct URL with protocol
+  if (text.includes("://")) {
+    return { url: text };
+  }
+
+  // host:port — digits-only after the last colon
+  const colonIdx = text.lastIndexOf(":");
+  if (colonIdx > 0) {
+    const afterColon = text.slice(colonIdx + 1);
+    if (/^\d+$/.test(afterColon)) {
+      return { url: `http://${text}` };
+    }
+    // CF tunnel "subdomain:token"
+    const subdomain = text.slice(0, colonIdx);
+    return { url: `https://${subdomain}.trycloudflare.com`, token: afterColon };
+  }
+
+  // Bare string — CF tunnel subdomain
+  return { url: `https://${text}.trycloudflare.com` };
+}
+
+export { parseConnectionInput };
+
 export function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState("");
-  const [pairingCode, setPairingCode] = useState("");
+  const [connectionInput, setConnectionInput] = useState(
+    window.location.protocol === "file:" ? "localhost:3814" : "",
+  );
   const [token, setToken] = useState<string | undefined>(undefined);
   const api = useMemo(() => new ChadAPI(apiBaseUrl, token), [apiBaseUrl, token]);
   const [connected, setConnected] = useState(false);
@@ -18,9 +55,18 @@ export function App() {
   const [tab, setTab] = useState<Tab>("chat");
   const [sessionVersion, setSessionVersion] = useState(0);
   const [defaultProjectPath, setDefaultProjectPath] = useState("");
+  // Track whether the user has ever set a URL (vs initial empty state)
+  const hasUrl = useRef(false);
 
-  // Auto-connect on mount, retry until server is up
+  // Auto-connect when apiBaseUrl changes, retry only if we have a URL
   useEffect(() => {
+    if (!apiBaseUrl) {
+      // No URL set yet — stay disconnected, don't retry
+      setConnected(false);
+      setError(null);
+      return;
+    }
+    hasUrl.current = true;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     setConnected(false);
@@ -31,14 +77,11 @@ export function App() {
         if (!cancelled) {
           setConnected(true);
           setError(null);
-          // Use server cwd as default project path
           if (status.cwd) {
             setDefaultProjectPath(status.cwd);
           }
-          // Auto-create "Task 1" session on first connect if none selected
           const sessionsData = await api.listSessions();
           if (sessionsData.sessions.length === 0) {
-            // No sessions - create first one
             const newSession = await api.createSession({
               name: "Task 1",
               project_path: status.cwd || null,
@@ -46,7 +89,6 @@ export function App() {
             setSelectedSession(newSession.id);
             setSessionVersion((v) => v + 1);
           } else if (!sessionsData.sessions.some((s) => s.active)) {
-            // No active sessions - select the most recent one
             setSelectedSession(sessionsData.sessions[0].id);
           }
         }
@@ -65,55 +107,32 @@ export function App() {
     setSessionVersion((v) => v + 1);
   }, []);
 
-  const connectToTunnel = useCallback(() => {
-    const code = pairingCode.trim();
-    if (!code) return;
-    // Pairing code format: "subdomain:token" or just "subdomain" (no auth)
-    const colonIdx = code.indexOf(":");
-    if (colonIdx > 0) {
-      const subdomain = code.slice(0, colonIdx);
-      const pairToken = code.slice(colonIdx + 1);
-      setApiBaseUrl(`https://${subdomain}.trycloudflare.com`);
-      setToken(pairToken);
-    } else {
-      setApiBaseUrl(`https://${code}.trycloudflare.com`);
-      setToken(undefined);
-    }
+  const connect = useCallback(() => {
+    const parsed = parseConnectionInput(connectionInput);
+    if (!parsed.url) return;
+    setApiBaseUrl(parsed.url);
+    setToken(parsed.token);
     setSelectedSession(null);
-  }, [pairingCode]);
+  }, [connectionInput]);
 
-  if (!connected) {
-    return (
-      <div className="app">
-        <header className="app-header">
-          <h1>Chad</h1>
-          <span className="status-dot" />
-          <span className="connect-status">
-            {error ?? "Connecting..."}
-          </span>
-          <div style={{ marginLeft: "auto", display: "flex", gap: "0.25rem", alignItems: "center" }}>
-            <input
-              type="text"
-              placeholder="Pairing code"
-              value={pairingCode}
-              onChange={(e) => setPairingCode(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && connectToTunnel()}
-              style={{ width: "12rem", padding: "0.2rem 0.4rem", fontSize: "0.85rem" }}
-            />
-            <button onClick={connectToTunnel} style={{ fontSize: "0.85rem", padding: "0.2rem 0.6rem" }}>
-              Connect
-            </button>
-          </div>
-        </header>
-      </div>
-    );
-  }
+  // On initial mount, detect if we're served by the API (not file://)
+  // and auto-set the base URL to the current origin
+  useEffect(() => {
+    if (window.location.protocol !== "file:" && !hasUrl.current) {
+      setApiBaseUrl(window.location.origin);
+    }
+  }, []);
 
   return (
     <div className="app">
       <header className="app-header">
         <h1>Chad</h1>
-        <span className="status-dot connected" />
+        <span className={`status-dot${connected ? " connected" : ""}`} />
+        {!connected && (
+          <span className="connect-status">
+            {error ?? (apiBaseUrl ? "Connecting..." : "Not connected")}
+          </span>
+        )}
         <nav className="tabs">
           <button className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}>
             Chat
@@ -125,11 +144,28 @@ export function App() {
             Settings
           </button>
         </nav>
-        {apiBaseUrl && (
-          <span style={{ marginLeft: "auto", fontSize: "0.8rem", opacity: 0.7 }}>
-            Remote: {apiBaseUrl.replace("https://", "").replace(".trycloudflare.com", "")}
-          </span>
-        )}
+        <div style={{ marginLeft: "auto", display: "flex", gap: "0.25rem", alignItems: "center" }}>
+          {!connected && (
+            <>
+              <input
+                type="text"
+                placeholder="Server URL or pairing code"
+                value={connectionInput}
+                onChange={(e) => setConnectionInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && connect()}
+                style={{ width: "14rem", padding: "0.2rem 0.4rem", fontSize: "0.85rem" }}
+              />
+              <button onClick={connect} style={{ fontSize: "0.85rem", padding: "0.2rem 0.6rem" }}>
+                Connect
+              </button>
+            </>
+          )}
+          {connected && apiBaseUrl && (
+            <span style={{ fontSize: "0.8rem", opacity: 0.7 }}>
+              Remote: {apiBaseUrl.replace("https://", "").replace("http://", "").replace(".trycloudflare.com", "")}
+            </span>
+          )}
+        </div>
       </header>
 
       <div className="app-body">
@@ -142,10 +178,15 @@ export function App() {
               onSelect={setSelectedSession}
               version={sessionVersion}
               onRefresh={refreshSessions}
+              connected={connected}
             />
           </aside>
           <main className="main">
-            {selectedSession ? (
+            {!connected ? (
+              <div className="placeholder">
+                Connect to a server to get started.
+              </div>
+            ) : selectedSession ? (
               <ChatView
                 key={selectedSession}
                 api={api}
@@ -164,12 +205,12 @@ export function App() {
         </div>
         {tab === "providers" && (
           <main className="main full-width">
-            <ProvidersPanel api={api} />
+            <ProvidersPanel api={api} connected={connected} />
           </main>
         )}
         {tab === "settings" && (
           <main className="main full-width">
-            <SettingsPanel api={api} />
+            <SettingsPanel api={api} connected={connected} />
           </main>
         )}
       </div>

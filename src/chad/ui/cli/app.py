@@ -1229,7 +1229,89 @@ def run_cli(client: APIClient) -> None:
         stream_client.close()
 
 
-def launch_cli_ui(api_base_url: str = "http://localhost:8000", password: str | None = None) -> None:
+def _parse_connection_input(text: str) -> tuple[str, str | None]:
+    """Parse a connection input string into (url, token).
+
+    Handles:
+      - Direct URLs: "http://localhost:3814" -> ("http://localhost:3814", None)
+      - Host:port: "localhost:8000" -> ("http://localhost:3814", None)
+      - CF tunnel with token: "subdomain:mytoken" -> ("https://subdomain.trycloudflare.com", "mytoken")
+      - CF tunnel subdomain: "my-tunnel" -> ("https://my-tunnel.trycloudflare.com", None)
+      - Empty string: ("", None)
+    """
+    text = text.strip().rstrip("/")
+    if not text:
+        return ("", None)
+
+    # Direct URL with protocol
+    if "://" in text:
+        return (text, None)
+
+    # host:port — digits-only after the last colon
+    colon_idx = text.rfind(":")
+    if colon_idx > 0:
+        after_colon = text[colon_idx + 1:]
+        if after_colon.isdigit():
+            return (f"http://{text}", None)
+        # CF tunnel "subdomain:token"
+        subdomain = text[:colon_idx]
+        return (f"https://{subdomain}.trycloudflare.com", after_colon)
+
+    # Bare string — CF tunnel subdomain
+    return (f"https://{text}.trycloudflare.com", None)
+
+
+def _run_disconnected_menu(original_url: str) -> None:
+    """Show a menu when the server is unreachable, allowing the user to connect."""
+    print(f"\nCannot connect to Chad server at {original_url}")
+    print("Make sure the server is running (chad --mode server)\n")
+
+    while True:
+        print("  [1] Connect to a different server")
+        print("  [2] Retry current server")
+        print("  [q] Quit")
+        try:
+            choice = input("\nChoice: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nGoodbye!")
+            return
+
+        if choice == "q":
+            print("Goodbye!")
+            return
+        elif choice == "2":
+            url = original_url
+        elif choice == "1":
+            try:
+                raw = input("Server URL or pairing code: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nGoodbye!")
+                return
+            if not raw:
+                continue
+            url, _token = _parse_connection_input(raw)
+            if not url:
+                continue
+        else:
+            continue
+
+        client = APIClient(base_url=url)
+        try:
+            status = client.get_status()
+            print(f"Connected to Chad server v{status.get('version', 'unknown')}")
+            try:
+                run_cli(client)
+            except KeyboardInterrupt:
+                print("\n\nGoodbye!")
+            finally:
+                client.close()
+            return
+        except Exception as e:
+            print(f"  Failed: {e}\n")
+            client.close()
+
+
+def launch_cli_ui(api_base_url: str = "http://localhost:3814", password: str | None = None) -> None:
     """Launch the Chad CLI UI.
 
     Args:
@@ -1239,14 +1321,12 @@ def launch_cli_ui(api_base_url: str = "http://localhost:8000", password: str | N
     client = APIClient(base_url=api_base_url)
 
     try:
-        # Verify server is available
         status = client.get_status()
         print(f"Connected to Chad server v{status.get('version', 'unknown')}")
-    except Exception as e:
-        print(f"Error: Cannot connect to Chad server at {api_base_url}")
-        print(f"  {e}")
-        print("\nMake sure the server is running (chad --mode server)")
-        sys.exit(1)
+    except Exception:
+        client.close()
+        _run_disconnected_menu(api_base_url)
+        return
 
     try:
         run_cli(client)

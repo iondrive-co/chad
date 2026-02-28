@@ -23,7 +23,7 @@ class StreamEvent:
 class StreamClient:
     """Client for streaming API endpoints (SSE and input)."""
 
-    def __init__(self, base_url: str = "http://localhost:8000"):
+    def __init__(self, base_url: str = "http://localhost:3814"):
         """Initialize the stream client.
 
         Args:
@@ -159,7 +159,7 @@ class StreamClient:
 class SyncStreamClient:
     """Synchronous wrapper around StreamClient for non-async code."""
 
-    def __init__(self, base_url: str = "http://localhost:8000"):
+    def __init__(self, base_url: str = "http://localhost:3814"):
         """Initialize the sync stream client.
 
         Args:
