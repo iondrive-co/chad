@@ -11,6 +11,33 @@ import pytest
 # Path to the scripts directory
 SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
 BUILD_RELEASE = SCRIPTS_DIR / "build_release.py"
+PYINSTALLER_ENTRY = SCRIPTS_DIR / "pyinstaller_entry.py"
+
+
+class TestPyInstallerEntry:
+    """Tests for the PyInstaller entry point wrapper."""
+
+    def test_entry_script_exists(self):
+        """Verify pyinstaller_entry.py exists."""
+        assert PYINSTALLER_ENTRY.exists(), (
+            f"pyinstaller_entry.py not found at {PYINSTALLER_ENTRY}"
+        )
+
+    def test_entry_uses_absolute_imports(self):
+        """Entry point must use absolute imports, not relative."""
+        content = PYINSTALLER_ENTRY.read_text()
+        assert "from chad.__main__ import main" in content
+        assert "from ." not in content
+
+    def test_entry_can_be_compiled(self):
+        """Entry point should be valid Python that compiles without error."""
+        content = PYINSTALLER_ENTRY.read_text()
+        compile(content, str(PYINSTALLER_ENTRY), "exec")
+
+    def test_entry_imports_main(self):
+        """Entry point should successfully import chad.__main__.main."""
+        from chad.__main__ import main
+        assert callable(main)
 
 
 class TestBuildReleaseScript:
@@ -175,6 +202,89 @@ class TestBuildReleaseScript:
             with patch("shutil.which", return_value=None):
                 with pytest.raises(SystemExit):
                     build_release._build_linux_deb(artifact, "1.0.0", tmp_path)
+        finally:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    def test_pyinstaller_uses_wrapper_entry_point(self, tmp_path):
+        """PyInstaller should use pyinstaller_entry.py, not __main__.py directly."""
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import build_release
+
+            captured_args = []
+
+            def capture_command(cmd, cwd=None):
+                captured_args.append(cmd)
+
+            mock_artifact = tmp_path / "dist" / "chad" / "chad"
+            mock_artifact.parent.mkdir(parents=True)
+            mock_artifact.write_text("mock")
+
+            with patch("shutil.which", return_value="/usr/bin/pyinstaller"):
+                with patch.object(build_release, "run_command", side_effect=capture_command):
+                    with patch.object(build_release, "build_ui"):
+                        with patch.object(
+                            build_release, "_find_built_artifact", return_value=mock_artifact
+                        ):
+                            with patch.object(
+                                build_release, "_build_linux_deb",
+                                return_value=tmp_path / "chad.deb"
+                            ):
+                                build_release.build_installer(output_dir=tmp_path)
+
+            # Find the PyInstaller invocation
+            pyinstaller_call = [c for c in captured_args if "pyinstaller" in str(c[0]).lower()]
+            assert pyinstaller_call, "PyInstaller should have been called"
+            args = pyinstaller_call[0]
+
+            # Should use pyinstaller_entry.py, NOT __main__.py
+            entry_args = [a for a in args if "pyinstaller_entry" in str(a)]
+            main_args = [a for a in args if "__main__" in str(a)]
+            assert entry_args, "Should use pyinstaller_entry.py as entry point"
+            assert not main_args, "Should NOT use __main__.py directly"
+
+            # Should include --paths src
+            assert "--paths" in args, "Should include --paths for chad package"
+
+            # Should include --collect-submodules chad
+            assert "--collect-submodules" in args, "Should collect chad submodules"
+        finally:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    def test_add_data_separator_windows(self, tmp_path):
+        """On Windows, --add-data separator should be semicolon, not colon."""
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import build_release
+
+            captured_args = []
+
+            def capture_command(cmd, cwd=None):
+                captured_args.append(cmd)
+
+            mock_artifact = tmp_path / "dist" / "chad" / "chad.exe"
+            mock_artifact.parent.mkdir(parents=True)
+            mock_artifact.write_text("mock")
+
+            with patch("sys.platform", "win32"):
+                with patch("shutil.which", return_value="C:/pyinstaller.exe"):
+                    with patch.object(build_release, "run_command", side_effect=capture_command):
+                        with patch.object(build_release, "build_ui"):
+                            with patch.object(
+                                build_release, "_find_built_artifact", return_value=mock_artifact
+                            ):
+                                build_release.build_installer(output_dir=tmp_path)
+
+            pyinstaller_call = [c for c in captured_args if "pyinstaller" in str(c[0]).lower()]
+            assert pyinstaller_call
+            args = pyinstaller_call[0]
+
+            # Find --add-data argument
+            add_data_idx = args.index("--add-data")
+            add_data_val = args[add_data_idx + 1]
+            assert ";" in add_data_val, (
+                f"Windows --add-data should use ';' separator, got: {add_data_val}"
+            )
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 

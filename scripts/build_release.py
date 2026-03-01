@@ -23,6 +23,7 @@ from typing import Sequence
 ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = ROOT / "pyproject.toml"
 BUILD_UI_SCRIPT = ROOT / "scripts" / "build_ui.py"
+PYINSTALLER_ENTRY = ROOT / "scripts" / "pyinstaller_entry.py"
 DIST_DIR = ROOT / "dist"
 RELEASE_DIR = ROOT / "release"
 
@@ -204,14 +205,21 @@ def build_installer(output_dir: Path | None = None) -> Path:
             shutil.rmtree(dir_to_clean)
             print(f"Cleaned {dir_to_clean}")
 
-    # Build with PyInstaller
+    # Build with PyInstaller using a wrapper entry point that avoids
+    # relative import failures (PyInstaller runs scripts without a parent
+    # package, so from .util... would fail in chad/__main__.py).
+    data_sep = ";" if platform_name == "windows" else ":"
     pyinstaller_args = [
         *pyinstaller_cmd,
         "--name", "chad",
         "--onedir",  # Create a directory with executable + dependencies
         "--noconfirm",  # Don't ask for confirmation
-        # Add the main entry point
-        str(ROOT / "src" / "chad" / "__main__.py"),
+        # Use the wrapper entry point with absolute imports
+        str(PYINSTALLER_ENTRY),
+        # Tell PyInstaller where to find the chad package
+        "--paths", str(ROOT / "src"),
+        # Collect all chad submodules (many are imported conditionally)
+        "--collect-submodules", "chad",
         # Add hidden imports that PyInstaller might miss
         "--hidden-import", "uvicorn.logging",
         "--hidden-import", "uvicorn.loops.auto",
@@ -225,7 +233,7 @@ def build_installer(output_dir: Path | None = None) -> Path:
         "--hidden-import", "bcrypt",
         "--hidden-import", "cryptography",
         # Add data files
-        "--add-data", f"{ROOT / 'src' / 'chad' / 'ui_dist'}:chad/ui_dist",
+        "--add-data", f"{ROOT / 'src' / 'chad' / 'ui_dist'}{data_sep}chad/ui_dist",
     ]
 
     # Platform-specific options
