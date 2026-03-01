@@ -56,6 +56,8 @@ def get_installer_filename(version: str) -> str:
     platform = get_platform_name()
     if platform == "windows":
         return f"chad-{version}-{platform}.exe"
+    if platform == "linux":
+        return f"chad-{version}-{platform}.deb"
     return f"chad-{version}-{platform}"
 
 
@@ -75,6 +77,35 @@ def run_command(cmd: Sequence[str], cwd: Path | None = None) -> None:
     subprocess.run(cmd, check=True, cwd=cwd)
 
 
+def ensure_pyinstaller() -> list[str]:
+    """Ensure PyInstaller is available; install it if missing.
+
+    Returns a command list that can be used to invoke PyInstaller. We prefer the
+    installed executable when present and fall back to ``python -m PyInstaller``
+    to avoid PATH issues after installation.
+    """
+    pyinstaller = shutil.which("pyinstaller")
+    if pyinstaller:
+        return [pyinstaller]
+
+    print("PyInstaller not found. Installing via pip ...")
+    run_command([sys.executable, "-m", "pip", "install", "pyinstaller"])
+
+    pyinstaller = shutil.which("pyinstaller")
+    if pyinstaller:
+        return [pyinstaller]
+
+    try:
+        import PyInstaller  # noqa: F401
+    except ImportError as exc:  # pragma: no cover - defensive fallback
+        raise SystemExit(
+            "PyInstaller installation failed. Install it manually with:\n"
+            "  pip install pyinstaller"
+        ) from exc
+
+    return [sys.executable, "-m", "PyInstaller"]
+
+
 def _find_built_artifact(name: str) -> Path | None:
     """Find the built executable in the dist directory."""
     # PyInstaller puts executables in dist/<name>/<name> or dist/<name>.exe
@@ -90,6 +121,61 @@ def _find_built_artifact(name: str) -> Path | None:
     return None
 
 
+def _build_linux_deb(app_binary: Path, version: str, output_dir: Path) -> Path:
+    """Create a Debian package from the PyInstaller onedir build."""
+    dpkg = shutil.which("dpkg-deb")
+    if dpkg is None:
+        raise SystemExit(
+            "dpkg-deb is required to build a .deb package.\n"
+            "On Debian/Ubuntu install it with: sudo apt-get install dpkg"
+        )
+
+    app_dir = app_binary.parent if app_binary.is_file() else app_binary
+    staging = output_dir / f"chad-{version}-deb"
+    install_root = staging
+    opt_dir = install_root / "opt" / "chad"
+    bin_dir = install_root / "usr" / "bin"
+    control_dir = install_root / "DEBIAN"
+
+    # Recreate staging area
+    if staging.exists():
+        shutil.rmtree(staging)
+    opt_dir.mkdir(parents=True, exist_ok=True)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    control_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy PyInstaller output into /opt/chad
+    shutil.copytree(app_dir, opt_dir, dirs_exist_ok=True)
+
+    # Symlink /usr/bin/chad -> /opt/chad/chad
+    symlink_target = Path("../../opt/chad/chad")
+    symlink_path = bin_dir / "chad"
+    if symlink_path.exists():
+        symlink_path.unlink()
+    symlink_path.symlink_to(symlink_target)
+
+    # Control file
+    control_contents = "\n".join(
+        [
+            "Package: chad-ai",
+            f"Version: {version}",
+            "Section: utils",
+            "Priority: optional",
+            "Architecture: amd64",
+            "Maintainer: Team Chad <support@chad.ai>",
+            "Description: Chad AI CLI packaged with PyInstaller",
+            "",
+        ]
+    )
+    (control_dir / "control").write_text(control_contents, encoding="utf-8")
+
+    final_path = output_dir / get_installer_filename(version)
+    cmd = [dpkg, "--build", "--root-owner-group", str(staging), str(final_path)]
+    run_command(cmd)
+    shutil.rmtree(staging)
+    return final_path
+
+
 def build_installer(output_dir: Path | None = None) -> Path:
     """Build the installer for the current platform.
 
@@ -99,14 +185,8 @@ def build_installer(output_dir: Path | None = None) -> Path:
     Returns:
         Path to the built installer.
     """
-    # Check for PyInstaller
-    pyinstaller = shutil.which("pyinstaller")
-    if pyinstaller is None:
-        raise SystemExit(
-            "PyInstaller is not installed. Install it with:\n"
-            "  pip install pyinstaller\n"
-            "Or include it in your virtualenv."
-        )
+    # Ensure PyInstaller is available (installs automatically if missing)
+    pyinstaller_cmd = ensure_pyinstaller()
 
     version = get_current_version()
     platform_name = get_platform_name()
@@ -126,7 +206,7 @@ def build_installer(output_dir: Path | None = None) -> Path:
 
     # Build with PyInstaller
     pyinstaller_args = [
-        pyinstaller,
+        *pyinstaller_cmd,
         "--name", "chad",
         "--onedir",  # Create a directory with executable + dependencies
         "--noconfirm",  # Don't ask for confirmation
@@ -169,7 +249,9 @@ def build_installer(output_dir: Path | None = None) -> Path:
     installer_name = get_installer_filename(version)
     final_path = output_dir / installer_name
 
-    if artifact.is_dir():
+    if platform_name == "linux":
+        final_path = _build_linux_deb(artifact, version, output_dir)
+    elif artifact.is_dir():
         # For onedir builds, we need to create an archive
         shutil.make_archive(
             str(output_dir / f"chad-{version}-{platform_name}"),

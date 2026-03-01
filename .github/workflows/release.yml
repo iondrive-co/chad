@@ -57,7 +57,7 @@ jobs:
           elif [[ "${{ runner.os }}" == "macOS" ]]; then
             ARTIFACT=$(ls release/*.tar.gz 2>/dev/null || ls release/*macos* 2>/dev/null | head -1)
           else
-            ARTIFACT=$(ls release/*.tar.gz 2>/dev/null || ls release/*linux* 2>/dev/null | head -1)
+            ARTIFACT=$(ls release/*.deb 2>/dev/null || ls release/*.tar.gz 2>/dev/null || ls release/*linux* 2>/dev/null | head -1)
           fi
           echo "path=$ARTIFACT" >> $GITHUB_OUTPUT
           echo "name=$(basename $ARTIFACT)" >> $GITHUB_OUTPUT

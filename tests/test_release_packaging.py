@@ -1,5 +1,6 @@
 """Tests for release packaging and installer generation."""
 
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -62,38 +63,60 @@ class TestBuildReleaseScript:
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 
-    def test_build_installer_requires_pyinstaller(self, tmp_path):
-        """Test that build_installer checks for PyInstaller availability."""
+    def test_ensure_pyinstaller_installs_when_missing(self):
+        """PyInstaller should be installed automatically when not found."""
         sys.path.insert(0, str(SCRIPTS_DIR))
         try:
             import build_release
-            with patch("shutil.which", return_value=None):
-                with pytest.raises(SystemExit) as exc_info:
-                    build_release.build_installer(output_dir=tmp_path)
-                assert "pyinstaller" in str(exc_info.value).lower()
+
+            install_calls = []
+
+            def fake_run_command(cmd, cwd=None):
+                install_calls.append(cmd)
+
+            with patch.object(build_release, "run_command", side_effect=fake_run_command):
+                with patch("shutil.which", side_effect=[None, "/tmp/pyinstaller"]):
+                    cmd = build_release.ensure_pyinstaller()
+
+            assert cmd == ["/tmp/pyinstaller"]
+            assert [sys.executable, "-m", "pip", "install", "pyinstaller"] in install_calls
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 
+    def test_ensure_pyinstaller_falls_back_to_module_invocation(self):
+        """If executable is still missing after install, fall back to python -m PyInstaller."""
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import build_release
+            import types
+
+            sys.modules["PyInstaller"] = types.ModuleType("PyInstaller")
+            with patch.object(build_release, "run_command"):
+                with patch("shutil.which", side_effect=[None, None]):
+                    cmd = build_release.ensure_pyinstaller()
+
+            assert cmd == [sys.executable, "-m", "PyInstaller"]
+        finally:
+            sys.modules.pop("PyInstaller", None)
+            sys.path.remove(str(SCRIPTS_DIR))
+
     def test_output_directory_creation(self, tmp_path):
-        """Test that output directory is created even if build fails early."""
+        """Output directory should remain absent if PyInstaller install fails."""
         sys.path.insert(0, str(SCRIPTS_DIR))
         try:
             import build_release
             output_dir = tmp_path / "dist" / "installers"
 
-            # We verify that output_dir.mkdir is called by the function
-            # by checking that when we call with a nonexistent pyinstaller,
-            # the output_dir is still created before the SystemExit
             with patch("shutil.which", return_value=None):
-                try:
-                    build_release.build_installer(output_dir=output_dir)
-                except SystemExit:
-                    pass  # Expected - pyinstaller not found
+                with patch.object(
+                    build_release,
+                    "run_command",
+                    side_effect=subprocess.CalledProcessError(1, ["pip"]),
+                ):
+                    with pytest.raises(subprocess.CalledProcessError):
+                        build_release.build_installer(output_dir=output_dir)
 
-            # The directory should NOT be created when pyinstaller is missing
-            # because we exit before that step. Let's test a different aspect:
-            # Test that output_dir parameter is properly used
-            assert not output_dir.exists()  # Correct - we exit before mkdir
+            assert not output_dir.exists()
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 
@@ -104,8 +127,10 @@ class TestBuildReleaseScript:
             import build_release
             output_dir = tmp_path / "release" / "builds"
 
-            # Create a mock artifact - when it's a file, copy2 is called
-            mock_artifact = tmp_path / "chad_binary"
+            # Create a mock artifact directory (PyInstaller onedir)
+            mock_artifact_dir = tmp_path / "dist" / "chad"
+            mock_artifact_dir.mkdir(parents=True)
+            mock_artifact = mock_artifact_dir / "chad"
             mock_artifact.write_text("mock executable")
 
             # We need to patch at the module level where it's imported
@@ -115,9 +140,10 @@ class TestBuildReleaseScript:
                         with patch.object(
                             build_release, "_find_built_artifact", return_value=mock_artifact
                         ):
-                            with patch("shutil.copy2"):
-                                with patch("os.chmod"):
-                                    build_release.build_installer(output_dir=output_dir)
+                            with patch.object(
+                                build_release, "_build_linux_deb", return_value=output_dir / "chad.deb"
+                            ):
+                                build_release.build_installer(output_dir=output_dir)
 
             # Output directory should be created
             assert output_dir.exists()
@@ -135,6 +161,20 @@ class TestBuildReleaseScript:
             parts = version.split(".")
             assert len(parts) >= 2
             assert all(p.isdigit() for p in parts[:2])
+        finally:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    def test_build_linux_deb_requires_dpkg(self, tmp_path):
+        """_build_linux_deb should fail clearly if dpkg-deb is missing."""
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import build_release
+            artifact = tmp_path / "dist" / "chad" / "chad"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("bin")
+            with patch("shutil.which", return_value=None):
+                with pytest.raises(SystemExit):
+                    build_release._build_linux_deb(artifact, "1.0.0", tmp_path)
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 
@@ -243,7 +283,7 @@ class TestInstallerNaming:
             # Test Linux
             with patch("sys.platform", "linux"):
                 name = build_release.get_installer_filename("0.11.0")
-                assert name == "chad-0.11.0-linux"
+                assert name == "chad-0.11.0-linux.deb"
 
             # Test macOS
             with patch("sys.platform", "darwin"):

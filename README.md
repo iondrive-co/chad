@@ -14,7 +14,8 @@ task, and Chad will ralph loop to deliver a one-shot result.
 this is not. 
 
 **World Warning II:** Chad is a risk-taker who knows no limits. Chad runs agents in YOLO mode and has access to 
-everything on your hard drive and your internet connection.
+everything on your hard drive and your internet connection. Especially if you are going to allow remote connections,
+consider using a cheap isolated cloud server, the [Weft](https://github.com/iondrive-co/weft) project makes this easy.
 
 ### Blah blah how do I run it?
 ```bash
