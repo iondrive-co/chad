@@ -174,7 +174,7 @@ class SessionEventLoop:
 
             # Post everything to Slack but keep them threaded; ping on coding_complete only.
             mention = milestone_type == "coding_complete"
-            ok, ts = get_slack_service().post_milestone(
+            slack_result = get_slack_service().post_milestone(
                 self.session_id,
                 milestone_type,
                 title,
@@ -182,6 +182,10 @@ class SessionEventLoop:
                 thread_ts=self._slack_thread_ts,
                 mention=mention,
             )
+            if isinstance(slack_result, tuple):
+                ok, ts = slack_result
+            else:
+                ok, ts = bool(slack_result), None
             if ok and not self._slack_thread_ts:
                 self._slack_thread_ts = ts
 

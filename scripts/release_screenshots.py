@@ -4,7 +4,7 @@
 This script captures the three main views for the README carousel:
 1. providers-tab.png - Full providers view with multiple accounts
 2. run-task-input.png - Task input panel (top section)
-3. run-task-conversation.png - Completed task with follow-up input visible
+3. settings.png - Settings pane with action rules
 
 Usage:
     python scripts/release_screenshots.py
@@ -111,17 +111,18 @@ def main():
         instance = start_chad(env)
         print(f"Chad running on port {instance.port}")
 
-        viewport = {"width": 1280, "height": 900}
+        viewport_large = {"width": 1280, "height": 900}
+        viewport_medium = {"width": 1280, "height": 800}
 
-        # Screenshot 1: Providers tab (dark mode only for README)
+        # Screenshot 1: Providers tab
         print("\n[1/3] Capturing providers tab...")
         output_path = DOCS_DIR / "screenshot-providers.png"
         with open_playwright_page(
             instance.port,
             tab="providers",
             headless=True,
-            viewport=viewport,
-            color_scheme="dark",
+            viewport=viewport_large,
+            color_scheme="light",
             render_delay=2.0,
         ) as page:
             screenshot_page(page, output_path)
@@ -132,45 +133,26 @@ def main():
         output_path = DOCS_DIR / "screenshot-task-input.png"
         with open_playwright_page(
             instance.port,
-            tab="run",
+            tab="chat",
             headless=True,
-            viewport=viewport,
-            color_scheme="dark",
+            viewport=viewport_medium,
+            color_scheme="light",
             render_delay=2.0,
         ) as page:
-            # Capture just the top input section
-            screenshot_element(page, "#run-top-inputs", output_path)
+            screenshot_page(page, output_path)
             print(f"  Saved: {output_path}")
 
-        # Screenshot 3: Conversation with follow-up visible
-        print("\n[3/3] Capturing conversation with follow-up...")
-        output_path = DOCS_DIR / "screenshot-conversation.png"
+        # Screenshot 3: Settings tab
+        print("\n[3/3] Capturing settings tab...")
+        output_path = DOCS_DIR / "screenshot-settings.png"
         with open_playwright_page(
             instance.port,
-            tab="run",
+            tab="settings",
             headless=True,
-            viewport={"width": 1280, "height": 800},
-            color_scheme="dark",
+            viewport=viewport_medium,
+            color_scheme="light",
             render_delay=2.0,
         ) as page:
-            # Make follow-up row visible and add sample text
-            inject_followup_visible(page)
-            page.wait_for_timeout(500)  # Let UI update
-
-            # Capture both chatbot and follow-up row by taking full page
-            # then we'll crop to just the relevant area
-            # First, scroll to ensure chatbot area is visible
-            page.evaluate(
-                """
-            () => {
-                const chatbot = document.getElementById('agent-chatbot');
-                if (chatbot) chatbot.scrollIntoView({ behavior: 'instant', block: 'start' });
-            }
-            """
-            )
-            page.wait_for_timeout(200)
-
-            # Take full page screenshot then crop to conversation area
             screenshot_page(page, output_path)
             print(f"  Saved: {output_path}")
 
@@ -178,7 +160,7 @@ def main():
         print("Release screenshots saved to docs/")
         print("=" * 60)
         print("\nFiles created:")
-        for f in ["screenshot-providers.png", "screenshot-task-input.png", "screenshot-conversation.png"]:
+        for f in ["screenshot-providers.png", "screenshot-task-input.png", "screenshot-settings.png"]:
             path = DOCS_DIR / f
             if path.exists():
                 size = path.stat().st_size

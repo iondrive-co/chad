@@ -74,7 +74,7 @@ export function App() {
     setError(null);
     const tryConnect = async () => {
       try {
-        const status = await api.getStatus();
+        await api.getStatus();
         const prefs = await api.getPreferences().catch(() => null);
         if (!cancelled) {
           setConnected(true);
