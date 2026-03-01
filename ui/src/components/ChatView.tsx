@@ -44,6 +44,9 @@ export function ChatView({
   const [historicalEvents, setHistoricalEvents] = useState<StreamEvent[]>([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
 
+  // Current task description (extracted from session_started events)
+  const [taskDescription, setTaskDescription] = useState<string | null>(null);
+
   // Track the event log position at which the current task started, so the
   // stream skips old milestones/events from previous tasks in the same session.
   const streamSinceSeqRef = useRef<number | undefined>(undefined);
@@ -68,6 +71,7 @@ export function ChatView({
     setHistoricalOutput("");
     setHistoricalEvents([]);
     setHistoryLoaded(false);
+    setTaskDescription(null);
 
     if (!sessionActive && !taskActive) {
       (async () => {
@@ -95,6 +99,14 @@ export function ChatView({
           setHistoricalEvents(streamEvents);
           setHistoryLoaded(true);
 
+          // Extract task description from the most recent session_started event
+          const sessionStartedEvents = (data.events as { type: string; task_description?: string }[])
+            .filter((e) => e.type === "session_started" && e.task_description);
+          if (sessionStartedEvents.length > 0) {
+            const latestStart = sessionStartedEvents[sessionStartedEvents.length - 1];
+            setTaskDescription(latestStart.task_description ?? null);
+          }
+
           // Check for pending worktree changes to merge
           const status = await api.getWorktreeStatus(sessionId);
           if (!cancelled && status.exists && status.has_changes) {
@@ -120,6 +132,13 @@ export function ChatView({
         try {
           const data = await api.getEvents(sessionId, 0, "session_started");
           if (!cancelled) streamSinceSeqRef.current = data.latest_seq;
+          // Extract task description from the most recent session_started event
+          const sessionStartedEvents = (data.events as { type: string; task_description?: string }[])
+            .filter((e) => e.type === "session_started" && e.task_description);
+          if (!cancelled && sessionStartedEvents.length > 0) {
+            const latestStart = sessionStartedEvents[sessionStartedEvents.length - 1];
+            setTaskDescription(latestStart.task_description ?? null);
+          }
         } catch {
           // Fall back to streaming all events
         }
@@ -152,7 +171,7 @@ export function ChatView({
     }
   }, [api, completed, sessionId, onSessionChange]);
 
-  const handleTaskStart = useCallback(async (codingAgent: string) => {
+  const handleTaskStart = useCallback(async (codingAgent: string, taskDesc: string) => {
     // Capture the current event log position before the task starts, so the
     // stream only shows events from this task (not old milestones/output).
     try {
@@ -168,6 +187,7 @@ export function ChatView({
     setTaskActive(true);
     setShowMerge(false);
     setLastCodingAgent(codingAgent);
+    setTaskDescription(taskDesc);
   }, [api, sessionId, reset]);
 
   const handleMergeDone = useCallback(() => {
@@ -205,15 +225,17 @@ export function ChatView({
       } catch {
         streamSinceSeqRef.current = undefined;
       }
+      const followupDesc = followupText.trim();
       await api.startTask(sessionId, {
         project_path: session.project_path || defaultProjectPath,
-        task_description: followupText.trim(),
+        task_description: followupDesc,
         coding_agent: codingAgent,
         is_followup: true,
       });
       setFollowupText("");
       reset();
       setTaskActive(true);
+      setTaskDescription(followupDesc);
     } catch {
       // ignore
     } finally {
@@ -271,6 +293,14 @@ export function ChatView({
         />
         <SessionLog api={api} sessionId={sessionId} />
       </div>
+
+      {/* Task description - shown when a task is running or has output */}
+      {taskDescription && (taskActive || displayOutput) && (
+        <div className="task-description-bar">
+          <span className="task-description-label">Task:</span>
+          <span className="task-description-text">{taskDescription}</span>
+        </div>
+      )}
 
       {/* Project settings (collapsible) */}
       {currentProjectPath && (

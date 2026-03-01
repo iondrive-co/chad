@@ -1118,6 +1118,31 @@ label {
   font-size: 0.85rem;
 }
 
+/* ── Task Description Bar ── */
+
+.task-description-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+
+.task-description-label {
+  font-weight: 600;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.task-description-text {
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.4;
+}
+
 /* ── Worktree Info ── */
 
 .worktree-info {

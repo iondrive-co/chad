@@ -5,7 +5,7 @@ import { AccountPicker } from "./AccountPicker.tsx";
 interface Props {
   api: ChadAPI;
   sessionId: string;
-  onStart: (codingAgent: string) => void;
+  onStart: (codingAgent: string, taskDescription: string) => void;
   defaultProjectPath?: string;
 }
 
@@ -216,7 +216,7 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
         verification_reasoning: verificationAllowed && verificationReasoning ? verificationReasoning : undefined,
         screenshots: screenshots.length > 0 ? screenshots.map((s) => s.path) : undefined,
       });
-      onStart(account!.name);
+      onStart(account!.name, description.trim());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to start task");
     } finally {
