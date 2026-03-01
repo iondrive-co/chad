@@ -191,7 +191,28 @@ export function App() {
           <main className="main">
             {!connected ? (
               <div className="placeholder">
-                Connect to a server to get started.
+                <div className="placeholder-card">
+                  <h3>Connect to a Chad server</h3>
+                  <div className="placeholder-steps">
+                    <p>
+                      1) Download the Chad server from{" "}
+                      <a
+                        href="https://github.com/iondrive-co/chad/releases"
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        the releases page
+                      </a>
+                      .
+                    </p>
+                    <p>
+                      2) Run it locally with <code>chad --tunnel</code>.
+                    </p>
+                    <p>
+                      3) Paste the pairing key it prints into the box above, then tap Connect.
+                    </p>
+                  </div>
+                </div>
               </div>
             ) : selectedSession ? (
               <ChatView
