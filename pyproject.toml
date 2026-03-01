@@ -30,6 +30,7 @@ dependencies = [
     "filelock>=3.0.0",
     # Server API dependencies
     "fastapi>=0.100.0",
+    "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.20.0",
     "websockets>=11.0",
     "httpx>=0.24.0",
