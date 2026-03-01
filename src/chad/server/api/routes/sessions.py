@@ -82,6 +82,8 @@ async def get_session(session_id: str) -> SessionResponse:
     session = manager.get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+    print(f"Client connected to session {session_id}")
     return _session_to_response(session)
 
 

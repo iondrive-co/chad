@@ -55,8 +55,9 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
         setBranches(branchData.branches);
         setDefaultBranch(branchData.default);
         setCurrentBranch(branchData.current);
-        // Default to current worktree branch, not main/default branch
-        setTargetBranch(branchData.current);
+        // Default merge target to the primary repo branch (first in list), not the worktree branch
+        const preferredTarget = branchData.branches[0] ?? branchData.default ?? "";
+        setTargetBranch(preferredTarget);
 
         setPhase("changes");
       } catch (e) {

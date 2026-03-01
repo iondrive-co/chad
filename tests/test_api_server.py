@@ -575,3 +575,40 @@ class TestProjectSettingsEndpoints:
         # If log_path is set, it should contain the session id
         if data["log_path"]:
             assert session_id in data["log_path"]
+
+
+class TestConnectionLogging:
+    """Tests for connection logging on SSE/WebSocket endpoints."""
+
+    def test_websocket_logs_connection(self, client, capsys):
+        """WebSocket endpoint should log connection events."""
+        # Create a session first
+        create_resp = client.post("/api/v1/sessions", json={"name": "Test WS"})
+        session_id = create_resp.json()["id"]
+
+        # Connect to WebSocket
+        with client.websocket_connect(f"/api/v1/ws/{session_id}") as websocket:
+            # Send a ping to establish connection
+            websocket.send_json({"type": "ping"})
+            response = websocket.receive_json()
+            assert response["type"] == "pong"
+
+        # Check that connection was logged
+        captured = capsys.readouterr()
+        assert f"WebSocket client connected to session {session_id}" in captured.out
+
+    def test_websocket_logs_disconnection(self, client, capsys):
+        """WebSocket endpoint should log disconnection events."""
+        # Create a session first
+        create_resp = client.post("/api/v1/sessions", json={"name": "Test Disconnect"})
+        session_id = create_resp.json()["id"]
+
+        # Connect and disconnect
+        with client.websocket_connect(f"/api/v1/ws/{session_id}") as websocket:
+            websocket.send_json({"type": "ping"})
+            websocket.receive_json()
+        # websocket is now disconnected
+
+        # Check that disconnection was logged
+        captured = capsys.readouterr()
+        assert f"WebSocket client disconnected from session {session_id}" in captured.out

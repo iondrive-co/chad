@@ -99,6 +99,7 @@ async def websocket_endpoint(
         return
 
     await manager.connect(websocket, session_id)
+    print(f"WebSocket client connected to session {session_id}")
 
     try:
         pty_service = get_pty_stream_service()
@@ -214,3 +215,4 @@ async def websocket_endpoint(
         pass
     finally:
         manager.disconnect(websocket, session_id)
+        print(f"WebSocket client disconnected from session {session_id}")
