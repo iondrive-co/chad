@@ -612,3 +612,137 @@ class TestConnectionLogging:
         # Check that disconnection was logged
         captured = capsys.readouterr()
         assert f"WebSocket client disconnected from session {session_id}" in captured.out
+
+
+class TestHistoricalSessionEvents:
+    """Tests for viewing historical events from finished sessions."""
+
+    def test_events_endpoint_returns_historical_events_from_disk(self, client, tmp_path, monkeypatch):
+        """Events endpoint should return events from persisted JSONL even without active task."""
+        from chad.util.event_log import (
+            EventLog,
+            SessionStartedEvent,
+            TerminalOutputEvent,
+            SessionEndedEvent,
+        )
+
+        # Set up log directory
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        monkeypatch.setenv("CHAD_LOG_DIR", str(log_dir))
+
+        # Create a session
+        create_resp = client.post("/api/v1/sessions", json={"name": "Historical Test"})
+        assert create_resp.status_code == 201
+        session_id = create_resp.json()["id"]
+
+        # Manually create a persisted event log (simulating a finished session)
+        event_log = EventLog(session_id, base_dir=log_dir)
+        event_log.log(SessionStartedEvent(
+            task_description="Test task",
+            project_path="/test/path",
+            coding_provider="mock",
+            coding_account="test-account",
+        ))
+        event_log.log(TerminalOutputEvent(data="Hello from terminal"))
+        event_log.log(SessionEndedEvent(
+            success=True,
+            reason="completed",
+            total_tool_calls=5,
+            total_turns=3,
+        ))
+        event_log.close()
+
+        # Now query the events endpoint - should return the persisted events
+        response = client.get(f"/api/v1/sessions/{session_id}/events")
+        assert response.status_code == 200
+        data = response.json()
+
+        # Should have events from the persisted log
+        assert len(data["events"]) == 3
+        assert data["latest_seq"] == 3
+
+        # Check event types are present
+        event_types = [e["type"] for e in data["events"]]
+        assert "session_started" in event_types
+        assert "terminal_output" in event_types
+        assert "session_ended" in event_types
+
+        # Check terminal output content
+        terminal_events = [e for e in data["events"] if e["type"] == "terminal_output"]
+        assert len(terminal_events) == 1
+        assert terminal_events[0]["data"] == "Hello from terminal"
+
+    def test_events_endpoint_filters_by_type_for_historical(self, client, tmp_path, monkeypatch):
+        """Events endpoint should support filtering by type for historical events."""
+        from chad.util.event_log import (
+            EventLog,
+            SessionStartedEvent,
+            TerminalOutputEvent,
+            SessionEndedEvent,
+        )
+
+        # Set up log directory
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        monkeypatch.setenv("CHAD_LOG_DIR", str(log_dir))
+
+        # Create a session
+        create_resp = client.post("/api/v1/sessions", json={"name": "Filter Test"})
+        session_id = create_resp.json()["id"]
+
+        # Create persisted event log
+        event_log = EventLog(session_id, base_dir=log_dir)
+        event_log.log(SessionStartedEvent(
+            task_description="Test task",
+            project_path="/test/path",
+            coding_provider="mock",
+            coding_account="test-account",
+        ))
+        event_log.log(TerminalOutputEvent(data="Line 1"))
+        event_log.log(TerminalOutputEvent(data="Line 2"))
+        event_log.log(SessionEndedEvent(success=True, reason="done"))
+        event_log.close()
+
+        # Filter to only terminal_output events
+        response = client.get(
+            f"/api/v1/sessions/{session_id}/events",
+            params={"event_types": "terminal_output"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+
+        assert len(data["events"]) == 2
+        for event in data["events"]:
+            assert event["type"] == "terminal_output"
+
+    def test_events_endpoint_with_since_seq_for_historical(self, client, tmp_path, monkeypatch):
+        """Events endpoint should support since_seq filtering for historical events."""
+        from chad.util.event_log import EventLog, TerminalOutputEvent
+
+        # Set up log directory
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        monkeypatch.setenv("CHAD_LOG_DIR", str(log_dir))
+
+        # Create a session
+        create_resp = client.post("/api/v1/sessions", json={"name": "Seq Test"})
+        session_id = create_resp.json()["id"]
+
+        # Create persisted event log with multiple events
+        event_log = EventLog(session_id, base_dir=log_dir)
+        for i in range(5):
+            event_log.log(TerminalOutputEvent(data=f"Event {i}"))
+        event_log.close()
+
+        # Get events after seq 2
+        response = client.get(
+            f"/api/v1/sessions/{session_id}/events",
+            params={"since_seq": 2},
+        )
+        assert response.status_code == 200
+        data = response.json()
+
+        assert len(data["events"]) == 3  # seqs 3, 4, 5
+        seqs = [e["seq"] for e in data["events"]]
+        assert seqs == [3, 4, 5]

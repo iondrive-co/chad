@@ -434,6 +434,9 @@ async def get_session_events(
     - Building session history/timeline views
     - Debugging and auditing agent activity
 
+    For finished sessions (no active task), reads directly from the persisted
+    JSONL log file on disk, allowing any UI instance to view historical sessions.
+
     Event types include: session_started, model_selected, user_message,
     assistant_message, tool_call_started, tool_call_finished, terminal_output,
     verification_attempt, session_ended, etc.
@@ -446,16 +449,21 @@ async def get_session_events(
     executor = get_task_executor()
     task = executor.get_latest_task_for_session(session_id)
 
-    if not task or not task.event_log:
-        return {"events": [], "latest_seq": 0}
-
     # Parse event type filter
     type_filter = None
     if event_types:
         type_filter = [t.strip() for t in event_types.split(",") if t.strip()]
 
-    events = task.event_log.get_events(since_seq=since_seq, event_types=type_filter)
-    latest_seq = task.event_log.get_latest_seq()
+    # Use in-memory event log from active task if available,
+    # otherwise fall back to persisted log on disk
+    if task and task.event_log:
+        event_log = task.event_log
+    else:
+        # Read from persisted JSONL file for finished/historical sessions
+        event_log = EventLog(session_id)
+
+    events = event_log.get_events(since_seq=since_seq, event_types=type_filter)
+    latest_seq = event_log.get_latest_seq()
 
     return {
         "events": events,

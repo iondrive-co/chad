@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import type { ChadAPI } from "chad-client";
+import type { ChadAPI, StreamEvent } from "chad-client";
 import { useStream } from "../hooks/useStream.ts";
 import { TaskForm } from "./TaskForm.tsx";
 import { MergePanel } from "./MergePanel.tsx";
@@ -39,6 +39,11 @@ export function ChatView({
   const [lastCodingAgent, setLastCodingAgent] = useState<string | null>(null);
   const outputRef = useRef<HTMLPreElement>(null);
 
+  // Historical output/events loaded from persisted log for finished sessions
+  const [historicalOutput, setHistoricalOutput] = useState("");
+  const [historicalEvents, setHistoricalEvents] = useState<StreamEvent[]>([]);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+
   // Track the event log position at which the current task started, so the
   // stream skips old milestones/events from previous tasks in the same session.
   const streamSinceSeqRef = useRef<number | undefined>(undefined);
@@ -49,6 +54,61 @@ export function ChatView({
     apiBaseUrl,
     token,
   );
+
+  // Combined output: live streaming output or historical output for finished sessions
+  const displayOutput = terminalOutput || historicalOutput;
+  const displayEvents = events.length > 0 ? events : historicalEvents;
+
+  // Load historical events when session is selected and not active
+  // This allows viewing finished sessions from any UI instance
+  useEffect(() => {
+    let cancelled = false;
+
+    // Reset history when session changes
+    setHistoricalOutput("");
+    setHistoricalEvents([]);
+    setHistoryLoaded(false);
+
+    if (!sessionActive && !taskActive) {
+      (async () => {
+        try {
+          // Fetch all events from the persisted log
+          const data = await api.getEvents(sessionId, 0);
+          if (cancelled) return;
+
+          // Extract terminal output from terminal_output events
+          const terminalEvents = (data.events as { type: string; data?: string }[])
+            .filter((e) => e.type === "terminal_output" && e.data);
+          if (terminalEvents.length > 0) {
+            // Combine all terminal output chunks
+            const output = terminalEvents.map((e) => e.data || "").join("");
+            setHistoricalOutput(output);
+          }
+
+          // Convert events to StreamEvent format for milestones display
+          const streamEvents: StreamEvent[] = (data.events as { type: string; seq?: number }[])
+            .map((e) => ({
+              event_type: "event",
+              data: e,
+              seq: e.seq ?? null,
+            }));
+          setHistoricalEvents(streamEvents);
+          setHistoryLoaded(true);
+
+          // Check for pending worktree changes to merge
+          const status = await api.getWorktreeStatus(sessionId);
+          if (!cancelled && status.exists && status.has_changes) {
+            setShowMerge(true);
+          }
+        } catch {
+          // Ignore errors loading history
+          setHistoryLoaded(true);
+        }
+      })();
+    }
+
+    return () => { cancelled = true; };
+  }, [api, sessionId, sessionActive, taskActive]);
 
   // React to session becoming active (from polling or on mount).
   // When another UI starts a task, the polled sessionActive prop flips to true
@@ -65,25 +125,16 @@ export function ChatView({
         }
         if (!cancelled) setTaskActive(true);
       })();
-    } else if (!sessionActive && !taskActive && !terminalOutput) {
-      // Not active — check for pending worktree changes to merge
-      api.getWorktreeStatus(sessionId).then((status) => {
-        if (!cancelled && status.exists && status.has_changes) {
-          setShowMerge(true);
-        }
-      }).catch(() => {
-        // Ignore errors checking worktree status
-      });
     }
     return () => { cancelled = true; };
   }, [sessionActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-scroll terminal output
+  // Auto-scroll terminal output (live or historical)
   useEffect(() => {
     if (outputRef.current) {
       outputRef.current.scrollTop = outputRef.current.scrollHeight;
     }
-  }, [terminalOutput]);
+  }, [terminalOutput, historicalOutput]);
 
   // Mark task inactive when stream completes, check for worktree changes
   useEffect(() => {
@@ -111,6 +162,9 @@ export function ChatView({
       streamSinceSeqRef.current = undefined;
     }
     reset();
+    // Clear historical output when starting a new task
+    setHistoricalOutput("");
+    setHistoricalEvents([]);
     setTaskActive(true);
     setShowMerge(false);
     setLastCodingAgent(codingAgent);
@@ -177,8 +231,8 @@ export function ChatView({
     [handleFollowup],
   );
 
-  // Show milestones from structured events
-  const milestones = events.filter(
+  // Show milestones from structured events (live or historical)
+  const milestones = displayEvents.filter(
     (e) =>
       e.data.event_type === "milestone" ||
       e.data.type === "milestone",
@@ -224,7 +278,7 @@ export function ChatView({
       )}
 
       {/* Task form or streaming output */}
-      {!taskActive && !terminalOutput && !showMerge && (
+      {!taskActive && !displayOutput && !showMerge && historyLoaded && (
         <TaskForm
           api={api}
           sessionId={sessionId}
@@ -233,8 +287,8 @@ export function ChatView({
         />
       )}
 
-      {/* Terminal output */}
-      {(taskActive || terminalOutput) && (
+      {/* Terminal output (live or historical) */}
+      {(taskActive || displayOutput) && (
         <div className="terminal-area">
           <div className="terminal-header">
             {taskActive && !completed && (
@@ -245,7 +299,10 @@ export function ChatView({
                 </button>
               </>
             )}
-            {completed && <span className="done-indicator">Completed</span>}
+            {/* Show completed for live completion or historical sessions with output */}
+            {(completed || (historicalOutput && !taskActive)) && (
+              <span className="done-indicator">Completed</span>
+            )}
             {error && <span className="error-text">{error}</span>}
           </div>
 
@@ -261,7 +318,7 @@ export function ChatView({
           )}
 
           <pre ref={outputRef} className="terminal-output">
-            {stripAnsi(terminalOutput)}
+            {stripAnsi(displayOutput)}
           </pre>
         </div>
       )}
@@ -277,7 +334,7 @@ export function ChatView({
       )}
 
       {/* Follow-up input */}
-      {terminalOutput && !taskActive && (
+      {displayOutput && !taskActive && (
         <div className="followup-bar">
           <textarea
             value={followupText}
