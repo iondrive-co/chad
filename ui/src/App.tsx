@@ -121,7 +121,7 @@ export function App() {
   // On initial mount, detect if we're served by the API (not file://)
   // and auto-set the base URL to the current origin
   useEffect(() => {
-    if (window.location.protocol !== "file:" && !hasUrl.current) {
+    if (window.location.protocol !== "file:" && !hasUrl.current && window.self === window.top) {
       setApiBaseUrl(window.location.origin);
     }
   }, []);
