@@ -2,6 +2,7 @@
 
 import logging
 import threading
+from typing import Tuple
 
 import httpx
 
@@ -28,34 +29,42 @@ class SlackService:
         milestone_type: str,
         title: str,
         summary: str,
-    ) -> bool:
+        *,
+        thread_ts: str | None = None,
+        mention: bool = False,
+    ) -> Tuple[bool, str | None]:
         """Post a milestone notification to the configured Slack channel.
 
-        Returns True if the message was posted successfully.
+        Returns (ok, ts) where ts is the Slack message timestamp when posted.
         """
         if not self._is_enabled():
-            return False
+            return False, None
 
         cm = get_config_manager()
         token = cm.get_slack_bot_token()
         channel = cm.get_slack_channel()
 
-        text = f"*{title}* \u2014 {summary}\n_Session {session_id} \u00b7 {milestone_type}_"
+        mention_prefix = "<!here> " if mention else ""
+        text = f"{mention_prefix}*{title}* — {summary}\n_Session {session_id} · {milestone_type}_"
+
+        payload: dict[str, str] = {"channel": channel, "text": text}
+        if thread_ts:
+            payload["thread_ts"] = thread_ts
 
         try:
             resp = self._http.post(
                 SLACK_POST_MESSAGE_URL,
                 headers={"Authorization": f"Bearer {token}"},
-                json={"channel": channel, "text": text},
+                json=payload,
             )
             data = resp.json()
             if not data.get("ok"):
                 logger.warning("Slack API error: %s", data.get("error", "unknown"))
-                return False
-            return True
+                return False, None
+            return True, data.get("ts")
         except Exception:
             logger.warning("Failed to post milestone to Slack", exc_info=True)
-            return False
+            return False, None
 
     def post_milestone_async(
         self,
@@ -63,6 +72,9 @@ class SlackService:
         milestone_type: str,
         title: str,
         summary: str,
+        *,
+        thread_ts: str | None = None,
+        mention: bool = False,
     ) -> None:
         """Fire-and-forget milestone post in a background thread."""
         if not self._is_enabled():
@@ -70,6 +82,7 @@ class SlackService:
         t = threading.Thread(
             target=self.post_milestone,
             args=(session_id, milestone_type, title, summary),
+            kwargs={"thread_ts": thread_ts, "mention": mention},
             daemon=True,
         )
         t.start()

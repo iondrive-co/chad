@@ -90,6 +90,12 @@ class SessionEventLoop:
         self._pending_action: dict | None = None
         self._pending_action_lock = threading.Lock()
 
+        # Slack threading: first Slack message ts is reused so all milestones stay in one thread
+        self._slack_thread_ts: str | None = None
+
+        # Slack threading: first Slack message ts is reused so all milestones stay in one thread
+        self._slack_thread_ts: str | None = None
+
         # Accumulated output from all phases
         self.accumulated_output = ""
 
@@ -165,9 +171,19 @@ class SessionEventLoop:
 
         if self._notify_slack:
             from chad.server.services.slack_service import get_slack_service
-            get_slack_service().post_milestone_async(
-                self.session_id, milestone_type, title, summary,
+
+            # Post everything to Slack but keep them threaded; ping on coding_complete only.
+            mention = milestone_type == "coding_complete"
+            ok, ts = get_slack_service().post_milestone(
+                self.session_id,
+                milestone_type,
+                title,
+                summary,
+                thread_ts=self._slack_thread_ts,
+                mention=mention,
             )
+            if ok and not self._slack_thread_ts:
+                self._slack_thread_ts = ts
 
     def _extract_meaningful_error_summary(self, tail: str) -> str | None:
         """Extract meaningful error summary from terminal output, filtering out JavaScript error objects.

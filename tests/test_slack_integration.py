@@ -74,12 +74,13 @@ class TestSlackService:
         svc = SlackService()
 
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {"ok": True}
+        mock_resp.json.return_value = {"ok": True, "ts": "123.45"}
         svc._http = MagicMock()
         svc._http.post.return_value = mock_resp
 
-        result = svc.post_milestone("abc123", "coding_complete", "Coding Complete", "Task finished")
-        assert result is True
+        ok, ts = svc.post_milestone("abc123", "coding_complete", "Coding Complete", "Task finished")
+        assert ok is True
+        assert ts == "123.45"
 
         call_args = svc._http.post.call_args
         assert call_args[0][0] == "https://slack.com/api/chat.postMessage"
@@ -97,8 +98,9 @@ class TestSlackService:
         svc = SlackService()
         svc._http = MagicMock()
 
-        result = svc.post_milestone("abc", "coding_complete", "Done", "Summary")
-        assert result is False
+        ok, ts = svc.post_milestone("abc", "coding_complete", "Done", "Summary")
+        assert ok is False
+        assert ts is None
         svc._http.post.assert_not_called()
 
     @patch("chad.server.services.slack_service.get_config_manager")
@@ -112,8 +114,9 @@ class TestSlackService:
         svc._http = MagicMock()
         svc._http.post.return_value = mock_resp
 
-        result = svc.post_milestone("abc", "coding_complete", "Done", "Summary")
-        assert result is False
+        ok, ts = svc.post_milestone("abc", "coding_complete", "Done", "Summary")
+        assert ok is False
+        assert ts is None
 
     @patch("chad.server.services.slack_service.get_config_manager")
     def test_post_milestone_no_token(self, mock_get_cm):
@@ -123,8 +126,9 @@ class TestSlackService:
         svc = SlackService()
         svc._http = MagicMock()
 
-        result = svc.post_milestone("abc", "coding_complete", "Done", "Summary")
-        assert result is False
+        ok, ts = svc.post_milestone("abc", "coding_complete", "Done", "Summary")
+        assert ok is False
+        assert ts is None
 
 
 class TestSlackConfigEndpoints:
@@ -211,8 +215,10 @@ class TestMilestoneSlackHook:
         loop._milestone_lock = __import__("threading").Lock()
         loop._emit_fn = MagicMock()
         loop._notify_slack = True
+        loop._slack_thread_ts = None
 
         mock_svc = MagicMock()
+        mock_svc.post_milestone.return_value = (True, "111.22")
         with patch(
             "chad.server.services.slack_service._slack_service",
             mock_svc,
@@ -222,9 +228,13 @@ class TestMilestoneSlackHook:
         ):
             loop._emit_milestone("coding_complete", "Task done")
 
-        mock_svc.post_milestone_async.assert_called_once_with(
-            "test-sess", "coding_complete", "Coding Complete", "Task done",
-        )
+        mock_svc.post_milestone.assert_called_once()
+        args, kwargs = mock_svc.post_milestone.call_args
+        assert args[0] == "test-sess"
+        assert args[1] == "coding_complete"
+        assert kwargs["mention"] is True
+        assert kwargs["thread_ts"] is None
+        assert loop._slack_thread_ts == "111.22"
 
     def test_emit_milestone_skips_slack_by_default(self):
         """notify_slack defaults to False so tests don't leak real Slack calls."""
@@ -246,4 +256,4 @@ class TestMilestoneSlackHook:
         ):
             loop._emit_milestone("coding_complete", "Task done")
 
-        mock_svc.post_milestone_async.assert_not_called()
+        mock_svc.post_milestone.assert_not_called()
