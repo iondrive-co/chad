@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, DragEvent } from "react";
 import type { ChadAPI, Account, ProviderInfo, VerificationSettings } from "chad-client";
 import { AccountPicker } from "./AccountPicker.tsx";
 
@@ -7,6 +7,12 @@ interface Props {
   sessionId: string;
   onStart: (codingAgent: string) => void;
   defaultProjectPath?: string;
+}
+
+interface UploadedScreenshot {
+  path: string;
+  filename: string;
+  previewUrl: string;
 }
 
 const REASONING_OPTIONS = ["", "low", "medium", "high"];
@@ -19,6 +25,12 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
   const [models, setModels] = useState<string[]>([]);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Screenshot attachments
+  const [screenshots, setScreenshots] = useState<UploadedScreenshot[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Provider info for reasoning support
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
@@ -118,16 +130,74 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
       .catch(() => setVerificationModels([]));
   }, [api, verificationAccount]);
 
+  // Screenshot upload handlers
+  const handleFiles = useCallback(async (files: FileList | File[]) => {
+    const imageFiles = Array.from(files).filter((f) =>
+      f.type.startsWith("image/")
+    );
+    if (imageFiles.length === 0) return;
+
+    setUploading(true);
+    setError(null);
+
+    for (const file of imageFiles) {
+      try {
+        const result = await api.uploadFile(file);
+        const previewUrl = URL.createObjectURL(file);
+        setScreenshots((prev) => [
+          ...prev,
+          { path: result.path, filename: result.filename, previewUrl },
+        ]);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to upload screenshot");
+      }
+    }
+    setUploading(false);
+  }, [api]);
+
+  const handleDrop = useCallback(
+    (e: DragEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      setDragOver(false);
+      if (e.dataTransfer.files.length > 0) {
+        handleFiles(e.dataTransfer.files);
+      }
+    },
+    [handleFiles]
+  );
+
+  const handleDragOver = useCallback((e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragOver(false);
+  }, []);
+
+  const removeScreenshot = useCallback((index: number) => {
+    setScreenshots((prev) => {
+      const removed = prev[index];
+      if (removed?.previewUrl) {
+        URL.revokeObjectURL(removed.previewUrl);
+      }
+      return prev.filter((_, i) => i !== index);
+    });
+  }, []);
+
   const missingFields: string[] = [];
   if (!projectPath.trim()) missingFields.push("project path");
   if (!description.trim()) missingFields.push("task description");
   if (!account) missingFields.push("coding agent");
-  const canStart = missingFields.length === 0 && !starting;
+  const canStart = missingFields.length === 0 && !starting && !uploading;
   const disabledReason = starting
     ? "Starting..."
-    : missingFields.length > 0
-      ? `Missing: ${missingFields.join(", ")}`
-      : "";
+    : uploading
+      ? "Uploading..."
+      : missingFields.length > 0
+        ? `Missing: ${missingFields.join(", ")}`
+        : "";
 
   const handleStart = useCallback(async () => {
     if (!canStart) return;
@@ -144,6 +214,7 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
         verification_agent: verificationAllowed && verificationAccount ? verificationAccount.name : undefined,
         verification_model: verificationAllowed && verificationModel ? verificationModel : undefined,
         verification_reasoning: verificationAllowed && verificationReasoning ? verificationReasoning : undefined,
+        screenshots: screenshots.length > 0 ? screenshots.map((s) => s.path) : undefined,
       });
       onStart(account!.name);
     } catch (e) {
@@ -154,7 +225,7 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
   }, [
     api, sessionId, description, projectPath, account, modelOverride,
     codingReasoning, useVerification, verificationAccount, verificationModel,
-    verificationReasoning, verificationSettings, onStart, canStart,
+    verificationReasoning, verificationSettings, onStart, canStart, screenshots,
   ]);
 
   return (
@@ -180,6 +251,50 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
           rows={4}
         />
       </label>
+
+      {/* Screenshot Drop Zone */}
+      <div className="screenshot-section">
+        <div className="screenshot-label">Screenshots (optional)</div>
+        <div
+          className={`screenshot-dropzone ${dragOver ? "drag-over" : ""}`}
+          onDrop={handleDrop}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            style={{ display: "none" }}
+            onChange={(e) => e.target.files && handleFiles(e.target.files)}
+          />
+          {uploading ? (
+            <span>Uploading...</span>
+          ) : (
+            <span>Drop images here or click to browse</span>
+          )}
+        </div>
+        {screenshots.length > 0 && (
+          <div className="screenshot-previews">
+            {screenshots.map((s, i) => (
+              <div key={s.path} className="screenshot-preview">
+                <img src={s.previewUrl} alt={s.filename} />
+                <button
+                  type="button"
+                  className="screenshot-remove"
+                  onClick={() => removeScreenshot(i)}
+                  title="Remove"
+                >
+                  x
+                </button>
+                <span className="screenshot-name">{s.filename}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       <label>
         Coding Agent

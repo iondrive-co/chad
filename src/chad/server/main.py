@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
 from .state import init_start_time
-from .api.routes import health, sessions, providers, worktree, config, ws, slack, tunnel
+from .api.routes import health, sessions, providers, worktree, config, ws, slack, tunnel, uploads
 
 
 def _resolve_ui_index() -> Path | None:
@@ -104,6 +104,7 @@ def create_app(
     app.include_router(ws.router, prefix="/api/v1", tags=["WebSocket"])
     app.include_router(slack.router, prefix="/api/v1", tags=["Slack"])
     app.include_router(tunnel.router, prefix="/api/v1", tags=["Tunnel"])
+    app.include_router(uploads.router, prefix="/api/v1/uploads", tags=["Uploads"])
 
     # Serve the single-file React UI if available (packaged or repo build).
     ui_index = _resolve_ui_index()

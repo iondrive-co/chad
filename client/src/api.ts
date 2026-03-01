@@ -482,4 +482,29 @@ export class ChadAPI {
   }> {
     return this.get(`/api/v1/sessions/${sessionId}/log`);
   }
+
+  // ── File Uploads ──
+
+  async uploadFile(file: File): Promise<{ path: string; filename: string }> {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const headers: Record<string, string> = {};
+    if (this.token) {
+      headers["Authorization"] = `Bearer ${this.token}`;
+    }
+
+    const res = await fetch(`${this.baseUrl}/api/v1/uploads`, {
+      method: "POST",
+      headers,
+      body: formData,
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => null);
+      throw new ChadAPIError(res.status, body);
+    }
+
+    return res.json();
+  }
 }

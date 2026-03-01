@@ -296,6 +296,99 @@ label {
   padding: 8px 24px;
 }
 
+/* ── Screenshot Drop Zone ── */
+
+.screenshot-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.screenshot-label {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.screenshot-dropzone {
+  border: 2px dashed var(--border);
+  border-radius: 6px;
+  padding: 20px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.2s, background-color 0.2s;
+}
+
+.screenshot-dropzone:hover {
+  border-color: var(--accent);
+  background: rgba(233, 69, 96, 0.05);
+}
+
+.screenshot-dropzone.drag-over {
+  border-color: var(--accent);
+  background: rgba(233, 69, 96, 0.1);
+  color: var(--accent);
+}
+
+.screenshot-previews {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.screenshot-preview {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px;
+  max-width: 100px;
+}
+
+.screenshot-preview img {
+  width: 80px;
+  height: 60px;
+  object-fit: cover;
+  border-radius: 2px;
+}
+
+.screenshot-preview .screenshot-name {
+  font-size: 10px;
+  color: var(--text-muted);
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 4px;
+}
+
+.screenshot-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--error);
+  color: white;
+  border: none;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.screenshot-remove:hover {
+  background: #ef4444;
+}
+
 /* ── Chat / Terminal ── */
 
 .chat-view {

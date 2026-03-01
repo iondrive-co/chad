@@ -1,5 +1,7 @@
 """Tests for Chad server API endpoints."""
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -746,3 +748,69 @@ class TestHistoricalSessionEvents:
         assert len(data["events"]) == 3  # seqs 3, 4, 5
         seqs = [e["seq"] for e in data["events"]]
         assert seqs == [3, 4, 5]
+
+
+class TestUploadEndpoint:
+    """Tests for file upload functionality."""
+
+    def test_upload_screenshot(self, client, tmp_path):
+        """Can upload a screenshot file."""
+        # Create a test image file (PNG-like bytes)
+        png_header = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
+        files = {"file": ("test.png", png_header, "image/png")}
+
+        response = client.post("/api/v1/uploads", files=files)
+        assert response.status_code == 201
+        data = response.json()
+        assert "path" in data
+        assert data["filename"] == "test.png"
+        # Verify the file was saved
+        assert Path(data["path"]).exists()
+
+    def test_upload_multiple_screenshots(self, client, tmp_path):
+        """Can upload multiple screenshot files."""
+        png_header = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
+
+        # Upload first file
+        response1 = client.post(
+            "/api/v1/uploads",
+            files={"file": ("screenshot1.png", png_header, "image/png")}
+        )
+        assert response1.status_code == 201
+
+        # Upload second file
+        response2 = client.post(
+            "/api/v1/uploads",
+            files={"file": ("screenshot2.png", png_header, "image/png")}
+        )
+        assert response2.status_code == 201
+
+        # Paths should be different
+        assert response1.json()["path"] != response2.json()["path"]
+
+    def test_upload_rejects_non_image(self, client):
+        """Rejects non-image file types."""
+        response = client.post(
+            "/api/v1/uploads",
+            files={"file": ("malware.exe", b"bad content", "application/octet-stream")}
+        )
+        assert response.status_code == 400
+        assert "image" in response.json()["detail"].lower()
+
+    def test_upload_accepts_jpeg(self, client):
+        """Accepts JPEG images."""
+        jpeg_header = b'\xff\xd8\xff\xe0' + b'\x00' * 100
+        response = client.post(
+            "/api/v1/uploads",
+            files={"file": ("photo.jpg", jpeg_header, "image/jpeg")}
+        )
+        assert response.status_code == 201
+
+    def test_upload_accepts_webp(self, client):
+        """Accepts WebP images."""
+        webp_header = b'RIFF\x00\x00\x00\x00WEBP' + b'\x00' * 100
+        response = client.post(
+            "/api/v1/uploads",
+            files={"file": ("image.webp", webp_header, "image/webp")}
+        )
+        assert response.status_code == 201
