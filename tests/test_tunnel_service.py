@@ -1,7 +1,6 @@
 """Tests for Cloudflare tunnel service and API endpoints."""
 
 import subprocess
-import threading
 from unittest.mock import MagicMock, patch
 
 import pytest

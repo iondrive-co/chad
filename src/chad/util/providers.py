@@ -519,7 +519,6 @@ def _stream_pipe_output(
 
     try:
         while time.monotonic() < deadline:
-            now = time.monotonic()
             if process.poll() is not None and output_queue.empty() and stop_event.is_set():
                 # Process any remaining buffered content before exiting
                 if line_buffer[0]:

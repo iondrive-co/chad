@@ -37,7 +37,7 @@ export class ChadAPI {
   private baseUrl: string;
   private token: string | null;
 
-  constructor(baseUrl: string, token?: string) {
+  constructor(baseUrl: string = "http://localhost:3184", token?: string) {
     // Strip trailing slash
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.token = token ?? null;

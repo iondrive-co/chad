@@ -6,13 +6,8 @@ all critical import chains succeed.
 """
 
 import importlib
-import subprocess
 import sys
-import types
 from pathlib import Path
-from unittest.mock import patch
-
-import pytest
 
 
 # Unix-only modules that must not be imported at top level
@@ -25,8 +20,6 @@ def _hide_unix_modules(monkeypatch):
     Patches sys.modules to make importing these modules raise ImportError,
     simulating a Windows environment.
     """
-    sentinel = types.ModuleType("_blocked")
-
     class BlockedImporter:
         """Meta path finder that blocks Unix-only modules."""
 
@@ -166,10 +159,7 @@ class TestPipeStreamServiceBasics:
 
     def test_start_and_terminate_session(self, tmp_path):
         """Can start and terminate a pipe-based session."""
-        from chad.server.services.pty_stream_win import (
-            PTYStreamService,
-            reset_pty_stream_service,
-        )
+        from chad.server.services.pty_stream_win import PTYStreamService
 
         service = PTYStreamService()
         try:

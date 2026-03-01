@@ -43,11 +43,11 @@ function parseConnectionInput(input: string): { url: string; token?: string } {
 
 export { parseConnectionInput };
 
+const DEFAULT_CONNECTION = "127.0.0.1:3184";
+
 export function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState("");
-  const [connectionInput, setConnectionInput] = useState(
-    window.location.protocol === "file:" ? "localhost:3814" : "",
-  );
+  const [connectionInput, setConnectionInput] = useState(DEFAULT_CONNECTION);
   const [token, setToken] = useState<string | undefined>(undefined);
   const api = useMemo(() => new ChadAPI(apiBaseUrl, token), [apiBaseUrl, token]);
   const [connected, setConnected] = useState(false);
@@ -75,11 +75,12 @@ export function App() {
     const tryConnect = async () => {
       try {
         const status = await api.getStatus();
+        const prefs = await api.getPreferences().catch(() => null);
         if (!cancelled) {
           setConnected(true);
           setError(null);
-          if (status.cwd) {
-            setDefaultProjectPath(status.cwd);
+          if (prefs?.last_project_path) {
+            setDefaultProjectPath(prefs.last_project_path);
           }
           const sessionsData = await api.listSessions();
           if (sessionsData.sessions.length > 0) {

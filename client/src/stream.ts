@@ -19,7 +19,7 @@ export class ChadStream {
   private callbacks: Partial<Record<StreamEventType, StreamCallback[]>> = {};
   private lastSeq = 0;
 
-  constructor(private baseUrl: string) {
+  constructor(private baseUrl: string = "http://localhost:3184") {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
   }
 

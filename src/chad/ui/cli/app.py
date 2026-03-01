@@ -1232,8 +1232,8 @@ def _parse_connection_input(text: str) -> tuple[str, str | None]:
     """Parse a connection input string into (url, token).
 
     Handles:
-      - Direct URLs: "http://localhost:3814" -> ("http://localhost:3814", None)
-      - Host:port: "localhost:8000" -> ("http://localhost:3814", None)
+      - Direct URLs: "http://localhost:3184" -> ("http://localhost:3184", None)
+      - Host:port: "localhost:8000" -> ("http://localhost:3184", None)
       - CF tunnel with token: "subdomain:mytoken" -> ("https://subdomain.trycloudflare.com", "mytoken")
       - CF tunnel subdomain: "my-tunnel" -> ("https://my-tunnel.trycloudflare.com", None)
       - Empty string: ("", None)
@@ -1310,7 +1310,7 @@ def _run_disconnected_menu(original_url: str) -> None:
             client.close()
 
 
-def launch_cli_ui(api_base_url: str = "http://localhost:3814", password: str | None = None) -> None:
+def launch_cli_ui(api_base_url: str = "http://localhost:3184", password: str | None = None) -> None:
     """Launch the Chad CLI UI.
 
     Args:

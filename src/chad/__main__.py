@@ -87,7 +87,7 @@ SCS = [
 ]
 
 
-CHAD_DEFAULT_PORT = 3814  # c=3, h=8, a=1, d=4
+CHAD_DEFAULT_PORT = 3184  # c=3, h=1, a=8, d=4 -> 3184 for UI/API default
 
 
 def find_free_port() -> int:
@@ -311,10 +311,10 @@ def main() -> int:
         help="Run mode: unified (default, UI + local server), server (API only)",
     )
     parser.add_argument(
-        "--port", type=int, default=3814, help="Port for UI (default: 3814)"
+        "--port", type=int, default=3184, help="Port for UI (default: 3184)"
     )
     parser.add_argument(
-        "--api-port", type=int, default=3814, help="Port for API server (default: 3814)"
+        "--api-port", type=int, default=3184, help="Port for API server (default: 3184)"
     )
     parser.add_argument(
         "--api-host", type=str, default="0.0.0.0", help="Host for API server (default: 0.0.0.0)"

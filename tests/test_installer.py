@@ -47,7 +47,6 @@ def test_shell_installer_resolves_binary_from_user_install_dir(monkeypatch, tmp_
 def test_cloudflared_installer_windows(monkeypatch, tmp_path):
     """Binary installer should pick Windows asset and emit .exe into bin dir."""
     installer = AIToolInstaller(tools_dir=tmp_path / "tools")
-    spec = installer.tool_specs["cloudflared"]
 
     # Pretend we're on Windows/AMD64 and no existing install is available
     monkeypatch.setattr("platform.system", lambda: "Windows")

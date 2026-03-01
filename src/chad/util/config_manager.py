@@ -1034,7 +1034,6 @@ class ConfigManager:
         self.save_config(config)
 
 
-
 def validate_config_keys(config: dict[str, Any], *, allow: Iterable[str] | None = None) -> None:
     """Ensure the config file only contains known keys.
 

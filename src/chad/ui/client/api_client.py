@@ -96,7 +96,7 @@ class CleanupSettings:
 class APIClient:
     """Client for Chad server REST API."""
 
-    def __init__(self, base_url: str = "http://localhost:3814"):
+    def __init__(self, base_url: str = "http://localhost:3184"):
         """Initialize the API client.
 
         Args:
