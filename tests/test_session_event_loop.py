@@ -474,11 +474,10 @@ class TestExplorationMilestoneDetection:
         assert "parser cleanup" in exploration_emits[0][1]["summary"]
 
     def test_ignores_non_marker_line_mentions(self):
-        """Lines that merely mention EXPLORATION_RESULT should not emit milestones."""
+        """Lines that mention EXPLORATION_RESULT without colon should not emit."""
         loop, event_log, emitted = self._make_loop()
 
         loop.feed_output("I will output EXPLORATION_RESULT lines after discovery\n")
-        loop.feed_output("prefix EXPLORATION_RESULT: not a marker because no line prefix match\n")
         loop._analyze_output()
 
         exploration_emits = [
@@ -486,6 +485,24 @@ class TestExplorationMilestoneDetection:
             if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
         ]
         assert len(exploration_emits) == 0
+
+    def test_matches_marker_preceded_by_progress_indicators(self):
+        """Progress dots from agent tool should not block marker detection."""
+        loop, event_log, emitted = self._make_loop()
+
+        # Real-world pattern: Claude Code prepends bullet progress on the same line
+        loop.feed_output(
+            "\u2022 1 file read\u2022 2 files read"
+            "EXPLORATION_RESULT: Server entry point is at src/server/main.py\n"
+        )
+        loop._analyze_output()
+
+        exploration_emits = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
+        ]
+        assert len(exploration_emits) == 1
+        assert "Server entry point" in exploration_emits[0][1]["summary"]
 
     def test_flushes_partial_marker_line_on_finalize(self):
         """Finalize scan should emit trailing marker lines without newline."""

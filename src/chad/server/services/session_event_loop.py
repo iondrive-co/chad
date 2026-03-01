@@ -248,7 +248,7 @@ class SessionEventLoop:
         return any(stripped.startswith(p) for p in SessionEventLoop._CODE_CONTENT_PREFIXES)
 
     # ---- Exploration marker detection ----
-    _EXPLORATION_LINE_RE = re.compile(r"^\s*EXPLORATION_RESULT:\s*(?P<summary>.+?)\s*$")
+    _EXPLORATION_LINE_RE = re.compile(r"EXPLORATION_RESULT:\s*(?P<summary>.+?)\s*$")
     _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
     _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
     _INVALID_EXPLORATION_PREFIXES = (
@@ -292,7 +292,7 @@ class SessionEventLoop:
             self._exploration_partial_line = lines[-1]
 
         for line in complete_lines:
-            match = self._EXPLORATION_LINE_RE.match(line)
+            match = self._EXPLORATION_LINE_RE.search(line)
             if not match:
                 continue
             summary = self._normalize_exploration_summary(match.group("summary"))
