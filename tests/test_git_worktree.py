@@ -356,7 +356,7 @@ class TestGitWorktreeManager:
         assert mgr.has_changes(task_id) is True
 
     def test_get_diff_summary(self, git_repo):
-        """Test getting diff summary."""
+        """Test getting diff summary for uncommitted changes."""
         mgr = GitWorktreeManager(git_repo)
         task_id = "test-task-7"
 
@@ -364,11 +364,10 @@ class TestGitWorktreeManager:
         (worktree_path / "new_file.txt").write_text("New content")
 
         summary = mgr.get_diff_summary(task_id)
-        assert "Uncommitted changes" in summary
         assert "new_file.txt" in summary
 
-    def test_diff_summary_ignores_committed_changes(self, git_repo):
-        """Committed-only worktree should report no uncommitted summary."""
+    def test_diff_summary_includes_committed_changes(self, git_repo):
+        """Committed changes on worktree branch should appear in diff summary."""
         mgr = GitWorktreeManager(git_repo)
         task_id = "test-task-7b"
 
@@ -378,10 +377,10 @@ class TestGitWorktreeManager:
         subprocess.run(["git", "commit", "-m", "Commit file"], cwd=worktree_path, check=True, capture_output=True)
 
         summary = mgr.get_diff_summary(task_id)
-        assert summary == ""
+        assert "committed.txt" in summary
 
-    def test_parsed_diff_only_uncommitted(self, git_repo):
-        """Parsed diff should only include uncommitted changes."""
+    def test_parsed_diff_includes_committed_and_uncommitted(self, git_repo):
+        """Parsed diff should include both committed and uncommitted changes."""
         mgr = GitWorktreeManager(git_repo)
         task_id = "test-task-7c"
 
@@ -395,7 +394,7 @@ class TestGitWorktreeManager:
         diffs = mgr.get_parsed_diff(task_id)
         names = [Path(f.new_path).name for f in diffs]
         assert "uncommitted.txt" in names
-        assert "committed.txt" not in names
+        assert "committed.txt" in names
 
     def test_commit_all_changes(self, git_repo):
         """Test committing all changes."""

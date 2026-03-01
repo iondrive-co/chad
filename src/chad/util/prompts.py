@@ -35,6 +35,9 @@ CODING_AGENT_PROMPT = """\
 
 ## Instructions
 
+Do not run `git commit` or `git add`. Leave all changes as uncommitted files in the working tree so the orchestration 
+system can handle committing and merging.
+
 As you explore the codebase, each time you discover something relevant, output a line starting with \
 `EXPLORATION_RESULT:` followed by a brief description of what you found. For example:
 `EXPLORATION_RESULT: The authentication logic is in src/auth.py, using JWT tokens with a 24h expiry`
