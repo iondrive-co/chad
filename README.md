@@ -18,10 +18,11 @@ everything on your hard drive and your internet connection. Especially if you ar
 consider using a cheap isolated cloud server, the [Weft](https://github.com/iondrive-co/weft) project makes this easy.
 
 ### Blah blah how do I run it?
-```bash
-pip install chad-ai
-chad 
-```
+
+- Install the latest version from the [releases page](https://github.com/iondrive-co/chad/releases) or by running 
+`pip install chad-ai`. 
+- Run it locally with the `chad` command
+- Run it remotely with the `chad --tunnel` command and connect at https://iondrive.co/Chad
 
 ### How is this better than $Grug?
 
@@ -32,15 +33,14 @@ connected to from a remote ui using a cloudflare tunnel.
 <details open>
 <summary><b>Screenshots</b></summary>
 
-#### Select coding and verification agents for a task
-<img src="docs/screenshot-task-input.png" width="800" alt="Task input panel">
-
 #### Monitor provider accounts with usage tracking
 <img src="docs/screenshot-providers.png" width="800" alt="Providers tab with usage">
 
 #### Configure rules to switch providers or wait for usage resets
 <img src="docs/screenshot-settings.png" width="800" alt="Action rules configuration">
 
+#### Select coding and verification agents for a task
+<img src="docs/screenshot-task-input.png" width="800" alt="Task input panel">
 </details>
 
 ### Is this satire? What are you even doing here?

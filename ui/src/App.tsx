@@ -195,7 +195,7 @@ export function App() {
                   <h3>Connect to a Chad server</h3>
                   <div className="placeholder-steps">
                     <p>
-                      1) Download the Chad server from{" "}
+                      1) Get the latest Chad server from{" "}
                       <a
                         href="https://github.com/iondrive-co/chad/releases"
                         target="_blank"
@@ -206,7 +206,7 @@ export function App() {
                       .
                     </p>
                     <p>
-                      2) Run it locally with <code>chad --tunnel</code>.
+                      2) Run it on an isolated machine with <code>chad --tunnel</code>.
                     </p>
                     <p>
                       3) Paste the pairing key it prints into the box above, then tap Connect.

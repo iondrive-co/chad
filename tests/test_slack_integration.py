@@ -228,13 +228,22 @@ class TestMilestoneSlackHook:
         ):
             loop._emit_milestone("coding_complete", "Task done")
 
+        # First call: threaded, no mention
         mock_svc.post_milestone.assert_called_once()
         args, kwargs = mock_svc.post_milestone.call_args
         assert args[0] == "test-sess"
         assert args[1] == "coding_complete"
-        assert kwargs["mention"] is True
+        assert kwargs["mention"] is False
         assert kwargs["thread_ts"] is None
         assert loop._slack_thread_ts == "111.22"
+
+        # Second call: top-level @here ping via async helper
+        mock_svc.post_milestone_async.assert_called_once()
+        args2, kwargs2 = mock_svc.post_milestone_async.call_args
+        assert args2[0] == "test-sess"
+        assert args2[1] == "coding_complete"
+        assert kwargs2["mention"] is True
+        assert kwargs2["thread_ts"] is None
 
     def test_emit_milestone_skips_slack_by_default(self):
         """notify_slack defaults to False so tests don't leak real Slack calls."""
