@@ -156,7 +156,29 @@ def create_temp_env(screenshot_mode: bool = True) -> TempChadEnv:
     }
     security_mgr.save_config(config)
 
-    if not screenshot_mode:
+    if screenshot_mode:
+        # Create fixture accounts for release screenshots
+        security_mgr.store_account(
+            "claude-pro", "anthropic", "", password, "claude-sonnet-4-20250514"
+        )
+        security_mgr.store_account(
+            "codex-work", "openai", "", password, "o3-pro"
+        )
+        security_mgr.assign_role("claude-pro", "CODING")
+        # Configure action rules that showcase different actions
+        security_mgr.set_action_settings([
+            {"event": "session_usage", "threshold": 100, "action": "await_reset"},
+            {
+                "event": "weekly_usage",
+                "threshold": 90,
+                "action": "switch_provider",
+                "target_account": "codex-work",
+            },
+            {"event": "context_usage", "threshold": 90, "action": "notify"},
+        ])
+        # Set a clean project path for the task form screenshot
+        security_mgr.save_preferences("/home/user/my-webapp")
+    else:
         security_mgr.store_account("mock-coding", "mock", "", password, "mock-model")
         security_mgr.assign_role("mock-coding", "CODING")
 

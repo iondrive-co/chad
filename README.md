@@ -7,7 +7,7 @@ agents, decide what happens when you reach a limit (wait for the reset and conti
 task, and Chad will ralph loop to deliver a one-shot result.
 
 <p style="text-align: center;">
-  <img src="docs/Chad.png" alt="Chad Code" width="80">
+  <img src="https://raw.githubusercontent.com/iondrive-co/chad/main/docs/Chad.png" alt="Chad Code" width="80">
 </p>
 
 **The First Warning:** Chad was developed with...  Chad. Yes, this material writes itself. No, high quality robust code 
@@ -34,13 +34,13 @@ connected to from a remote ui using a cloudflare tunnel.
 <summary><b>Screenshots</b></summary>
 
 #### Monitor provider accounts with usage tracking
-<img src="docs/screenshot-providers.png" width="800" alt="Providers tab with usage">
+<img src="https://raw.githubusercontent.com/iondrive-co/chad/main/docs/screenshot-providers.png" width="800" alt="Providers tab with usage">
 
 #### Configure rules to switch providers or wait for usage resets
-<img src="docs/screenshot-settings.png" width="800" alt="Action rules configuration">
+<img src="https://raw.githubusercontent.com/iondrive-co/chad/main/docs/screenshot-settings.png" width="800" alt="Action rules configuration">
 
 #### Select coding and verification agents for a task
-<img src="docs/screenshot-task-input.png" width="800" alt="Task input panel">
+<img src="https://raw.githubusercontent.com/iondrive-co/chad/main/docs/screenshot-task-input.png" width="800" alt="Task input panel">
 </details>
 
 ### Is this satire? What are you even doing here?

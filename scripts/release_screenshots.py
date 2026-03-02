@@ -98,6 +98,52 @@ def inject_followup_visible(page):
     )
 
 
+def fill_task_form(page):
+    """Fill the task form with realistic data for the screenshot."""
+    # Create a session first — the task form only appears when one is selected
+    page.locator("button:has-text('New Session')").click()
+    page.wait_for_timeout(2000)
+
+    # The AccountPicker auto-selects the CODING-role account (claude-pro).
+    # Wait for the coding agent select to have a selected value.
+    page.wait_for_timeout(1000)
+
+    # Fill task description
+    page.locator(".task-form textarea").fill(
+        "Add a REST API endpoint for user profile updates with "
+        "validation, rate limiting, and comprehensive test coverage"
+    )
+
+    # Wait for model override dropdown to appear (async fetch)
+    page.wait_for_timeout(1000)
+
+    # Select model override for coding agent
+    model_select = page.locator(".task-form > label:has-text('Model Override') select")
+    if model_select.count() > 0:
+        model_select.select_option(label="claude-opus-4-20250514")
+
+    # Enable verification
+    page.locator(".verification-section input[type='checkbox']").check()
+    page.wait_for_timeout(500)
+
+    # Select verification agent (codex-work)
+    verification_select = page.locator(
+        ".verification-section label:has-text('Verification Agent') select"
+    )
+    if verification_select.count() > 0:
+        verification_select.select_option(label="codex-work (openai / o3-pro)")
+
+    # Wait for verification models and reasoning to appear
+    page.wait_for_timeout(1000)
+
+    # Select verification reasoning
+    reasoning_select = page.locator(
+        ".verification-section label:has-text('Verification Reasoning') select"
+    )
+    if reasoning_select.count() > 0:
+        reasoning_select.select_option(value="high")
+
+
 def main():
     print("=" * 60)
     print("Generating Release Screenshots")
@@ -139,6 +185,8 @@ def main():
             color_scheme="light",
             render_delay=2.0,
         ) as page:
+            fill_task_form(page)
+            page.wait_for_timeout(500)
             screenshot_page(page, output_path)
             print(f"  Saved: {output_path}")
 
