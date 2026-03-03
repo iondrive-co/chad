@@ -397,8 +397,6 @@ class TestBuildReleaseScript:
             def fake_run_command(cmd, cwd=None):
                 run_calls.append(cmd)
 
-            version = build_release.get_current_version()
-
             with patch("sys.platform", "darwin"):
                 with patch("shutil.which", side_effect=lambda name: f"/usr/bin/{name}"):
                     with patch.object(build_release, "run_command", side_effect=fake_run_command):
