@@ -1,9 +1,11 @@
 """Cloudflare tunnel integration for remote access via trycloudflare.com."""
 
 import logging
+import os
 import re
 import subprocess
 import threading
+from pathlib import Path
 
 from chad.util.installer import AIToolInstaller
 from chad.util.process_registry import get_global_registry
@@ -94,7 +96,7 @@ class TunnelService:
         return None
 
     def stop(self) -> None:
-        """Stop the running tunnel."""
+        """Stop the running tunnel and clean up pairing artifacts."""
         if self._proc is not None:
             pid = self._proc.pid
             registry = get_global_registry()
@@ -102,6 +104,13 @@ class TunnelService:
             self._proc = None
         self._url = None
         self._subdomain = None
+
+        # Clean up pairing files
+        chad_dir = Path(os.environ.get("CHAD_DIR", "")) if os.environ.get("CHAD_DIR") else Path.home() / ".chad"
+        for name in ("pairing-url", "pairing-qr.png"):
+            f = chad_dir / name
+            if f.exists():
+                f.unlink()
 
     def status(self) -> dict:
         """Return current tunnel status."""

@@ -4,6 +4,7 @@ import { SessionList } from "./components/SessionList.tsx";
 import { ChatView } from "./components/ChatView.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { ProvidersPanel } from "./components/ProvidersPanel.tsx";
+import { QRScanner } from "./components/QRScanner.tsx";
 import { useSessions } from "./hooks/useSessions.ts";
 
 type Tab = "chat" | "providers" | "settings";
@@ -56,6 +57,7 @@ export function App() {
   const [tab, setTab] = useState<Tab>("chat");
   const [sessionVersion, setSessionVersion] = useState(0);
   const [defaultProjectPath, setDefaultProjectPath] = useState("");
+  const [scanning, setScanning] = useState(false);
   // Track whether the user has ever set a URL (vs initial empty state)
   const hasUrl = useRef(false);
 
@@ -119,10 +121,20 @@ export function App() {
     setSelectedSession(null);
   }, [connectionInput]);
 
-  // On initial mount, detect if we're served by the API (not file://)
-  // and auto-set the base URL to the current origin
+  // On initial mount, check for #pair=... hash (from QR code scan) or
+  // auto-detect if we're served by the API (not file://)
   useEffect(() => {
-    if (window.location.protocol !== "file:" && !hasUrl.current && window.self === window.top) {
+    const hash = window.location.hash;
+    const pairMatch = hash.match(/^#pair=(.+)$/);
+    if (pairMatch) {
+      const parsed = parseConnectionInput(pairMatch[1]);
+      if (parsed.url) {
+        setApiBaseUrl(parsed.url);
+        setToken(parsed.token);
+        setConnectionInput(pairMatch[1]);
+      }
+      history.replaceState(null, "", window.location.pathname + window.location.search);
+    } else if (window.location.protocol !== "file:" && !hasUrl.current && window.self === window.top) {
       setApiBaseUrl(window.location.origin);
     }
   }, []);
@@ -192,26 +204,47 @@ export function App() {
             {!connected ? (
               <div className="placeholder">
                 <div className="placeholder-card">
-                  <h3>Connect to a Chad server</h3>
-                  <div className="placeholder-steps">
-                    <p>
-                      1) Get the latest Chad server from{" "}
-                      <a
-                        href="https://github.com/iondrive-co/chad/releases"
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        the releases page
-                      </a>
-                      .
-                    </p>
-                    <p>
-                      2) Run it on an isolated machine with <code>chad --tunnel</code>.
-                    </p>
-                    <p>
-                      3) Paste the pairing key it prints into the box above, then tap Connect.
-                    </p>
-                  </div>
+                  {scanning ? (
+                    <QRScanner
+                      onScan={(code) => {
+                        setScanning(false);
+                        const parsed = parseConnectionInput(code);
+                        if (parsed.url) {
+                          setConnectionInput(code);
+                          setApiBaseUrl(parsed.url);
+                          setToken(parsed.token);
+                          setSelectedSession(null);
+                        }
+                      }}
+                      onCancel={() => setScanning(false)}
+                    />
+                  ) : (
+                    <>
+                      <h3>Connect to a Chad server</h3>
+                      <div className="placeholder-steps">
+                        <p>
+                          1) Get the latest Chad server from{" "}
+                          <a
+                            href="https://github.com/iondrive-co/chad/releases"
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            the releases page
+                          </a>
+                          .
+                        </p>
+                        <p>
+                          2) Run it on an isolated machine with <code>chad --tunnel</code>.
+                        </p>
+                        <p>
+                          3) Scan the QR code it displays, or paste the pairing key above.
+                        </p>
+                      </div>
+                      <button className="scan-qr-btn" onClick={() => setScanning(true)}>
+                        Scan QR Code
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             ) : selectedSession ? (

@@ -151,14 +151,28 @@ def read_server_port() -> int | None:
 def _start_tunnel(port: int, token: str | None = None) -> None:
     """Start a Cloudflare tunnel and print the URL with pairing code."""
     from chad.server.services.tunnel_service import get_tunnel_service
+    from chad.util.qr import print_pairing_qr, save_pairing_qr
+
     svc = get_tunnel_service()
     url = svc.start(port)
     if url:
         print(f"Tunnel URL: {url}")
         if token and svc._subdomain:
-            print(f"Pairing code: {svc._subdomain}:{token}")
+            pairing_code = f"{svc._subdomain}:{token}"
+            print(f"Pairing code: {pairing_code}")
         elif svc._subdomain:
-            print(f"Pairing code: {svc._subdomain}")
+            pairing_code = svc._subdomain
+            print(f"Pairing code: {pairing_code}")
+        else:
+            pairing_code = None
+
+        if pairing_code:
+            pairing_url = f"{url}/#pair={pairing_code}"
+            print_pairing_qr(pairing_url)
+            chad_dir = get_chad_dir()
+            save_pairing_qr(pairing_url, chad_dir / "pairing-qr.png")
+            (chad_dir / "pairing-url").write_text(pairing_url)
+            print(f"QR code saved to {chad_dir / 'pairing-qr.png'}")
     else:
         print(f"Failed to start tunnel: {svc._error}")
 

@@ -665,6 +665,20 @@ def run_settings_menu(client: APIClient) -> None:
                 print(f"  Pairing:   {subdomain}")
             if error:
                 print(f"  Error:     {error}")
+
+            # Show QR code if pairing URL file exists
+            pairing_url_file = Path.home() / ".chad" / "pairing-url"
+            if running and pairing_url_file.exists():
+                from chad.util.qr import print_pairing_qr
+                pairing_url = pairing_url_file.read_text().strip()
+                if pairing_url:
+                    print()
+                    print("Scan to connect:")
+                    print_pairing_qr(pairing_url)
+                    qr_png = Path.home() / ".chad" / "pairing-qr.png"
+                    if qr_png.exists():
+                        print(f"  QR PNG: {qr_png}")
+
             print()
             if running:
                 print("  [s] Stop tunnel")

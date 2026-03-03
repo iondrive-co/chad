@@ -1,5 +1,6 @@
 """Tests for Cloudflare tunnel service and API endpoints."""
 
+import os
 import subprocess
 from unittest.mock import MagicMock, patch
 
@@ -170,3 +171,50 @@ class TestCloudflaredInstaller:
         spec = installer.tool_specs["cloudflared"]
         assert spec.installer == "binary"
         assert spec.binary == "cloudflared"
+
+
+class TestPairingQR:
+    """Test QR code generation for tunnel pairing."""
+
+    def test_print_pairing_qr_produces_output(self, capsys):
+        from chad.util.qr import print_pairing_qr
+
+        print_pairing_qr("https://test-tunnel.trycloudflare.com/#pair=test-tunnel:abc123")
+        captured = capsys.readouterr()
+        # Should produce multi-line Unicode output (half-block characters)
+        lines = captured.out.strip().split("\n")
+        assert len(lines) > 5, f"Expected multi-line QR output, got {len(lines)} lines"
+        # Should contain block characters used by segno terminal output
+        assert any("\u2588" in line or "\u2580" in line or "\u2584" in line for line in lines)
+
+    def test_save_pairing_qr_creates_png(self, tmp_path):
+        from chad.util.qr import save_pairing_qr
+
+        png_path = tmp_path / "test-qr.png"
+        save_pairing_qr("https://test-tunnel.trycloudflare.com/#pair=test-tunnel:abc123", png_path)
+
+        assert png_path.exists()
+        data = png_path.read_bytes()
+        # PNG magic bytes
+        assert data[:4] == b"\x89PNG"
+        # Should be a reasonable size (not empty/trivial)
+        assert len(data) > 100
+
+    def test_stop_cleans_pairing_artifacts(self, tmp_path):
+        from chad.server.services.tunnel_service import TunnelService
+
+        # Create pairing files in a temp CHAD_DIR
+        pairing_url = tmp_path / "pairing-url"
+        pairing_qr = tmp_path / "pairing-qr.png"
+        pairing_url.write_text("https://test.trycloudflare.com/#pair=test:tok")
+        pairing_qr.write_bytes(b"\x89PNG fake")
+
+        svc = TunnelService()
+
+        with patch.dict(os.environ, {"CHAD_DIR": str(tmp_path)}), \
+             patch("chad.server.services.tunnel_service.get_global_registry") as mock_registry:
+            mock_registry.return_value = MagicMock()
+            svc.stop()
+
+        assert not pairing_url.exists(), "pairing-url should be deleted on stop"
+        assert not pairing_qr.exists(), "pairing-qr.png should be deleted on stop"

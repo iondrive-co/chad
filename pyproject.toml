@@ -37,6 +37,8 @@ dependencies = [
     "pydantic>=2.0.0",
     # Terminal emulation
     "pyte>=0.8.0",
+    # QR code generation
+    "segno>=1.6.0",
 ]
 
 [project.optional-dependencies]

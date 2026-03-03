@@ -152,6 +152,55 @@ body {
   gap: 6px;
 }
 
+.scan-qr-btn {
+  align-self: center;
+  padding: 10px 24px;
+  font-size: 15px;
+  border-radius: 8px;
+  margin-top: 4px;
+}
+
+/* ── QR Scanner ── */
+
+.qr-scanner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.qr-scanner video {
+  width: 100%;
+  max-width: 400px;
+  border-radius: 8px;
+  background: #000;
+}
+
+.qr-scanner-error {
+  color: var(--error);
+  font-size: 14px;
+  text-align: center;
+  padding: 24px 0;
+}
+
+.qr-scanner-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.qr-scanner-actions button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 6px 20px;
+}
+
+.qr-scanner-actions button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 @media (max-width: 640px) {
   .placeholder {
     padding: 16px;
@@ -165,6 +214,10 @@ body {
 
   .placeholder-card h3 {
     font-size: 16px;
+  }
+
+  .qr-scanner video {
+    max-width: 100%;
   }
 }
 

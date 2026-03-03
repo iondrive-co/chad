@@ -1,5 +1,6 @@
 """Tests for release packaging and installer generation."""
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -285,6 +286,48 @@ class TestBuildReleaseScript:
             assert ";" in add_data_val, (
                 f"Windows --add-data should use ';' separator, got: {add_data_val}"
             )
+        finally:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    def test_macos_onedir_is_archived(self, tmp_path):
+        """macOS build should package the whole onedir bundle (not just the binary)."""
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import build_release
+
+            artifact_dir = tmp_path / "dist" / "chad"
+            artifact_dir.mkdir(parents=True)
+            artifact = artifact_dir / "chad"
+            artifact.write_text("bin")
+            (artifact_dir / "_internal").mkdir()
+
+            archive_calls = {}
+
+            def fake_make_archive(base_name, format, root_dir=None, base_dir=None):
+                archive_calls["base_name"] = Path(base_name)
+                archive_calls["format"] = format
+                archive_calls["root_dir"] = Path(root_dir)
+                archive_calls["base_dir"] = base_dir
+                archive_path = Path(str(base_name) + (".zip" if format == "zip" else ".tar.gz"))
+                archive_path.parent.mkdir(parents=True, exist_ok=True)
+                archive_path.write_text("archive")
+                return str(archive_path)
+
+            with patch("sys.platform", "darwin"):
+                with patch("shutil.which", return_value="/usr/bin/pyinstaller"):
+                    with patch.object(build_release, "run_command"):
+                        with patch.object(build_release, "build_ui"):
+                            with patch.object(
+                                build_release, "_find_built_artifact", return_value=artifact
+                            ):
+                                with patch.object(shutil, "make_archive", side_effect=fake_make_archive):
+                                    final_path = build_release.build_installer(output_dir=tmp_path)
+
+            assert str(final_path).endswith(".tar.gz")
+            assert archive_calls["format"] == "gztar"
+            assert archive_calls["root_dir"] == artifact_dir.parent
+            assert archive_calls["base_dir"] == artifact_dir.name
+            assert final_path.exists()
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 

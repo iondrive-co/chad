@@ -253,26 +253,32 @@ def build_installer(output_dir: Path | None = None) -> Path:
     if artifact is None:
         raise SystemExit(f"Build failed - could not find artifact in {DIST_DIR}")
 
+    # PyInstaller --onedir produces an executable inside a folder that carries
+    # the bundled Python runtime. Packaging only the executable drops the
+    # _internal/ directory (which causes the macOS failure reported in 0.11.0),
+    # so we always package the containing directory when it exists.
+    build_root = artifact if artifact.is_dir() else artifact.parent
+
     # Copy to release directory with proper naming
     installer_name = get_installer_filename(version)
     final_path = output_dir / installer_name
 
     if platform_name == "linux":
-        final_path = _build_linux_deb(artifact, version, output_dir)
-    elif artifact.is_dir():
-        # For onedir builds, we need to create an archive
+        # Debian packaging expects the whole onedir tree so we pass the root dir
+        final_path = _build_linux_deb(build_root, version, output_dir)
+    else:
+        # Always archive the onedir tree so the bundled Python runtime (_internal/)
+        # ships with the executable. This fixes the macOS launcher failure where
+        # only the binary was copied.
+        archive_format = "zip" if platform_name == "windows" else "gztar"
+        archive_ext = ".zip" if platform_name == "windows" else ".tar.gz"
         shutil.make_archive(
             str(output_dir / f"chad-{version}-{platform_name}"),
-            "zip" if platform_name == "windows" else "gztar",
-            artifact.parent,
-            artifact.name,
+            archive_format,
+            build_root.parent,
+            build_root.name,
         )
-        archive_ext = ".zip" if platform_name == "windows" else ".tar.gz"
         final_path = output_dir / f"chad-{version}-{platform_name}{archive_ext}"
-    else:
-        shutil.copy2(artifact, final_path)
-        if platform_name != "windows":
-            os.chmod(final_path, 0o755)
 
     print(f"Installer created: {final_path}")
     return final_path
