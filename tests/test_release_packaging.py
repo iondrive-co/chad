@@ -342,8 +342,8 @@ class TestBuildReleaseScript:
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 
-    def test_windows_onedir_is_zipped(self, tmp_path):
-        """Windows build should zip the onedir bundle instead of copying the exe."""
+    def test_windows_builds_msi(self, tmp_path):
+        """Windows build should produce an MSI via WiX tools."""
         sys.path.insert(0, str(SCRIPTS_DIR))
         try:
             import build_release
@@ -354,29 +354,36 @@ class TestBuildReleaseScript:
             artifact.write_text("bin")
             (artifact_dir / "_internal").mkdir()
 
-            zip_call = {}
+            run_calls = []
 
-            def fake_make_archive(base_name, format, root_dir=None, base_dir=None):
-                zip_call["base_name"] = Path(base_name)
-                zip_call["format"] = format
-                zip_call["root_dir"] = Path(root_dir)
-                zip_call["base_dir"] = base_dir
-                return str(Path(base_name).with_suffix(".zip"))
+            def fake_run_command(cmd, cwd=None):
+                run_calls.append(cmd)
+
+            tools = {
+                "heat.exe": Path("C:/wix/heat.exe"),
+                "candle.exe": Path("C:/wix/candle.exe"),
+                "light.exe": Path("C:/wix/light.exe"),
+            }
+
+            version = build_release.get_current_version()
 
             with patch("sys.platform", "win32"):
                 with patch("shutil.which", side_effect=lambda name: f"C:/{name}.exe"):
-                    with patch.object(build_release, "run_command"):
-                        with patch.object(build_release, "build_ui"):
-                            with patch.object(
-                                build_release, "_find_built_artifact", return_value=artifact
-                            ):
-                                with patch("shutil.make_archive", side_effect=fake_make_archive):
-                                    final_path = build_release.build_installer(output_dir=tmp_path)
+                    with patch.object(build_release, "_ensure_wix_tools", return_value=tools):
+                        with patch.object(build_release, "run_command", side_effect=fake_run_command):
+                            with patch.object(build_release, "build_ui"):
+                                with patch.object(
+                                    build_release, "_find_built_artifact", return_value=artifact
+                                ):
+                                    with patch.object(build_release.shutil, "rmtree"):
+                                        final_path = build_release.build_installer(output_dir=tmp_path)
 
-            assert final_path.suffix == ".zip"
-            assert zip_call["format"] == "zip"
-            assert zip_call["root_dir"] == artifact_dir.parent
-            assert zip_call["base_dir"] == artifact_dir.name
+            assert final_path.suffix == ".msi"
+            assert any(Path(c[0]).name == "heat.exe" for c in run_calls)
+            assert any(Path(c[0]).name == "candle.exe" for c in run_calls)
+            assert any(Path(c[0]).name == "light.exe" for c in run_calls)
+            expected_staging = tmp_path / f"chad-{version}-msi"
+            assert any(str(expected_staging / "harvest.wxs") in map(str, cmd) for cmd in run_calls)
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 
@@ -536,6 +543,6 @@ class TestInstallerNaming:
             # Test Windows
             with patch("sys.platform", "win32"):
                 name = build_release.get_installer_filename("0.11.0")
-                assert name == "chad-0.11.0-windows.zip"
+                assert name == "chad-0.11.0-windows.msi"
         finally:
             sys.path.remove(str(SCRIPTS_DIR))

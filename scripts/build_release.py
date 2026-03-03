@@ -59,7 +59,7 @@ def get_installer_filename(version: str) -> str:
     """Get the installer filename for the current platform."""
     platform = get_platform_name()
     if platform == "windows":
-        return f"chad-{version}-{platform}.zip"
+        return f"chad-{version}-{platform}.msi"
     if platform == "linux":
         return f"chad-{version}-{platform}.deb"
     if platform == "macos":
@@ -250,6 +250,157 @@ def _build_linux_deb(app_binary: Path, version: str, output_dir: Path) -> Path:
     return final_path
 
 
+def _ensure_wix_tools() -> dict[str, Path]:
+    """Locate WiX Toolset binaries on Windows (install via choco if missing)."""
+    tools: dict[str, Path] = {}
+    default_dirs = [
+        Path("C:/Program Files (x86)/WiX Toolset v3.11/bin"),
+        Path("C:/Program Files/Windows Installer XML v3.11/bin"),
+    ]
+    names = ["heat.exe", "candle.exe", "light.exe"]
+
+    def _locate(name: str) -> Path | None:
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+        for base in default_dirs:
+            candidate = base / name
+            if candidate.exists():
+                return candidate
+        return None
+
+    for name in names:
+        path = _locate(name)
+        if path:
+            tools[name] = path
+
+    missing = [n for n in names if n not in tools]
+    if missing:
+        choco = shutil.which("choco")
+        if not choco:
+            raise SystemExit(
+                "WiX tools not found (heat.exe, candle.exe, light.exe) and Chocolatey is unavailable. "
+                "Install WiX v3.11+ or add it to PATH."
+            )
+        print("WiX not found; installing via choco ...")
+        run_command([choco, "install", "wixtoolset", "-y", "--no-progress"])
+        for name in missing:
+            path = _locate(name)
+            if path:
+                tools[name] = path
+
+    still_missing = [n for n in names if n not in tools]
+    if still_missing:
+        raise SystemExit(f"WiX tools missing after install: {', '.join(still_missing)}")
+    return tools
+
+
+def _build_windows_msi(build_root: Path, version: str, output_dir: Path) -> Path:
+    """Create a Windows MSI installer using WiX harvest + candle + light."""
+    tools = _ensure_wix_tools()
+
+    staging = output_dir / f"chad-{version}-msi"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True, exist_ok=True)
+
+    harvest_wxs = staging / "harvest.wxs"
+    product_wxs = staging / "product.wxs"
+    obj_dir = staging / "obj"
+    obj_dir.mkdir(parents=True, exist_ok=True)
+
+    run_command([
+        str(tools["heat.exe"]),
+        "dir",
+        str(build_root),
+        "-o",
+        str(harvest_wxs),
+        "-cg",
+        "ChadComponents",
+        "-dr",
+        "INSTALLDIR",
+        "-srd",
+        "-gg",
+        "-var",
+        "var.SourceDir",
+    ])
+
+    product_wxs.write_text(
+        f"""<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="Chad" Manufacturer="Chad AI" Version="{version}" Language="1033" UpgradeCode="6f0d5c39-5f9f-4b64-8cb6-9a7f3e9c5a9c">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine"/>
+    <MediaTemplate/>
+    <MajorUpgrade AllowDowngrades="no" DowngradeErrorMessage="A newer version of Chad is already installed."/>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFilesFolder">
+        <Directory Id="INSTALLDIR" Name="Chad">
+          <Component Id="PathComponent" Guid="*">
+            <CreateFolder/>
+            <Environment Id="ChadPath" Name="PATH" Action="set" Part="last" Permanent="no" System="no" Value="[INSTALLDIR]"/>
+            <RegistryValue Root="HKCU" Key="Software\\Chad" Name="PathComponent" Type="integer" Value="1" KeyPath="yes"/>
+          </Component>
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ChadProgramMenu" Name="Chad">
+          <Component Id="MenuComponent" Guid="*">
+            <Shortcut Id="ChadShortcut" Directory="ChadProgramMenu" Name="Chad CLI" Target="[SystemFolder]cmd.exe" Arguments='/k "[INSTALLDIR]chad.exe"' WorkingDirectory="INSTALLDIR" />
+            <RemoveFolder Id="RemoveChadMenu" Directory="ChadProgramMenu" On="uninstall"/>
+            <RegistryValue Root="HKCU" Key="Software\\Chad" Name="MenuComponent" Type="integer" Value="1" KeyPath="yes"/>
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+    <Feature Id="ChadFeature" Title="Chad" Level="1">
+      <ComponentGroupRef Id="ChadComponents"/>
+      <ComponentRef Id="PathComponent"/>
+      <ComponentRef Id="MenuComponent"/>
+    </Feature>
+    <UIRef Id="WixUI_InstallDir"/>
+    <UIRef Id="WixUI_ErrorProgressText"/>
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR"/>
+  </Product>
+</Wix>
+""",
+        encoding="utf-8",
+    )
+
+    harvest_obj = obj_dir / "harvest.wixobj"
+    product_obj = obj_dir / "product.wixobj"
+
+    run_command([
+        str(tools["candle.exe"]),
+        "-dSourceDir=" + str(build_root),
+        "-out",
+        str(harvest_obj),
+        str(harvest_wxs),
+    ])
+    run_command([
+        str(tools["candle.exe"]),
+        "-out",
+        str(product_obj),
+        str(product_wxs),
+    ])
+
+    final_path = output_dir / get_installer_filename(version)
+    if final_path.exists():
+        final_path.unlink()
+
+    run_command([
+        str(tools["light.exe"]),
+        "-ext",
+        "WixUIExtension",
+        "-out",
+        str(final_path),
+        str(product_obj),
+        str(harvest_obj),
+    ])
+
+    shutil.rmtree(staging)
+    return final_path
+
+
 def _build_macos_pkg(build_root: Path, version: str, output_dir: Path) -> Path:
     """Create a macOS .pkg installer with a PATH-visible `chad` command."""
     pkgbuild = shutil.which("pkgbuild")
@@ -381,20 +532,11 @@ def build_installer(output_dir: Path | None = None) -> Path:
     build_root = artifact if artifact.is_dir() else artifact.parent
 
     if platform_name == "linux":
-        # Debian packaging expects the whole onedir tree so we pass the root dir
         final_path = _build_linux_deb(build_root, version, output_dir)
     elif platform_name == "macos":
         final_path = _build_macos_pkg(build_root, version, output_dir)
     else:
-        # Windows: zip the onedir bundle so the runtime stays alongside chad.exe.
-        archive_base = output_dir / f"chad-{version}-{platform_name}"
-        shutil.make_archive(
-            str(archive_base),
-            "zip",
-            build_root.parent,
-            build_root.name,
-        )
-        final_path = archive_base.with_suffix(".zip")
+        final_path = _build_windows_msi(build_root, version, output_dir)
 
     print(f"Installer created: {final_path}")
     return final_path
