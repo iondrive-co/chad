@@ -106,12 +106,6 @@ class TestSetupScreenConfig:
         config_manager.set_ui_mode("cli")
         assert config_manager.get_ui_mode() == "cli"
 
-    def test_save_ui_mode_gradio(self, config_manager, mock_app):
-        """Saving UI mode to gradio persists in config."""
-        config_manager.set_ui_mode("cli")  # First set to cli
-        config_manager.set_ui_mode("gradio")  # Then back to gradio
-        assert config_manager.get_ui_mode() == "gradio"
-
     def test_save_cleanup_days(self, config_manager, mock_app):
         """Saving cleanup days persists in config."""
         config_manager.set_cleanup_days(7)
@@ -206,51 +200,51 @@ class TestProviderCommandGeneration:
 
     def test_anthropic_command_has_bypass_permissions(self):
         """Anthropic command includes permission bypass."""
-        from chad.ui.cli.pty_runner import build_agent_command
+        from chad.server.services.task_executor import build_agent_command
 
-        cmd, env = build_agent_command("anthropic", "test", Path("/tmp"))
+        cmd, env, _ = build_agent_command("anthropic", "test", Path("/tmp"))
 
-        assert "claude" in cmd
+        assert any("claude" in c for c in cmd)
         assert "-p" in cmd
         assert "--permission-mode" in cmd
         assert "bypassPermissions" in cmd
 
     def test_openai_command_has_bypass_and_home(self):
         """OpenAI command includes bypass and isolated HOME."""
-        from chad.ui.cli.pty_runner import build_agent_command
+        from chad.server.services.task_executor import build_agent_command
 
-        cmd, env = build_agent_command("openai", "my-codex", Path("/tmp"))
+        cmd, env, _ = build_agent_command("openai", "my-codex", Path("/tmp"))
 
-        assert "codex" in cmd
+        assert any("codex" in c for c in cmd)
         assert "--dangerously-bypass-approvals-and-sandbox" in cmd
         assert "HOME" in env
         assert "my-codex" in env["HOME"]
 
     def test_gemini_command_has_yolo(self):
         """Gemini command includes YOLO flag."""
-        from chad.ui.cli.pty_runner import build_agent_command
+        from chad.server.services.task_executor import build_agent_command
 
-        cmd, env = build_agent_command("gemini", "test", Path("/tmp"))
+        cmd, env, _ = build_agent_command("gemini", "test", Path("/tmp"))
 
-        assert "gemini" in cmd
+        assert any("gemini" in c for c in cmd)
         assert "-y" in cmd
 
     def test_qwen_command_has_yolo(self):
         """Qwen command includes YOLO flag."""
-        from chad.ui.cli.pty_runner import build_agent_command
+        from chad.server.services.task_executor import build_agent_command
 
-        cmd, env = build_agent_command("qwen", "test", Path("/tmp"))
+        cmd, env, _ = build_agent_command("qwen", "test", Path("/tmp"))
 
-        assert "qwen" in cmd
+        assert any("qwen" in c for c in cmd)
         assert "-y" in cmd
 
     def test_mistral_command(self):
         """Mistral command is correctly formed."""
-        from chad.ui.cli.pty_runner import build_agent_command
+        from chad.server.services.task_executor import build_agent_command
 
-        cmd, env = build_agent_command("mistral", "test", Path("/tmp"))
+        cmd, env, _ = build_agent_command("mistral", "test", Path("/tmp"))
 
-        assert "vibe" in cmd
+        assert any("vibe" in c for c in cmd)
 
 
 class TestConfigPersistence:
@@ -331,15 +325,15 @@ class TestConfigPersistence:
 class TestUIModeSwitching:
     """Tests for UI mode switching behavior."""
 
-    def test_default_ui_mode_is_gradio(self, tmp_path, monkeypatch):
-        """Default UI mode is gradio."""
+    def test_default_ui_mode_is_react(self, tmp_path, monkeypatch):
+        """Default UI mode is react."""
         from chad.util.config_manager import ConfigManager
 
         config_file = tmp_path / "fresh.conf"
         monkeypatch.setenv("CHAD_CONFIG", str(config_file))
 
         cm = ConfigManager()
-        assert cm.get_ui_mode() == "gradio"
+        assert cm.get_ui_mode() == "react"
 
     def test_cli_mode_persists_across_restarts(self, tmp_path, monkeypatch):
         """CLI mode setting persists across ConfigManager instances."""

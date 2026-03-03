@@ -474,11 +474,10 @@ class TestExplorationMilestoneDetection:
         assert "parser cleanup" in exploration_emits[0][1]["summary"]
 
     def test_ignores_non_marker_line_mentions(self):
-        """Lines that merely mention EXPLORATION_RESULT should not emit milestones."""
+        """Lines that mention EXPLORATION_RESULT without colon should not emit."""
         loop, event_log, emitted = self._make_loop()
 
         loop.feed_output("I will output EXPLORATION_RESULT lines after discovery\n")
-        loop.feed_output("prefix EXPLORATION_RESULT: not a marker because no line prefix match\n")
         loop._analyze_output()
 
         exploration_emits = [
@@ -486,6 +485,24 @@ class TestExplorationMilestoneDetection:
             if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
         ]
         assert len(exploration_emits) == 0
+
+    def test_matches_marker_preceded_by_progress_indicators(self):
+        """Progress dots from agent tool should not block marker detection."""
+        loop, event_log, emitted = self._make_loop()
+
+        # Real-world pattern: Claude Code prepends bullet progress on the same line
+        loop.feed_output(
+            "\u2022 1 file read\u2022 2 files read"
+            "EXPLORATION_RESULT: Server entry point is at src/server/main.py\n"
+        )
+        loop._analyze_output()
+
+        exploration_emits = [
+            e for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "exploration"
+        ]
+        assert len(exploration_emits) == 1
+        assert "Server entry point" in exploration_emits[0][1]["summary"]
 
     def test_flushes_partial_marker_line_on_finalize(self):
         """Finalize scan should emit trailing marker lines without newline."""
@@ -1550,3 +1567,206 @@ class TestAwaitResetWithMockResetTime:
 
         # Verify remaining was restored in config
         assert cm.get_mock_remaining_usage(account) == 1.0
+
+
+class TestNegativeExitCodeWithPendingAction:
+    """Ensure pending actions (await_reset, switch_provider) are processed
+    even when the agent was killed by a signal (negative exit code)."""
+
+    def test_await_reset_processed_despite_negative_exit_code(self, monkeypatch):
+        """When terminate_pty kills the agent (exit_code < 0), the pending
+        await_reset action must still be handled instead of silently dropped."""
+        event_log = FakeEventLog()
+        emitted = []
+        phases_run = []
+        call_count = [0]
+
+        def usage_fn():
+            call_count[0] += 1
+            # Return 100% initially, then drop below threshold to exit loop
+            if call_count[0] <= 2:
+                return 100.0
+            return 50.0
+
+        def fake_run_phase(**kwargs):
+            phase = kwargs.get("phase")
+            phases_run.append(phase)
+            if phase == "combined":
+                # Simulate agent killed by SIGTERM
+                return -15, "partial output"
+            return 0, "continuation done"
+
+        monkeypatch.setattr(
+            "chad.server.services.session_event_loop.time.sleep",
+            lambda s: None,
+        )
+
+        task = type("Task", (), {
+            "cancel_requested": False,
+            "stream_id": None,
+            "_last_terminal_snapshot": "",
+            "_mock_duration_applied": False,
+        })()
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=task,
+            run_phase_fn=fake_run_phase,
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            get_session_usage_fn=usage_fn,
+            action_settings=[
+                {"event": "session_usage", "threshold": 90, "action": "await_reset"},
+            ],
+            terminate_pty_fn=lambda: None,
+        )
+
+        loop._running = True
+
+        # Simulate the tick thread having already detected the threshold and
+        # set a pending action (which also terminated the PTY, hence -15).
+        loop._pending_action = {
+            "event": "session_usage",
+            "threshold": 90,
+            "action": "await_reset",
+            "label": "session",
+        }
+
+        exit_code, output = loop._run_coding_phase(
+            session=None,
+            task_description="test task",
+            coding_account="mock-1",
+            coding_provider="mock",
+            screenshots=None,
+            rows=24, cols=80,
+            git_mgr=None,
+            coding_model=None,
+            coding_reasoning=None,
+        )
+
+        # The await_reset handler should have been invoked and run continuation
+        assert exit_code == 0, (
+            f"Expected exit_code=0 after await_reset handling, got {exit_code}"
+        )
+        assert "continuation" in phases_run, (
+            f"Expected continuation phase to run, only got {phases_run}"
+        )
+
+        # Verify paused milestone was emitted
+        milestone_summaries = [
+            e[1].get("summary", "") for e in emitted if e[0] == "milestone"
+        ]
+        assert any("Paused" in s for s in milestone_summaries), (
+            f"Expected 'Paused' milestone, got {milestone_summaries}"
+        )
+
+    def test_second_await_reset_during_continuation_is_handled(self, monkeypatch):
+        """When continuation after first await_reset hits the limit again,
+        the handler must pause a second time rather than dropping the action.
+
+        Reproduces: agent runs ~10min, hits limit, waits ~4.5h, resumes,
+        hits limit again ~16min later — second pause was silently skipped.
+        """
+        event_log = FakeEventLog()
+        emitted = []
+        phases_run = []
+        poll_call = [0]
+
+        # Usage: starts at 100%, drops to 50% after 2 polls (first reset),
+        # then 100% again (set during continuation), drops after 2 more polls.
+        usage_sequence = iter([
+            100.0, 100.0, 50.0,   # First pause: 2 polls at 100, then reset
+            100.0, 100.0, 50.0,   # Second pause: 2 polls at 100, then reset
+        ])
+
+        def usage_fn():
+            poll_call[0] += 1
+            try:
+                return next(usage_sequence)
+            except StopIteration:
+                return 50.0
+
+        continuation_count = [0]
+
+        def fake_run_phase(**kwargs):
+            phase = kwargs.get("phase")
+            phases_run.append(phase)
+            if phase == "continuation":
+                continuation_count[0] += 1
+                if continuation_count[0] == 1:
+                    # First continuation: simulate tick thread setting new
+                    # pending action during the run (second limit hit).
+                    loop._pending_action = {
+                        "event": "session_usage",
+                        "threshold": 90,
+                        "action": "await_reset",
+                        "label": "session",
+                    }
+                    return 0, "first continuation output"
+                return 0, "second continuation output"
+            return 0, "initial output"
+
+        monkeypatch.setattr(
+            "chad.server.services.session_event_loop.time.sleep",
+            lambda s: None,
+        )
+
+        task = type("Task", (), {"cancel_requested": False})()
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=task,
+            run_phase_fn=fake_run_phase,
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            get_session_usage_fn=usage_fn,
+            action_settings=[
+                {"event": "session_usage", "threshold": 90, "action": "await_reset"},
+            ],
+        )
+        loop._running = True
+
+        action = {
+            "event": "session_usage",
+            "threshold": 90,
+            "action": "await_reset",
+            "label": "session",
+        }
+        result = loop._handle_await_reset(
+            action=action,
+            session=None,
+            task_description="cleanup ui",
+            previous_output="",
+            screenshots=None,
+            rows=24, cols=80,
+            git_mgr=None,
+            coding_account="claude-1",
+            coding_provider="anthropic",
+            coding_model=None,
+            coding_reasoning=None,
+        )
+
+        # Two continuation phases should have run
+        assert phases_run.count("continuation") == 2, (
+            f"Expected 2 continuations, got {phases_run}"
+        )
+
+        # Two "Paused" milestones should have been emitted
+        milestone_summaries = [
+            e[1].get("summary", "") for e in emitted if e[0] == "milestone"
+        ]
+        paused_count = sum(1 for s in milestone_summaries if "Paused" in s)
+        assert paused_count == 2, (
+            f"Expected 2 'Paused' milestones, got {paused_count}: {milestone_summaries}"
+        )
+
+        # Two "resuming" milestones
+        resume_count = sum(1 for s in milestone_summaries if "resuming" in s)
+        assert resume_count == 2, (
+            f"Expected 2 'resuming' milestones, got {resume_count}: {milestone_summaries}"
+        )
+
+        # Final output includes both continuations
+        assert "second continuation output" in result

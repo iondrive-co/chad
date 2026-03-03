@@ -1,43 +1,37 @@
 import { useState, useCallback } from "react";
-import type { ChadAPI } from "chad-client";
-import { useSessions } from "../hooks/useSessions.ts";
+import type { ChadAPI, Session } from "chad-client";
 
 interface Props {
   api: ChadAPI;
+  sessions: Session[];
+  loading: boolean;
+  createSession: (projectPath?: string) => Promise<Session | null>;
+  deleteSession: (id: string) => Promise<void>;
   selectedId: string | null;
   onSelect: (id: string) => void;
-  version: number;
   onRefresh: () => void;
+  connected: boolean;
 }
 
 export function SessionList({
   api,
+  sessions,
+  loading,
+  createSession,
+  deleteSession,
   selectedId,
   onSelect,
-  version,
   onRefresh,
+  connected,
 }: Props) {
-  const { sessions, loading, createSession, deleteSession } = useSessions(
-    api,
-    version,
-  );
   const [projectPath, setProjectPath] = useState("");
   const [creating, setCreating] = useState(false);
 
   const handleCreate = useCallback(async () => {
     setCreating(true);
     try {
-      // Compute next task number from existing sessions
-      const taskNumbers = sessions
-        .map((s) => {
-          const match = s.name.match(/^Task (\d+)$/);
-          return match ? parseInt(match[1], 10) : 0;
-        })
-        .filter((n) => n > 0);
-      const nextNumber = taskNumbers.length > 0 ? Math.max(...taskNumbers) + 1 : 1;
-      const taskName = `Task ${nextNumber}`;
-
-      const session = await createSession(projectPath || undefined, taskName);
+      // Session name defaults to the session ID (set by the server)
+      const session = await createSession(projectPath || undefined);
       if (session) {
         onSelect(session.id);
         onRefresh();
@@ -45,7 +39,7 @@ export function SessionList({
     } finally {
       setCreating(false);
     }
-  }, [createSession, projectPath, sessions, onSelect, onRefresh]);
+  }, [createSession, projectPath, onSelect, onRefresh]);
 
   const handleDelete = useCallback(
     async (e: React.MouseEvent, id: string) => {
@@ -56,6 +50,19 @@ export function SessionList({
     [deleteSession, onRefresh],
   );
 
+  const handleResume = useCallback(
+    async (e: React.MouseEvent, id: string) => {
+      e.stopPropagation();
+      try {
+        await api.resumeSession(id);
+        onRefresh();
+      } catch (err) {
+        console.error("Failed to resume session:", err);
+      }
+    },
+    [api, onRefresh],
+  );
+
   return (
     <div className="session-list">
       <div className="session-create">
@@ -64,8 +71,9 @@ export function SessionList({
           value={projectPath}
           onChange={(e) => setProjectPath(e.target.value)}
           placeholder="Project path (optional)"
+          disabled={!connected}
         />
-        <button onClick={handleCreate} disabled={creating}>
+        <button onClick={handleCreate} disabled={creating || !connected}>
           {creating ? "..." : "New Session"}
         </button>
       </div>
@@ -82,8 +90,18 @@ export function SessionList({
             onClick={() => onSelect(s.id)}
           >
             <span className="session-name">{s.name}</span>
-            {s.active && <span className="badge running-badge">running</span>}
+            {s.active && !s.paused && <span className="badge running-badge">running</span>}
+            {s.paused && <span className="badge paused-badge">paused</span>}
             {s.has_changes && !s.active && <span className="badge changes-badge">changes</span>}
+            {s.paused && (
+              <button
+                className="resume-btn"
+                onClick={(e) => handleResume(e, s.id)}
+                title="Resume session"
+              >
+                resume
+              </button>
+            )}
             <button
               className="delete-btn"
               onClick={(e) => handleDelete(e, s.id)}

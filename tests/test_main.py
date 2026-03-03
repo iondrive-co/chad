@@ -2,7 +2,6 @@
 
 import os
 import sys
-import threading
 import time
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -26,7 +25,7 @@ class TestMain:
         mock_config.is_first_run.return_value = False
         mock_config.verify_main_password.return_value = "verified-password"
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         with patch.object(sys, "argv", ["chad"]):
@@ -49,7 +48,7 @@ class TestMain:
         mock_config.is_first_run.return_value = True
         mock_config.setup_main_password.return_value = "new-password"
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         with patch.object(sys, "argv", ["chad"]):
@@ -70,7 +69,7 @@ class TestMain:
         mock_config = Mock()
         mock_config.is_first_run.return_value = False
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         with patch.object(sys, "argv", ["chad"]):
@@ -93,7 +92,7 @@ class TestMain:
         mock_config.is_first_run.return_value = False
         mock_config.verify_main_password.return_value = "password"
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         mock_run_unified.side_effect = ValueError("Invalid password")
@@ -113,7 +112,7 @@ class TestMain:
         mock_config.is_first_run.return_value = False
         mock_config.verify_main_password.return_value = "password"
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         mock_run_unified.side_effect = KeyboardInterrupt()
@@ -171,7 +170,7 @@ class TestMain:
         mock_config.is_first_run.return_value = False
         mock_config.verify_main_password.return_value = "password"
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         # Write a port file for autodiscovery
@@ -194,7 +193,7 @@ class TestMain:
         mock_config = Mock()
         mock_config.is_first_run.return_value = False
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         with patch.object(sys, "argv", ["chad", "--server-url", "http://127.0.0.1:9999"]):
@@ -217,7 +216,7 @@ class TestMain:
         mock_config = Mock()
         mock_config.is_first_run.return_value = False
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         port_file = tmp_path / "server.port"
@@ -243,7 +242,7 @@ class TestMain:
         mock_config.is_first_run.return_value = False
         mock_config.verify_main_password.return_value = "password"
         mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "gradio"
+        mock_config.get_ui_mode.return_value = "cli"
         mock_config_class.return_value = mock_config
 
         with patch.object(sys, "argv", ["chad", "--server-url", "auto"]):
@@ -261,37 +260,26 @@ class TestParentWatchdog:
         """Watchdog thread should not start without CHAD_PARENT_PID."""
         monkeypatch.delenv("CHAD_PARENT_PID", raising=False)
 
-        thread_count_before = threading.active_count()
-        _start_parent_watchdog()
-        thread_count_after = threading.active_count()
-
-        # Should not have started a new thread
-        assert thread_count_after == thread_count_before
+        thread = _start_parent_watchdog()
+        assert thread is None
 
     def test_watchdog_not_started_with_invalid_pid(self, monkeypatch):
         """Watchdog thread should not start with invalid PID."""
         monkeypatch.setenv("CHAD_PARENT_PID", "not_a_number")
 
-        thread_count_before = threading.active_count()
-        _start_parent_watchdog()
-        thread_count_after = threading.active_count()
-
-        # Should not have started a new thread
-        assert thread_count_after == thread_count_before
+        thread = _start_parent_watchdog()
+        assert thread is None
 
     def test_watchdog_starts_with_valid_pid(self, monkeypatch):
         """Watchdog thread should start with valid parent PID."""
         # Use current process as parent (it exists, so watchdog won't kill us)
         monkeypatch.setenv("CHAD_PARENT_PID", str(os.getpid()))
 
-        thread_count_before = threading.active_count()
-        _start_parent_watchdog()
+        thread = _start_parent_watchdog()
+        assert thread is not None
         # Give thread time to start
-        time.sleep(0.1)
-        thread_count_after = threading.active_count()
-
-        # Should have started a new thread
-        assert thread_count_after == thread_count_before + 1
+        time.sleep(0.05)
+        assert thread.is_alive()
 
 
 class TestServerPortAutodiscovery:

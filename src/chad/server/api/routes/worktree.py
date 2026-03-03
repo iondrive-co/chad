@@ -237,7 +237,7 @@ async def merge_worktree(session_id: str, request: MergeRequest) -> MergeRespons
     )
 
     if success:
-        # Cleanup worktree after successful merge (mirrors Gradio attempt_merge)
+        # Cleanup worktree after successful merge
         wt_mgr.cleanup_after_merge(session_id)
         session.worktree_path = None
         session.worktree_branch = None
@@ -350,10 +350,12 @@ async def get_branches(session_id: str) -> BranchesResponse:
 
     branches = wt_mgr.get_branches()
     default_branch = wt_mgr.get_main_branch()
+    current_branch = session.worktree_branch or default_branch
 
     return BranchesResponse(
         branches=branches,
         default=default_branch,
+        current=current_branch,
     )
 
 

@@ -1,5 +1,7 @@
 """Tests for Chad server API endpoints."""
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -54,6 +56,7 @@ class TestSessionEndpoints:
         assert "id" in data
         assert data["name"] == "Test Session"
         assert data["active"] is False
+        assert data["paused"] is False  # New paused field
 
     def test_create_session_with_project_path(self, client):
         """Can create session with project path."""
@@ -105,6 +108,25 @@ class TestSessionEndpoints:
 
         # Verify it's gone
         response = client.get(f"/api/v1/sessions/{session_id}")
+        assert response.status_code == 404
+
+    def test_resume_session_not_paused(self, client):
+        """Resume endpoint returns resumed=False if session is not paused."""
+        # Create a session
+        create_resp = client.post("/api/v1/sessions", json={"name": "Test"})
+        session_id = create_resp.json()["id"]
+
+        # Try to resume when not paused
+        response = client.post(f"/api/v1/sessions/{session_id}/resume")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["session_id"] == session_id
+        assert data["resumed"] is False
+        assert "not paused" in data["message"]
+
+    def test_resume_session_not_found(self, client):
+        """Resume endpoint returns 404 for non-existent session."""
+        response = client.post("/api/v1/sessions/nonexistent/resume")
         assert response.status_code == 404
 
 
@@ -365,7 +387,11 @@ class TestWorktreeEndpoints:
         data = response.json()
         assert "branches" in data
         assert "default" in data
+        assert "current" in data  # Current worktree branch
         assert isinstance(data["branches"], list)
+        # Current branch is the worktree branch - it might be a chad-task-* branch
+        # that isn't in the main branches list if it was just created for the worktree
+        assert data["current"]  # Just verify it's not empty
 
     def test_resolve_conflicts_endpoint(self, client, tmp_path):
         """POST /worktree/resolve-conflicts should exist."""
@@ -473,119 +499,6 @@ class TestWorktreeEndpoints:
             assert wt_status.json()["exists"] is False
 
 
-class TestMockAccountUsage:
-    """Tests for get_mock_account_usage() fixture function."""
-
-    def test_openai_account_returns_session_and_weekly(self):
-        """OpenAI accounts map primary→session, secondary→weekly."""
-        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
-        result = get_mock_account_usage("codex-work")
-        assert result["account_name"] == "codex-work"
-        assert result["provider"] == "openai"
-        assert result["session_usage_pct"] == 15.0
-        assert result["weekly_usage_pct"] == 42.0
-        assert result["session_reset_eta"] is not None
-        assert result["weekly_reset_eta"] is not None
-
-    def test_openai_free_no_weekly(self):
-        """OpenAI free plan has no secondary usage → weekly is None."""
-        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
-        result = get_mock_account_usage("codex-free")
-        assert result["session_usage_pct"] == 95.0
-        assert result["weekly_usage_pct"] is None
-        assert result["weekly_reset_eta"] is None
-
-    def test_anthropic_account_returns_session_and_weekly(self):
-        """Anthropic accounts map five_hour→session, seven_day→weekly."""
-        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
-        result = get_mock_account_usage("claude-pro")
-        assert result["provider"] == "anthropic"
-        assert result["session_usage_pct"] == 23.0
-        assert result["weekly_usage_pct"] == 55.0
-
-    def test_gemini_account_returns_session_only(self):
-        """Gemini maps request count to session pct, no weekly."""
-        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
-        result = get_mock_account_usage("gemini-advanced")
-        assert result["provider"] == "gemini"
-        assert result["session_usage_pct"] is not None
-        assert result["session_usage_pct"] > 0
-        assert result["weekly_usage_pct"] is None
-
-    def test_mistral_account_returns_session_only(self):
-        """Mistral maps token count to session pct, no weekly."""
-        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
-        result = get_mock_account_usage("vibe-pro")
-        assert result["provider"] == "mistral"
-        assert result["session_usage_pct"] is not None
-        assert result["session_usage_pct"] > 0
-        assert result["weekly_usage_pct"] is None
-
-    def test_unknown_account_returns_all_none(self):
-        """Unknown accounts return all-None usage fields."""
-        from chad.ui.gradio.verification.screenshot_fixtures import get_mock_account_usage
-        result = get_mock_account_usage("nonexistent-account")
-        assert result["account_name"] == "nonexistent-account"
-        assert result["session_usage_pct"] is None
-        assert result["weekly_usage_pct"] is None
-        assert result["session_reset_eta"] is None
-        assert result["weekly_reset_eta"] is None
-
-
-class TestScreenshotModeUsageEndpoint:
-    """Tests for usage endpoint with CHAD_SCREENSHOT_MODE=1."""
-
-    @staticmethod
-    def _init_config_with_accounts(config_mgr):
-        """Initialize config with encryption salt and register mock accounts."""
-        import base64
-        import bcrypt
-        from chad.ui.gradio.verification.screenshot_fixtures import setup_mock_accounts
-        password = ""
-        password_hash = config_mgr.hash_password(password)
-        encryption_salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
-        config_mgr.save_config({
-            "password_hash": password_hash,
-            "encryption_salt": encryption_salt,
-            "accounts": {},
-        })
-        setup_mock_accounts(config_mgr, password)
-
-    def test_usage_returns_mock_data_in_screenshot_mode(self, client, monkeypatch):
-        """Usage endpoint returns fixture data when CHAD_SCREENSHOT_MODE=1."""
-        monkeypatch.setenv("CHAD_SCREENSHOT_MODE", "1")
-
-        config_mgr = get_config_manager()
-        self._init_config_with_accounts(config_mgr)
-
-        response = client.get("/api/v1/accounts/claude-pro/usage")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["account_name"] == "claude-pro"
-        assert data["provider"] == "anthropic"
-        assert data["session_usage_pct"] == 23.0
-        assert data["weekly_usage_pct"] == 55.0
-
-    def test_usage_returns_mock_for_openai_in_screenshot_mode(self, client, monkeypatch):
-        """OpenAI usage endpoint returns fixture data in screenshot mode."""
-        monkeypatch.setenv("CHAD_SCREENSHOT_MODE", "1")
-
-        config_mgr = get_config_manager()
-        self._init_config_with_accounts(config_mgr)
-
-        response = client.get("/api/v1/accounts/codex-work/usage")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["session_usage_pct"] == 15.0
-        assert data["weekly_usage_pct"] == 42.0
-
-    def test_usage_404_for_nonexistent_account_in_screenshot_mode(self, client, monkeypatch):
-        """Non-existent accounts still return 404 in screenshot mode."""
-        monkeypatch.setenv("CHAD_SCREENSHOT_MODE", "1")
-        response = client.get("/api/v1/accounts/nonexistent/usage")
-        assert response.status_code == 404
-
-
 class TestProjectSettingsEndpoints:
     """Tests for project settings API endpoints."""
 
@@ -664,3 +577,240 @@ class TestProjectSettingsEndpoints:
         # If log_path is set, it should contain the session id
         if data["log_path"]:
             assert session_id in data["log_path"]
+
+
+class TestConnectionLogging:
+    """Tests for connection logging on SSE/WebSocket endpoints."""
+
+    def test_websocket_logs_connection(self, client, capsys):
+        """WebSocket endpoint should log connection events."""
+        # Create a session first
+        create_resp = client.post("/api/v1/sessions", json={"name": "Test WS"})
+        session_id = create_resp.json()["id"]
+
+        # Connect to WebSocket
+        with client.websocket_connect(f"/api/v1/ws/{session_id}") as websocket:
+            # Send a ping to establish connection
+            websocket.send_json({"type": "ping"})
+            response = websocket.receive_json()
+            assert response["type"] == "pong"
+
+        # Check that connection was logged
+        captured = capsys.readouterr()
+        assert f"WebSocket client connected to session {session_id}" in captured.out
+
+    def test_websocket_logs_disconnection(self, client, capsys):
+        """WebSocket endpoint should log disconnection events."""
+        # Create a session first
+        create_resp = client.post("/api/v1/sessions", json={"name": "Test Disconnect"})
+        session_id = create_resp.json()["id"]
+
+        # Connect and disconnect
+        with client.websocket_connect(f"/api/v1/ws/{session_id}") as websocket:
+            websocket.send_json({"type": "ping"})
+            websocket.receive_json()
+        # websocket is now disconnected
+
+        # Check that disconnection was logged
+        captured = capsys.readouterr()
+        assert f"WebSocket client disconnected from session {session_id}" in captured.out
+
+
+class TestHistoricalSessionEvents:
+    """Tests for viewing historical events from finished sessions."""
+
+    def test_events_endpoint_returns_historical_events_from_disk(self, client, tmp_path, monkeypatch):
+        """Events endpoint should return events from persisted JSONL even without active task."""
+        from chad.util.event_log import (
+            EventLog,
+            SessionStartedEvent,
+            TerminalOutputEvent,
+            SessionEndedEvent,
+        )
+
+        # Set up log directory
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        monkeypatch.setenv("CHAD_LOG_DIR", str(log_dir))
+
+        # Create a session
+        create_resp = client.post("/api/v1/sessions", json={"name": "Historical Test"})
+        assert create_resp.status_code == 201
+        session_id = create_resp.json()["id"]
+
+        # Manually create a persisted event log (simulating a finished session)
+        event_log = EventLog(session_id, base_dir=log_dir)
+        event_log.log(SessionStartedEvent(
+            task_description="Test task",
+            project_path="/test/path",
+            coding_provider="mock",
+            coding_account="test-account",
+        ))
+        event_log.log(TerminalOutputEvent(data="Hello from terminal"))
+        event_log.log(SessionEndedEvent(
+            success=True,
+            reason="completed",
+            total_tool_calls=5,
+            total_turns=3,
+        ))
+        event_log.close()
+
+        # Now query the events endpoint - should return the persisted events
+        response = client.get(f"/api/v1/sessions/{session_id}/events")
+        assert response.status_code == 200
+        data = response.json()
+
+        # Should have events from the persisted log
+        assert len(data["events"]) == 3
+        assert data["latest_seq"] == 3
+
+        # Check event types are present
+        event_types = [e["type"] for e in data["events"]]
+        assert "session_started" in event_types
+        assert "terminal_output" in event_types
+        assert "session_ended" in event_types
+
+        # Check terminal output content
+        terminal_events = [e for e in data["events"] if e["type"] == "terminal_output"]
+        assert len(terminal_events) == 1
+        assert terminal_events[0]["data"] == "Hello from terminal"
+
+    def test_events_endpoint_filters_by_type_for_historical(self, client, tmp_path, monkeypatch):
+        """Events endpoint should support filtering by type for historical events."""
+        from chad.util.event_log import (
+            EventLog,
+            SessionStartedEvent,
+            TerminalOutputEvent,
+            SessionEndedEvent,
+        )
+
+        # Set up log directory
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        monkeypatch.setenv("CHAD_LOG_DIR", str(log_dir))
+
+        # Create a session
+        create_resp = client.post("/api/v1/sessions", json={"name": "Filter Test"})
+        session_id = create_resp.json()["id"]
+
+        # Create persisted event log
+        event_log = EventLog(session_id, base_dir=log_dir)
+        event_log.log(SessionStartedEvent(
+            task_description="Test task",
+            project_path="/test/path",
+            coding_provider="mock",
+            coding_account="test-account",
+        ))
+        event_log.log(TerminalOutputEvent(data="Line 1"))
+        event_log.log(TerminalOutputEvent(data="Line 2"))
+        event_log.log(SessionEndedEvent(success=True, reason="done"))
+        event_log.close()
+
+        # Filter to only terminal_output events
+        response = client.get(
+            f"/api/v1/sessions/{session_id}/events",
+            params={"event_types": "terminal_output"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+
+        assert len(data["events"]) == 2
+        for event in data["events"]:
+            assert event["type"] == "terminal_output"
+
+    def test_events_endpoint_with_since_seq_for_historical(self, client, tmp_path, monkeypatch):
+        """Events endpoint should support since_seq filtering for historical events."""
+        from chad.util.event_log import EventLog, TerminalOutputEvent
+
+        # Set up log directory
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        monkeypatch.setenv("CHAD_LOG_DIR", str(log_dir))
+
+        # Create a session
+        create_resp = client.post("/api/v1/sessions", json={"name": "Seq Test"})
+        session_id = create_resp.json()["id"]
+
+        # Create persisted event log with multiple events
+        event_log = EventLog(session_id, base_dir=log_dir)
+        for i in range(5):
+            event_log.log(TerminalOutputEvent(data=f"Event {i}"))
+        event_log.close()
+
+        # Get events after seq 2
+        response = client.get(
+            f"/api/v1/sessions/{session_id}/events",
+            params={"since_seq": 2},
+        )
+        assert response.status_code == 200
+        data = response.json()
+
+        assert len(data["events"]) == 3  # seqs 3, 4, 5
+        seqs = [e["seq"] for e in data["events"]]
+        assert seqs == [3, 4, 5]
+
+
+class TestUploadEndpoint:
+    """Tests for file upload functionality."""
+
+    def test_upload_screenshot(self, client, tmp_path):
+        """Can upload a screenshot file."""
+        # Create a test image file (PNG-like bytes)
+        png_header = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
+        files = {"file": ("test.png", png_header, "image/png")}
+
+        response = client.post("/api/v1/uploads", files=files)
+        assert response.status_code == 201
+        data = response.json()
+        assert "path" in data
+        assert data["filename"] == "test.png"
+        # Verify the file was saved
+        assert Path(data["path"]).exists()
+
+    def test_upload_multiple_screenshots(self, client, tmp_path):
+        """Can upload multiple screenshot files."""
+        png_header = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
+
+        # Upload first file
+        response1 = client.post(
+            "/api/v1/uploads",
+            files={"file": ("screenshot1.png", png_header, "image/png")}
+        )
+        assert response1.status_code == 201
+
+        # Upload second file
+        response2 = client.post(
+            "/api/v1/uploads",
+            files={"file": ("screenshot2.png", png_header, "image/png")}
+        )
+        assert response2.status_code == 201
+
+        # Paths should be different
+        assert response1.json()["path"] != response2.json()["path"]
+
+    def test_upload_rejects_non_image(self, client):
+        """Rejects non-image file types."""
+        response = client.post(
+            "/api/v1/uploads",
+            files={"file": ("malware.exe", b"bad content", "application/octet-stream")}
+        )
+        assert response.status_code == 400
+        assert "image" in response.json()["detail"].lower()
+
+    def test_upload_accepts_jpeg(self, client):
+        """Accepts JPEG images."""
+        jpeg_header = b'\xff\xd8\xff\xe0' + b'\x00' * 100
+        response = client.post(
+            "/api/v1/uploads",
+            files={"file": ("photo.jpg", jpeg_header, "image/jpeg")}
+        )
+        assert response.status_code == 201
+
+    def test_upload_accepts_webp(self, client):
+        """Accepts WebP images."""
+        webp_header = b'RIFF\x00\x00\x00\x00WEBP' + b'\x00' * 100
+        response = client.post(
+            "/api/v1/uploads",
+            files={"file": ("image.webp", webp_header, "image/webp")}
+        )
+        assert response.status_code == 201

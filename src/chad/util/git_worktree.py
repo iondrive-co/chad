@@ -227,9 +227,19 @@ class GitWorktreeManager:
         worktree_path = self._worktree_path(task_id)
         branch_name = self._branch_name(task_id)
 
-        # Clean up any existing worktree/branch from previous runs
-        if self.worktree_exists(task_id):
+        # Clean up any existing worktree/branch from previous runs.
+        # Also check if the branch exists even when the directory doesn't — a crash
+        # can leave a stale git registration that causes "already used by worktree"
+        # on the next create attempt.
+        branch_registered = (
+            self._run_git("rev-parse", "--verify", branch_name, check=False).returncode == 0
+        )
+        if self.worktree_exists(task_id) or branch_registered:
             self.delete_worktree(task_id)
+
+        # Prune any lingering stale worktree entries (e.g. from server crashes)
+        # so git doesn't block the upcoming add with "already used by worktree".
+        self._run_git("worktree", "prune", check=False)
 
         # Ensure worktree base directory exists
         self.worktree_base.mkdir(parents=True, exist_ok=True)
@@ -272,11 +282,12 @@ class GitWorktreeManager:
         if worktree_path.exists():
             result = self._run_git("worktree", "remove", "--force", str(worktree_path), check=False)
             if result.returncode != 0:
-                # Try to prune and remove directory manually
-                self._run_git("worktree", "prune", check=False)
                 import shutil
-
                 shutil.rmtree(worktree_path, ignore_errors=True)
+
+        # Prune stale registrations so git won't block branch deletion with
+        # "already used by worktree" (e.g. directory was deleted without cleanup).
+        self._run_git("worktree", "prune", check=False)
 
         # Clean up any .pth files that reference this worktree
         main_venv = find_main_venv(self.project_path)
@@ -317,50 +328,66 @@ class GitWorktreeManager:
         ahead_count = int(result.stdout.strip()) if result.stdout.strip() else 0
         return ahead_count > 0
 
+    def _diff_target(self, task_id: str, base_commit: str | None) -> str:
+        """Return the git ref to diff against.
+
+        Uses base_commit if provided, otherwise diffs against the main branch.
+        This captures both committed and uncommitted changes on the worktree branch.
+        """
+        if base_commit:
+            return base_commit
+        return self.get_main_branch()
+
     def get_diff_summary(self, task_id: str, base_commit: str | None = None) -> str:
-        """Get a summary of *uncommitted* changes in the worktree."""
+        """Get a summary of all changes in the worktree vs the base."""
         worktree_path = self._worktree_path(task_id)
         if not worktree_path.exists():
             return ""
 
-        # Staged + unstaged diff against HEAD
-        stat_result = self._run_git("diff", "--stat", "HEAD", cwd=worktree_path, check=False)
+        target = self._diff_target(task_id, base_commit)
+
+        # Diff working tree (committed + uncommitted) against the base
+        stat_result = self._run_git("diff", "--stat", target, cwd=worktree_path, check=False)
         stat = stat_result.stdout.strip()
 
-        status_result = self._run_git("status", "--porcelain", cwd=worktree_path, check=False)
-        status = status_result.stdout.strip()
+        # Also check for untracked files not captured by diff
+        untracked = self._run_git(
+            "ls-files", "--others", "--exclude-standard", cwd=worktree_path, check=False
+        )
+        untracked_files = [f for f in untracked.stdout.splitlines() if f.strip()]
 
-        if not status and not stat:
+        if not stat and not untracked_files:
             return ""
 
-        summary_lines = ["**Uncommitted changes:**"]
+        summary_lines = ["**Changes:**"]
         if stat:
             summary_lines.append("```\n" + stat + "\n```")
-        else:
-            # Fall back to porcelain output for clarity when --stat is empty (e.g., rename only)
-            summary_lines.append("```\n" + status + "\n```")
+        if untracked_files:
+            summary_lines.append("**New files:** " + ", ".join(untracked_files))
 
         return "\n".join(summary_lines)
 
     def get_full_diff(self, task_id: str, base_commit: str | None = None) -> str:
-        """Get the full diff content for *uncommitted* worktree changes."""
+        """Get the full diff content for all worktree changes vs the base."""
         worktree_path = self._worktree_path(task_id)
         if not worktree_path.exists():
             return ""
 
-        result = self._run_git("diff", "HEAD", cwd=worktree_path, check=False)
+        target = self._diff_target(task_id, base_commit)
+        result = self._run_git("diff", target, cwd=worktree_path, check=False)
         return result.stdout.strip() or "No changes"
 
     def get_parsed_diff(self, task_id: str, base_commit: str | None = None) -> list[FileDiff]:
-        """Get structured diff data for *uncommitted* worktree changes."""
+        """Get structured diff data for all worktree changes vs the base."""
         worktree_path = self._worktree_path(task_id)
         if not worktree_path.exists():
             return []
 
+        target = self._diff_target(task_id, base_commit)
         diff_texts = []
 
-        # Staged + unstaged changes (tracked files)
-        result = self._run_git("diff", "HEAD", cwd=worktree_path, check=False)
+        # All changes (committed + uncommitted) vs base
+        result = self._run_git("diff", target, cwd=worktree_path, check=False)
         if result.stdout.strip():
             diff_texts.append(result.stdout)
 
@@ -381,27 +408,7 @@ class GitWorktreeManager:
         if not diff_texts:
             return []
 
-        parsed = self._parse_unified_diff("\n".join(diff_texts))
-
-        # Filter to files that actually appear in status/untracked to avoid showing committed-only files
-        status = self._run_git("status", "--porcelain", cwd=worktree_path, check=False).stdout.splitlines()
-        changed_files = {line[3:].strip() for line in status if line.strip()}
-        changed_files.update(
-            path for path in
-            self._run_git("ls-files", "--others", "--exclude-standard", cwd=worktree_path, check=False).stdout.splitlines()
-            if path.strip()
-        )
-
-        def _matches(file_path: str) -> bool:
-            p = Path(file_path)
-            try:
-                rel = p.resolve().relative_to(worktree_path.resolve())
-                rel_str = rel.as_posix()
-            except Exception:
-                rel_str = p.name
-            return rel_str in changed_files or p.name in {Path(c).name for c in changed_files}
-
-        return [f for f in parsed if _matches(f.new_path)]
+        return self._parse_unified_diff("\n".join(diff_texts))
 
     def _parse_unified_diff(self, diff_text: str) -> list[FileDiff]:
         """Parse unified diff output into structured FileDiff objects."""
@@ -583,6 +590,13 @@ class GitWorktreeManager:
 
             if not worktree_path.exists():
                 return False, None, "Worktree not found"
+
+            # Refuse to merge into the worktree's own branch — that would produce
+            # a "already used by worktree" error from git checkout.
+            if merge_target == branch_name or merge_target.startswith("chad-task-"):
+                return False, None, (
+                    f"Cannot merge into '{merge_target}': target must be a regular branch"
+                )
 
             # If there is nothing to merge, surface a clear error early
             if not self.has_changes(task_id):

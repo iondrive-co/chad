@@ -227,6 +227,68 @@ class TestGitWorktreeManager:
         assert result is True
         assert not worktree_path.exists()
 
+    def test_create_worktree_recovers_from_stale_branch_registration(self, git_repo):
+        """create_worktree must succeed even when the branch exists but the directory was
+        deleted without proper cleanup (e.g. server crash).
+
+        Previously this would fail with:
+            fatal: 'chad-task-X' is already used by worktree at '...'
+        because worktree_exists only checked the directory, not the git branch registration.
+        """
+        import shutil
+
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-stale-branch"
+
+        # Create a worktree normally
+        worktree_path, _ = mgr.create_worktree(task_id)
+        assert worktree_path.exists()
+
+        # Simulate a crash: delete the directory without running git worktree remove
+        shutil.rmtree(worktree_path)
+        assert not worktree_path.exists()
+
+        # The git branch registration still exists — verify
+        branch_name = mgr._branch_name(task_id)
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", branch_name],
+            cwd=git_repo,
+            capture_output=True,
+        )
+        assert result.returncode == 0, "branch should still be registered"
+
+        # Creating the worktree again should NOT raise "already used by worktree"
+        new_path, _ = mgr.create_worktree(task_id)
+        assert new_path.exists()
+
+    def test_merge_rejects_worktree_branch_as_target(self, git_repo):
+        """merge_to_main must refuse when the target branch is a worktree branch.
+
+        Attempting git checkout on a branch checked out in a worktree raises:
+            fatal: 'chad-task-X' is already used by worktree at '...'
+        """
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-bad-target"
+
+        worktree_path, _ = mgr.create_worktree(task_id)
+        (worktree_path / "feature.txt").write_text("feature\n")
+        subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Add feature"],
+            cwd=worktree_path,
+            check=True,
+            capture_output=True,
+        )
+
+        # Passing the worktree branch itself as the target must fail cleanly
+        branch_name = mgr._branch_name(task_id)
+        success, conflicts, error = mgr.merge_to_main(task_id, target_branch=branch_name)
+
+        assert success is False
+        assert conflicts is None
+        assert error is not None
+        assert "chad-task-" in error or "Cannot merge" in error
+
     def test_reset_worktree_resets_changes(self, git_repo):
         """Test resetting a worktree back to its base commit."""
         mgr = GitWorktreeManager(git_repo)
@@ -294,7 +356,7 @@ class TestGitWorktreeManager:
         assert mgr.has_changes(task_id) is True
 
     def test_get_diff_summary(self, git_repo):
-        """Test getting diff summary."""
+        """Test getting diff summary for uncommitted changes."""
         mgr = GitWorktreeManager(git_repo)
         task_id = "test-task-7"
 
@@ -302,11 +364,10 @@ class TestGitWorktreeManager:
         (worktree_path / "new_file.txt").write_text("New content")
 
         summary = mgr.get_diff_summary(task_id)
-        assert "Uncommitted changes" in summary
         assert "new_file.txt" in summary
 
-    def test_diff_summary_ignores_committed_changes(self, git_repo):
-        """Committed-only worktree should report no uncommitted summary."""
+    def test_diff_summary_includes_committed_changes(self, git_repo):
+        """Committed changes on worktree branch should appear in diff summary."""
         mgr = GitWorktreeManager(git_repo)
         task_id = "test-task-7b"
 
@@ -316,10 +377,10 @@ class TestGitWorktreeManager:
         subprocess.run(["git", "commit", "-m", "Commit file"], cwd=worktree_path, check=True, capture_output=True)
 
         summary = mgr.get_diff_summary(task_id)
-        assert summary == ""
+        assert "committed.txt" in summary
 
-    def test_parsed_diff_only_uncommitted(self, git_repo):
-        """Parsed diff should only include uncommitted changes."""
+    def test_parsed_diff_includes_committed_and_uncommitted(self, git_repo):
+        """Parsed diff should include both committed and uncommitted changes."""
         mgr = GitWorktreeManager(git_repo)
         task_id = "test-task-7c"
 
@@ -333,7 +394,7 @@ class TestGitWorktreeManager:
         diffs = mgr.get_parsed_diff(task_id)
         names = [Path(f.new_path).name for f in diffs]
         assert "uncommitted.txt" in names
-        assert "committed.txt" not in names
+        assert "committed.txt" in names
 
     def test_commit_all_changes(self, git_repo):
         """Test committing all changes."""

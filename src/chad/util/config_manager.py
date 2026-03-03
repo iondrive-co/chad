@@ -36,7 +36,7 @@ CONFIG_BASE_KEYS: set[str] = {
     "slack_enabled",       # Whether Slack integration is active
     "slack_bot_token",     # Encrypted Slack bot token (xoxb-...)
     "slack_channel",       # Slack channel ID to post milestones to
-    "slack_signing_secret",  # Slack app signing secret for webhook verification
+
 }
 
 
@@ -81,6 +81,13 @@ class ConfigManager:
             if key in config:
                 del config[key]
                 changed = True
+
+        # Normalize legacy ui_mode values to supported options.
+        if config.get("ui_mode") not in (None, "cli", "react"):
+            # Default any unknown legacy value to the modern default
+            config["ui_mode"] = "react"
+            changed = True
+
         if changed:
             self.save_config(config)
 
@@ -285,7 +292,7 @@ class ConfigManager:
         # Generate a salt for encryption (different from bcrypt salt)
         encryption_salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
 
-        config = {"password_hash": password_hash, "encryption_salt": encryption_salt, "accounts": {}, "ui_mode": "gradio"}
+        config = {"password_hash": password_hash, "encryption_salt": encryption_salt, "accounts": {}, "ui_mode": "react"}
         self.save_config(config)
 
         print("\nMain password configured successfully!")
@@ -343,7 +350,7 @@ class ConfigManager:
                 new_password_hash = self.hash_password(password)
                 encryption_salt = base64.urlsafe_b64encode(bcrypt.gensalt()).decode()
 
-                config = {"password_hash": new_password_hash, "encryption_salt": encryption_salt, "accounts": {}, "ui_mode": "gradio"}
+                config = {"password_hash": new_password_hash, "encryption_salt": encryption_salt, "accounts": {}, "ui_mode": "react"}
                 self.save_config(config)
 
                 print("\nMain password reset complete. All stored accounts have been deleted.")
@@ -708,22 +715,22 @@ class ConfigManager:
         """Get the UI mode preference.
 
         Returns:
-            UI mode: "gradio" (default) or "cli"
+            UI mode: "react" (default) or "cli"
         """
         config = self.load_config()
-        return config.get("ui_mode", "gradio")
+        return config.get("ui_mode", "react")
 
     def set_ui_mode(self, mode: str) -> None:
         """Set the UI mode preference.
 
         Args:
-            mode: "gradio" or "cli"
+            mode: "react" (default) or "cli"
 
         Raises:
             ValueError: If mode is not valid
         """
-        if mode not in ("gradio", "cli"):
-            raise ValueError(f"Invalid ui_mode: {mode}. Must be 'gradio' or 'cli'")
+        if mode not in ("react", "cli"):
+            raise ValueError(f"Invalid ui_mode: {mode}. Use 'react' or 'cli'.")
         config = self.load_config()
         config["ui_mode"] = mode
         self.save_config(config)
@@ -1024,24 +1031,6 @@ class ConfigManager:
             config["slack_channel"] = channel
         elif "slack_channel" in config:
             del config["slack_channel"]
-        self.save_config(config)
-
-    def get_slack_signing_secret(self) -> str | None:
-        """Get the Slack app signing secret used for webhook verification."""
-        config = self.load_config()
-        return config.get("slack_signing_secret") or None
-
-    def set_slack_signing_secret(self, secret: str | None) -> None:
-        """Store the Slack app signing secret.
-
-        Args:
-            secret: Signing secret string, or None to clear
-        """
-        config = self.load_config()
-        if secret:
-            config["slack_signing_secret"] = secret
-        elif "slack_signing_secret" in config:
-            del config["slack_signing_secret"]
         self.save_config(config)
 
 

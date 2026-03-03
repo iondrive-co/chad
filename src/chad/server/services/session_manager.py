@@ -16,9 +16,11 @@ class Session:
     """Per-session state for concurrent task execution."""
 
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
-    name: str = "New Session"
+    name: str = ""
     cancel_requested: bool = False
+    resume_requested: bool = False  # Set to force resume from paused state
     active: bool = False
+    paused: bool = False  # Set when waiting for usage reset
     provider: Any = None
     config: Any = None
     log_path: Path | None = None
@@ -65,8 +67,9 @@ class SessionManager:
             ConfigManager().ensure_recent_backup()
             session = Session(
                 project_path=project_path,
-                name=name or "New Session",
             )
+            # Default name to session ID if none provided
+            session.name = name or session.id
             self._sessions[session.id] = session
             return session
 
@@ -93,7 +96,7 @@ class SessionManager:
         """
         with self._lock:
             if session_id not in self._sessions:
-                session = Session(id=session_id)
+                session = Session(id=session_id, name=session_id)
                 self._sessions[session_id] = session
             return self._sessions[session_id]
 
@@ -150,6 +153,40 @@ class SessionManager:
             session = self._sessions.get(session_id)
             if session:
                 session.cancel_requested = value
+                return True
+            return False
+
+    def set_paused(self, session_id: str, value: bool = True) -> bool:
+        """Set the paused flag for a session.
+
+        Args:
+            session_id: The session ID
+            value: The flag value (default True)
+
+        Returns:
+            True if session was found and updated
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session:
+                session.paused = value
+                return True
+            return False
+
+    def set_resume_requested(self, session_id: str, value: bool = True) -> bool:
+        """Set the resume_requested flag for a session.
+
+        Args:
+            session_id: The session ID
+            value: The flag value (default True)
+
+        Returns:
+            True if session was found and updated
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session:
+                session.resume_requested = value
                 return True
             return False
 

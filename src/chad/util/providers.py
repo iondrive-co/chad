@@ -472,13 +472,32 @@ def _stream_pipe_output(
     - This ensures callbacks receive complete lines for JSON parsing
     """
     output_chunks: list[str] = []
-    start_time = time.time()
+    start_time = time.monotonic()
     last_activity = start_time
     idle_stalled = False
     output_queue: queue.Queue = queue.Queue()
     stop_event = threading.Event()
     # Buffer for incomplete lines (Windows pipes can split at arbitrary boundaries)
     line_buffer: list[bytes] = [b""]
+
+    # Small grace window to let the reader thread hand off any pending output
+    # before declaring an idle stall. This avoids false positives when the CPU
+    # is saturated and the reader thread is delayed.
+    idle_grace = 0.5
+
+    def _process_bytes(raw: bytes) -> None:
+        """Decode bytes into full lines, buffering partial lines between calls."""
+        if not raw:
+            return
+        combined = line_buffer[0] + raw
+        lines = combined.split(b"\n")
+        line_buffer[0] = lines[-1]  # Keep the trailing partial line (may be empty)
+        if len(lines) > 1:
+            complete_data = b"\n".join(lines[:-1]) + b"\n"
+            decoded = complete_data.decode("utf-8", errors="replace")
+            output_chunks.append(decoded)
+            if on_chunk:
+                on_chunk(decoded)
 
     def _reader() -> None:
         try:
@@ -496,8 +515,10 @@ def _stream_pipe_output(
     reader_thread = threading.Thread(target=_reader, daemon=True)
     reader_thread.start()
 
+    deadline = start_time + timeout
+
     try:
-        while time.time() - start_time < timeout:
+        while time.monotonic() < deadline:
             if process.poll() is not None and output_queue.empty() and stop_event.is_set():
                 # Process any remaining buffered content before exiting
                 if line_buffer[0]:
@@ -514,25 +535,30 @@ def _stream_pipe_output(
                 chunk = None
 
             if chunk:
-                # Combine with any buffered partial line from previous chunk
-                combined = line_buffer[0] + chunk
-                # Split into lines, keeping the last partial line in buffer
-                lines = combined.split(b"\n")
-                line_buffer[0] = lines[-1]  # Keep incomplete line for next iteration
+                _process_bytes(chunk)
+                last_activity = time.monotonic()
 
-                # Process complete lines (all but the last split result)
-                if len(lines) > 1:
-                    complete_data = b"\n".join(lines[:-1]) + b"\n"
-                    decoded = complete_data.decode("utf-8", errors="replace")
-                    output_chunks.append(decoded)
-                    if on_chunk:
-                        on_chunk(decoded)
+            if idle_timeout and (time.monotonic() - last_activity) >= idle_timeout:
+                # Give the reader thread a short grace period to deliver any
+                # already-produced output before we declare a stall.
+                processed = False
+                grace_deadline = time.monotonic() + idle_grace
+                while time.monotonic() < grace_deadline:
+                    try:
+                        pending = output_queue.get(timeout=max(0.0, grace_deadline - time.monotonic()))
+                    except queue.Empty:
+                        pending = None
 
-                start_time = time.time()
-                last_activity = start_time
+                    if pending:
+                        _process_bytes(pending)
+                        last_activity = time.monotonic()
+                        processed = True
+                        break
 
-            if idle_timeout and (time.time() - last_activity) >= idle_timeout:
-                elapsed = time.time() - last_activity
+                if processed:
+                    continue
+
+                elapsed = time.monotonic() - last_activity
                 if idle_timeout_callback and not idle_timeout_callback(elapsed):
                     continue
                 # Before declaring stall, check if data arrived in the queue
@@ -547,15 +573,7 @@ def _stream_pipe_output(
             try:
                 chunk = output_queue.get_nowait()
                 if chunk:
-                    combined = line_buffer[0] + chunk
-                    lines = combined.split(b"\n")
-                    line_buffer[0] = lines[-1]
-                    if len(lines) > 1:
-                        complete_data = b"\n".join(lines[:-1]) + b"\n"
-                        decoded = complete_data.decode("utf-8", errors="replace")
-                        output_chunks.append(decoded)
-                        if on_chunk:
-                            on_chunk(decoded)
+                    _process_bytes(chunk)
             except queue.Empty:
                 break
 
@@ -674,7 +692,17 @@ def _stream_pty_output(
 
 
 def _normalize_usage_percentage(util_value: float | int | None) -> float | None:
-    """Convert utilization values to 0-100 percentage, scaling fractional inputs."""
+    """Convert utilization values to 0-100 percentage, scaling fractional inputs.
+
+    The Anthropic usage API can return either:
+    - Fractions (0.0-1.0) representing 0-100%
+    - Direct percentages (0-100)
+
+    To distinguish: values strictly between 0 and 1 (exclusive of 1) are treated
+    as fractions and scaled by 100. The value 1.0 is ambiguous but treated as
+    1% (not 100%) since actual 100% usage typically triggers quota errors and
+    wouldn't be reported as a numeric value.
+    """
     try:
         pct = float(util_value)
     except (TypeError, ValueError):
@@ -683,8 +711,9 @@ def _normalize_usage_percentage(util_value: float | int | None) -> float | None:
     if math.isnan(pct) or math.isinf(pct):
         return None
 
-    # Anthropic usage APIs sometimes return 0.0-1.0 fractions; scale those.
-    if 0.0 <= pct <= 1.0:
+    # Scale fractional values (strictly less than 1.0) to percentages.
+    # Values >= 1.0 are assumed to already be percentages.
+    if 0.0 <= pct < 1.0:
         pct *= 100.0
 
     return max(0.0, min(100.0, pct))

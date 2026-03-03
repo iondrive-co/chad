@@ -2704,6 +2704,51 @@ class TestUsagePercentageCalculation:
 
         assert pct == pytest.approx(87.0)
 
+    def test_normalize_usage_percentage_treats_one_as_percentage_not_fraction(self, tmp_path):
+        """Utilization value of 1 should be treated as 1%, not scaled to 100%.
+
+        The Anthropic API can return either fractions (0.0-1.0) or percentages (0-100).
+        Values strictly between 0 and 1 (exclusive) are scaled as fractions.
+        The value 1 is ambiguous but more likely to be 1% than 100% (as a fraction),
+        since 100% would typically trigger quota errors before being reported.
+        """
+        from chad.util.providers import _get_claude_usage_percentage
+
+        account = "claude-one-percent"
+        self._write_claude_creds(tmp_path, account)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        # API returns 1, meaning 1% usage
+        mock_response.json.return_value = {"five_hour": {"utilization": 1}}
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path), \
+                patch("requests.get", return_value=mock_response):
+            pct = _get_claude_usage_percentage(account)
+
+        # Should be 1%, not 100%
+        assert pct == pytest.approx(1.0), f"Expected 1.0 (1%), got {pct}"
+
+    def test_normalize_usage_percentage_still_scales_true_fractions(self, tmp_path):
+        """Values strictly less than 1.0 should still be scaled as fractions.
+
+        E.g., 0.99 means 99%, not 0.99%
+        """
+        from chad.util.providers import _get_claude_usage_percentage
+
+        account = "claude-fraction"
+        self._write_claude_creds(tmp_path, account)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"five_hour": {"utilization": 0.99}}
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path), \
+                patch("requests.get", return_value=mock_response):
+            pct = _get_claude_usage_percentage(account)
+
+        assert pct == pytest.approx(99.0), f"Expected 99.0 (from 0.99 scaled), got {pct}"
+
     def test_claude_weekly_usage_percentage_scales_fractional_utilization(self, tmp_path):
         """Weekly usage should also scale fractional utilization to percentage."""
         from chad.util.providers import _get_claude_weekly_usage_percentage

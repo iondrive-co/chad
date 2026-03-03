@@ -2,16 +2,19 @@
 
 import json
 import os
-import select
 import shutil
 import signal
 import subprocess
 import sys
-import termios
 import threading
-import tty
 from pathlib import Path
 
+from chad.ui.cli.terminal_io import (
+    save_terminal,
+    restore_terminal,
+    enter_raw_mode,
+    poll_stdin,
+)
 from chad.ui.client import APIClient
 from chad.ui.client.stream_client import SyncStreamClient, decode_terminal_data
 from chad.util.providers import is_mistral_configured
@@ -395,8 +398,8 @@ def run_settings_menu(client: APIClient) -> None:
         print("  [4] Set verification model")
         print("  [5] Set max verification attempts")
         print("  [6] Action rules")
-        print("  [7] Set UI mode")
-        print("  [8] Slack integration")
+        print("  [7] Slack integration")
+        print("  [8] Remote access (tunnel)")
         print("  [b] Back to main menu")
         print()
 
@@ -603,33 +606,16 @@ def run_settings_menu(client: APIClient) -> None:
             input("Press Enter to continue...")
 
         elif choice == "7":
-            # Set UI mode
-            print()
-            print(f"Current UI mode: {preferences.ui_mode}")
-            options = [
-                ("Gradio (web interface)", "gradio"),
-                ("CLI (terminal interface)", "cli"),
-            ]
-            default_idx = 0 if preferences.ui_mode == "gradio" else 1
-            selected = select_from_list("Select UI mode:", options, default_idx)
-            if selected is not None:
-                client.set_preferences(ui_mode=selected)
-                print(f"UI mode set to: {selected}")
-            input("Press Enter to continue...")
-
-        elif choice == "8":
             # Slack integration
             print()
             print("Slack Integration")
             print("-" * 30)
             print(f"  Enabled:   {slack_settings.get('enabled', False)}")
             print(f"  Token:     {'(set)' if slack_settings.get('has_token') else '(not set)'}")
-            print(f"  Signing:   {'(set)' if slack_settings.get('has_signing_secret') else '(not set)'}")
             print(f"  Channel:   {slack_settings.get('channel') or '(not set)'}")
             print()
             print("  [e] Toggle enabled")
             print("  [t] Set bot token")
-            print("  [g] Set signing secret")
             print("  [c] Set channel ID")
             print("  [s] Send test message")
             print()
@@ -644,11 +630,6 @@ def run_settings_menu(client: APIClient) -> None:
                     if token:
                         client.set_slack_settings(bot_token=token)
                         print("Bot token saved")
-                elif sub == "g":
-                    secret = input("Signing secret: ").strip()
-                    if secret:
-                        client.set_slack_settings(signing_secret=secret)
-                        print("Signing secret saved")
                 elif sub == "c":
                     channel = input("Channel ID (e.g. C0123456789): ").strip()
                     if channel:
@@ -660,6 +641,63 @@ def run_settings_menu(client: APIClient) -> None:
                         print("Test message sent to Slack")
                     else:
                         print(f"Failed: {result.get('error', 'unknown error')}")
+            except (ValueError, EOFError):
+                pass
+            input("Press Enter to continue...")
+
+        elif choice == "8":
+            # Remote access (tunnel)
+            print()
+            print("Remote Access (Tunnel)")
+            print("-" * 30)
+            try:
+                tunnel_status = client.get_tunnel_status()
+            except Exception:
+                tunnel_status = {"running": False, "url": None, "subdomain": None, "error": None}
+            running = tunnel_status.get("running", False)
+            url = tunnel_status.get("url")
+            subdomain = tunnel_status.get("subdomain")
+            error = tunnel_status.get("error")
+            print(f"  Status:    {'Running' if running else 'Stopped'}")
+            if url:
+                print(f"  URL:       {url}")
+            if subdomain:
+                print(f"  Pairing:   {subdomain}")
+            if error:
+                print(f"  Error:     {error}")
+
+            # Show QR code if pairing URL file exists
+            pairing_url_file = Path.home() / ".chad" / "pairing-url"
+            if running and pairing_url_file.exists():
+                from chad.util.qr import print_pairing_qr
+                pairing_url = pairing_url_file.read_text().strip()
+                if pairing_url:
+                    print()
+                    print("Scan to connect:")
+                    print_pairing_qr(pairing_url)
+                    qr_png = Path.home() / ".chad" / "pairing-qr.png"
+                    if qr_png.exists():
+                        print(f"  QR PNG: {qr_png}")
+
+            print()
+            if running:
+                print("  [s] Stop tunnel")
+            else:
+                print("  [s] Start tunnel")
+            print()
+            try:
+                sub = input("Choice (or Enter to skip): ").strip().lower()
+                if sub == "s":
+                    if running:
+                        result = client.stop_tunnel()
+                        print("Tunnel stopped")
+                    else:
+                        result = client.start_tunnel()
+                        if result.get("running"):
+                            print(f"Tunnel started: {result.get('url')}")
+                            print(f"Pairing code: {result.get('subdomain')}")
+                        else:
+                            print(f"Failed: {result.get('error', 'unknown error')}")
             except (ValueError, EOFError):
                 pass
             input("Press Enter to continue...")
@@ -874,11 +912,7 @@ def run_task_with_streaming(
     milestone_poll_thread.start()
 
     # Save terminal state
-    old_settings = None
-    try:
-        old_settings = termios.tcgetattr(sys.stdin)
-    except termios.error:
-        pass
+    old_settings = save_terminal()
 
     exit_code = 0
 
@@ -900,7 +934,7 @@ def run_task_with_streaming(
     try:
         # Set terminal to raw mode for passthrough
         if old_settings:
-            tty.setraw(sys.stdin.fileno())
+            enter_raw_mode()
 
         # Stream events and relay I/O
         for event in stream_client.stream_events(session_id, include_terminal=True):
@@ -927,22 +961,19 @@ def run_task_with_streaming(
 
             elif event.event_type == "error":
                 # Restore terminal before printing error
-                if old_settings:
-                    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                restore_terminal(old_settings)
                 print(f"\nError: {event.data.get('error', 'Unknown error')}")
                 exit_code = 1
                 break
 
             # Check for user input (non-blocking)
-            if old_settings:
-                rlist, _, _ = select.select([sys.stdin], [], [], 0)
-                if sys.stdin in rlist:
-                    try:
-                        input_data = os.read(sys.stdin.fileno(), 1024)
-                        if input_data:
-                            stream_client.send_input(session_id, input_data)
-                    except OSError:
-                        pass
+            if old_settings and poll_stdin():
+                try:
+                    input_data = os.read(sys.stdin.fileno(), 1024)
+                    if input_data:
+                        stream_client.send_input(session_id, input_data)
+                except OSError:
+                    pass
 
     finally:
         milestone_poll_stop.set()
@@ -957,8 +988,7 @@ def run_task_with_streaming(
                 pass
 
         # Restore terminal state
-        if old_settings:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        restore_terminal(old_settings)
 
     return exit_code
 
@@ -1107,14 +1137,13 @@ def run_cli(client: APIClient) -> None:
                 print("Creating session...")
                 session = client.create_session(
                     project_path=project_path,
-                    name=f"Task: {task_description[:30]}...",
                 )
 
                 # Run with streaming
                 clear_screen()
                 print(f"Starting {coding_provider} agent...")
                 print(f"Project: {project_path}")
-                print(f"Task: {task_description[:80]}...")
+                print(f"Task: {task_description}")
                 print("-" * 60)
                 print()
 
@@ -1213,7 +1242,89 @@ def run_cli(client: APIClient) -> None:
         stream_client.close()
 
 
-def launch_cli_ui(api_base_url: str = "http://localhost:8000", password: str | None = None) -> None:
+def _parse_connection_input(text: str) -> tuple[str, str | None]:
+    """Parse a connection input string into (url, token).
+
+    Handles:
+      - Direct URLs: "http://localhost:3184" -> ("http://localhost:3184", None)
+      - Host:port: "localhost:8000" -> ("http://localhost:3184", None)
+      - CF tunnel with token: "subdomain:mytoken" -> ("https://subdomain.trycloudflare.com", "mytoken")
+      - CF tunnel subdomain: "my-tunnel" -> ("https://my-tunnel.trycloudflare.com", None)
+      - Empty string: ("", None)
+    """
+    text = text.strip().rstrip("/")
+    if not text:
+        return ("", None)
+
+    # Direct URL with protocol
+    if "://" in text:
+        return (text, None)
+
+    # host:port — digits-only after the last colon
+    colon_idx = text.rfind(":")
+    if colon_idx > 0:
+        after_colon = text[colon_idx + 1:]
+        if after_colon.isdigit():
+            return (f"http://{text}", None)
+        # CF tunnel "subdomain:token"
+        subdomain = text[:colon_idx]
+        return (f"https://{subdomain}.trycloudflare.com", after_colon)
+
+    # Bare string — CF tunnel subdomain
+    return (f"https://{text}.trycloudflare.com", None)
+
+
+def _run_disconnected_menu(original_url: str) -> None:
+    """Show a menu when the server is unreachable, allowing the user to connect."""
+    print(f"\nCannot connect to Chad server at {original_url}")
+    print("Make sure the server is running (chad --mode server)\n")
+
+    while True:
+        print("  [1] Connect to a different server")
+        print("  [2] Retry current server")
+        print("  [q] Quit")
+        try:
+            choice = input("\nChoice: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nGoodbye!")
+            return
+
+        if choice == "q":
+            print("Goodbye!")
+            return
+        elif choice == "2":
+            url = original_url
+        elif choice == "1":
+            try:
+                raw = input("Server URL or pairing code: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nGoodbye!")
+                return
+            if not raw:
+                continue
+            url, _token = _parse_connection_input(raw)
+            if not url:
+                continue
+        else:
+            continue
+
+        client = APIClient(base_url=url)
+        try:
+            status = client.get_status()
+            print(f"Connected to Chad server v{status.get('version', 'unknown')}")
+            try:
+                run_cli(client)
+            except KeyboardInterrupt:
+                print("\n\nGoodbye!")
+            finally:
+                client.close()
+            return
+        except Exception as e:
+            print(f"  Failed: {e}\n")
+            client.close()
+
+
+def launch_cli_ui(api_base_url: str = "http://localhost:3184", password: str | None = None) -> None:
     """Launch the Chad CLI UI.
 
     Args:
@@ -1223,14 +1334,12 @@ def launch_cli_ui(api_base_url: str = "http://localhost:8000", password: str | N
     client = APIClient(base_url=api_base_url)
 
     try:
-        # Verify server is available
         status = client.get_status()
         print(f"Connected to Chad server v{status.get('version', 'unknown')}")
-    except Exception as e:
-        print(f"Error: Cannot connect to Chad server at {api_base_url}")
-        print(f"  {e}")
-        print("\nMake sure the server is running (chad --mode server)")
-        sys.exit(1)
+    except Exception:
+        client.close()
+        _run_disconnected_menu(api_base_url)
+        return
 
     try:
         run_cli(client)

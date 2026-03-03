@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = ROOT / "pyproject.toml"
 PACKAGE_INIT = ROOT / "src" / "chad" / "__init__.py"
 DIST_DIR = ROOT / "dist"
+BUILD_UI_SCRIPT = ROOT / "scripts" / "build_ui.py"
 
 
 def _get_current_version() -> str:
@@ -82,11 +83,18 @@ def run_command(cmd: Sequence[str]) -> None:
     subprocess.run(cmd, check=True)
 
 
+def build_ui() -> None:
+    """Build the React UI and bundle it into the Python package."""
+    print("Building React UI for packaging ...")
+    run_command([sys.executable, str(BUILD_UI_SCRIPT)])
+
+
 def main() -> None:
     current_version = _get_current_version()
     version = _prompt_version(current_version)
     update_versions(version)
     clean_dist()
+    build_ui()
     run_command([sys.executable, "-m", "pip", "install", "--upgrade", "build", "twine"])
     run_command([sys.executable, "-m", "build"])
     artifacts = sorted(DIST_DIR.glob("*"))

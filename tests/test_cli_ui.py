@@ -169,12 +169,122 @@ class TestProviderOauthFlow:
         assert "No API key" in message
 
 
+class TestConnectionParsing:
+    """Tests for _parse_connection_input used by CLI disconnected menu."""
+
+    def test_direct_http_url(self):
+        from chad.ui.cli.app import _parse_connection_input
+        url, token = _parse_connection_input("http://localhost:8000")
+        assert url == "http://localhost:8000"
+        assert token is None
+
+    def test_direct_https_url(self):
+        from chad.ui.cli.app import _parse_connection_input
+        url, token = _parse_connection_input("https://my.server.com")
+        assert url == "https://my.server.com"
+        assert token is None
+
+    def test_url_trailing_slash_stripped(self):
+        from chad.ui.cli.app import _parse_connection_input
+        url, token = _parse_connection_input("http://localhost:8000/")
+        assert url == "http://localhost:8000"
+        assert token is None
+
+    def test_host_port_shorthand(self):
+        from chad.ui.cli.app import _parse_connection_input
+        url, token = _parse_connection_input("localhost:8000")
+        assert url == "http://localhost:8000"
+        assert token is None
+
+    def test_ip_port(self):
+        from chad.ui.cli.app import _parse_connection_input
+        url, token = _parse_connection_input("192.168.1.5:3000")
+        assert url == "http://192.168.1.5:3000"
+        assert token is None
+
+    def test_cf_tunnel_with_token(self):
+        from chad.ui.cli.app import _parse_connection_input
+        url, token = _parse_connection_input("my-subdomain:secrettoken")
+        assert url == "https://my-subdomain.trycloudflare.com"
+        assert token == "secrettoken"
+
+    def test_cf_tunnel_bare_subdomain(self):
+        from chad.ui.cli.app import _parse_connection_input
+        url, token = _parse_connection_input("my-tunnel")
+        assert url == "https://my-tunnel.trycloudflare.com"
+        assert token is None
+
+    def test_empty_string(self):
+        from chad.ui.cli.app import _parse_connection_input
+        url, token = _parse_connection_input("")
+        assert url == ""
+        assert token is None
+
+    def test_whitespace_only(self):
+        from chad.ui.cli.app import _parse_connection_input
+        url, token = _parse_connection_input("   ")
+        assert url == ""
+        assert token is None
+
+
+class TestDisconnectedCLI:
+    """Tests for graceful CLI behavior when server is unreachable."""
+
+    def test_launch_cli_ui_shows_menu_instead_of_exit(self, monkeypatch):
+        """launch_cli_ui should show disconnected menu instead of sys.exit(1)."""
+        from chad.ui.cli.app import launch_cli_ui
+
+        # Mock APIClient to always fail
+        class FakeClient:
+            def __init__(self, **kwargs):
+                self.base_url = kwargs.get("base_url", "")
+
+            def get_status(self):
+                raise ConnectionError("refused")
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("chad.ui.cli.app.APIClient", FakeClient)
+
+        # User presses "q" to quit immediately
+        inputs = iter(["q"])
+        monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))
+
+        # Should NOT raise SystemExit
+        launch_cli_ui(api_base_url="http://localhost:99999")
+
+    def test_disconnected_menu_retry_connects(self, monkeypatch):
+        """Disconnected menu option 2 (retry) should attempt to connect."""
+        from chad.ui.cli.app import _run_disconnected_menu
+
+        connect_attempts = []
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                self.base_url = kwargs.get("base_url", "")
+                self.token = kwargs.get("token")
+
+            def get_status(self):
+                connect_attempts.append(self.base_url)
+                raise ConnectionError("still down")
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("chad.ui.cli.app.APIClient", FakeClient)
+        inputs = iter(["2", "q"])
+        monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))
+
+        _run_disconnected_menu("http://localhost:8000")
+        assert "http://localhost:8000" in connect_attempts
+
+
 class TestCLIStreamingMilestones:
     """Tests for milestone delivery in CLI task streaming."""
 
     def test_run_task_with_streaming_emits_milestones_from_api_endpoint(self, monkeypatch):
         """CLI should fetch milestones from the dedicated milestones API endpoint."""
-        import termios
         from unittest.mock import Mock
         from chad.ui.client.stream_client import StreamEvent
         from chad.ui.cli.app import run_task_with_streaming
@@ -203,11 +313,8 @@ class TestCLIStreamingMilestones:
             writes.append(data)
             return len(data)
 
-        def fake_tcgetattr(_fd):
-            raise termios.error("not a tty")
-
         monkeypatch.setattr("chad.ui.cli.app.get_terminal_size", lambda: (24, 80))
-        monkeypatch.setattr("chad.ui.cli.app.termios.tcgetattr", fake_tcgetattr)
+        monkeypatch.setattr("chad.ui.cli.app.save_terminal", lambda: None)
         monkeypatch.setattr("chad.ui.cli.app.signal.signal", lambda *_args, **_kwargs: None)
         monkeypatch.setattr("chad.ui.cli.app.os.write", fake_write)
 

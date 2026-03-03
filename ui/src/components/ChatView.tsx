@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import type { ChadAPI } from "chad-client";
+import type { ChadAPI, StreamEvent } from "chad-client";
 import { useStream } from "../hooks/useStream.ts";
 import { TaskForm } from "./TaskForm.tsx";
 import { MergePanel } from "./MergePanel.tsx";
@@ -12,6 +12,10 @@ interface Props {
   sessionId: string;
   onSessionChange: () => void;
   defaultProjectPath?: string;
+  apiBaseUrl?: string;
+  token?: string;
+  /** Whether the session is active (from polled session list data). */
+  sessionActive?: boolean;
 }
 
 /** Strip ANSI escape codes for plain-text display. */
@@ -24,6 +28,9 @@ export function ChatView({
   sessionId,
   onSessionChange,
   defaultProjectPath = "",
+  apiBaseUrl,
+  token,
+  sessionActive = false,
 }: Props) {
   const [taskActive, setTaskActive] = useState(false);
   const [followupText, setFollowupText] = useState("");
@@ -32,6 +39,14 @@ export function ChatView({
   const [lastCodingAgent, setLastCodingAgent] = useState<string | null>(null);
   const outputRef = useRef<HTMLPreElement>(null);
 
+  // Historical output/events loaded from persisted log for finished sessions
+  const [historicalOutput, setHistoricalOutput] = useState("");
+  const [historicalEvents, setHistoricalEvents] = useState<StreamEvent[]>([]);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+
+  // Current task description (extracted from session_started events)
+  const [taskDescription, setTaskDescription] = useState<string | null>(null);
+
   // Track the event log position at which the current task started, so the
   // stream skips old milestones/events from previous tasks in the same session.
   const streamSinceSeqRef = useRef<number | undefined>(undefined);
@@ -39,43 +54,106 @@ export function ChatView({
   const { terminalOutput, events, completed, error, reset } = useStream(
     taskActive ? sessionId : null,
     streamSinceSeqRef.current,
+    apiBaseUrl,
+    token,
   );
 
-  // On mount, check if this session already has an active task and reconnect,
-  // or if there are pending worktree changes that need merging.
+  // Combined output: live streaming output or historical output for finished sessions
+  const displayOutput = terminalOutput || historicalOutput;
+  const displayEvents = events.length > 0 ? events : historicalEvents;
+
+  // Load historical events when session is selected and not active
+  // This allows viewing finished sessions from any UI instance
   useEffect(() => {
     let cancelled = false;
-    api.getSession(sessionId).then(async (session) => {
-      if (!cancelled && session.active) {
+
+    // Reset history when session changes
+    setHistoricalOutput("");
+    setHistoricalEvents([]);
+    setHistoryLoaded(false);
+    setTaskDescription(null);
+
+    if (!sessionActive && !taskActive) {
+      (async () => {
+        try {
+          // Fetch all events from the persisted log
+          const data = await api.getEvents(sessionId, 0);
+          if (cancelled) return;
+
+          // Extract terminal output from terminal_output events
+          const terminalEvents = (data.events as { type: string; data?: string }[])
+            .filter((e) => e.type === "terminal_output" && e.data);
+          if (terminalEvents.length > 0) {
+            // Combine all terminal output chunks
+            const output = terminalEvents.map((e) => e.data || "").join("");
+            setHistoricalOutput(output);
+          }
+
+          // Convert events to StreamEvent format for milestones display
+          const streamEvents: StreamEvent[] = (data.events as { type: string; seq?: number }[])
+            .map((e) => ({
+              event_type: "event",
+              data: e,
+              seq: e.seq ?? null,
+            }));
+          setHistoricalEvents(streamEvents);
+          setHistoryLoaded(true);
+
+          // Extract task description from the most recent session_started event
+          const sessionStartedEvents = (data.events as { type: string; task_description?: string }[])
+            .filter((e) => e.type === "session_started" && e.task_description);
+          if (sessionStartedEvents.length > 0) {
+            const latestStart = sessionStartedEvents[sessionStartedEvents.length - 1];
+            setTaskDescription(latestStart.task_description ?? null);
+          }
+
+          // Check for pending worktree changes to merge
+          const status = await api.getWorktreeStatus(sessionId);
+          if (!cancelled && status.exists && status.has_changes) {
+            setShowMerge(true);
+          }
+        } catch {
+          // Ignore errors loading history
+          setHistoryLoaded(true);
+        }
+      })();
+    }
+
+    return () => { cancelled = true; };
+  }, [api, sessionId, sessionActive, taskActive]);
+
+  // React to session becoming active (from polling or on mount).
+  // When another UI starts a task, the polled sessionActive prop flips to true
+  // and this effect connects the WebSocket stream.
+  useEffect(() => {
+    let cancelled = false;
+    if (sessionActive && !taskActive) {
+      (async () => {
         try {
           const data = await api.getEvents(sessionId, 0, "session_started");
-          streamSinceSeqRef.current = data.latest_seq;
+          if (!cancelled) streamSinceSeqRef.current = data.latest_seq;
+          // Extract task description from the most recent session_started event
+          const sessionStartedEvents = (data.events as { type: string; task_description?: string }[])
+            .filter((e) => e.type === "session_started" && e.task_description);
+          if (!cancelled && sessionStartedEvents.length > 0) {
+            const latestStart = sessionStartedEvents[sessionStartedEvents.length - 1];
+            setTaskDescription(latestStart.task_description ?? null);
+          }
         } catch {
           // Fall back to streaming all events
         }
         if (!cancelled) setTaskActive(true);
-      } else if (!cancelled) {
-        // Session not active — check for pending worktree changes to merge
-        api.getWorktreeStatus(sessionId).then((status) => {
-          if (!cancelled && status.exists && status.has_changes) {
-            setShowMerge(true);
-          }
-        }).catch(() => {
-          // Ignore errors checking worktree status
-        });
-      }
-    }).catch(() => {
-      // Ignore - session may not exist yet
-    });
+      })();
+    }
     return () => { cancelled = true; };
-  }, [api, sessionId]);
+  }, [sessionActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-scroll terminal output
+  // Auto-scroll terminal output (live or historical)
   useEffect(() => {
     if (outputRef.current) {
       outputRef.current.scrollTop = outputRef.current.scrollHeight;
     }
-  }, [terminalOutput]);
+  }, [terminalOutput, historicalOutput]);
 
   // Mark task inactive when stream completes, check for worktree changes
   useEffect(() => {
@@ -93,7 +171,7 @@ export function ChatView({
     }
   }, [api, completed, sessionId, onSessionChange]);
 
-  const handleTaskStart = useCallback(async (codingAgent: string) => {
+  const handleTaskStart = useCallback(async (codingAgent: string, taskDesc: string) => {
     // Capture the current event log position before the task starts, so the
     // stream only shows events from this task (not old milestones/output).
     try {
@@ -103,9 +181,13 @@ export function ChatView({
       streamSinceSeqRef.current = undefined;
     }
     reset();
+    // Clear historical output when starting a new task
+    setHistoricalOutput("");
+    setHistoricalEvents([]);
     setTaskActive(true);
     setShowMerge(false);
     setLastCodingAgent(codingAgent);
+    setTaskDescription(taskDesc);
   }, [api, sessionId, reset]);
 
   const handleMergeDone = useCallback(() => {
@@ -143,15 +225,17 @@ export function ChatView({
       } catch {
         streamSinceSeqRef.current = undefined;
       }
+      const followupDesc = followupText.trim();
       await api.startTask(sessionId, {
         project_path: session.project_path || defaultProjectPath,
-        task_description: followupText.trim(),
+        task_description: followupDesc,
         coding_agent: codingAgent,
         is_followup: true,
       });
       setFollowupText("");
       reset();
       setTaskActive(true);
+      setTaskDescription(followupDesc);
     } catch {
       // ignore
     } finally {
@@ -169,8 +253,8 @@ export function ChatView({
     [handleFollowup],
   );
 
-  // Show milestones from structured events
-  const milestones = events.filter(
+  // Show milestones from structured events (live or historical)
+  const milestones = displayEvents.filter(
     (e) =>
       e.data.event_type === "milestone" ||
       e.data.type === "milestone",
@@ -210,13 +294,21 @@ export function ChatView({
         <SessionLog api={api} sessionId={sessionId} />
       </div>
 
+      {/* Task description - shown when a task is running or has output */}
+      {taskDescription && (taskActive || displayOutput) && (
+        <div className="task-description-bar">
+          <span className="task-description-label">Task:</span>
+          <span className="task-description-text">{taskDescription}</span>
+        </div>
+      )}
+
       {/* Project settings (collapsible) */}
       {currentProjectPath && (
         <ProjectSettings api={api} projectPath={currentProjectPath} />
       )}
 
       {/* Task form or streaming output */}
-      {!taskActive && !terminalOutput && !showMerge && (
+      {!taskActive && !displayOutput && !showMerge && historyLoaded && (
         <TaskForm
           api={api}
           sessionId={sessionId}
@@ -225,8 +317,8 @@ export function ChatView({
         />
       )}
 
-      {/* Terminal output */}
-      {(taskActive || terminalOutput) && (
+      {/* Terminal output (live or historical) */}
+      {(taskActive || displayOutput) && (
         <div className="terminal-area">
           <div className="terminal-header">
             {taskActive && !completed && (
@@ -237,7 +329,10 @@ export function ChatView({
                 </button>
               </>
             )}
-            {completed && <span className="done-indicator">Completed</span>}
+            {/* Show completed for live completion or historical sessions with output */}
+            {(completed || (historicalOutput && !taskActive)) && (
+              <span className="done-indicator">Completed</span>
+            )}
             {error && <span className="error-text">{error}</span>}
           </div>
 
@@ -253,7 +348,7 @@ export function ChatView({
           )}
 
           <pre ref={outputRef} className="terminal-output">
-            {stripAnsi(terminalOutput)}
+            {stripAnsi(displayOutput)}
           </pre>
         </div>
       )}
@@ -269,7 +364,7 @@ export function ChatView({
       )}
 
       {/* Follow-up input */}
-      {terminalOutput && !taskActive && (
+      {displayOutput && !taskActive && (
         <div className="followup-bar">
           <textarea
             value={followupText}

@@ -90,6 +90,12 @@ class SessionEventLoop:
         self._pending_action: dict | None = None
         self._pending_action_lock = threading.Lock()
 
+        # Slack threading: first Slack message ts is reused so all milestones stay in one thread
+        self._slack_thread_ts: str | None = None
+
+        # Slack threading: first Slack message ts is reused so all milestones stay in one thread
+        self._slack_thread_ts: str | None = None
+
         # Accumulated output from all phases
         self.accumulated_output = ""
 
@@ -165,9 +171,30 @@ class SessionEventLoop:
 
         if self._notify_slack:
             from chad.server.services.slack_service import get_slack_service
-            get_slack_service().post_milestone_async(
-                self.session_id, milestone_type, title, summary,
+
+            # Post everything to Slack in a single thread.
+            slack_result = get_slack_service().post_milestone(
+                self.session_id,
+                milestone_type,
+                title,
+                summary,
+                thread_ts=self._slack_thread_ts,
+                mention=False,
             )
+            ok, ts = slack_result if isinstance(slack_result, tuple) else (bool(slack_result), None)
+            if ok and not self._slack_thread_ts:
+                self._slack_thread_ts = ts
+
+            # For coding_complete, also emit a top-level @here ping (no thread_ts).
+            if milestone_type == "coding_complete":
+                get_slack_service().post_milestone_async(
+                    self.session_id,
+                    milestone_type,
+                    title,
+                    summary,
+                    thread_ts=None,
+                    mention=True,
+                )
 
     def _extract_meaningful_error_summary(self, tail: str) -> str | None:
         """Extract meaningful error summary from terminal output, filtering out JavaScript error objects.
@@ -248,7 +275,7 @@ class SessionEventLoop:
         return any(stripped.startswith(p) for p in SessionEventLoop._CODE_CONTENT_PREFIXES)
 
     # ---- Exploration marker detection ----
-    _EXPLORATION_LINE_RE = re.compile(r"^\s*EXPLORATION_RESULT:\s*(?P<summary>.+?)\s*$")
+    _EXPLORATION_LINE_RE = re.compile(r"EXPLORATION_RESULT:\s*(?P<summary>.+?)\s*$")
     _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
     _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
     _INVALID_EXPLORATION_PREFIXES = (
@@ -292,7 +319,7 @@ class SessionEventLoop:
             self._exploration_partial_line = lines[-1]
 
         for line in complete_lines:
-            match = self._EXPLORATION_LINE_RE.match(line)
+            match = self._EXPLORATION_LINE_RE.search(line)
             if not match:
                 continue
             summary = self._normalize_exploration_summary(match.group("summary"))
@@ -583,16 +610,16 @@ class SessionEventLoop:
         if getattr(self.task, "cancel_requested", False):
             return -1, output
 
-        if exit_code < 0:
-            return exit_code, output
-
         # Final threshold check: catches cases where the task completed before
         # the 10s periodic tick fired, or usage was already above threshold at
         # session start (the first periodic check would have seeded prev without
         # detecting the crossing).
         self._check_usage_thresholds()
 
-        # Check for pending action from background threshold check (or final check above)
+        # Check for pending action from background threshold check (or final check above).
+        # This MUST run before the exit_code < 0 check because _terminate_pty_fn()
+        # kills the agent (negative exit code) when a usage threshold is crossed.
+        # Without this, await_reset/switch_provider actions are silently skipped.
         with self._pending_action_lock:
             pending = self._pending_action
             self._pending_action = None
@@ -613,6 +640,11 @@ class SessionEventLoop:
                     coding_account, coding_provider, coding_model, coding_reasoning,
                 )
                 return 0, output + "\n" + action_output
+
+        # Now safe to bail on signal-killed agents (negative exit code).
+        # Pending actions were already handled above.
+        if exit_code < 0:
+            return exit_code, output
 
         # Check if coding completed
         summary = extract_coding_summary(output)
@@ -761,78 +793,126 @@ class SessionEventLoop:
         coding_model: str | None,
         coding_reasoning: str | None,
     ) -> str:
-        """Handle await_reset action: poll until usage drops, then resume."""
-        event_type = action.get("event")
-        threshold = action.get("threshold", 90)
-        label = action.get("label", "usage")
+        """Handle await_reset action: poll until usage drops, then resume.
 
-        # Determine which ETA and usage functions to use
-        eta_fn = None
-        mapping = self._EVENT_USAGE_MAP.get(event_type)
-        if not mapping:
-            return ""
-        fn_attr = mapping[0]
-        usage_fn = getattr(self, fn_attr, None)
-        if usage_fn is None:
-            return ""
+        Loops to handle repeated usage hits — if the continuation phase hits
+        the limit again, we pause and wait a second time rather than dropping
+        the pending action.
+        """
+        accumulated = ""
 
-        if event_type == "session_usage":
-            eta_fn = self._get_session_reset_eta_fn
-        elif event_type == "weekly_usage":
-            eta_fn = self._get_weekly_reset_eta_fn
+        while True:
+            event_type = action.get("event")
+            threshold = action.get("threshold", 90)
+            label = action.get("label", "usage")
 
-        eta_str = ""
-        if eta_fn:
-            try:
-                eta = eta_fn()
-                if eta:
-                    eta_str = f" (ETA: {eta})"
-            except Exception:
-                pass
+            # Determine which ETA and usage functions to use
+            eta_fn = None
+            mapping = self._EVENT_USAGE_MAP.get(event_type)
+            if not mapping:
+                return accumulated
+            fn_attr = mapping[0]
+            usage_fn = getattr(self, fn_attr, None)
+            if usage_fn is None:
+                return accumulated
 
-        self._emit_milestone(
-            "usage_threshold",
-            f"Paused, waiting for {label} reset{eta_str}",
-        )
+            if event_type == "session_usage":
+                eta_fn = self._get_session_reset_eta_fn
+            elif event_type == "weekly_usage":
+                eta_fn = self._get_weekly_reset_eta_fn
 
-        # Poll until usage drops below threshold
-        while self._running and not getattr(self.task, "cancel_requested", False):
-            time.sleep(10)
-            try:
-                current = usage_fn()
-            except Exception:
+            eta_str = ""
+            if eta_fn:
+                try:
+                    eta = eta_fn()
+                    if eta:
+                        eta_str = f" (ETA: {eta})"
+                except Exception:
+                    pass
+
+            self._emit_milestone(
+                "usage_threshold",
+                f"Paused, waiting for {label} reset{eta_str}",
+            )
+
+            # Set paused flag on session if available
+            if session is not None:
+                session.paused = True
+
+            # Poll until usage drops below threshold or resume is requested
+            resume_reason = None
+            while self._running and not getattr(self.task, "cancel_requested", False):
+                # Check if user requested resume
+                if session is not None and getattr(session, "resume_requested", False):
+                    session.resume_requested = False  # Clear the flag
+                    resume_reason = "user requested resume"
+                    break
+                time.sleep(10)
+                try:
+                    current = usage_fn()
+                except Exception:
+                    continue
+                if current is not None and current < threshold:
+                    resume_reason = f"{label.title()} reset detected"
+                    break
+
+            # Clear paused flag
+            if session is not None:
+                session.paused = False
+
+            if not self._running or getattr(self.task, "cancel_requested", False):
+                return accumulated
+
+            self._emit_milestone(
+                "usage_threshold",
+                f"{resume_reason}, resuming",
+            )
+
+            self._emit_fn("status", status="Resuming after reset...")
+            exit_code, cont_output = self._run_phase_fn(
+                task=self.task,
+                session=session,
+                worktree_path=self.worktree_path,
+                task_description=task_description,
+                coding_account=coding_account,
+                coding_provider=coding_provider,
+                screenshots=None,
+                phase="continuation",
+                exploration_output=previous_output,
+                rows=rows,
+                cols=cols,
+                emit=self._emit_fn,
+                git_mgr=git_mgr,
+                coding_model=coding_model,
+                coding_reasoning=coding_reasoning,
+            )
+            self._analyze_output(finalize=True)
+            accumulated += "\n" + cont_output if accumulated else cont_output
+            previous_output = cont_output
+
+            # Check if the continuation hit another usage threshold.
+            # The tick thread may have set a new pending action during the run.
+            with self._pending_action_lock:
+                new_pending = self._pending_action
+                self._pending_action = None
+
+            if not new_pending:
+                return accumulated
+
+            new_action = new_pending.get("action")
+            if new_action == "await_reset":
+                # Loop back to wait again
+                action = new_pending
                 continue
-            if current is not None and current < threshold:
-                break
+            elif new_action == "switch_provider":
+                switch_output = self._handle_switch_provider(
+                    new_pending, session, task_description, accumulated,
+                    screenshots, rows, cols, git_mgr,
+                    coding_account, coding_provider, coding_model, coding_reasoning,
+                )
+                return accumulated + "\n" + switch_output
 
-        if not self._running or getattr(self.task, "cancel_requested", False):
-            return ""
-
-        self._emit_milestone(
-            "usage_threshold",
-            f"{label.title()} reset detected, resuming",
-        )
-
-        self._emit_fn("status", status="Resuming after reset...")
-        exit_code, cont_output = self._run_phase_fn(
-            task=self.task,
-            session=session,
-            worktree_path=self.worktree_path,
-            task_description=task_description,
-            coding_account=coding_account,
-            coding_provider=coding_provider,
-            screenshots=None,
-            phase="continuation",
-            exploration_output=previous_output,
-            rows=rows,
-            cols=cols,
-            emit=self._emit_fn,
-            git_mgr=git_mgr,
-            coding_model=coding_model,
-            coding_reasoning=coding_reasoning,
-        )
-        self._analyze_output(finalize=True)
-        return cont_output
+            return accumulated
 
     def _run_verification_loop(
         self,

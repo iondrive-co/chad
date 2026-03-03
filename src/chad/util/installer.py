@@ -16,7 +16,7 @@ class CLIToolSpec:
 
     name: str
     binary: str
-    installer: str  # 'npm', 'pip', or 'shell'
+    installer: str  # 'npm', 'pip', 'shell', or 'binary'
     package: str
     version: str | None = None
 
@@ -83,31 +83,47 @@ class AIToolInstaller:
                 package="kimi-cli",
                 version=None,
             ),
+            "cloudflared": CLIToolSpec(
+                name="Cloudflared",
+                binary="cloudflared",
+                installer="binary",
+                package="https://github.com/cloudflare/cloudflared/releases/latest/download",
+                version=None,
+            ),
         }
 
     def resolve_tool_path(self, binary: str) -> Path | None:
         """Return a path to the binary if it exists in tools dir or PATH."""
         import os
 
-        candidate = self.bin_dir / binary
-        if candidate.exists():
-            return candidate
-
-        # On Windows, npm creates .cmd wrappers
         if os.name == "nt":
-            candidate_cmd = self.bin_dir / f"{binary}.cmd"
-            if candidate_cmd.exists():
-                return candidate_cmd
+            candidates = [
+                self.bin_dir / f"{binary}.exe",
+                self.bin_dir / f"{binary}.cmd",
+                self.bin_dir / binary,
+            ]
+        else:
+            candidates = [
+                self.bin_dir / binary,
+                self.bin_dir / f"{binary}.exe",
+                self.bin_dir / f"{binary}.cmd",
+            ]
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
 
         npm_bin = self.tools_dir / "node_modules" / ".bin" / binary
         if npm_bin.exists():
             return npm_bin
 
-        # On Windows, check for .cmd in npm bin
         if os.name == "nt":
             npm_bin_cmd = self.tools_dir / "node_modules" / ".bin" / f"{binary}.cmd"
+            npm_bin_exe = self.tools_dir / "node_modules" / ".bin" / f"{binary}.exe"
             if npm_bin_cmd.exists():
                 return npm_bin_cmd
+            if npm_bin_exe.exists():
+                return npm_bin_exe
 
         if is_tool_installed(binary):
             from shutil import which
@@ -134,6 +150,8 @@ class AIToolInstaller:
             return self._install_with_pip(spec)
         if spec.installer == "shell":
             return self._install_with_shell(spec)
+        if spec.installer == "binary":
+            return self._install_binary(spec)
         return False, f"No installer configured for {spec.name}"
 
     def _install_with_npm(self, spec: CLIToolSpec) -> tuple[bool, str]:
@@ -298,6 +316,59 @@ class AIToolInstaller:
         resolved = self.resolve_tool_path(spec.binary)
         if not resolved:
             return False, f"{spec.name} installation succeeded but '{spec.binary}' was not found."
+
+        return True, str(resolved)
+
+    def _install_binary(self, spec: CLIToolSpec) -> tuple[bool, str]:
+        """Install a tool by downloading a platform-appropriate binary."""
+        import platform
+        import stat
+        import urllib.request
+
+        ensure_directory(self.tools_dir)
+        ensure_directory(self.bin_dir)
+
+        system = platform.system().lower()
+        machine = platform.machine().lower()
+
+        if system == "darwin":
+            os_name = "darwin"
+            ext = ""
+        elif system == "linux":
+            os_name = "linux"
+            ext = ""
+        elif system == "windows":
+            os_name = "windows"
+            ext = ".exe"
+        else:
+            return False, f"Unsupported platform: {system}"
+
+        if machine in ("x86_64", "amd64"):
+            arch = "amd64"
+        elif machine in ("aarch64", "arm64"):
+            arch = "arm64"
+        else:
+            return False, f"Unsupported architecture: {machine}"
+
+        asset = f"{spec.binary}-{os_name}-{arch}{ext}"
+        url = f"{spec.package}/{asset}"
+        target_name = f"{spec.binary}{ext}" if ext else spec.binary
+        target = self.bin_dir / target_name
+
+        try:
+            urllib.request.urlretrieve(url, str(target))
+            if ext != ".exe":
+                target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        except Exception as e:
+            return False, (
+                f"Failed to download {spec.name}: {e}\n\n"
+                f"You can install it manually from:\n"
+                f"  {url}"
+            )
+
+        resolved = self.resolve_tool_path(spec.binary)
+        if not resolved:
+            return False, f"{spec.name} download succeeded but '{spec.binary}' was not found."
 
         return True, str(resolved)
 

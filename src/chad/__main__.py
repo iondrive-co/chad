@@ -9,19 +9,14 @@ import sys
 import threading
 import time
 from datetime import datetime
-from typing import Literal
-
 from pathlib import Path
 
 from .util.cleanup import cleanup_on_startup, cleanup_on_shutdown
 from .util.config_manager import ConfigManager
 from .util.config import ensure_project_root_env
 
-# Supported run modes
-RunMode = Literal["unified", "server", "ui"]
 
-
-def _start_parent_watchdog() -> None:
+def _start_parent_watchdog() -> threading.Thread | None:
     """Start a watchdog thread that terminates this process if parent dies.
 
     This is used when chad is spawned by tests - if the test process crashes,
@@ -29,12 +24,12 @@ def _start_parent_watchdog() -> None:
     """
     parent_pid_str = os.environ.get("CHAD_PARENT_PID")
     if not parent_pid_str:
-        return
+        return None
 
     try:
         parent_pid = int(parent_pid_str)
     except ValueError:
-        return
+        return None
 
     def watchdog() -> None:
         while True:
@@ -48,8 +43,9 @@ def _start_parent_watchdog() -> None:
                 os.kill(os.getpid(), signal.SIGTERM)
                 break
 
-    thread = threading.Thread(target=watchdog, daemon=True)
+    thread = threading.Thread(target=watchdog, daemon=True, name="parent-watchdog")
     thread.start()
+    return thread
 
 
 def _check_chad_import_path() -> None:
@@ -75,8 +71,10 @@ SCS = [
     "Chad is a singleton and ready to mingle-a-ton",
     "Chad likes you for its next paperclip",
     "Chad only gets one-shot and does not miss a chance to blow",
+    "Chad is slick with no agent-ick",
     "Chad is hyping its parameters",
     "Chad has no problem with control",
+    "Chad is prepping for the epochalypse",
     "Chad's touring is complete",
     "Chad has hardly taken off",
     "Chad has discovered some new legal grey areas",
@@ -89,12 +87,30 @@ SCS = [
 ]
 
 
+CHAD_DEFAULT_PORT = 3184  # c=3, h=1, a=8, d=4 -> 3184 for UI/API default
+
+
 def find_free_port() -> int:
     """Find a free port by binding to port 0."""
     import socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]
+
+
+def resolve_port(port: int) -> int:
+    """Resolve a port, falling back to ephemeral if the requested port is busy."""
+    import socket
+    if port == 0:
+        return find_free_port()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", port))
+            return port
+    except OSError:
+        fallback = find_free_port()
+        print(f"Port {port} is in use, using {fallback}")
+        return fallback
 
 
 def get_chad_dir() -> Path:
@@ -132,25 +148,83 @@ def read_server_port() -> int | None:
         return None
 
 
-def run_server(host: str = "0.0.0.0", port: int = 0) -> None:
+def _start_tunnel(port: int, token: str | None = None) -> None:
+    """Start a Cloudflare tunnel and print the URL with pairing code."""
+    from chad.server.services.tunnel_service import get_tunnel_service
+    from chad.util.qr import print_pairing_qr, save_pairing_qr
+
+    svc = get_tunnel_service()
+    url = svc.start(port)
+    if url:
+        print(f"Tunnel URL: {url}")
+        if token and svc._subdomain:
+            pairing_code = f"{svc._subdomain}:{token}"
+            print(f"Pairing code: {pairing_code}")
+        elif svc._subdomain:
+            pairing_code = svc._subdomain
+            print(f"Pairing code: {pairing_code}")
+        else:
+            pairing_code = None
+
+        if pairing_code:
+            pairing_url = f"{url}/#pair={pairing_code}"
+            print_pairing_qr(pairing_url)
+            chad_dir = get_chad_dir()
+            save_pairing_qr(pairing_url, chad_dir / "pairing-qr.png")
+            (chad_dir / "pairing-url").write_text(pairing_url)
+            print(f"QR code saved to {chad_dir / 'pairing-qr.png'}")
+    else:
+        print(f"Failed to start tunnel: {svc._error}")
+
+
+def run_server(host: str = "0.0.0.0", port: int = 0, tunnel: bool = False) -> None:
     """Run the Chad API server.
 
     Args:
         host: Host to bind to
         port: Port to run on (0 for ephemeral)
+        tunnel: Start a Cloudflare tunnel for remote access
     """
     import uvicorn
     from chad.server.main import create_app
 
-    if port == 0:
-        port = find_free_port()
+    port = resolve_port(port)
 
     # Write port for autodiscovery by other clients
     write_server_port(port)
 
-    app = create_app()
-    print(f"Starting Chad API server on {host}:{port}")
-    uvicorn.run(app, host=host, port=port)
+    # Generate auth token when tunnel is active
+    auth_token = None
+    if tunnel:
+        from chad.server.auth import generate_token
+        auth_token = generate_token()
+
+    app = create_app(auth_token=auth_token)
+
+    if tunnel:
+        # Start uvicorn in a thread so the server is listening before the
+        # tunnel tries to connect.  Without this, cloudflared gets 530s
+        # from the origin until uvicorn finishes starting up.
+        server_config = uvicorn.Config(app, host=host, port=port)
+        server = uvicorn.Server(server_config)
+
+        server_thread = threading.Thread(target=server.run, daemon=True)
+        server_thread.start()
+        time.sleep(0.5)
+        print(f"Chad API server running on {host}:{port}")
+
+        _start_tunnel(port, token=auth_token)
+
+        try:
+            while server_thread.is_alive():
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\nShutting down")
+            server.should_exit = True
+            server_thread.join(timeout=5)
+    else:
+        print(f"Starting Chad API server on {host}:{port}")
+        uvicorn.run(app, host=host, port=port)
 
 
 def run_unified(
@@ -158,8 +232,9 @@ def run_unified(
     ui_port: int,
     api_port: int,
     dev_mode: bool,
-    ui_mode: str = "gradio",
+    ui_mode: str = "react",
     server_url: str | None = None,
+    tunnel: bool = False,
 ) -> None:
     """Run UI, optionally with a local API server.
 
@@ -168,12 +243,18 @@ def run_unified(
 
     Args:
         main_password: Main password for config encryption
-        ui_port: Port for Gradio UI (0 for ephemeral)
+        ui_port: Port for UI (0 for ephemeral)
         api_port: Port for API server (0 for ephemeral)
         dev_mode: Enable development mode
-        ui_mode: UI mode - "gradio" or "cli"
+        ui_mode: UI mode - "react" (default) or "cli"
         server_url: External server URL to connect to (skips local server)
+        tunnel: Start a Cloudflare tunnel for remote access
     """
+    import webbrowser
+
+    if ui_mode not in ("react", "cli"):
+        raise ValueError(f"Unsupported UI mode: {ui_mode}. Use 'react' or 'cli'.")
+
     if server_url:
         # Connect to existing server
         api_base_url = server_url
@@ -183,10 +264,15 @@ def run_unified(
         import uvicorn
         from chad.server.main import create_app
 
-        if api_port == 0:
-            api_port = find_free_port()
+        api_port = resolve_port(api_port)
 
-        app = create_app()
+        # Generate auth token when tunnel is active
+        auth_token = None
+        if tunnel:
+            from chad.server.auth import generate_token
+            auth_token = generate_token()
+
+        app = create_app(auth_token=auth_token)
         server_config = uvicorn.Config(app, host="127.0.0.1", port=api_port, log_level="warning")
         server = uvicorn.Server(server_config)
 
@@ -199,13 +285,27 @@ def run_unified(
         write_server_port(api_port)
         print(f"API server running on {api_base_url}")
 
+    if tunnel and not server_url:
+        _start_tunnel(api_port, token=auth_token)
+
     # Run UI in main thread (blocking)
     if ui_mode == "cli":
         from chad.ui.cli import launch_cli_ui
         launch_cli_ui(api_base_url=api_base_url, password=main_password)
-    else:
-        from chad.ui.gradio.gradio_ui import launch_web_ui
-        launch_web_ui(api_base_url=api_base_url, port=ui_port, dev_mode=dev_mode)
+        return
+
+    web_url = api_base_url
+    print(f"Opening React UI at {web_url}")
+    try:
+        webbrowser.open(web_url)
+    except Exception:
+        print(f"Open your browser to {web_url}")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nShutting down Chad")
 
 
 def main() -> int:
@@ -225,10 +325,10 @@ def main() -> int:
         help="Run mode: unified (default, UI + local server), server (API only)",
     )
     parser.add_argument(
-        "--port", type=int, default=0, help="Port for UI (default: 0 = ephemeral)"
+        "--port", type=int, default=3184, help="Port for UI (default: 3184)"
     )
     parser.add_argument(
-        "--api-port", type=int, default=0, help="Port for API server (default: 0 = ephemeral)"
+        "--api-port", type=int, default=3184, help="Port for API server (default: 3184)"
     )
     parser.add_argument(
         "--api-host", type=str, default="0.0.0.0", help="Host for API server (default: 0.0.0.0)"
@@ -241,11 +341,14 @@ def main() -> int:
         "--dev", action="store_true", help="Enable development mode (enables mock provider)"
     )
     parser.add_argument(
+        "--tunnel", action="store_true", help="Start a Cloudflare tunnel for remote access"
+    )
+    parser.add_argument(
         "--ui",
         type=str,
-        choices=["gradio", "cli"],
+        choices=["react", "cli"],
         default=None,
-        help="UI mode: gradio (web) or cli (terminal). Overrides config preference.",
+        help="UI mode: react (default) or cli (terminal). Overrides config preference.",
     )
     args = parser.parse_args()
 
@@ -269,9 +372,10 @@ def main() -> int:
     atexit.register(cleanup_on_shutdown)
 
     try:
-        # Server-only mode - no password needed
+        # Server-only mode — no password needed (provider CLIs authenticate
+        # via their own isolated config dirs, not chad's encrypted keys)
         if args.mode == "server":
-            run_server(host=args.api_host, port=args.api_port)
+            run_server(host=args.api_host, port=args.api_port, tunnel=args.tunnel)
             return 0
 
         # Handle server URL autodiscovery early so we can skip password prompt when connecting
@@ -308,6 +412,7 @@ def main() -> int:
             dev_mode=args.dev,
             ui_mode=ui_mode,
             server_url=server_url,
+            tunnel=args.tunnel,
         )
 
         return 0

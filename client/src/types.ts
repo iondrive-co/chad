@@ -5,6 +5,7 @@ export interface Session {
   name: string;
   project_path: string | null;
   active: boolean;
+  paused: boolean;
   has_worktree: boolean;
   has_changes: boolean;
   coding_account: string | null;
@@ -25,6 +26,12 @@ export interface SessionList {
 export interface SessionCancel {
   session_id: string;
   cancel_requested: boolean;
+  message: string;
+}
+
+export interface SessionResume {
+  session_id: string;
+  resumed: boolean;
   message: string;
 }
 
@@ -154,14 +161,21 @@ export interface SlackSettings {
   enabled: boolean;
   channel: string | null;
   has_token: boolean;
-  has_signing_secret: boolean;
 }
 
 export interface SlackSettingsUpdate {
   enabled?: boolean | null;
   channel?: string | null;
   bot_token?: string | null;
-  signing_secret?: string | null;
+}
+
+// ── Tunnel types ──
+
+export interface TunnelStatus {
+  running: boolean;
+  url: string | null;
+  subdomain: string | null;
+  error: string | null;
 }
 
 // ── Worktree types ──
@@ -231,6 +245,7 @@ export interface MergeResult {
 export interface BranchesResponse {
   branches: string[];
   default: string;
+  current: string;
 }
 
 // ── Streaming types ──

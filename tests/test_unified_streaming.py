@@ -3,11 +3,8 @@
 import asyncio
 import anyio
 import base64
-import html
 import httpx
 import json
-import queue
-import re
 import time
 from pathlib import Path
 
@@ -513,63 +510,6 @@ class TestCliStreamAlignment:
         )
 
 
-class TestGradioStreamAlignment:
-    """Ensure Gradio stream rendering stays left-aligned."""
-
-    def test_stream_task_output_left_aligned(self, client, git_repo):
-        """stream_task_output HTML should not drift right across lines."""
-        from chad.ui.gradio.gradio_ui import ChadWebUI
-        from chad.ui.client.stream_client import SyncStreamClient
-
-        account_resp = client.post("/api/v1/accounts", json={"name": "gradio-mock", "provider": "mock"})
-        assert account_resp.status_code == 201
-
-        session_id = client.post("/api/v1/sessions", json={"name": "Gradio alignment"}).json()["id"]
-
-        start_resp = client.post(
-            f"/api/v1/sessions/{session_id}/tasks",
-            json={
-                "project_path": str(git_repo),
-                "task_description": "gradio align",
-                "coding_agent": "gradio-mock",
-                "terminal_rows": 24,
-                "terminal_cols": 80,
-            },
-        )
-        assert start_resp.status_code == 201
-
-        stream_client = SyncStreamClient(str(client.base_url))
-        stream_client._sync_client = httpx.Client(
-            transport=client._transport,
-            base_url=str(client.base_url),
-            timeout=None,
-        )
-
-        # Build a minimal ChadWebUI instance without running full init
-        ui = ChadWebUI.__new__(ChadWebUI)
-        ui.api_client = type("DummyAPI", (), {"base_url": str(client.base_url)})()
-        ui._stream_client = stream_client
-
-        latest_html = ""
-        for event_type, html_content, exit_code in ui.stream_task_output(session_id, include_terminal=True):
-            if event_type == "terminal":
-                latest_html = html_content or ""
-            elif event_type == "complete":
-                break
-
-        assert latest_html, "Expected live stream HTML content"
-
-        plain = html.unescape(re.sub(r"<[^>]+>", "", latest_html))
-        rendered_lines = [line for line in plain.split("\n") if line.strip()]
-        leading_spaces = [len(line) - len(line.lstrip(" ")) for line in rendered_lines]
-        base_indent = min(leading_spaces) if leading_spaces else 0
-
-        assert base_indent == 0 and all(space == base_indent for space in leading_spaces), (
-            "Gradio stream_task_output should render lines starting at column 0; "
-            f"got leading spaces per line: {leading_spaces}"
-        )
-
-
 class TestStreamClient:
     """Tests for the stream client."""
 
@@ -665,6 +605,57 @@ class TestWebSocketEndpoint:
             # Send cancel (no task running, should still work)
             websocket.send_json({"type": "cancel"})
             # May or may not receive response depending on timing
+
+    def test_websocket_since_seq_parameter(self, client):
+        """WebSocket endpoint accepts since_seq query parameter."""
+        create_resp = client.post("/api/v1/sessions", json={"name": "Test"})
+        session_id = create_resp.json()["id"]
+
+        with client.websocket_connect(
+            f"/api/v1/ws/{session_id}?since_seq=5"
+        ) as websocket:
+            websocket.send_json({"type": "ping"})
+            response = websocket.receive_json()
+            assert response["type"] == "pong"
+
+    def test_websocket_streams_mock_task_events(self, client, git_repo):
+        """WebSocket should stream events from a running mock task."""
+        import time
+
+        # Create mock account
+        client.post("/api/v1/accounts", json={"name": "ws-mock", "provider": "mock"})
+
+        # Create session
+        create_resp = client.post("/api/v1/sessions", json={"name": "WS-Stream"})
+        session_id = create_resp.json()["id"]
+
+        # Start a task
+        task_resp = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "test ws streaming",
+                "coding_agent": "ws-mock",
+            },
+        )
+        assert task_resp.status_code in (200, 201)
+
+        # Connect WebSocket and collect events
+        received = []
+        with client.websocket_connect(f"/api/v1/ws/{session_id}") as websocket:
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                try:
+                    msg = websocket.receive_json()
+                    received.append(msg)
+                    if msg["type"] in ("complete", "error"):
+                        break
+                except Exception:
+                    break
+
+        # Should have received at least some events
+        types = [m["type"] for m in received]
+        assert "complete" in types or "terminal" in types or len(received) > 0
 
 
 class TestCancelSession:
@@ -1056,8 +1047,7 @@ class TestMockProviderFullIntegration:
 
     These tests verify that:
     1. The mock provider works through the complete API pipeline
-    2. Both Gradio UI (via stream_task_output) and CLI (via SyncStreamClient)
-       use the same streaming method
+    2. CLI (via SyncStreamClient) uses the streaming properly
     3. Terminal output is properly captured and base64 encoded
     4. Session lifecycle is correctly managed
     """
@@ -1134,74 +1124,9 @@ class TestMockProviderFullIntegration:
         events_resp = client.get(f"/api/v1/sessions/{session_id}/events")
         assert events_resp.status_code == 200
 
-    def test_gradio_stream_task_output_integration(self, client, git_repo, tmp_path, monkeypatch):
-        """Test Gradio UI stream_task_output method uses same API as CLI."""
-        from unittest.mock import Mock
-
-        config_path = tmp_path / "test_chad.conf"
-        config_content = """
-[accounts]
-mock-agent = mock
-[roles]
-coding = mock-agent
-"""
-        config_path.write_text(config_content)
-        monkeypatch.setenv("CHAD_CONFIG", str(config_path))
-        reset_state()
-
-        # Create a mock API client
-        mock_api_client = Mock()
-        mock_api_client.base_url = "http://localhost:8000"
-
-        # Import ChadWebUI
-        from chad.ui.gradio.gradio_ui import ChadWebUI
-
-        ui = ChadWebUI(mock_api_client)
-
-        # Verify stream client is created
-        stream_client = ui._get_stream_client()
-        assert stream_client is not None
-        assert stream_client.base_url == "http://localhost:8000"
-
-        # Verify stream_task_output method exists and is callable
-        assert hasattr(ui, "stream_task_output")
-        assert callable(ui.stream_task_output)
-
-    def test_cli_and_gradio_use_same_streaming_class(self):
-        """Verify CLI and Gradio use the same SyncStreamClient class."""
-        # Import from CLI app
-        from chad.ui.cli.app import SyncStreamClient as CLISyncStreamClient
-
-        # Import from Gradio gradio_ui
-        from chad.ui.gradio.gradio_ui import SyncStreamClient as GradioSyncStreamClient
-
-        # Both should be the same class
-        assert CLISyncStreamClient is GradioSyncStreamClient
-
-        # Both should come from stream_client module
-        from chad.ui.client.stream_client import SyncStreamClient
-
-        assert CLISyncStreamClient is SyncStreamClient
-        assert GradioSyncStreamClient is SyncStreamClient
-
-    def test_ansi_to_html_preserves_layout(self):
-        """Test ANSI to HTML conversion preserves terminal layout."""
-        from chad.ui.gradio.gradio_ui import ansi_to_html
-
-        # Test simple ANSI codes
-        input_text = "\x1b[32mGreen\x1b[0m Normal \x1b[31mRed\x1b[0m"
-        html = ansi_to_html(input_text)
-
-        # Should contain color spans
-        assert "<span" in html
-        assert "Green" in html
-        assert "Red" in html
-        assert "Normal" in html
-
     def test_mock_provider_produces_parseable_output(self, tmp_path):
-        """Mock provider output can be parsed by ANSI-to-HTML converter."""
+        """Mock provider output can be parsed properly."""
         from chad.server.services.task_executor import _build_mock_agent_command
-        from chad.ui.gradio.gradio_ui import ansi_to_html
         import subprocess
 
         cmd = _build_mock_agent_command(tmp_path, "test task")
@@ -1213,62 +1138,8 @@ coding = mock-agent
         # Should contain ANSI codes
         assert "\x1b[" in output
 
-        # Should be convertible to HTML
-        html = ansi_to_html(output)
-        assert "<span" in html or "Mock" in html  # Either styled or plain content
-
-
-class TestPlainTextTerminalEvents:
-    """Ensure text-flagged terminal events are handled without base64 decoding."""
-
-    def test_gradio_run_task_handles_plain_text_terminal_events(self):
-        """Gradio run_task_via_api streams plain text terminal output safely."""
-        from chad.ui.client.stream_client import StreamEvent
-        from chad.ui.gradio.gradio_ui import ChadWebUI
-
-        terminal_text = "╭─ streamed log line"
-
-        class DummyAPI:
-            base_url = "http://localhost:8000"
-
-            def start_task(self, **kwargs):
-                return None
-
-        class DummyStreamClient:
-            def stream_events(self, session_id: str, include_terminal: bool = True):
-                yield StreamEvent(
-                    event_type="terminal",
-                    data={"data": terminal_text, "text": True, "seq": 1},
-                    seq=1,
-                )
-                yield StreamEvent(
-                    event_type="complete",
-                    data={"exit_code": 0, "seq": 2},
-                    seq=2,
-                )
-
-        ui = ChadWebUI(DummyAPI())
-        ui._stream_client = DummyStreamClient()
-
-        msg_queue = queue.Queue()
-
-        success, final_output, server_session_id, _ = ui.run_task_via_api(
-            session_id="local-plain",
-            project_path="/tmp",
-            task_description="Handle plain text terminal event",
-            coding_account="mock",
-            message_queue=msg_queue,
-            server_session_id="server-plain",
-        )
-
-        assert success is True
-        assert final_output.startswith("╭─")
-
-        stream_entries = [item for item in list(msg_queue.queue) if item[0] == "stream"]
-        assert len(stream_entries) == 1
-        _, text_chunk, html_output = stream_entries[0]
-        assert text_chunk.startswith("╭─")
-        assert "╭" in html_output
+        # Should contain recognizable output
+        assert "Mock" in output
 
 
 class TestEndToEndSSEStreaming:

@@ -15,6 +15,7 @@ import type {
   SessionCancel,
   SessionCreate,
   SessionList,
+  SessionResume,
   TaskCreate,
   TaskStatus,
   UserPreferences,
@@ -33,9 +34,13 @@ export class ChadAPIError extends Error {
 }
 
 export class ChadAPI {
-  constructor(private baseUrl: string) {
+  private baseUrl: string;
+  private token: string | null;
+
+  constructor(baseUrl: string = "http://localhost:3184", token?: string) {
     // Strip trailing slash
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.token = token ?? null;
   }
 
   // ── helpers ──
@@ -44,9 +49,20 @@ export class ChadAPI {
     path: string,
     options: RequestInit = {},
   ): Promise<T> {
+    const headers: Record<string, string> = {
+      ...(options.headers as Record<string, string>),
+    };
+    // Only set Content-Type when there's a body — setting it on GET/DELETE
+    // forces a CORS preflight which breaks cross-origin access through tunnels.
+    if (options.body != null) {
+      headers["Content-Type"] ??= "application/json";
+    }
+    if (this.token) {
+      headers["Authorization"] = `Bearer ${this.token}`;
+    }
     const res = await fetch(`${this.baseUrl}${path}`, {
-      headers: { "Content-Type": "application/json", ...options.headers },
       ...options,
+      headers,
     });
     if (!res.ok) {
       const body = await res.text().catch(() => null);
@@ -78,7 +94,14 @@ export class ChadAPI {
   // ── Status ──
 
   getStatus(): Promise<ServerStatus> {
-    return this.get("/status");
+    // /status is the health-check endpoint exempt from auth.  Skip the
+    // Authorization header so the request stays a CORS "simple request"
+    // (no preflight) — critical for first-contact through tunnels.
+    return fetch(`${this.baseUrl}/status`)
+      .then((res) => {
+        if (!res.ok) throw new ChadAPIError(res.status, null);
+        return res.json() as Promise<ServerStatus>;
+      });
   }
 
   // ── Sessions ──
@@ -101,6 +124,10 @@ export class ChadAPI {
 
   cancelSession(sessionId: string): Promise<SessionCancel> {
     return this.post(`/api/v1/sessions/${sessionId}/cancel`);
+  }
+
+  resumeSession(sessionId: string): Promise<SessionResume> {
+    return this.post(`/api/v1/sessions/${sessionId}/resume`);
   }
 
   // ── Tasks ──
@@ -355,13 +382,41 @@ export class ChadAPI {
     return this.put("/api/v1/config/action-settings", { settings });
   }
 
+  // ── Tunnel ──
+
+  getTunnelStatus(): Promise<{
+    running: boolean;
+    url: string | null;
+    subdomain: string | null;
+    error: string | null;
+  }> {
+    return this.get("/api/v1/tunnel");
+  }
+
+  startTunnel(): Promise<{
+    running: boolean;
+    url: string | null;
+    subdomain: string | null;
+    error: string | null;
+  }> {
+    return this.post("/api/v1/tunnel/start");
+  }
+
+  stopTunnel(): Promise<{
+    running: boolean;
+    url: string | null;
+    subdomain: string | null;
+    error: string | null;
+  }> {
+    return this.post("/api/v1/tunnel/stop");
+  }
+
   // ── Config: Slack ──
 
   getSlackSettings(): Promise<{
     enabled: boolean;
     channel: string | null;
     has_token: boolean;
-    has_signing_secret: boolean;
   }> {
     return this.get("/api/v1/config/slack");
   }
@@ -371,13 +426,11 @@ export class ChadAPI {
       enabled: boolean;
       channel: string;
       bot_token: string;
-      signing_secret: string;
     }>,
   ): Promise<{
     enabled: boolean;
     channel: string | null;
     has_token: boolean;
-    has_signing_secret: boolean;
   }> {
     return this.put("/api/v1/config/slack", settings);
   }
@@ -428,5 +481,30 @@ export class ChadAPI {
     log_exists: boolean;
   }> {
     return this.get(`/api/v1/sessions/${sessionId}/log`);
+  }
+
+  // ── File Uploads ──
+
+  async uploadFile(file: File): Promise<{ path: string; filename: string }> {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const headers: Record<string, string> = {};
+    if (this.token) {
+      headers["Authorization"] = `Bearer ${this.token}`;
+    }
+
+    const res = await fetch(`${this.baseUrl}/api/v1/uploads`, {
+      method: "POST",
+      headers,
+      body: formData,
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => null);
+      throw new ChadAPIError(res.status, body);
+    }
+
+    return res.json();
   }
 }

@@ -7,7 +7,7 @@ flawlessly working features.
 
 ## Class Map
 
-Consult this map before exploring to find the right starting point. Chad is a multi-provider AI coding assistant with a FastAPI backend and Gradio/CLI frontends.
+Consult this map before exploring to find the right starting point. Chad is a multi-provider AI coding assistant with a FastAPI backend, React web UI, and CLI frontend.
 
 ### Architecture
 
@@ -15,7 +15,7 @@ Consult this map before exploring to find the right starting point. Chad is a mu
 Entry: __main__.py → server + UI
 Server: SessionManager → TaskExecutor → PTYStreamService → EventMultiplexer → SSE
 Client: APIClient (REST) + StreamClient (SSE) + WSClient (WebSocket)
-UI: ChadWebUI (Gradio) or app.py (CLI), both use TerminalEmulator
+UI: React (ui/) or app.py (CLI), both use server API
 ```
 
 ### Provider Layer (`chad.util.providers`)
@@ -81,16 +81,33 @@ UI: ChadWebUI (Gradio) or app.py (CLI), both use TerminalEmulator
 |-------|-------------|
 | APIClient | REST client for server. Sessions, accounts, tasks, worktrees, config. |
 | StreamClient | Async SSE client. Parses events, yields StreamEvent. |
-| SyncStreamClient | Sync wrapper for Gradio (needs sync generators). |
+| SyncStreamClient | Sync wrapper (needs sync generators). |
 | WSClient | Sync WebSocket client. |
 | AsyncWSClient | Async WebSocket client. |
 
-### UI Layer
+### React UI (`ui/`)
+
+| Component | File | Description |
+|-----------|------|-------------|
+| App | `ui/src/App.tsx` | Root component. Tabs: Chat, Providers, Settings. |
+| ChatView | `ui/src/components/ChatView.tsx` | Main task interface. Terminal output, events, worktree merging. |
+| TaskForm | `ui/src/components/TaskForm.tsx` | Task input form. |
+| ProvidersPanel | `ui/src/components/ProvidersPanel.tsx` | Provider/account management. |
+| SettingsPanel | `ui/src/components/SettingsPanel.tsx` | Settings management. |
+| SessionList | `ui/src/components/SessionList.tsx` | Session selection/creation sidebar. |
+| DiffViewer | `ui/src/components/DiffViewer.tsx` | Git diff viewing. |
+| MergePanel | `ui/src/components/MergePanel.tsx` | Merge conflict resolution. |
+| useStream | `ui/src/hooks/useStream.ts` | SSE streaming hook. Terminal output decoding. |
+| useSessions | `ui/src/hooks/useSessions.ts` | Session management hook. |
+
+TypeScript client library: `client/src/` (ChadAPI, ChadStream, ChadWebSocket).
+Dev server: `cd ui && bash dev.sh` (starts API + Vite on port 5173).
+Built output: `ui/dist/` (served by API server at `/`).
+
+### Other UI / Utilities
 
 | Class | File | Description |
 |-------|------|-------------|
-| ChadWebUI | `chad.ui.gradio.web_ui` | Gradio interface. Sessions, provider cards, streaming, merge resolution. |
-| ProviderUIManager | `chad.ui.gradio.provider_ui` | Provider management: accounts, models, OAuth. |
 | TerminalEmulator | `chad.ui.terminal_emulator` | Pyte-based emulator. ANSI to HTML with scrollback. |
 | ModelCatalog | `chad.util.model_catalog` | Discovers/caches models per provider from config files. |
 | AIToolInstaller | `chad.util.installer` | Installs CLIs (claude, codex, etc.) in `~/.chad/tools/`. |
@@ -115,10 +132,8 @@ part of your change. Don't worry about backwards compatibility.
 customize prompts based on provider type. If a provider has different execution characteristics (e.g., terminates on
 certain output), handle that by restructuring the task execution phases rather than modifying prompts.
 
-**Dev-only Logging**: Diagnostic output (timing, internal state) must only appear when `--dev` is passed. In the Gradio
-UI, `ChadWebUI` has `self.dev_mode` and a `_startup_log(msg)` helper that checks it. In `launch_web_ui()`, gate prints
-behind the local `dev_mode` parameter. Never add unconditional `print()` for diagnostic info — user-visible output
-should be limited to essential status messages (e.g. "Loading web interface...", port conflicts).
+**Dev-only Logging**: Diagnostic output (timing, internal state) must only appear when `--dev` is passed. Never add
+unconditional `print()` for diagnostic info — user-visible output should be limited to essential status messages.
 
 When fixing bugs, first describe the behavior of the software in detail, and then describe how the code makes that 
 happen. From that description generate plausible theories for the bug, then use tests and research to eliminate 
@@ -127,19 +142,17 @@ candidates. Define the failure as a binary, assertable condition and aim to buil
 hypothesis predicts both failure and non-failure, minimize it to the smallest causal change and add a regression test 
 that fails before the fix and passes after.
 
-For all work, write test(s) which should fail until the issue is fixed or feature is implemented. Make these tests 
-general enough to cover later work in the area rather than targeting just the current work. Additionally, for gradio 
-ui work also search `src/chad/ui/gradio/verification/visual_test_map.py` for keywords from your task ("reasoning effort", 
-"verification agent" etc) and use the `UI_COMPONENT_MAP` to determine a screenshot component (and which tests cover it) 
-in order to take a before screenshot. Describe what you see in the screenshot and confirm it matches the problem/lack of 
-feature you were given, if not as part of your changes you will write a new test which DOES visually show the issue/lack 
-of feature, and before making changes you will look at its screenshot, describe the image, and confirm that description 
-matches the issue/lack of feature you were given to work on. See `src/chad/ui/gradio/verification/screenshot_fixtures.py` 
-for example data to use for screenshots.
+For all work, write test(s) which should fail until the issue is fixed or feature is implemented. Make these tests
+general enough to cover later work in the area rather than targeting just the current work.
+
+## Windows compatibility
+
+- Treat Windows as a first-class platform. Avoid adding Linux/macOS-only dependencies (pty/fcntl/tty/termios/bash-only scripts) unless guarded and tested for Windows.
+- Prefer cross-platform Python/stdlib for process handling; when in doubt, add a Windows-specific regression test in `tests/test_windows_compat.py`.
+- If you add or modify tool installers, ensure they resolve Windows `.exe`/`.cmd` binaries and include a Windows test case.
+- Don’t ship features that “only work on Unix”; rework them or add a Windows-safe path before merging.
 
 ## During changes
-
-For gradio UI changes add any new display functionality to `src/chad/ui/gradio/verification/visual_test_map.py`.
 
 When modifying functions that return tuples (e.g., `make_yield`, generator functions) and adding/removing elements:
 1. Search for tests that access tuple elements by index (e.g., `result[12]`, `output[N]`)
@@ -154,18 +167,14 @@ Start from the premise that the new code will NOT fix the issue or implement the
 won't. It is fine to go back and redo changes at this point, but it is NOT acceptable to declare victory and deliver the 
 wrong thing. Here are some suggested steps for proving:
 
-1. Take an after screenshot for gradio ui work (see Screenshots section below)
-2. Run verification using the `verify()` function which handles Python detection automatically:
+1. Run verification using the `verify()` function which handles Python detection automatically:
    ```python
-   from chad.ui.gradio.verification.tools import verify
+   from chad.util.verification.tools import verify
    result = verify()  # Runs flake8 + all tests
    # Or: verify(lint_only=True)  # Just flake8
-   # Or: verify(visual_only=True)  # Just visual tests
    ```
-3. **Run startup sanity checks** to catch import/runtime errors not covered by tests:
+2. **Run startup sanity checks** to catch import/runtime errors not covered by tests:
    ```bash
-   # Gradio UI
-   timeout 5 .venv/bin/python -c "from chad.ui.gradio import launch_web_ui" 2>&1 || echo "Gradio startup failed"
    # CLI UI
    timeout 5 .venv/bin/python -c "from chad.ui.cli import launch_cli_ui" 2>&1 || echo "CLI startup failed"
    ```
@@ -187,79 +196,44 @@ this process again
 
 ## Screenshots
 
-For UI changes, take before/after screenshots to verify visual correctness. **Both Gradio and CLI can be screenshotted.**
+For UI changes, take before/after screenshots to verify visual correctness.
 
-1. **Before starting**: Take a screenshot showing the current state
-2. **After changes**: Take a screenshot showing the result of your changes
-3. Include screenshot paths in your JSON summary:
-```json
-{
-  "change_summary": "Added dark mode toggle button",
-  "before_screenshot": "/path/to/before.png",
-  "before_description": "Settings panel without dark mode toggle",
-  "after_screenshot": "/path/to/after.png",
-  "after_description": "Settings panel with dark mode toggle visible"
-}
+### React Web UI Screenshots
+Use `chad.util.verification.ui_runner` to launch the API server and capture screenshots with Playwright:
+```python
+from chad.util.verification.ui_runner import create_temp_env, start_chad, stop_chad, open_playwright_page
+env = create_temp_env()
+instance = start_chad(env)
+with open_playwright_page(instance.port, tab="chat", headless=True) as page:
+    page.screenshot(path="/tmp/chad/screenshot.png")
+stop_chad(instance)
+env.cleanup()
 ```
-
-### Gradio UI Screenshots
-- Use `scripts/screenshot_ui.py` for web UI screenshots
-- Check `src/chad/ui/gradio/verification/visual_test_map.py` for existing screenshot tests
-- If you add or change UI components, update `visual_test_map.py` so future runs pick the right visual tests
-- See `src/chad/ui/gradio/verification/screenshot_fixtures.py` for example fixture data to use in screenshots
+Release screenshots: `python scripts/release_screenshots.py`
 
 ### CLI Terminal Screenshots
 - Use `scripts/screenshot_cli.py` for CLI/terminal screenshots
 - Example: `./.venv/bin/python scripts/screenshot_cli.py --command "chad --help" --output /tmp/chad/cli.png`
-- For interactive menus, capture output to a file first, then screenshot the file
-- **Never say "CLI cannot be screenshotted"** - it can, using this script
-
-## Visual Test Targeting
-
-For efficient testing, run only the visual tests relevant to your changes:
-
-```bash
-# Get list of visual tests for changed files
-VTESTS=$(.venv/bin/python - <<'PY'
-import subprocess
-from chad.ui.gradio.verification.visual_test_map import tests_for_paths
-changed = subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines()
-print(" or ".join(tests_for_paths(changed)))
-PY
-)
-
-# Run only relevant visual tests
-if [ -n "$VTESTS" ]; then
-    .venv/bin/python -m pytest tests/test_ui_integration.py \
-        tests/test_ui_playwright_runner.py -v --tb=short \
-        -m "visual" -k "$VTESTS"
-fi
-```
 
 ## Configuration
 
 Config stored in `~/.chad.conf` with encrypted provider tokens.
 
-### UI Mode
+### UI Modes
 
-Chad supports two UI modes:
-- `gradio` (default): Web interface with rich visual output
-- `cli`: Terminal interface with PTY passthrough to agent CLIs
-
-Set via config: `config_manager.set_ui_mode("cli")`
-Or command line: `chad --ui cli`
+- **React web UI**: Run `cd ui && bash dev.sh` for development (Vite + API server).
+  The API server also serves the built React UI from `ui/dist/` at `/`.
+- **CLI**: `chad` or `chad --ui cli` for terminal interface.
 
 ### Connecting to an Existing Server
 
-To connect to an existing API server instead of starting a local one:
 ```bash
 chad --server-url http://localhost:8000
-chad --server-url http://localhost:8000 --ui cli
 ```
 
 ### Adding New Config Options
 
-**IMPORTANT**: All user-editable config options MUST be exposed in BOTH Gradio and CLI UIs.
+**IMPORTANT**: All user-editable config options MUST be exposed in the CLI UI.
 Tests in `test_config_manager.py::TestConfigUIParity` will FAIL if you add a new config key
 without proper UI support.
 
@@ -268,11 +242,10 @@ When adding a new config option:
 2. Add getter/setter methods to `ConfigManager`
 3. Add API endpoint in `src/chad/server/api/routes/config.py`
 4. Add `APIClient` method in `src/chad/ui/client/api_client.py`
-5. Add UI element in `src/chad/ui/gradio/gradio_ui.py` (in the config panel)
+5. Add React UI element in `ui/src/components/SettingsPanel.tsx`
 6. Add menu option in `src/chad/ui/cli/app.py` (in `run_settings_menu`)
 7. Update `tests/test_config_manager.py`:
-   - Add to `REQUIRED_UI_CONFIG_KEYS` if user-editable in both UIs
-   - Add to `GRADIO_ONLY_KEYS` if only relevant for web UI
+   - Add to `REQUIRED_UI_CONFIG_KEYS` if user-editable
    - Add to `INTERNAL_KEYS` if system-managed (not user-editable)
    - Add to `KEY_PATTERNS` if the UI uses different naming
 
@@ -288,12 +261,10 @@ Tests are organized by module and marked for efficient targeting:
 | Test File | Tests | Description | Run Time |
 |-----------|-------|-------------|----------|
 | `test_providers.py` | 84 | Provider classes, CLI parsing | ~5s |
-| `test_gradio_ui.py` | 108 | Gradio UI logic (no browser) | ~8s |
 | `test_unified_streaming.py` | 53 | PTY/SSE streaming, EventLog | ~25s |
 | `test_git_worktree.py` | 43 | Git operations | ~3s |
 | `test_config_manager.py` | 38 | Config persistence | ~4s |
-| `test_ui_integration.py` | 49 | Visual tests (Playwright) | ~60s+ |
-| `test_code_syntax_highlighting.py` | 7 | Visual tests (Playwright) | ~20s |
+| `test_cli_ui.py` | — | CLI UI logic | ~5s |
 
 ### Running Tests Efficiently
 
@@ -305,7 +276,7 @@ Tests are organized by module and marked for efficient targeting:
 .venv/bin/python -m pytest tests/test_providers.py -q
 
 # Target specific class
-.venv/bin/python -m pytest tests/test_gradio_ui.py::TestChadWebUI -q
+.venv/bin/python -m pytest tests/test_cli_ui.py::TestCLIImports -q
 
 # Target specific test
 .venv/bin/python -m pytest tests/test_providers.py::TestCreateProvider::test_create_anthropic_provider -q
@@ -319,10 +290,7 @@ Tests are organized by module and marked for efficient targeting:
 
 ### Pytest Markers
 
-- `visual`: Playwright tests that launch a browser (slower)
 - `api`: API endpoint tests
-
-Use `-m "not visual"` to skip browser tests for faster iteration.
 
 ## Test Utility Tools
 
@@ -361,7 +329,7 @@ sim = ProviderOutputSimulator(monkeypatch, "qwen_duplicate")
 The project uses `.venv` (not `venv`). Worktrees automatically symlink to the main project's `.venv` so agents don't
 need to reinstall dependencies.
 
-**For running lint/tests**: Always use `verify()` from `chad.ui.gradio.verification.tools` instead of hardcoded paths 
+**For running lint/tests**: Always use `verify()` from `chad.util.verification.tools` instead of hardcoded paths
 like `./.venv/bin/python`. The verify() function automatically detects the correct Python interpreter.
 
 To create a fresh virtual environment (rarely needed):

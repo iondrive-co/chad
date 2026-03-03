@@ -1,6 +1,8 @@
 """FastAPI application factory for Chad server."""
 
 from contextlib import asynccontextmanager
+from importlib import resources
+from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
@@ -8,7 +10,29 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
 from .state import init_start_time
-from .api.routes import health, sessions, providers, worktree, config, ws, slack
+from .api.routes import health, sessions, providers, worktree, config, ws, slack, tunnel, uploads
+
+
+def _resolve_ui_index() -> Path | None:
+    """Return the path to the UI index.html if available.
+
+    The UI is a single self-contained HTML file (portable build) that can be
+    served without any additional asset files.
+    """
+    # Prefer packaged assets (bundled in wheel)
+    try:
+        package_dist = resources.files("chad.ui_dist")
+        index = Path(package_dist) / "index.html"
+        if index.is_file():
+            return index
+    except Exception:
+        pass
+
+    # Fallback to portable build in repository (useful in editable installs)
+    repo_portable = Path(__file__).resolve().parents[3] / "ui" / "dist-portable" / "index.html"
+    if repo_portable.is_file():
+        return repo_portable
+    return None
 
 
 @asynccontextmanager
@@ -29,6 +53,7 @@ def create_app(
     title: str = "Chad Server",
     debug: bool = False,
     cors_origins: list[str] | None = None,
+    auth_token: str | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -36,6 +61,7 @@ def create_app(
         title: Application title for OpenAPI docs
         debug: Enable debug mode
         cors_origins: List of allowed CORS origins (None = allow all)
+        auth_token: Bearer token for API authentication (None = no auth)
 
     Returns:
         Configured FastAPI application
@@ -48,10 +74,18 @@ def create_app(
         lifespan=lifespan,
     )
 
+    # Store auth token on app state for WebSocket auth
+    app.state.auth_token = auth_token
+
     # Configure CORS
     if cors_origins is None:
         # Default: allow all origins for development
         cors_origins = ["*"]
+
+    # Add auth middleware before CORS so it runs after CORS (middleware order is LIFO)
+    if auth_token:
+        from .auth import BearerAuthMiddleware
+        app.add_middleware(BearerAuthMiddleware, token=auth_token)
 
     app.add_middleware(
         CORSMiddleware,
@@ -69,6 +103,17 @@ def create_app(
     app.include_router(config.router, prefix="/api/v1/config", tags=["Config"])
     app.include_router(ws.router, prefix="/api/v1", tags=["WebSocket"])
     app.include_router(slack.router, prefix="/api/v1", tags=["Slack"])
+    app.include_router(tunnel.router, prefix="/api/v1", tags=["Tunnel"])
+    app.include_router(uploads.router, prefix="/api/v1/uploads", tags=["Uploads"])
+
+    # Serve the single-file React UI if available (packaged or repo build).
+    ui_index = _resolve_ui_index()
+    if ui_index:
+        from fastapi.responses import FileResponse
+
+        @app.get("/", include_in_schema=False)
+        async def serve_index():
+            return FileResponse(ui_index)
 
     return app
 

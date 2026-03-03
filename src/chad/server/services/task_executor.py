@@ -63,6 +63,7 @@ class ClaudeStreamJsonParser:
         self._tool_counts: dict[str, int] = {}
         self._tool_details: list[str] = []
         self._pending_summary = False  # True when we have tools to summarize
+        self._last_emitted_summary: str | None = None
         # Usage stats captured from result events (Gemini stream-json)
         self.result_stats: dict = {}
         self.init_model: str | None = None
@@ -90,15 +91,7 @@ class ClaudeStreamJsonParser:
 
             try:
                 obj = json.loads(line.decode("utf-8", errors="replace"))
-                text = self._format_json_event(obj)
-                if text:
-                    # Prepend accumulated tool summary before text content
-                    if self._pending_summary:
-                        summary = self.get_tool_summary()
-                        if summary:
-                            results.append(summary)
-                        self.clear_tool_tracking()
-                    results.append(text)
+                results.extend(self._format_json_event(obj))
             except json.JSONDecodeError:
                 # Not JSON, pass through as-is
                 results.append(line.decode("utf-8", errors="replace"))
@@ -116,31 +109,25 @@ class ClaudeStreamJsonParser:
             return []
         line = bytes(self._buffer)
         self._buffer.clear()
-        results = []
+        results: list[str] = []
         try:
             obj = json.loads(line.decode("utf-8", errors="replace"))
-            text = self._format_json_event(obj)
-            if text:
-                if self._pending_summary:
-                    summary = self.get_tool_summary()
-                    if summary:
-                        results.append(summary)
-                    self.clear_tool_tracking()
-                results.append(text)
+            results.extend(self._format_json_event(obj))
         except json.JSONDecodeError:
             results.append(line.decode("utf-8", errors="replace"))
         return results
 
-    def _format_json_event(self, obj: dict) -> str | None:
-        """Convert a stream-json event to human-readable text.
+    def _format_json_event(self, obj: dict) -> list[str]:
+        """Convert a stream-json event to human-readable text chunks.
 
         Args:
             obj: Parsed JSON object
 
         Returns:
-            Human-readable text or None if event should be hidden
+            List of human-readable text chunks (may be empty if event should be hidden)
         """
         event_type = obj.get("type", "")
+        outputs: list[str] = []
 
         if event_type == "system":
             # System init - don't display raw, just note session started
@@ -150,8 +137,8 @@ class ClaudeStreamJsonParser:
                 model = obj.get("model")
                 if model:
                     self.init_model = model
-                return None  # Skip init, already shown in UI
-            return None
+                return outputs  # Skip init, already shown in UI
+            return outputs
 
         elif event_type == "assistant":
             # Extract content from assistant message
@@ -176,23 +163,30 @@ class ClaudeStreamJsonParser:
                     if tool_desc:
                         self._tool_details.append(tool_desc)
                     self._pending_summary = True
-                    # Don't add to parts - tools are shown as collapsed summary
+                    outputs.extend(self._emit_summary_if_changed())
 
-            return "\n".join(parts) if parts else None
+            # Emit any pending summary ahead of text if counts changed during this message
+            if parts:
+                outputs.extend(self._emit_summary_if_changed())
+                outputs.append("\n".join(parts))
+                # Text marks the end of the current tool batch; reset tracking
+                self._reset_tool_state()
+
+            return outputs
 
         elif event_type == "result":
             # Capture usage stats from result event (Gemini stream-json)
             stats = obj.get("stats")
             if stats and isinstance(stats, dict):
                 self.result_stats = stats
-            return None
+            return outputs
 
         elif event_type == "init":
             # Gemini CLI format: {type: "init", model: "...", session_id: "..."}
             model = obj.get("model")
             if model:
                 self.init_model = model
-            return None
+            return outputs
 
         elif event_type == "message":
             # Qwen/Gemini CLI format: {type: "message", role: "assistant", content: "..."}
@@ -200,11 +194,11 @@ class ClaudeStreamJsonParser:
             if role == "assistant":
                 content = obj.get("content", "")
                 if content:
-                    return content
-            return None
+                    outputs.append(content)
+            return outputs
 
         # Unknown event type - skip
-        return None
+        return outputs
 
     def _format_tool_use(self, name: str, input_data: dict) -> str:
         """Format a tool_use event for display.
@@ -331,6 +325,26 @@ class ClaudeStreamJsonParser:
         self._tool_counts = {}
         self._tool_details = []
         self._pending_summary = False
+        self._last_emitted_summary = None
+
+    def _reset_tool_state(self):
+        """Clear tool tracking and last summary markers."""
+        self.clear_tool_tracking()
+
+    def _emit_summary_if_changed(self) -> list[str]:
+        """Emit the collapsed summary only if it differs from the last emission."""
+        if not self._pending_summary:
+            return []
+
+        summary = self.get_tool_summary()
+        if not summary:
+            return []
+
+        if summary == self._last_emitted_summary:
+            return []
+
+        self._last_emitted_summary = summary
+        return [summary]
 
 
 def _read_project_docs(project_path: Path) -> str | None:
@@ -920,6 +934,11 @@ class TaskExecutor:
         last_output_time = time.time()
         last_warning_time = 0.0
         last_log_flush = time.time()
+        # Reset the activity timestamp for this task so a stale timestamp from a
+        # prior phase (e.g., the coding phase before an await_reset pause) does
+        # not cause the inactivity check to fire immediately when a new phase starts.
+        with self._lock:
+            self._activity_times[task.id] = last_output_time
         terminal_buffer = bytearray()
         terminal_lock = threading.Lock()
         first_stream_chunk_seen = False
@@ -1202,10 +1221,16 @@ class TaskExecutor:
             time.sleep(0.1)
             pty_session = pty_service.get_session(stream_id)
 
-        # Get final exit code
+        # Get final exit code.  The reader thread sets exit_code after
+        # _proc.wait(), but terminate() sets active=False first.  Wait briefly
+        # for the reader thread to populate exit_code to avoid a race.
         exit_code = 0
         if pty_session:
-            exit_code = pty_session.exit_code or 0
+            for _ in range(20):  # up to 2 seconds
+                if pty_session.exit_code is not None:
+                    break
+                time.sleep(0.1)
+            exit_code = pty_session.exit_code if pty_session.exit_code is not None else 0
 
         # Flush any remaining Codex output buffer that wasn't emitted
         if codex_output_buffer:

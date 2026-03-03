@@ -4,7 +4,7 @@
 This script captures the three main views for the README carousel:
 1. providers-tab.png - Full providers view with multiple accounts
 2. run-task-input.png - Task input panel (top section)
-3. run-task-conversation.png - Completed task with follow-up input visible
+3. settings.png - Settings pane with action rules
 
 Usage:
     python scripts/release_screenshots.py
@@ -19,7 +19,7 @@ from pathlib import Path
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from chad.verification.ui_playwright_runner import (  # noqa: E402
+from chad.util.verification.ui_runner import (  # noqa: E402
     ChadLaunchError,
     PlaywrightUnavailable,
     create_temp_env,
@@ -53,7 +53,7 @@ def inject_followup_visible(page):
     page.evaluate(
         """
     () => {
-        // Show the follow-up row - handle Gradio's visibility
+        // Show the follow-up row - handle visibility
         const followupRow = document.getElementById('followup-row');
         if (followupRow) {
             followupRow.style.setProperty('display', 'flex', 'important');
@@ -98,6 +98,52 @@ def inject_followup_visible(page):
     )
 
 
+def fill_task_form(page):
+    """Fill the task form with realistic data for the screenshot."""
+    # Create a session first — the task form only appears when one is selected
+    page.locator("button:has-text('New Session')").click()
+    page.wait_for_timeout(2000)
+
+    # The AccountPicker auto-selects the CODING-role account (claude-pro).
+    # Wait for the coding agent select to have a selected value.
+    page.wait_for_timeout(1000)
+
+    # Fill task description
+    page.locator(".task-form textarea").fill(
+        "Add a REST API endpoint for user profile updates with "
+        "validation, rate limiting, and comprehensive test coverage"
+    )
+
+    # Wait for model override dropdown to appear (async fetch)
+    page.wait_for_timeout(1000)
+
+    # Select model override for coding agent
+    model_select = page.locator(".task-form > label:has-text('Model Override') select")
+    if model_select.count() > 0:
+        model_select.select_option(label="claude-opus-4-20250514")
+
+    # Enable verification
+    page.locator(".verification-section input[type='checkbox']").check()
+    page.wait_for_timeout(500)
+
+    # Select verification agent (codex-work)
+    verification_select = page.locator(
+        ".verification-section label:has-text('Verification Agent') select"
+    )
+    if verification_select.count() > 0:
+        verification_select.select_option(label="codex-work (openai / o3-pro)")
+
+    # Wait for verification models and reasoning to appear
+    page.wait_for_timeout(1000)
+
+    # Select verification reasoning
+    reasoning_select = page.locator(
+        ".verification-section label:has-text('Verification Reasoning') select"
+    )
+    if reasoning_select.count() > 0:
+        reasoning_select.select_option(value="high")
+
+
 def main():
     print("=" * 60)
     print("Generating Release Screenshots")
@@ -111,17 +157,18 @@ def main():
         instance = start_chad(env)
         print(f"Chad running on port {instance.port}")
 
-        viewport = {"width": 1280, "height": 900}
+        viewport_large = {"width": 1280, "height": 900}
+        viewport_medium = {"width": 1280, "height": 800}
 
-        # Screenshot 1: Providers tab (dark mode only for README)
+        # Screenshot 1: Providers tab
         print("\n[1/3] Capturing providers tab...")
         output_path = DOCS_DIR / "screenshot-providers.png"
         with open_playwright_page(
             instance.port,
             tab="providers",
             headless=True,
-            viewport=viewport,
-            color_scheme="dark",
+            viewport=viewport_large,
+            color_scheme="light",
             render_delay=2.0,
         ) as page:
             screenshot_page(page, output_path)
@@ -132,45 +179,28 @@ def main():
         output_path = DOCS_DIR / "screenshot-task-input.png"
         with open_playwright_page(
             instance.port,
-            tab="run",
+            tab="chat",
             headless=True,
-            viewport=viewport,
-            color_scheme="dark",
+            viewport=viewport_medium,
+            color_scheme="light",
             render_delay=2.0,
         ) as page:
-            # Capture just the top input section
-            screenshot_element(page, "#run-top-inputs", output_path)
+            fill_task_form(page)
+            page.wait_for_timeout(500)
+            screenshot_page(page, output_path)
             print(f"  Saved: {output_path}")
 
-        # Screenshot 3: Conversation with follow-up visible
-        print("\n[3/3] Capturing conversation with follow-up...")
-        output_path = DOCS_DIR / "screenshot-conversation.png"
+        # Screenshot 3: Settings tab
+        print("\n[3/3] Capturing settings tab...")
+        output_path = DOCS_DIR / "screenshot-settings.png"
         with open_playwright_page(
             instance.port,
-            tab="run",
+            tab="settings",
             headless=True,
-            viewport={"width": 1280, "height": 800},
-            color_scheme="dark",
+            viewport=viewport_medium,
+            color_scheme="light",
             render_delay=2.0,
         ) as page:
-            # Make follow-up row visible and add sample text
-            inject_followup_visible(page)
-            page.wait_for_timeout(500)  # Let UI update
-
-            # Capture both chatbot and follow-up row by taking full page
-            # then we'll crop to just the relevant area
-            # First, scroll to ensure chatbot area is visible
-            page.evaluate(
-                """
-            () => {
-                const chatbot = document.getElementById('agent-chatbot');
-                if (chatbot) chatbot.scrollIntoView({ behavior: 'instant', block: 'start' });
-            }
-            """
-            )
-            page.wait_for_timeout(200)
-
-            # Take full page screenshot then crop to conversation area
             screenshot_page(page, output_path)
             print(f"  Saved: {output_path}")
 
@@ -178,7 +208,7 @@ def main():
         print("Release screenshots saved to docs/")
         print("=" * 60)
         print("\nFiles created:")
-        for f in ["screenshot-providers.png", "screenshot-task-input.png", "screenshot-conversation.png"]:
+        for f in ["screenshot-providers.png", "screenshot-task-input.png", "screenshot-settings.png"]:
             path = DOCS_DIR / f
             if path.exists():
                 size = path.stat().st_size

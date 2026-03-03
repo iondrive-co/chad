@@ -21,7 +21,7 @@ class StreamMessage:
 class WSClient:
     """Synchronous WebSocket client for task streaming."""
 
-    def __init__(self, base_url: str = "ws://localhost:8000"):
+    def __init__(self, base_url: str = "ws://localhost:3184"):
         """Initialize the WebSocket client.
 
         Args:
@@ -124,7 +124,7 @@ class WSClient:
 class AsyncWSClient:
     """Async WebSocket client for task streaming."""
 
-    def __init__(self, base_url: str = "ws://localhost:8000"):
+    def __init__(self, base_url: str = "ws://localhost:3184"):
         """Initialize the WebSocket client.
 
         Args:

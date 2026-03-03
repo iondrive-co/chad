@@ -10,6 +10,7 @@ from chad.server.api.schemas import (
     SessionResponse,
     SessionListResponse,
     SessionCancelResponse,
+    SessionResumeResponse,
     TaskCreate,
     TaskStatusResponse,
     TaskStatus,
@@ -34,6 +35,7 @@ def _session_to_response(session: Session) -> SessionResponse:
         name=session.name,
         project_path=session.project_path,
         active=session.active,
+        paused=getattr(session, "paused", False),
         has_worktree=session.worktree_path is not None,
         has_changes=session.has_worktree_changes,
         coding_account=getattr(session, "coding_account", None),
@@ -80,6 +82,8 @@ async def get_session(session_id: str) -> SessionResponse:
     session = manager.get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+    print(f"Client connected to session {session_id}")
     return _session_to_response(session)
 
 
@@ -141,6 +145,33 @@ async def cancel_session(session_id: str) -> SessionCancelResponse:
         session_id=session_id,
         cancel_requested=True,
         message="Cancellation requested",
+    )
+
+
+@router.post("/{session_id}/resume", response_model=SessionResumeResponse)
+async def resume_session(session_id: str) -> SessionResumeResponse:
+    """Request resumption of a paused session.
+
+    Sessions may be paused when waiting for usage limits to reset.
+    This endpoint forces the session to resume immediately.
+    """
+    manager = get_session_manager()
+    session = manager.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+    if not getattr(session, "paused", False):
+        return SessionResumeResponse(
+            session_id=session_id,
+            resumed=False,
+            message="Session is not paused",
+        )
+
+    manager.set_resume_requested(session_id, True)
+    return SessionResumeResponse(
+        session_id=session_id,
+        resumed=True,
+        message="Resume requested",
     )
 
 
@@ -403,6 +434,9 @@ async def get_session_events(
     - Building session history/timeline views
     - Debugging and auditing agent activity
 
+    For finished sessions (no active task), reads directly from the persisted
+    JSONL log file on disk, allowing any UI instance to view historical sessions.
+
     Event types include: session_started, model_selected, user_message,
     assistant_message, tool_call_started, tool_call_finished, terminal_output,
     verification_attempt, session_ended, etc.
@@ -415,16 +449,21 @@ async def get_session_events(
     executor = get_task_executor()
     task = executor.get_latest_task_for_session(session_id)
 
-    if not task or not task.event_log:
-        return {"events": [], "latest_seq": 0}
-
     # Parse event type filter
     type_filter = None
     if event_types:
         type_filter = [t.strip() for t in event_types.split(",") if t.strip()]
 
-    events = task.event_log.get_events(since_seq=since_seq, event_types=type_filter)
-    latest_seq = task.event_log.get_latest_seq()
+    # Use in-memory event log from active task if available,
+    # otherwise fall back to persisted log on disk
+    if task and task.event_log:
+        event_log = task.event_log
+    else:
+        # Read from persisted JSONL file for finished/historical sessions
+        event_log = EventLog(session_id)
+
+    events = event_log.get_events(since_seq=since_seq, event_types=type_filter)
+    latest_seq = event_log.get_latest_seq()
 
     return {
         "events": events,

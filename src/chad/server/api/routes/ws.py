@@ -56,10 +56,19 @@ manager = ConnectionManager()
 
 
 @router.websocket("/ws/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str):
+async def websocket_endpoint(
+    websocket: WebSocket,
+    session_id: str,
+    since_seq: int = 0,
+    token: str | None = None,
+):
     """WebSocket endpoint for streaming task updates.
 
     Bidirectional communication with PTY sessions.
+
+    Query params:
+    - since_seq: Resume from this sequence number (for reconnection)
+    - token: Bearer token for authenticated connections
 
     Server -> Client message types:
     - terminal: Raw PTY output (base64 encoded)
@@ -74,6 +83,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     - cancel: Cancel/terminate PTY
     - ping: Heartbeat
     """
+    # Check auth token if configured
+    auth_token = getattr(websocket.app.state, "auth_token", None)
+    if auth_token:
+        from chad.server.auth import check_websocket_token
+        if not check_websocket_token(websocket, auth_token):
+            await websocket.close(code=4001, reason="Authentication required")
+            return
+
     # Verify session exists
     session_mgr = get_session_manager()
     session = session_mgr.get_session(session_id)
@@ -82,6 +99,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         return
 
     await manager.connect(websocket, session_id)
+    print(f"WebSocket client connected to session {session_id}")
 
     try:
         pty_service = get_pty_stream_service()
@@ -95,9 +113,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             event_log = task.event_log if task else None
             mux = EventMultiplexer(session_id, event_log)
 
-            # Stream events through the multiplexer
-            async for event in mux.stream_events(
+            # Use stream_with_since for catch-up support on reconnection
+            async for event in mux.stream_with_since(
                 pty_service,
+                since_seq=since_seq,
                 include_terminal=True,
                 include_events=True,
             ):
@@ -196,3 +215,4 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         pass
     finally:
         manager.disconnect(websocket, session_id)
+        print(f"WebSocket client disconnected from session {session_id}")

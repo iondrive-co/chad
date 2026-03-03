@@ -24,31 +24,59 @@ class TestClaudeStreamJsonParser:
         results = parser.feed(data)
         assert results == ["Hello world"]
 
-    def test_tool_use_accumulated_not_returned_immediately(self):
-        """Parser accumulates tool uses instead of returning them immediately."""
+    def test_tool_use_emitted_immediately(self):
+        """Tool-use chunks should surface a collapsed summary right away."""
         parser = ClaudeStreamJsonParser()
         data = b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/src/main.py"}}]}}\n'
         results = parser.feed(data)
-        # Tool uses are accumulated, not returned immediately
-        assert results == []
-        # But the tool is tracked
+
+        assert results == ["• 1 file read"]
+        # Tool tracking remains active so later updates can accumulate
         assert parser.has_pending_tools()
         assert parser._tool_counts == {"Read": 1}
 
-    def test_tool_summary_emitted_before_text(self):
-        """Parser emits tool summary when text content arrives."""
+    def test_tool_summary_updates_incrementally_and_avoids_duplicates_on_text(self):
+        """Tool summary should update as counts change and not repeat when text arrives."""
         parser = ClaudeStreamJsonParser()
-        # First, a tool use
-        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/src/main.py"}}]}}\n')
-        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"pytest"}}]}}\n')
-        # Then text content arrives
-        results = parser.feed(b'{"type":"assistant","message":{"content":[{"type":"text","text":"Done!"}]}}\n')
-        # Summary is emitted before text
-        assert len(results) == 2
-        assert results[0] == "• 1 file read, 1 command"
-        assert results[1] == "Done!"
-        # Tool tracking is cleared
+        outputs: list[str] = []
+
+        outputs.extend(parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/src/main.py"}}]}}\n'))
+        outputs.extend(parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"pytest"}}]}}\n'))
+
+        # Text arrives after tool summaries have already been emitted
+        text_results = parser.feed(b'{"type":"assistant","message":{"content":[{"type":"text","text":"Done!"}]}}\n')
+        outputs.extend(text_results)
+
+        assert outputs == [
+            "• 1 file read",
+            "• 1 file read, 1 command",
+            "Done!",
+        ]
+        # Tool tracking is cleared after text
         assert not parser.has_pending_tools()
+
+    def test_tool_summary_updates_with_additional_tools(self):
+        """Each new tool_use chunk should emit a refreshed summary with updated counts."""
+        parser = ClaudeStreamJsonParser()
+
+        first = parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}\n')
+        second = parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}\n')
+        third = parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Grep","input":{"pattern":"foo"}}]}}\n')
+
+        assert first == ["• 1 file read"]
+        assert second == ["• 2 files read"]
+        assert third == ["• 2 files read, 1 search"]
+        assert parser.has_pending_tools()
+
+    def test_flush_emits_pending_summary_without_trailing_newline(self):
+        """Pending tool summaries should still be surfaced when flush() processes a partial line."""
+        parser = ClaudeStreamJsonParser()
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/src/main.py"}}]}}')
+
+        # No newline so feed() returns nothing; flush should emit the summary
+        remaining = parser.flush()
+
+        assert remaining == ["• 1 file read"]
 
     def test_get_tool_summary_formats_correctly(self):
         """Parser formats tool summary with correct grammar."""

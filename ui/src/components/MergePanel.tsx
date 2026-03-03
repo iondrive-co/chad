@@ -21,6 +21,7 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
   const [conflicts, setConflicts] = useState<MergeConflict[]>([]);
   const [branches, setBranches] = useState<string[]>([]);
   const [defaultBranch, setDefaultBranch] = useState("main");
+  const [currentBranch, setCurrentBranch] = useState("");
   const [targetBranch, setTargetBranch] = useState("");
   const [commitMessage, setCommitMessage] = useState("");
   const [showDiff, setShowDiff] = useState(false);
@@ -53,7 +54,10 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
         const branchData = await api.getBranches(sessionId);
         setBranches(branchData.branches);
         setDefaultBranch(branchData.default);
-        setTargetBranch(branchData.default);
+        setCurrentBranch(branchData.current);
+        // Default merge target to the primary repo branch (first in list), not the worktree branch
+        const preferredTarget = branchData.branches[0] ?? branchData.default ?? "";
+        setTargetBranch(preferredTarget);
 
         setPhase("changes");
       } catch (e) {
@@ -252,11 +256,17 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
             value={targetBranch}
             onChange={(e) => setTargetBranch(e.target.value)}
           >
-            {branches.map((b) => (
-              <option key={b} value={b}>
-                {b}{b === defaultBranch ? " (default)" : ""}
-              </option>
-            ))}
+            {branches.map((b) => {
+              const labels: string[] = [];
+              if (b === currentBranch) labels.push("current");
+              if (b === defaultBranch) labels.push("default");
+              const suffix = labels.length > 0 ? ` (${labels.join(", ")})` : "";
+              return (
+                <option key={b} value={b}>
+                  {b}{suffix}
+                </option>
+              );
+            })}
           </select>
         </label>
       </div>

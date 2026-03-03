@@ -21,7 +21,7 @@ class UserPreferences(BaseModel):
     """User preferences."""
 
     last_project_path: str | None = Field(default=None, description="Last used project path")
-    ui_mode: str = Field(default="gradio", description="UI mode: gradio or cli")
+    ui_mode: str = Field(default="react", description="UI mode: react (default) or cli")
 
 
 class SlackSettingsResponse(BaseModel):
@@ -30,7 +30,6 @@ class SlackSettingsResponse(BaseModel):
     enabled: bool = Field(default=False, description="Whether Slack integration is active")
     channel: str | None = Field(default=None, description="Slack channel ID")
     has_token: bool = Field(default=False, description="Whether a bot token is stored")
-    has_signing_secret: bool = Field(default=False, description="Whether a signing secret is stored")
 
 
 class SlackSettingsUpdate(BaseModel):
@@ -39,4 +38,3 @@ class SlackSettingsUpdate(BaseModel):
     enabled: bool | None = Field(default=None, description="Enable or disable Slack integration")
     channel: str | None = Field(default=None, description="Slack channel ID")
     bot_token: str | None = Field(default=None, description="Slack bot token (xoxb-...)")
-    signing_secret: str | None = Field(default=None, description="Slack app signing secret")

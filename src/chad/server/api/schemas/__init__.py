@@ -5,6 +5,7 @@ from .session import (
     SessionResponse,
     SessionListResponse,
     SessionCancelResponse,
+    SessionResumeResponse,
 )
 from .task import (
     TaskCreate,
@@ -74,6 +75,7 @@ __all__ = [
     "SessionResponse",
     "SessionListResponse",
     "SessionCancelResponse",
+    "SessionResumeResponse",
     # Task
     "TaskCreate",
     "TaskStatusResponse",

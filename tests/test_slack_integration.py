@@ -1,26 +1,11 @@
-"""Tests for Slack integration: SlackService, webhook endpoint, config getters/setters."""
+"""Tests for Slack integration: SlackService and config getters/setters."""
 
-import hashlib
-import hmac
-import json
-import os
-import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from chad.util.config_manager import ConfigManager
-from pathlib import Path
-
-
-def sign_slack_request(body: bytes, secret: str) -> tuple[str, str]:
-    """Return timestamp and signature for a Slack webhook payload."""
-
-    ts = str(int(time.time()))
-    sig_basestring = f"v0:{ts}:{body.decode('utf-8')}"
-    sig = "v0=" + hmac.new(secret.encode(), sig_basestring.encode(), hashlib.sha256).hexdigest()
-    return ts, sig
 
 
 class TestSlackConfigManager:
@@ -66,15 +51,6 @@ class TestSlackConfigManager:
         self.cm.set_slack_channel(None)
         assert self.cm.get_slack_channel() is None
 
-    def test_slack_signing_secret_default_none(self):
-        assert self.cm.get_slack_signing_secret() is None
-
-    def test_slack_signing_secret_roundtrip(self):
-        self.cm.set_slack_signing_secret("secret123")
-        assert self.cm.get_slack_signing_secret() == "secret123"
-        self.cm.set_slack_signing_secret(None)
-        assert self.cm.get_slack_signing_secret() is None
-
 
 class TestSlackService:
     """Test SlackService methods with mocked HTTP."""
@@ -98,12 +74,13 @@ class TestSlackService:
         svc = SlackService()
 
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {"ok": True}
+        mock_resp.json.return_value = {"ok": True, "ts": "123.45"}
         svc._http = MagicMock()
         svc._http.post.return_value = mock_resp
 
-        result = svc.post_milestone("abc123", "coding_complete", "Coding Complete", "Task finished")
-        assert result is True
+        ok, ts = svc.post_milestone("abc123", "coding_complete", "Coding Complete", "Task finished")
+        assert ok is True
+        assert ts == "123.45"
 
         call_args = svc._http.post.call_args
         assert call_args[0][0] == "https://slack.com/api/chat.postMessage"
@@ -121,8 +98,9 @@ class TestSlackService:
         svc = SlackService()
         svc._http = MagicMock()
 
-        result = svc.post_milestone("abc", "coding_complete", "Done", "Summary")
-        assert result is False
+        ok, ts = svc.post_milestone("abc", "coding_complete", "Done", "Summary")
+        assert ok is False
+        assert ts is None
         svc._http.post.assert_not_called()
 
     @patch("chad.server.services.slack_service.get_config_manager")
@@ -136,8 +114,9 @@ class TestSlackService:
         svc._http = MagicMock()
         svc._http.post.return_value = mock_resp
 
-        result = svc.post_milestone("abc", "coding_complete", "Done", "Summary")
-        assert result is False
+        ok, ts = svc.post_milestone("abc", "coding_complete", "Done", "Summary")
+        assert ok is False
+        assert ts is None
 
     @patch("chad.server.services.slack_service.get_config_manager")
     def test_post_milestone_no_token(self, mock_get_cm):
@@ -147,96 +126,9 @@ class TestSlackService:
         svc = SlackService()
         svc._http = MagicMock()
 
-        result = svc.post_milestone("abc", "coding_complete", "Done", "Summary")
-        assert result is False
-
-
-class TestWebhookSignatureVerification:
-    """Test Slack webhook signature verification."""
-
-    def test_valid_signature(self):
-        from chad.server.services.slack_service import SlackService
-
-        secret = "test_signing_secret"
-        ts = str(int(time.time()))
-        body = b'{"type":"event_callback","event":{"type":"message","text":"hello"}}'
-
-        sig_basestring = f"v0:{ts}:{body.decode('utf-8')}"
-        expected_sig = "v0=" + hmac.new(
-            secret.encode(), sig_basestring.encode(), hashlib.sha256
-        ).hexdigest()
-
-        assert SlackService.verify_webhook_signature(secret, ts, expected_sig, body) is True
-
-    def test_invalid_signature(self):
-        from chad.server.services.slack_service import SlackService
-
-        assert SlackService.verify_webhook_signature(
-            "secret", str(int(time.time())), "v0=bad", b"body"
-        ) is False
-
-    def test_expired_timestamp(self):
-        from chad.server.services.slack_service import SlackService
-
-        old_ts = str(int(time.time()) - 600)
-        assert SlackService.verify_webhook_signature(
-            "secret", old_ts, "v0=anything", b"body"
-        ) is False
-
-
-class TestSlackWebhookEndpoint:
-    """Test the /api/v1/slack/webhook FastAPI endpoint."""
-
-    @pytest.fixture(autouse=True)
-    def setup(self):
-        from chad.server.main import create_app
-        self.app = create_app()
-        self.client = TestClient(self.app)
-
-    def test_url_verification_challenge(self):
-        payload = {"type": "url_verification", "challenge": "test_challenge_abc"}
-        resp = self.client.post("/api/v1/slack/webhook", json=payload)
-        assert resp.status_code == 200
-        assert resp.json()["challenge"] == "test_challenge_abc"
-
-    def test_message_event_forwards(self):
-        payload = {
-            "type": "event_callback",
-            "event": {
-                "type": "message",
-                "text": "hello from slack",
-            },
-        }
-        with patch("chad.server.api.routes.slack.get_slack_service") as mock_svc:
-            mock_instance = MagicMock()
-            mock_svc.return_value = mock_instance
-            resp = self.client.post("/api/v1/slack/webhook", json=payload)
-            assert resp.status_code == 200
-            mock_instance.forward_message_to_session.assert_called_once_with("hello from slack")
-
-    def test_bot_messages_ignored(self):
-        payload = {
-            "type": "event_callback",
-            "event": {
-                "type": "message",
-                "text": "bot message",
-                "bot_id": "B12345",
-            },
-        }
-        with patch("chad.server.api.routes.slack.get_slack_service") as mock_svc:
-            mock_instance = MagicMock()
-            mock_svc.return_value = mock_instance
-            resp = self.client.post("/api/v1/slack/webhook", json=payload)
-            assert resp.status_code == 200
-            mock_instance.forward_message_to_session.assert_not_called()
-
-    def test_invalid_json(self):
-        resp = self.client.post(
-            "/api/v1/slack/webhook",
-            content=b"not json",
-            headers={"Content-Type": "application/json"},
-        )
-        assert resp.status_code == 400
+        ok, ts = svc.post_milestone("abc", "coding_complete", "Done", "Summary")
+        assert ok is False
+        assert ts is None
 
 
 class TestSlackConfigEndpoints:
@@ -265,27 +157,23 @@ class TestSlackConfigEndpoints:
         assert data["enabled"] is False
         assert data["channel"] is None
         assert data["has_token"] is False
-        assert data["has_signing_secret"] is False
 
     def test_put_slack_settings(self):
         resp = self.client.put("/api/v1/config/slack", json={
             "enabled": True,
             "channel": "C999",
             "bot_token": "xoxb-abc",
-            "signing_secret": "sec-123",
         })
         assert resp.status_code == 200
         data = resp.json()
         assert data["enabled"] is True
         assert data["channel"] == "C999"
         assert data["has_token"] is True
-        assert data["has_signing_secret"] is True
 
         # Verify persisted
         assert self.cm.get_slack_enabled() is True
         assert self.cm.get_slack_channel() == "C999"
         assert self.cm.get_slack_bot_token() == "xoxb-abc"
-        assert self.cm.get_slack_signing_secret() == "sec-123"
 
     def test_put_partial_update(self):
         self.cm.set_slack_enabled(True)
@@ -312,75 +200,6 @@ class TestSlackConfigEndpoints:
         assert "channel" in data["error"].lower()
 
 
-class TestSlackWebhookSignature:
-    """Ensure Slack webhook requests are verified when a signing secret is set."""
-
-    @pytest.fixture(autouse=True)
-    def setup(self, tmp_path, monkeypatch):
-        from chad.server.main import create_app
-
-        # Isolate config for this test class
-        config_path = tmp_path / "test_chad.conf"
-        monkeypatch.setenv("CHAD_CONFIG", str(config_path))
-
-        cm = ConfigManager(config_path=config_path)
-        cm.save_config({
-            "password_hash": "x",
-            "encryption_salt": "dGVzdHNhbHQ=",
-            "slack_signing_secret": "sigsecret",
-        })
-
-        # Patch the global config manager used by the route to our temp config
-        self._patcher = patch("chad.server.state._config_manager", cm)
-        self._patcher.start()
-
-        self.app = create_app()
-        self.client = TestClient(self.app)
-        self.secret = "sigsecret"
-
-    def teardown_method(self):
-        self._patcher.stop()
-
-    def _post(self, payload: dict, secret: str | None = None, tamper: bool = False, omit_headers: bool = False):
-        """Helper to POST to webhook with signed headers."""
-        body = json.dumps(payload).encode()
-        headers = {"Content-Type": "application/json"}
-        if not omit_headers:
-            ts, sig = sign_slack_request(body, secret or self.secret)
-            if tamper:
-                sig = sig[:-1] + ("0" if sig[-1] != "0" else "1")
-            headers.update({
-                "X-Slack-Request-Timestamp": ts,
-                "X-Slack-Signature": sig,
-            })
-        return self.client.post("/api/v1/slack/webhook", data=body, headers=headers)
-
-    def test_webhook_rejects_bad_signature(self):
-        payload = {"type": "event_callback", "event": {"type": "message", "text": "hi"}}
-        resp = self._post(payload, tamper=True)
-        assert resp.status_code == 401
-
-    def test_webhook_rejects_missing_signature(self):
-        payload = {"type": "event_callback", "event": {"type": "message", "text": "hi"}}
-        resp = self._post(payload, omit_headers=True)
-        assert resp.status_code == 401
-
-    def test_webhook_accepts_valid_signature(self):
-        payload = {"type": "url_verification", "challenge": "abc"}
-        resp = self._post(payload)
-        assert resp.status_code == 200
-        assert resp.json()["challenge"] == "abc"
-
-    def test_webhook_accepts_when_no_signing_secret_configured(self, tmp_path, monkeypatch):
-        # Remove signing secret and ensure request is accepted without headers
-        config_path = Path(os.environ.get("CHAD_CONFIG", tmp_path / "test_chad.conf"))
-        cm = ConfigManager(config_path=config_path)
-        cm.set_slack_signing_secret(None)
-        payload = {"type": "event_callback", "event": {"type": "message", "text": "hi"}}
-        resp = self.client.post("/api/v1/slack/webhook", json=payload)
-        assert resp.status_code == 200
-
-
 class TestMilestoneSlackHook:
     """Test that _emit_milestone triggers Slack notification."""
 
@@ -396,8 +215,10 @@ class TestMilestoneSlackHook:
         loop._milestone_lock = __import__("threading").Lock()
         loop._emit_fn = MagicMock()
         loop._notify_slack = True
+        loop._slack_thread_ts = None
 
         mock_svc = MagicMock()
+        mock_svc.post_milestone.return_value = (True, "111.22")
         with patch(
             "chad.server.services.slack_service._slack_service",
             mock_svc,
@@ -407,9 +228,22 @@ class TestMilestoneSlackHook:
         ):
             loop._emit_milestone("coding_complete", "Task done")
 
-        mock_svc.post_milestone_async.assert_called_once_with(
-            "test-sess", "coding_complete", "Coding Complete", "Task done",
-        )
+        # First call: threaded, no mention
+        mock_svc.post_milestone.assert_called_once()
+        args, kwargs = mock_svc.post_milestone.call_args
+        assert args[0] == "test-sess"
+        assert args[1] == "coding_complete"
+        assert kwargs["mention"] is False
+        assert kwargs["thread_ts"] is None
+        assert loop._slack_thread_ts == "111.22"
+
+        # Second call: top-level @here ping via async helper
+        mock_svc.post_milestone_async.assert_called_once()
+        args2, kwargs2 = mock_svc.post_milestone_async.call_args
+        assert args2[0] == "test-sess"
+        assert args2[1] == "coding_complete"
+        assert kwargs2["mention"] is True
+        assert kwargs2["thread_ts"] is None
 
     def test_emit_milestone_skips_slack_by_default(self):
         """notify_slack defaults to False so tests don't leak real Slack calls."""
@@ -431,4 +265,4 @@ class TestMilestoneSlackHook:
         ):
             loop._emit_milestone("coding_complete", "Task done")
 
-        mock_svc.post_milestone_async.assert_not_called()
+        mock_svc.post_milestone.assert_not_called()

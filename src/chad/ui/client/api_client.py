@@ -96,7 +96,7 @@ class CleanupSettings:
 class APIClient:
     """Client for Chad server REST API."""
 
-    def __init__(self, base_url: str = "http://localhost:8000"):
+    def __init__(self, base_url: str = "http://localhost:3184"):
         """Initialize the API client.
 
         Args:
@@ -553,7 +553,7 @@ class APIClient:
         data = resp.json()
         return Preferences(
             last_project_path=data.get("last_project_path"),
-            ui_mode=data.get("ui_mode", "gradio"),
+            ui_mode=data.get("ui_mode", "react"),
         )
 
     def set_preferences(
@@ -573,7 +573,7 @@ class APIClient:
         result = resp.json()
         return Preferences(
             last_project_path=result.get("last_project_path"),
-            ui_mode=result.get("ui_mode", "gradio"),
+            ui_mode=result.get("ui_mode", "react"),
         )
 
     # Providers
@@ -759,7 +759,6 @@ class APIClient:
         enabled: bool | None = None,
         channel: str | None = None,
         bot_token: str | None = None,
-        signing_secret: str | None = None,
     ) -> dict:
         """Update Slack integration settings.
 
@@ -773,9 +772,38 @@ class APIClient:
             payload["channel"] = channel
         if bot_token is not None:
             payload["bot_token"] = bot_token
-        if signing_secret is not None:
-            payload["signing_secret"] = signing_secret
         resp = self._client.put(self._url("/config/slack"), json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    # Tunnel
+    def get_tunnel_status(self) -> dict:
+        """Get tunnel status.
+
+        Returns:
+            Dict with running, url, subdomain, error
+        """
+        resp = self._client.get(self._url("/tunnel"))
+        resp.raise_for_status()
+        return resp.json()
+
+    def start_tunnel(self) -> dict:
+        """Start a Cloudflare tunnel.
+
+        Returns:
+            Dict with running, url, subdomain, error
+        """
+        resp = self._client.post(self._url("/tunnel/start"))
+        resp.raise_for_status()
+        return resp.json()
+
+    def stop_tunnel(self) -> dict:
+        """Stop the Cloudflare tunnel.
+
+        Returns:
+            Dict with running, url, subdomain, error
+        """
+        resp = self._client.post(self._url("/tunnel/stop"))
         resp.raise_for_status()
         return resp.json()
 

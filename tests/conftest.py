@@ -24,15 +24,27 @@ class _NoOpSlackService:
     def post_milestone_async(self, *a, **kw):
         pass
 
-    def get_signing_secret(self):
+
+class _NoOpTunnelService:
+    """TunnelService stand-in that never spawns real cloudflared."""
+
+    _url = None
+    _subdomain = None
+    _error = None
+    _proc = None
+
+    @property
+    def is_running(self):
+        return False
+
+    def start(self, port):
         return None
 
-    def forward_message_to_session(self, *a, **kw):
-        return False
+    def stop(self):
+        pass
 
-    @staticmethod
-    def verify_webhook_signature(signing_secret, timestamp, signature, body):
-        return False
+    def status(self):
+        return {"running": False, "url": None, "subdomain": None, "error": None}
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +58,12 @@ def _isolate_session_logs(tmp_path_factory, monkeypatch):
     noop = _NoOpSlackService()
     monkeypatch.setattr(
         "chad.server.services.slack_service.get_slack_service", lambda: noop,
+    )
+
+    # Prevent any test from spawning real cloudflared.
+    noop_tunnel = _NoOpTunnelService()
+    monkeypatch.setattr(
+        "chad.server.services.tunnel_service.get_tunnel_service", lambda: noop_tunnel,
     )
 
     # Prevent tests from opening real browser windows.

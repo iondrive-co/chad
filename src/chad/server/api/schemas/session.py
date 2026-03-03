@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 class SessionCreate(BaseModel):
     """Request model for creating a new session."""
 
-    name: str = Field(default="New Session", description="Human-readable session name")
+    name: str | None = Field(default=None, description="Session name (defaults to session ID)")
     project_path: str | None = Field(
         default=None, description="Path to the project directory"
     )
@@ -22,6 +22,7 @@ class SessionResponse(BaseModel):
         default=None, description="Path to the project directory"
     )
     active: bool = Field(default=False, description="Whether a task is currently running")
+    paused: bool = Field(default=False, description="Whether the task is paused waiting for usage reset")
     has_worktree: bool = Field(default=False, description="Whether a git worktree exists")
     has_changes: bool = Field(default=False, description="Whether there are uncommitted changes")
     coding_account: str | None = Field(default=None, description="Account used for the last coding task")
@@ -42,3 +43,11 @@ class SessionCancelResponse(BaseModel):
     session_id: str
     cancel_requested: bool = True
     message: str = "Cancellation requested"
+
+
+class SessionResumeResponse(BaseModel):
+    """Response model for resume request."""
+
+    session_id: str
+    resumed: bool = True
+    message: str = "Session resumed"
