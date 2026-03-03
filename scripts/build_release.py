@@ -28,6 +28,7 @@ DIST_DIR = ROOT / "dist"
 RELEASE_DIR = ROOT / "release"
 
 MIN_BUILD_PYTHON = (3, 12)
+REEXEC_ENV_KEY = "CHAD_BUILD_RELEASE_REEXEC"
 
 
 def get_current_version() -> str:
@@ -62,11 +63,43 @@ def get_installer_filename(version: str) -> str:
     if platform == "linux":
         return f"chad-{version}-{platform}.deb"
     if platform == "macos":
-        return f"chad-{version}-{platform}.dmg"
+        return f"chad-{version}-{platform}.pkg"
     return f"chad-{version}-{platform}"
 
 
-def _require_min_python() -> None:
+def _python_supports_minimum_version(python_executable: Path) -> bool:
+    """Return whether the given Python executable satisfies MIN_BUILD_PYTHON."""
+    cmd = [
+        str(python_executable),
+        "-c",
+        (
+            "import sys;"
+            "raise SystemExit(0 if sys.version_info[:2] >= "
+            f"{MIN_BUILD_PYTHON!r} else 1)"
+        ),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, check=False)
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def _find_project_python() -> Path | None:
+    """Find a local project virtualenv python that meets MIN_BUILD_PYTHON."""
+    candidates = [
+        ROOT / ".venv" / "bin" / "python",
+        ROOT / "venv" / "bin" / "python",
+        ROOT / ".venv" / "Scripts" / "python.exe",
+        ROOT / "venv" / "Scripts" / "python.exe",
+    ]
+    for candidate in candidates:
+        if candidate.exists() and _python_supports_minimum_version(candidate):
+            return candidate
+    return None
+
+
+def _require_min_python(*, allow_reexec: bool = False) -> None:
     """Ensure the build is run with a new enough Python.
 
     PyInstaller bundles the interpreter that runs this script. If someone runs
@@ -76,12 +109,30 @@ def _require_min_python() -> None:
     broken artifact.
     """
 
-    if sys.version_info < MIN_BUILD_PYTHON:
-        ver = ".".join(map(str, MIN_BUILD_PYTHON))
-        raise SystemExit(
-            f"Python {ver}+ required to build Chad. "
-            "Create a 3.12+ virtualenv and re-run scripts/build_release.py."
-        )
+    if sys.version_info >= MIN_BUILD_PYTHON:
+        return
+
+    ver = ".".join(map(str, MIN_BUILD_PYTHON))
+    current_ver = ".".join(map(str, sys.version_info[:3]))
+
+    if allow_reexec and os.environ.get(REEXEC_ENV_KEY) != "1":
+        project_python = _find_project_python()
+        if project_python is not None and str(project_python) != sys.executable:
+            print(f"Re-launching build with {project_python} ...")
+            env = os.environ.copy()
+            env[REEXEC_ENV_KEY] = "1"
+            os.execve(
+                str(project_python),
+                [str(project_python), str(Path(__file__)), *sys.argv[1:]],
+                env,
+            )
+            return
+
+    raise SystemExit(
+        f"Python {ver}+ required to build Chad. "
+        f"Current interpreter: {sys.executable} ({current_ver}). "
+        "Create a 3.12+ virtualenv and re-run scripts/build_release.py."
+    )
 
 
 def build_ui() -> None:
@@ -199,47 +250,50 @@ def _build_linux_deb(app_binary: Path, version: str, output_dir: Path) -> Path:
     return final_path
 
 
-def _build_macos_dmg(build_root: Path, version: str, output_dir: Path) -> Path:
-    """Create an unsigned macOS DMG from the PyInstaller onedir build."""
-    hdiutil = shutil.which("hdiutil")
-    if hdiutil is None:
+def _build_macos_pkg(build_root: Path, version: str, output_dir: Path) -> Path:
+    """Create a macOS .pkg installer with a PATH-visible `chad` command."""
+    pkgbuild = shutil.which("pkgbuild")
+    if pkgbuild is None:
         raise SystemExit(
-            "hdiutil is required to build a macOS .dmg image. "
+            "pkgbuild is required to build a macOS .pkg installer. "
             "It should be available by default on macOS."
         )
 
-    staging = output_dir / f"chad-{version}-dmg"
+    staging = output_dir / f"chad-{version}-pkg"
+    payload_root = staging / "payload"
     if staging.exists():
         shutil.rmtree(staging)
-    staging.mkdir(parents=True, exist_ok=True)
 
-    # Copy the onedir bundle and add an Applications shortcut for drag-and-drop install
-    bundle_dst = staging / "chad"
-    shutil.copytree(build_root, bundle_dst)
-    applications_link = staging / "Applications"
-    if applications_link.exists():
-        applications_link.unlink()
-    applications_link.symlink_to("/Applications")
+    app_dst = payload_root / "Applications" / "chad"
+    app_dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(build_root, app_dst)
 
-    dmg_path = output_dir / get_installer_filename(version)
-    if dmg_path.exists():
-        dmg_path.unlink()
+    bin_dir = payload_root / "usr" / "local" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    symlink_path = bin_dir / "chad"
+    if symlink_path.exists():
+        symlink_path.unlink()
+    symlink_path.symlink_to(Path("../../../Applications/chad/chad"))
+
+    pkg_path = output_dir / get_installer_filename(version)
+    if pkg_path.exists():
+        pkg_path.unlink()
 
     cmd = [
-        hdiutil,
-        "create",
-        "-volname",
-        f"Chad {version}",
-        "-srcfolder",
-        str(staging),
-        "-ov",
-        "-format",
-        "UDZO",
-        str(dmg_path),
+        pkgbuild,
+        "--root",
+        str(payload_root),
+        "--identifier",
+        "ai.chad.cli",
+        "--version",
+        version,
+        "--install-location",
+        "/",
+        str(pkg_path),
     ]
     run_command(cmd)
     shutil.rmtree(staging)
-    return dmg_path
+    return pkg_path
 
 
 def build_installer(output_dir: Path | None = None) -> Path:
@@ -330,7 +384,7 @@ def build_installer(output_dir: Path | None = None) -> Path:
         # Debian packaging expects the whole onedir tree so we pass the root dir
         final_path = _build_linux_deb(build_root, version, output_dir)
     elif platform_name == "macos":
-        final_path = _build_macos_dmg(build_root, version, output_dir)
+        final_path = _build_macos_pkg(build_root, version, output_dir)
     else:
         # Windows: zip the onedir bundle so the runtime stays alongside chad.exe.
         archive_base = output_dir / f"chad-{version}-{platform_name}"
@@ -358,6 +412,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        _require_min_python(allow_reexec=True)
         build_installer(output_dir=args.output)
         return 0
     except subprocess.CalledProcessError as e:

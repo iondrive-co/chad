@@ -67,8 +67,50 @@ class TestBuildReleaseScript:
             import build_release
 
             with patch.object(build_release.sys, "version_info", (3, 9)):
-                with pytest.raises(SystemExit):
-                    build_release.build_installer(output_dir=tmp_path)
+                with patch.object(build_release, "_find_project_python", return_value=None):
+                    with pytest.raises(SystemExit):
+                        build_release.build_installer(output_dir=tmp_path)
+        finally:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    def test_require_min_python_reexecs_with_project_virtualenv(self):
+        """_require_min_python should relaunch with a valid local venv when allowed."""
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import build_release
+
+            project_python = Path("/tmp/chad/.venv/bin/python3.12")
+            with patch.object(build_release.sys, "version_info", (3, 11, 9)):
+                with patch.object(build_release.sys, "executable", "/usr/bin/python3"):
+                    with patch.object(build_release.sys, "argv", ["scripts/build_release.py", "--output", "/tmp/out"]):
+                        with patch.dict(build_release.os.environ, {}, clear=True):
+                            with patch.object(build_release, "_find_project_python", return_value=project_python):
+                                with patch.object(build_release.os, "execve") as mock_execve:
+                                    build_release._require_min_python(allow_reexec=True)
+
+            mock_execve.assert_called_once_with(
+                str(project_python),
+                [str(project_python), str(BUILD_RELEASE), "--output", "/tmp/out"],
+                {build_release.REEXEC_ENV_KEY: "1"},
+            )
+        finally:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    def test_require_min_python_shows_current_interpreter(self):
+        """_require_min_python error should include interpreter path and version."""
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import build_release
+
+            with patch.object(build_release.sys, "version_info", (3, 11, 7)):
+                with patch.object(build_release.sys, "executable", "/usr/bin/python3"):
+                    with patch.object(build_release, "_find_project_python", return_value=None):
+                        with pytest.raises(SystemExit) as exc:
+                            build_release._require_min_python()
+
+            message = str(exc.value)
+            assert "Python 3.12+ required to build Chad." in message
+            assert "Current interpreter: /usr/bin/python3 (3.11.7)." in message
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 
@@ -338,8 +380,8 @@ class TestBuildReleaseScript:
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 
-    def test_macos_builds_dmg_from_onedir(self, tmp_path):
-        """macOS build should wrap the onedir bundle into a DMG via hdiutil."""
+    def test_macos_builds_pkg_with_path_symlink(self, tmp_path):
+        """macOS build should create a .pkg payload with /usr/local/bin/chad symlink."""
         sys.path.insert(0, str(SCRIPTS_DIR))
         try:
             import build_release
@@ -364,16 +406,20 @@ class TestBuildReleaseScript:
                             with patch.object(
                                 build_release, "_find_built_artifact", return_value=artifact
                             ):
-                                final_path = build_release.build_installer(output_dir=tmp_path)
+                                with patch.object(build_release.shutil, "rmtree"):
+                                    final_path = build_release.build_installer(output_dir=tmp_path)
 
-            hdiutil_calls = [c for c in run_calls if Path(c[0]).name == "hdiutil"]
-            assert hdiutil_calls, "hdiutil should be invoked to create the DMG"
-            hdi_cmd = hdiutil_calls[-1]
-            assert "-srcfolder" in hdi_cmd
-            expected_staging = tmp_path / f"chad-{version}-dmg"
-            assert str(expected_staging) in hdi_cmd
-            assert str(final_path) in hdi_cmd
-            assert final_path.suffix == ".dmg"
+            pkgbuild_calls = [c for c in run_calls if Path(c[0]).name == "pkgbuild"]
+            assert pkgbuild_calls, "pkgbuild should be invoked to create the .pkg"
+            pkg_cmd = pkgbuild_calls[-1]
+            assert "--root" in pkg_cmd
+            root_idx = pkg_cmd.index("--root")
+            payload_root = Path(pkg_cmd[root_idx + 1])
+            symlink_path = payload_root / "usr" / "local" / "bin" / "chad"
+            assert symlink_path.is_symlink()
+            assert symlink_path.readlink() == Path("../../../Applications/chad/chad")
+            assert str(final_path) == pkg_cmd[-1]
+            assert final_path.suffix == ".pkg"
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 
@@ -487,7 +533,7 @@ class TestInstallerNaming:
             # Test macOS
             with patch("sys.platform", "darwin"):
                 name = build_release.get_installer_filename("0.11.0")
-                assert name == "chad-0.11.0-macos.dmg"
+                assert name == "chad-0.11.0-macos.pkg"
 
             # Test Windows
             with patch("sys.platform", "win32"):
