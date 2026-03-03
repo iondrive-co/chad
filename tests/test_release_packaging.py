@@ -60,6 +60,18 @@ class TestBuildReleaseScript:
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 
+    def test_build_requires_modern_python(self, tmp_path):
+        """build_installer should refuse to run on Python < 3.12."""
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import build_release
+
+            with patch.object(build_release.sys, "version_info", (3, 9)):
+                with pytest.raises(SystemExit):
+                    build_release.build_installer(output_dir=tmp_path)
+        finally:
+            sys.path.remove(str(SCRIPTS_DIR))
+
     def test_get_platform_name_linux(self):
         """Test platform detection for Linux."""
         sys.path.insert(0, str(SCRIPTS_DIR))
@@ -343,6 +355,8 @@ class TestBuildReleaseScript:
             def fake_run_command(cmd, cwd=None):
                 run_calls.append(cmd)
 
+            version = build_release.get_current_version()
+
             with patch("sys.platform", "darwin"):
                 with patch("shutil.which", side_effect=lambda name: f"/usr/bin/{name}"):
                     with patch.object(build_release, "run_command", side_effect=fake_run_command):
@@ -356,7 +370,8 @@ class TestBuildReleaseScript:
             assert hdiutil_calls, "hdiutil should be invoked to create the DMG"
             hdi_cmd = hdiutil_calls[-1]
             assert "-srcfolder" in hdi_cmd
-            assert str(artifact_dir) in hdi_cmd
+            expected_staging = tmp_path / f"chad-{version}-dmg"
+            assert str(expected_staging) in hdi_cmd
             assert str(final_path) in hdi_cmd
             assert final_path.suffix == ".dmg"
         finally:

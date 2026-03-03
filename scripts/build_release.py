@@ -27,6 +27,8 @@ PYINSTALLER_ENTRY = ROOT / "scripts" / "pyinstaller_entry.py"
 DIST_DIR = ROOT / "dist"
 RELEASE_DIR = ROOT / "release"
 
+MIN_BUILD_PYTHON = (3, 12)
+
 
 def get_current_version() -> str:
     """Extract the current version from pyproject.toml."""
@@ -62,6 +64,24 @@ def get_installer_filename(version: str) -> str:
     if platform == "macos":
         return f"chad-{version}-{platform}.dmg"
     return f"chad-{version}-{platform}"
+
+
+def _require_min_python() -> None:
+    """Ensure the build is run with a new enough Python.
+
+    PyInstaller bundles the interpreter that runs this script. If someone runs
+    build_release with an older system Python (e.g., 3.9 on macOS), the
+    resulting binary will crash at startup because the codebase uses
+    3.10+ syntax. Bail out early with a clear message instead of producing a
+    broken artifact.
+    """
+
+    if sys.version_info < MIN_BUILD_PYTHON:
+        ver = ".".join(map(str, MIN_BUILD_PYTHON))
+        raise SystemExit(
+            f"Python {ver}+ required to build Chad. "
+            "Create a 3.12+ virtualenv and re-run scripts/build_release.py."
+        )
 
 
 def build_ui() -> None:
@@ -188,6 +208,19 @@ def _build_macos_dmg(build_root: Path, version: str, output_dir: Path) -> Path:
             "It should be available by default on macOS."
         )
 
+    staging = output_dir / f"chad-{version}-dmg"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True, exist_ok=True)
+
+    # Copy the onedir bundle and add an Applications shortcut for drag-and-drop install
+    bundle_dst = staging / "chad"
+    shutil.copytree(build_root, bundle_dst)
+    applications_link = staging / "Applications"
+    if applications_link.exists():
+        applications_link.unlink()
+    applications_link.symlink_to("/Applications")
+
     dmg_path = output_dir / get_installer_filename(version)
     if dmg_path.exists():
         dmg_path.unlink()
@@ -198,13 +231,14 @@ def _build_macos_dmg(build_root: Path, version: str, output_dir: Path) -> Path:
         "-volname",
         f"Chad {version}",
         "-srcfolder",
-        str(build_root),
+        str(staging),
         "-ov",
         "-format",
         "UDZO",
         str(dmg_path),
     ]
     run_command(cmd)
+    shutil.rmtree(staging)
     return dmg_path
 
 
@@ -217,6 +251,8 @@ def build_installer(output_dir: Path | None = None) -> Path:
     Returns:
         Path to the built installer.
     """
+    _require_min_python()
+
     # Ensure PyInstaller is available (installs automatically if missing)
     pyinstaller_cmd = ensure_pyinstaller()
 
