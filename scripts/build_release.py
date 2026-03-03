@@ -56,9 +56,11 @@ def get_installer_filename(version: str) -> str:
     """Get the installer filename for the current platform."""
     platform = get_platform_name()
     if platform == "windows":
-        return f"chad-{version}-{platform}.exe"
+        return f"chad-{version}-{platform}.zip"
     if platform == "linux":
         return f"chad-{version}-{platform}.deb"
+    if platform == "macos":
+        return f"chad-{version}-{platform}.dmg"
     return f"chad-{version}-{platform}"
 
 
@@ -177,6 +179,35 @@ def _build_linux_deb(app_binary: Path, version: str, output_dir: Path) -> Path:
     return final_path
 
 
+def _build_macos_dmg(build_root: Path, version: str, output_dir: Path) -> Path:
+    """Create an unsigned macOS DMG from the PyInstaller onedir build."""
+    hdiutil = shutil.which("hdiutil")
+    if hdiutil is None:
+        raise SystemExit(
+            "hdiutil is required to build a macOS .dmg image. "
+            "It should be available by default on macOS."
+        )
+
+    dmg_path = output_dir / get_installer_filename(version)
+    if dmg_path.exists():
+        dmg_path.unlink()
+
+    cmd = [
+        hdiutil,
+        "create",
+        "-volname",
+        f"Chad {version}",
+        "-srcfolder",
+        str(build_root),
+        "-ov",
+        "-format",
+        "UDZO",
+        str(dmg_path),
+    ]
+    run_command(cmd)
+    return dmg_path
+
+
 def build_installer(output_dir: Path | None = None) -> Path:
     """Build the installer for the current platform.
 
@@ -259,26 +290,21 @@ def build_installer(output_dir: Path | None = None) -> Path:
     # so we always package the containing directory when it exists.
     build_root = artifact if artifact.is_dir() else artifact.parent
 
-    # Copy to release directory with proper naming
-    installer_name = get_installer_filename(version)
-    final_path = output_dir / installer_name
-
     if platform_name == "linux":
         # Debian packaging expects the whole onedir tree so we pass the root dir
         final_path = _build_linux_deb(build_root, version, output_dir)
+    elif platform_name == "macos":
+        final_path = _build_macos_dmg(build_root, version, output_dir)
     else:
-        # Always archive the onedir tree so the bundled Python runtime (_internal/)
-        # ships with the executable. This fixes the macOS launcher failure where
-        # only the binary was copied.
-        archive_format = "zip" if platform_name == "windows" else "gztar"
-        archive_ext = ".zip" if platform_name == "windows" else ".tar.gz"
+        # Windows: zip the onedir bundle so the runtime stays alongside chad.exe.
+        archive_base = output_dir / f"chad-{version}-{platform_name}"
         shutil.make_archive(
-            str(output_dir / f"chad-{version}-{platform_name}"),
-            archive_format,
+            str(archive_base),
+            "zip",
             build_root.parent,
             build_root.name,
         )
-        final_path = output_dir / f"chad-{version}-{platform_name}{archive_ext}"
+        final_path = archive_base.with_suffix(".zip")
 
     print(f"Installer created: {final_path}")
     return final_path

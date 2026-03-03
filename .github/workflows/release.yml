@@ -55,7 +55,7 @@ jobs:
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             ARTIFACT=$(ls release/*.zip 2>/dev/null || ls release/*.exe 2>/dev/null | head -1)
           elif [[ "${{ runner.os }}" == "macOS" ]]; then
-            ARTIFACT=$(ls release/*.tar.gz 2>/dev/null || ls release/*macos* 2>/dev/null | head -1)
+            ARTIFACT=$(ls release/*.dmg 2>/dev/null || ls release/*macos* 2>/dev/null | head -1)
           else
             ARTIFACT=$(ls release/*.deb 2>/dev/null || ls release/*.tar.gz 2>/dev/null || ls release/*linux* 2>/dev/null | head -1)
           fi

@@ -1,6 +1,5 @@
 """Tests for release packaging and installer generation."""
 
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -289,8 +288,46 @@ class TestBuildReleaseScript:
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 
-    def test_macos_onedir_is_archived(self, tmp_path):
-        """macOS build should package the whole onedir bundle (not just the binary)."""
+    def test_windows_onedir_is_zipped(self, tmp_path):
+        """Windows build should zip the onedir bundle instead of copying the exe."""
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import build_release
+
+            artifact_dir = tmp_path / "dist" / "chad"
+            artifact_dir.mkdir(parents=True)
+            artifact = artifact_dir / "chad.exe"
+            artifact.write_text("bin")
+            (artifact_dir / "_internal").mkdir()
+
+            zip_call = {}
+
+            def fake_make_archive(base_name, format, root_dir=None, base_dir=None):
+                zip_call["base_name"] = Path(base_name)
+                zip_call["format"] = format
+                zip_call["root_dir"] = Path(root_dir)
+                zip_call["base_dir"] = base_dir
+                return str(Path(base_name).with_suffix(".zip"))
+
+            with patch("sys.platform", "win32"):
+                with patch("shutil.which", side_effect=lambda name: f"C:/{name}.exe"):
+                    with patch.object(build_release, "run_command"):
+                        with patch.object(build_release, "build_ui"):
+                            with patch.object(
+                                build_release, "_find_built_artifact", return_value=artifact
+                            ):
+                                with patch("shutil.make_archive", side_effect=fake_make_archive):
+                                    final_path = build_release.build_installer(output_dir=tmp_path)
+
+            assert final_path.suffix == ".zip"
+            assert zip_call["format"] == "zip"
+            assert zip_call["root_dir"] == artifact_dir.parent
+            assert zip_call["base_dir"] == artifact_dir.name
+        finally:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    def test_macos_builds_dmg_from_onedir(self, tmp_path):
+        """macOS build should wrap the onedir bundle into a DMG via hdiutil."""
         sys.path.insert(0, str(SCRIPTS_DIR))
         try:
             import build_release
@@ -301,33 +338,27 @@ class TestBuildReleaseScript:
             artifact.write_text("bin")
             (artifact_dir / "_internal").mkdir()
 
-            archive_calls = {}
+            run_calls = []
 
-            def fake_make_archive(base_name, format, root_dir=None, base_dir=None):
-                archive_calls["base_name"] = Path(base_name)
-                archive_calls["format"] = format
-                archive_calls["root_dir"] = Path(root_dir)
-                archive_calls["base_dir"] = base_dir
-                archive_path = Path(str(base_name) + (".zip" if format == "zip" else ".tar.gz"))
-                archive_path.parent.mkdir(parents=True, exist_ok=True)
-                archive_path.write_text("archive")
-                return str(archive_path)
+            def fake_run_command(cmd, cwd=None):
+                run_calls.append(cmd)
 
             with patch("sys.platform", "darwin"):
-                with patch("shutil.which", return_value="/usr/bin/pyinstaller"):
-                    with patch.object(build_release, "run_command"):
+                with patch("shutil.which", side_effect=lambda name: f"/usr/bin/{name}"):
+                    with patch.object(build_release, "run_command", side_effect=fake_run_command):
                         with patch.object(build_release, "build_ui"):
                             with patch.object(
                                 build_release, "_find_built_artifact", return_value=artifact
                             ):
-                                with patch.object(shutil, "make_archive", side_effect=fake_make_archive):
-                                    final_path = build_release.build_installer(output_dir=tmp_path)
+                                final_path = build_release.build_installer(output_dir=tmp_path)
 
-            assert str(final_path).endswith(".tar.gz")
-            assert archive_calls["format"] == "gztar"
-            assert archive_calls["root_dir"] == artifact_dir.parent
-            assert archive_calls["base_dir"] == artifact_dir.name
-            assert final_path.exists()
+            hdiutil_calls = [c for c in run_calls if Path(c[0]).name == "hdiutil"]
+            assert hdiutil_calls, "hdiutil should be invoked to create the DMG"
+            hdi_cmd = hdiutil_calls[-1]
+            assert "-srcfolder" in hdi_cmd
+            assert str(artifact_dir) in hdi_cmd
+            assert str(final_path) in hdi_cmd
+            assert final_path.suffix == ".dmg"
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 
@@ -441,11 +472,11 @@ class TestInstallerNaming:
             # Test macOS
             with patch("sys.platform", "darwin"):
                 name = build_release.get_installer_filename("0.11.0")
-                assert name == "chad-0.11.0-macos"
+                assert name == "chad-0.11.0-macos.dmg"
 
             # Test Windows
             with patch("sys.platform", "win32"):
                 name = build_release.get_installer_filename("0.11.0")
-                assert name == "chad-0.11.0-windows.exe"
+                assert name == "chad-0.11.0-windows.zip"
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
