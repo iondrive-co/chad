@@ -4,6 +4,8 @@ Note: UI mode tests are in test_cli_integration.py::TestUIModeSwitching.
 Note: PTY runner command tests are in test_cli_integration.py::TestProviderCommandGeneration.
 """
 
+import pytest
+
 
 class TestCLIImports:
     """Tests for CLI package imports."""
@@ -12,6 +14,24 @@ class TestCLIImports:
         """Can import launch_cli_ui from chad.ui.cli."""
         from chad.ui.cli import launch_cli_ui
         assert callable(launch_cli_ui)
+
+
+class TestMainVersionFlag:
+    """Tests for the CLI --version flag."""
+
+    def test_version_flag_prints_version(self, capsys, monkeypatch):
+        import chad.__main__ as chad_main
+        from chad import __version__
+
+        monkeypatch.setattr(chad_main, "_start_parent_watchdog", lambda: None)
+        monkeypatch.setattr(chad_main, "_check_chad_import_path", lambda: None)
+        monkeypatch.setattr(chad_main.sys, "argv", ["chad", "--version"])
+
+        with pytest.raises(SystemExit):
+            chad_main.main()
+
+        captured = capsys.readouterr()
+        assert __version__ in captured.out
 
 
 class TestProviderOauthFlow:

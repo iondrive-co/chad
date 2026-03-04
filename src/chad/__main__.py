@@ -14,6 +14,7 @@ from pathlib import Path
 from .util.cleanup import cleanup_on_startup, cleanup_on_shutdown
 from .util.config_manager import ConfigManager
 from .util.config import ensure_project_root_env
+from . import __version__
 
 
 def _start_parent_watchdog() -> threading.Thread | None:
@@ -317,6 +318,11 @@ def main() -> int:
     _check_chad_import_path()
 
     parser = argparse.ArgumentParser(description="Chad: YOLO AI")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"chad {__version__}",
+    )
     parser.add_argument(
         "--mode",
         type=str,

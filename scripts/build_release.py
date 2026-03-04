@@ -12,11 +12,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import re
 import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Sequence
 
@@ -24,6 +26,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = ROOT / "pyproject.toml"
 BUILD_UI_SCRIPT = ROOT / "scripts" / "build_ui.py"
 PYINSTALLER_ENTRY = ROOT / "scripts" / "pyinstaller_entry.py"
+PYINSTALLER_HOOKS_DIR = ROOT / "scripts" / "pyinstaller_hooks"
+WIX_LICENSE_RTF = ROOT / "scripts" / "wix" / "license.rtf"
 DIST_DIR = ROOT / "dist"
 RELEASE_DIR = ROOT / "release"
 
@@ -309,9 +313,47 @@ def _ensure_wix_tools() -> dict[str, Path]:
     return tools
 
 
+def _ensure_wix_file_language(harvest_wxs: Path) -> None:
+    """Add Language="0" to versioned File entries missing a Language value."""
+    ET.register_namespace("", "http://schemas.microsoft.com/wix/2006/wi")
+    tree = ET.parse(harvest_wxs)
+    root = tree.getroot()
+    ns = {"wix": "http://schemas.microsoft.com/wix/2006/wi"}
+    updated = False
+
+    for file_elem in root.findall(".//wix:File", ns):
+        if "Version" in file_elem.attrib and "Language" not in file_elem.attrib:
+            file_elem.set("Language", "0")
+            updated = True
+
+    if updated:
+        tree.write(harvest_wxs, encoding="utf-8", xml_declaration=True)
+
+
+def _ensure_build_dependencies() -> None:
+    """Ensure required runtime deps are installed before PyInstaller runs."""
+    required = ["pyte", "websockets"]
+    missing = [name for name in required if importlib.util.find_spec(name) is None]
+    if not missing:
+        return
+
+    print(f"Installing build dependencies: {', '.join(missing)}")
+    run_command([sys.executable, "-m", "pip", "install", "-r", str(ROOT / "requirements.txt")])
+
+    still_missing = [name for name in required if importlib.util.find_spec(name) is None]
+    if still_missing:
+        raise SystemExit(
+            "Missing required dependencies after install: "
+            f"{', '.join(still_missing)}"
+        )
+
+
 def _build_windows_msi(build_root: Path, version: str, output_dir: Path) -> Path:
     """Create a Windows MSI installer using WiX harvest + candle + light."""
     tools = _ensure_wix_tools()
+
+    if not WIX_LICENSE_RTF.exists():
+        raise SystemExit(f"Missing WiX license file at {WIX_LICENSE_RTF}")
 
     staging = output_dir / f"chad-{version}-msi"
     if staging.exists():
@@ -335,9 +377,11 @@ def _build_windows_msi(build_root: Path, version: str, output_dir: Path) -> Path
         "INSTALLDIR",
         "-srd",
         "-gg",
+        "-sreg",
         "-var",
         "var.SourceDir",
     ])
+    _ensure_wix_file_language(harvest_wxs)
 
     product_wxs.write_text(
         f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -351,7 +395,7 @@ def _build_windows_msi(build_root: Path, version: str, output_dir: Path) -> Path
         <Directory Id="INSTALLDIR" Name="Chad">
           <Component Id="PathComponent" Guid="*">
             <CreateFolder/>
-            <Environment Id="ChadPath" Name="PATH" Action="set" Part="last" Permanent="no" System="no" Value="[INSTALLDIR]"/>
+            <Environment Id="ChadPath" Name="PATH" Action="set" Part="first" Permanent="no" System="yes" Value="[INSTALLDIR]"/>
             <RegistryValue Root="HKCU" Key="Software\\Chad" Name="PathComponent" Type="integer" Value="1" KeyPath="yes"/>
           </Component>
         </Directory>
@@ -374,6 +418,7 @@ def _build_windows_msi(build_root: Path, version: str, output_dir: Path) -> Path
     <UIRef Id="WixUI_InstallDir"/>
     <UIRef Id="WixUI_ErrorProgressText"/>
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR"/>
+    <WixVariable Id="WixUILicenseRtf" Value="{WIX_LICENSE_RTF.as_posix()}"/>
   </Product>
 </Wix>
 """,
@@ -472,6 +517,8 @@ def build_installer(output_dir: Path | None = None) -> Path:
     """
     _require_min_python()
 
+    _ensure_build_dependencies()
+
     # Ensure PyInstaller is available (installs automatically if missing)
     pyinstaller_cmd = ensure_pyinstaller()
 
@@ -502,6 +549,7 @@ def build_installer(output_dir: Path | None = None) -> Path:
         "--noconfirm",  # Don't ask for confirmation
         # Use the wrapper entry point with absolute imports
         str(PYINSTALLER_ENTRY),
+        "--additional-hooks-dir", str(PYINSTALLER_HOOKS_DIR),
         # Tell PyInstaller where to find the chad package
         "--paths", str(ROOT / "src"),
         # Collect all chad submodules (many are imported conditionally)
@@ -518,6 +566,7 @@ def build_installer(output_dir: Path | None = None) -> Path:
         "--hidden-import", "pyte",
         "--hidden-import", "bcrypt",
         "--hidden-import", "cryptography",
+        "--collect-all", "pyte",
         # Add data files
         "--add-data", f"{ROOT / 'src' / 'chad' / 'ui_dist'}{data_sep}chad/ui_dist",
     ]
