@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
-from chad.server.services.tunnel_service import get_tunnel_service
+from chad.server.services import tunnel_service
 
 router = APIRouter()
 
@@ -20,7 +20,7 @@ class TunnelStatus(BaseModel):
 @router.get("/tunnel", response_model=TunnelStatus)
 async def get_tunnel_status() -> TunnelStatus:
     """Get the current tunnel status."""
-    svc = get_tunnel_service()
+    svc = tunnel_service.get_tunnel_service()
     return TunnelStatus(**svc.status())
 
 
@@ -28,7 +28,7 @@ async def get_tunnel_status() -> TunnelStatus:
 async def start_tunnel(request: Request) -> TunnelStatus:
     """Start a Cloudflare quick-tunnel. Port is inferred from the server."""
     port = request.url.port or 8000
-    svc = get_tunnel_service()
+    svc = tunnel_service.get_tunnel_service()
     svc.start(port)
     return TunnelStatus(**svc.status())
 
@@ -36,6 +36,6 @@ async def start_tunnel(request: Request) -> TunnelStatus:
 @router.post("/tunnel/stop", response_model=TunnelStatus)
 async def stop_tunnel() -> TunnelStatus:
     """Stop the running tunnel."""
-    svc = get_tunnel_service()
+    svc = tunnel_service.get_tunnel_service()
     svc.stop()
     return TunnelStatus(**svc.status())

@@ -3,7 +3,7 @@
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from chad.server.services.slack_service import get_slack_service
+from chad.server.services import slack_service
 from chad.server.state import get_config_manager
 
 router = APIRouter()
@@ -28,7 +28,7 @@ async def test_slack_connection() -> SlackTestResult:
     if not cm.get_slack_channel():
         return SlackTestResult(ok=False, error="No channel ID configured")
 
-    svc = get_slack_service()
+    svc = slack_service.get_slack_service()
     ok = svc.post_milestone("test", "connection_test", "Connection Test", "Chad is connected to Slack")
     if not ok:
         import httpx
