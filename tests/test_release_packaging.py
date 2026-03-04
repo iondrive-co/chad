@@ -387,6 +387,39 @@ class TestBuildReleaseScript:
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 
+    def test_ensure_wix_tools_accepts_winget_no_upgrade(self):
+        """WiX install via winget should not fail if winget reports no upgrade."""
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import build_release
+
+            state = {"installed": False}
+
+            def fake_which(name):
+                if name in {"heat.exe", "candle.exe", "light.exe"}:
+                    return f"C:/wix/{name}" if state["installed"] else None
+                if name == "winget":
+                    return "C:/winget.exe"
+                if name == "choco":
+                    return None
+                return None
+
+            class FakeResult:
+                def __init__(self, returncode):
+                    self.returncode = returncode
+
+            def fake_run(*args, **kwargs):
+                state["installed"] = True
+                return FakeResult(2316632107)
+
+            with patch.object(build_release.shutil, "which", side_effect=fake_which):
+                with patch.object(build_release.subprocess, "run", side_effect=fake_run):
+                    tools = build_release._ensure_wix_tools()
+
+            assert set(tools.keys()) == {"heat.exe", "candle.exe", "light.exe"}
+        finally:
+            sys.path.remove(str(SCRIPTS_DIR))
+
     def test_macos_builds_pkg_with_path_symlink(self, tmp_path):
         """macOS build should create a .pkg payload with /usr/local/bin/chad symlink."""
         sys.path.insert(0, str(SCRIPTS_DIR))

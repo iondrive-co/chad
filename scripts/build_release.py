@@ -251,13 +251,21 @@ def _build_linux_deb(app_binary: Path, version: str, output_dir: Path) -> Path:
 
 
 def _ensure_wix_tools() -> dict[str, Path]:
-    """Locate WiX Toolset binaries on Windows (install via choco if missing)."""
+    """Locate WiX Toolset binaries on Windows (install via choco/winget if missing)."""
     tools: dict[str, Path] = {}
     default_dirs = [
+        Path("C:/Program Files (x86)/WiX Toolset v3.14/bin"),
+        Path("C:/Program Files (x86)/WiX Toolset v3.12/bin"),
         Path("C:/Program Files (x86)/WiX Toolset v3.11/bin"),
+        Path("C:/Program Files (x86)/WiX Toolset v3.10/bin"),
+        Path("C:/Program Files/WiX Toolset v3.14/bin"),
+        Path("C:/Program Files/WiX Toolset v3.12/bin"),
+        Path("C:/Program Files/WiX Toolset v3.11/bin"),
+        Path("C:/Program Files/WiX Toolset v3.10/bin"),
         Path("C:/Program Files/Windows Installer XML v3.11/bin"),
     ]
     names = ["heat.exe", "candle.exe", "light.exe"]
+    winget_id = "WiXToolset.WiXToolset"
 
     def _locate(name: str) -> Path | None:
         found = shutil.which(name)
@@ -277,13 +285,19 @@ def _ensure_wix_tools() -> dict[str, Path]:
     missing = [n for n in names if n not in tools]
     if missing:
         choco = shutil.which("choco")
-        if not choco:
-            raise SystemExit(
-                "WiX tools not found (heat.exe, candle.exe, light.exe) and Chocolatey is unavailable. "
-                "Install WiX v3.11+ or add it to PATH."
-            )
-        print("WiX not found; installing via choco ...")
-        run_command([choco, "install", "wixtoolset", "-y", "--no-progress"])
+        if choco:
+            print("WiX not found; installing via choco ...")
+            run_command([choco, "install", "wixtoolset", "-y", "--no-progress"])
+        else:
+            winget = shutil.which("winget")
+            if winget:
+                print("WiX not found; installing via winget ...")
+                subprocess.run([winget, "install", "--id", winget_id, "-e"], check=False)
+            else:
+                raise SystemExit(
+                    "WiX tools not found (heat.exe, candle.exe, light.exe) and no package manager is available. "
+                    "Install WiX v3.11+ or add it to PATH."
+                )
         for name in missing:
             path = _locate(name)
             if path:
