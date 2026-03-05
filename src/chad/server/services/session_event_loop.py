@@ -139,6 +139,8 @@ class SessionEventLoop:
         "weekly_limit_reached": "Weekly Limit",
         "usage_threshold": "Usage Warning",
         "verification_started": "Verification",
+        "verification_automated": "Automated Verification",
+        "verification_llm": "LLM Verification",
         "verification_passed": "Verification Passed",
         "verification_failed": "Verification Failed",
         "revision_started": "Re-coding",
