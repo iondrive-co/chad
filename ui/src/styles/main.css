@@ -83,13 +83,6 @@ body {
   overflow: hidden;
 }
 
-.sidebar {
-  width: 280px;
-  border-right: 1px solid var(--border);
-  background: var(--bg-secondary);
-  overflow-y: auto;
-}
-
 .main {
   flex: 1;
   overflow-y: auto;
@@ -226,7 +219,9 @@ body {
 .tabs {
   display: flex;
   gap: 4px;
-  margin-left: auto;
+  overflow-x: auto;
+  align-items: center;
+  min-width: 0;
 }
 
 .tabs button {
@@ -320,47 +315,76 @@ label {
   color: var(--text-muted);
 }
 
-/* ── Session List ── */
+/* ── Session Tabs ── */
 
-.session-list {
-  padding: 8px;
+.tab-separator {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  margin: 0 4px;
+  flex-shrink: 0;
 }
 
-.session-create {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 12px;
-}
-
-.session-list ul {
-  list-style: none;
-}
-
-.session-item {
+.session-tab {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
+  gap: 4px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 4px 8px;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
+  max-width: 160px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
-.session-item:hover {
+.session-tab.active {
   background: var(--bg-tertiary);
+  color: var(--text);
+  border-color: var(--accent);
 }
 
-.session-item.selected {
-  background: var(--bg-tertiary);
-  border-left: 3px solid var(--accent);
-}
-
-.session-name {
-  flex: 1;
+.session-tab-name {
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  max-width: 100px;
+}
+
+.session-tab-close {
+  opacity: 0;
+  font-size: 10px;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+
+.session-tab:hover .session-tab-close {
+  opacity: 1;
+}
+
+.session-tab-close:hover {
+  color: var(--error);
+}
+
+.new-session-btn {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--text-muted);
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.new-session-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .badge {
@@ -1483,4 +1507,105 @@ label {
 .project-settings-actions button {
   padding: 6px 16px;
   font-size: 0.85rem;
+}
+
+.project-settings-section {
+  margin-top: 12px;
+}
+
+.project-settings-section-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.add-path-btn {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--text-muted);
+  padding: 2px 8px;
+  font-size: 0.8rem;
+  border-radius: 4px;
+}
+
+.add-path-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.instructions-path-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.instructions-path-row input {
+  flex: 1;
+  padding: 6px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+
+.remove-path-btn {
+  background: transparent;
+  color: var(--text-muted);
+  padding: 2px 6px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.remove-path-btn:hover {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.instructions-hint {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ── Prompts Panel ── */
+
+.prompts-toggle {
+  margin-top: 8px;
+  padding: 6px 12px;
+  font-size: 0.85rem;
+}
+
+.prompts-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 0;
+}
+
+.prompt-note {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.prompt-note code {
+  background: var(--bg-tertiary);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 0.8rem;
+}
+
+.prompt-textarea {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.4;
+  resize: vertical;
+  min-height: 100px;
 }

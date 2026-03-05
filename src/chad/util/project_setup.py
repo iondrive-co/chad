@@ -27,8 +27,23 @@ class VerificationConfig:
 class DocsConfig:
     """Configuration for project documentation locations."""
 
-    instructions_path: str | None = None
-    architecture_path: str | None = None
+    instructions_paths: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "DocsConfig":
+        """Create from dictionary, migrating old single-path fields."""
+        paths = data.get("instructions_paths")
+        if paths is not None:
+            return cls(instructions_paths=list(paths))
+        # Migrate legacy single-field format
+        migrated: list[str] = []
+        old_inst = data.get("instructions_path")
+        old_arch = data.get("architecture_path")
+        if old_inst:
+            migrated.append(old_inst)
+        if old_arch:
+            migrated.append(old_arch)
+        return cls(instructions_paths=migrated)
 
 
 @dataclass
@@ -58,8 +73,7 @@ class ProjectConfig:
             },
             "instructions": self.instructions,
             "docs": {
-                "instructions_path": self.docs.instructions_path,
-                "architecture_path": self.docs.architecture_path,
+                "instructions_paths": self.docs.instructions_paths,
             },
         }
 
@@ -76,10 +90,7 @@ class ProjectConfig:
             last_validated=verification_data.get("last_validated"),
         )
         docs_data = data.get("docs", {})
-        docs = DocsConfig(
-            instructions_path=docs_data.get("instructions_path"),
-            architecture_path=docs_data.get("architecture_path"),
-        )
+        docs = DocsConfig.from_dict(docs_data)
         return cls(
             version=data.get("version", "1.0"),
             detected_at=data.get("detected_at", ""),
@@ -262,28 +273,21 @@ def detect_verification_commands(project_path: Path) -> dict:
     }
 
 
+DOC_CANDIDATES = INSTRUCTION_DOC_CANDIDATES + ARCHITECTURE_DOC_CANDIDATES
+
+
 def detect_doc_paths(project_path: Path) -> DocsConfig:
     """Find instruction and architecture docs in the project."""
     project_path = Path(project_path)
-    instructions_path = None
-    architecture_path = None
-
-    for candidate in INSTRUCTION_DOC_CANDIDATES:
+    found: list[str] = []
+    for candidate in DOC_CANDIDATES:
         candidate_path = project_path / candidate
         if candidate_path.exists():
-            instructions_path = str(candidate_path.relative_to(project_path))
-            break
+            rel = str(candidate_path.relative_to(project_path))
+            if rel not in found:
+                found.append(rel)
 
-    for candidate in ARCHITECTURE_DOC_CANDIDATES:
-        candidate_path = project_path / candidate
-        if candidate_path.exists():
-            architecture_path = str(candidate_path.relative_to(project_path))
-            break
-
-    return DocsConfig(
-        instructions_path=instructions_path,
-        architecture_path=architecture_path,
-    )
+    return DocsConfig(instructions_paths=found)
 
 
 def _get_config_project_root(project_path: Path) -> Path:
@@ -310,10 +314,8 @@ def ensure_docs_config(project_path: Path) -> DocsConfig:
     docs = config.docs or DocsConfig()
     detected = detect_doc_paths(config_root)
 
-    if not docs.instructions_path:
-        docs.instructions_path = detected.instructions_path
-    if not docs.architecture_path:
-        docs.architecture_path = detected.architecture_path
+    if not docs.instructions_paths:
+        docs.instructions_paths = detected.instructions_paths
 
     config.docs = docs
     save_project_config(config_root, config)
@@ -326,14 +328,12 @@ def build_doc_reference_text(project_path: Path) -> str | None:
     project_path = Path(project_path).resolve()
     docs = ensure_docs_config(project_path)
 
-    lines: list[str] = []
-    if docs.instructions_path:
-        lines.append(f"- Project instructions: {project_path / docs.instructions_path}")
-    if docs.architecture_path:
-        lines.append(f"- Architecture overview: {project_path / docs.architecture_path}")
-
-    if not lines:
+    if not docs.instructions_paths:
         return None
+
+    lines: list[str] = []
+    for p in docs.instructions_paths:
+        lines.append(f"- {project_path / p}")
 
     return "Read the following project files from disk before making changes:\n" + "\n".join(lines)
 
@@ -410,8 +410,7 @@ def save_project_settings(
     project_path: Path,
     lint_command: str | None = None,
     test_command: str | None = None,
-    instructions_path: str | None = None,
-    architecture_path: str | None = None,
+    instructions_paths: list[str] | None = None,
 ) -> ProjectConfig:
     """Persist verification commands and documentation paths for a project.
 
@@ -419,8 +418,7 @@ def save_project_settings(
         project_path: Path to the project root
         lint_command: Lint command to save (None to clear)
         test_command: Test command to save (None to clear)
-        instructions_path: Relative/absolute path to agent instructions file
-        architecture_path: Relative/absolute path to architecture overview
+        instructions_paths: List of paths to agent instruction/doc files
 
     Returns:
         The saved ProjectConfig instance
@@ -449,16 +447,12 @@ def save_project_settings(
 
     docs = config.docs or DocsConfig()
 
-    if instructions_path is not None:
-        docs.instructions_path = instructions_path.strip() or None
-    if architecture_path is not None:
-        docs.architecture_path = architecture_path.strip() or None
+    if instructions_paths is not None:
+        docs.instructions_paths = [p.strip() for p in instructions_paths if p.strip()]
 
-    detected_docs = detect_doc_paths(project_path)
-    if not docs.instructions_path:
-        docs.instructions_path = detected_docs.instructions_path
-    if not docs.architecture_path:
-        docs.architecture_path = detected_docs.architecture_path
+    if not docs.instructions_paths:
+        detected_docs = detect_doc_paths(project_path)
+        docs.instructions_paths = detected_docs.instructions_paths
 
     config.docs = docs
 
@@ -511,10 +505,8 @@ def setup_project(project_path: Path, validate: bool = True) -> ProjectConfig:
 
     # Detect documentation paths
     detected_docs = detect_doc_paths(project_path)
-    if not config.docs.instructions_path:
-        config.docs.instructions_path = detected_docs.instructions_path
-    if not config.docs.architecture_path:
-        config.docs.architecture_path = detected_docs.architecture_path
+    if not config.docs.instructions_paths:
+        config.docs.instructions_paths = detected_docs.instructions_paths
 
     # Validate commands if requested
     if validate:

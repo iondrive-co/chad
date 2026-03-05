@@ -7,32 +7,32 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .state import init_start_time
 from .api.routes import health, sessions, providers, worktree, config, ws, slack, tunnel, uploads
 
 
-def _resolve_ui_index() -> Path | None:
-    """Return the path to the UI index.html if available.
-
-    The UI is a single self-contained HTML file (portable build) that can be
-    served without any additional asset files.
-    """
+def _resolve_ui_paths() -> tuple[Path | None, Path | None]:
+    """Return the UI index and assets directory if available."""
     # Prefer packaged assets (bundled in wheel)
     try:
         package_dist = resources.files("chad.ui_dist")
         index = Path(package_dist) / "index.html"
         if index.is_file():
-            return index
+            assets = index.parent / "assets"
+            return index, assets if assets.is_dir() else None
     except Exception:
         pass
 
     # Fallback to portable build in repository (useful in editable installs)
     repo_portable = Path(__file__).resolve().parents[3] / "ui" / "dist-portable" / "index.html"
     if repo_portable.is_file():
-        return repo_portable
-    return None
+        assets = repo_portable.parent / "assets"
+        return repo_portable, assets if assets.is_dir() else None
+    return None, None
 
 
 @asynccontextmanager
@@ -107,13 +107,14 @@ def create_app(
     app.include_router(uploads.router, prefix="/api/v1/uploads", tags=["Uploads"])
 
     # Serve the single-file React UI if available (packaged or repo build).
-    ui_index = _resolve_ui_index()
+    ui_index, ui_assets = _resolve_ui_paths()
     if ui_index:
-        from fastapi.responses import FileResponse
-
         @app.get("/", include_in_schema=False)
         async def serve_index():
             return FileResponse(ui_index)
+
+        if ui_assets:
+            app.mount("/assets", StaticFiles(directory=ui_assets), name="assets")
 
     return app
 

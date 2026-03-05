@@ -1,6 +1,5 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { ChadAPI } from "chad-client";
-import { SessionList } from "./components/SessionList.tsx";
 import { ChatView } from "./components/ChatView.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { ProvidersPanel } from "./components/ProvidersPanel.tsx";
@@ -139,6 +138,29 @@ export function App() {
     }
   }, []);
 
+  const handleNewSession = useCallback(async () => {
+    const session = await createSession();
+    if (session) {
+      setSelectedSession(session.id);
+      setTab("chat");
+      refreshSessions();
+    }
+  }, [createSession, refreshSessions]);
+
+  const handleDeleteSession = useCallback(async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    await deleteSession(id);
+    if (selectedSession === id) {
+      setSelectedSession(sessions.find(s => s.id !== id)?.id ?? null);
+    }
+    refreshSessions();
+  }, [deleteSession, selectedSession, sessions, refreshSessions]);
+
+  const handleSelectSession = useCallback((id: string) => {
+    setSelectedSession(id);
+    setTab("chat");
+  }, []);
+
   return (
     <div className="app">
       <header className="app-header">
@@ -159,6 +181,41 @@ export function App() {
           <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>
             Settings
           </button>
+          {connected && sessions.length > 0 && (
+            <>
+              <span className="tab-separator" />
+              {sessions.map((s) => (
+                <button
+                  key={s.id}
+                  className={`session-tab ${s.id === selectedSession && tab === "chat" ? "active" : ""}`}
+                  onClick={() => handleSelectSession(s.id)}
+                  title={s.name}
+                >
+                  <span className="session-tab-name">{s.name}</span>
+                  {s.active && !s.paused && <span className="badge running-badge">R</span>}
+                  {s.paused && <span className="badge paused-badge">P</span>}
+                  {s.has_changes && !s.active && <span className="badge changes-badge">C</span>}
+                  <span
+                    className="session-tab-close"
+                    onClick={(e) => handleDeleteSession(e, s.id)}
+                    title="Delete session"
+                  >
+                    x
+                  </span>
+                </button>
+              ))}
+            </>
+          )}
+          {connected && (
+            <button
+              className="new-session-btn"
+              onClick={handleNewSession}
+              disabled={sessionsLoading}
+              title="New session"
+            >
+              +
+            </button>
+          )}
         </nav>
         <div style={{ marginLeft: "auto", display: "flex", gap: "0.25rem", alignItems: "center" }}>
           {!connected && (
@@ -187,19 +244,6 @@ export function App() {
       <div className="app-body">
         {/* Keep chat content mounted so form state and merge panel survive tab switches */}
         <div style={{ display: tab === "chat" ? "contents" : "none" }}>
-          <aside className="sidebar">
-            <SessionList
-              api={api}
-              sessions={sessions}
-              loading={sessionsLoading}
-              createSession={createSession}
-              deleteSession={deleteSession}
-              selectedId={selectedSession}
-              onSelect={setSelectedSession}
-              onRefresh={refreshSessions}
-              connected={connected}
-            />
-          </aside>
           <main className="main">
             {!connected ? (
               <div className="placeholder">

@@ -1,5 +1,6 @@
 """Tests for Chad server API endpoints."""
 
+from importlib import resources
 from pathlib import Path
 
 import pytest
@@ -195,6 +196,27 @@ class TestConfigEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert "ui_mode" in data
+
+
+class TestUIServing:
+    """Ensure the packaged React UI is served correctly."""
+
+    def test_root_serves_index_html(self, client):
+        response = client.get("/")
+        assert response.status_code == 200
+        body = response.content.decode("utf-8", errors="ignore")
+        assert "<div id=\"root\"></div>" in body
+
+    def test_static_assets_are_served(self, client):
+        ui_root = Path(resources.files("chad.ui_dist"))
+        assets_dir = ui_root / "assets"
+        js_files = [p for p in assets_dir.iterdir() if p.suffix == ".js"]
+        assert js_files, "Expected at least one JS asset in chad.ui_dist/assets"
+
+        asset_name = js_files[0].name
+        response = client.get(f"/assets/{asset_name}")
+        assert response.status_code == 200
+        assert response.content == (assets_dir / asset_name).read_bytes()
 
     def test_get_verification_settings(self, client):
         """Can get verification settings."""
@@ -529,14 +551,14 @@ class TestProjectSettingsEndpoints:
                 "project_path": project_path,
                 "lint_command": "flake8 .",
                 "test_command": "pytest tests/",
-                "instructions_path": "AGENTS.md",
+                "instructions_paths": ["AGENTS.md"],
             },
         )
         assert response.status_code == 200
         data = response.json()
         assert data["lint_command"] == "flake8 ."
         assert data["test_command"] == "pytest tests/"
-        assert data["instructions_path"] == "AGENTS.md"
+        assert data["instructions_paths"] == ["AGENTS.md"]
 
     def test_get_project_settings_after_save(self, client, tmp_path):
         """Saved project settings are returned on GET."""

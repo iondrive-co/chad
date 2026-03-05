@@ -385,8 +385,7 @@ class ProjectSettingsResponse(BaseModel):
     project_type: str | None = Field(description="Detected project type")
     lint_command: str | None = Field(description="Lint command for the project")
     test_command: str | None = Field(description="Test command for the project")
-    instructions_path: str | None = Field(description="Path to agent instructions file")
-    architecture_path: str | None = Field(description="Path to architecture docs")
+    instructions_paths: list[str] = Field(default_factory=list, description="Paths to agent instruction/doc files")
 
 
 class ProjectSettingsUpdate(BaseModel):
@@ -395,8 +394,7 @@ class ProjectSettingsUpdate(BaseModel):
     project_path: str = Field(description="Path to the project")
     lint_command: str | None = Field(default=None, description="Lint command")
     test_command: str | None = Field(default=None, description="Test command")
-    instructions_path: str | None = Field(default=None, description="Agent instructions path")
-    architecture_path: str | None = Field(default=None, description="Architecture docs path")
+    instructions_paths: list[str] | None = Field(default=None, description="Paths to agent instruction/doc files")
 
 
 @router.get("/project", response_model=ProjectSettingsResponse)
@@ -423,8 +421,7 @@ async def get_project_settings(
             project_type=config.project_type,
             lint_command=config.verification.lint_command,
             test_command=config.verification.test_command,
-            instructions_path=config.docs.instructions_path if config.docs else None,
-            architecture_path=config.docs.architecture_path if config.docs else None,
+            instructions_paths=config.docs.instructions_paths if config.docs else [],
         )
 
     # Return defaults for new project
@@ -434,8 +431,7 @@ async def get_project_settings(
         project_type=project_type,
         lint_command=None,
         test_command=None,
-        instructions_path=None,
-        architecture_path=None,
+        instructions_paths=[],
     )
 
 
@@ -453,8 +449,7 @@ async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSetting
         path,
         lint_command=request.lint_command,
         test_command=request.test_command,
-        instructions_path=request.instructions_path,
-        architecture_path=request.architecture_path,
+        instructions_paths=request.instructions_paths,
     )
 
     return ProjectSettingsResponse(
@@ -462,6 +457,26 @@ async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSetting
         project_type=config.project_type,
         lint_command=config.verification.lint_command,
         test_command=config.verification.test_command,
-        instructions_path=config.docs.instructions_path if config.docs else None,
-        architecture_path=config.docs.architecture_path if config.docs else None,
+        instructions_paths=config.docs.instructions_paths if config.docs else [],
+    )
+
+
+class PromptPreviewsResponse(BaseModel):
+    """Response for prompt previews endpoint."""
+
+    coding: str = Field(description="Coding prompt template with {task} placeholder")
+    verification: str = Field(description="Verification prompt template")
+
+
+@router.get("/prompt-previews", response_model=PromptPreviewsResponse)
+async def get_prompt_previews(
+    project_path: str | None = None,
+) -> PromptPreviewsResponse:
+    """Get prompt previews with project docs filled in but {task} as placeholder."""
+    from chad.util.prompts import build_prompt_previews
+
+    previews = build_prompt_previews(project_path)
+    return PromptPreviewsResponse(
+        coding=previews.coding,
+        verification=previews.verification,
     )

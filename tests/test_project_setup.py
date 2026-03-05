@@ -299,25 +299,25 @@ class TestBuildVerificationInstructions:
 class TestDocsConfig:
     """Test detection and prompt reference generation for docs."""
 
-    def test_detect_doc_paths_prefers_agents_and_architecture(self, tmp_path):
-        """Detect doc paths and store them relative to project root."""
+    def test_detect_doc_paths_finds_all_docs(self, tmp_path):
+        """Detect doc paths returns all found docs in a single list."""
         (tmp_path / "AGENTS.md").write_text("instructions", encoding="utf-8")
         (tmp_path / "docs").mkdir()
         (tmp_path / "docs" / "ARCHITECTURE.md").write_text("arch", encoding="utf-8")
 
         docs = detect_doc_paths(tmp_path)
-        assert docs.instructions_path == "AGENTS.md"
-        assert docs.architecture_path == "docs/ARCHITECTURE.md"
+        assert "AGENTS.md" in docs.instructions_paths
+        assert "docs/ARCHITECTURE.md" in docs.instructions_paths
 
     def test_ensure_docs_config_persists_to_config_file(self, tmp_path, isolated_config):
         """ensure_docs_config should save discovered paths into main config file."""
         (tmp_path / "AGENTS.md").write_text("instructions", encoding="utf-8")
         docs = ensure_docs_config(tmp_path)
-        assert docs.instructions_path == "AGENTS.md"
+        assert "AGENTS.md" in docs.instructions_paths
 
         saved = load_project_config(tmp_path)
         assert saved is not None
-        assert saved.docs.instructions_path == "AGENTS.md"
+        assert "AGENTS.md" in saved.docs.instructions_paths
 
     def test_build_doc_reference_text_outputs_absolute_paths(self, tmp_path, isolated_config):
         """Doc reference text should point to absolute file locations."""
@@ -339,12 +339,11 @@ class TestDocsConfig:
             tmp_path,
             lint_command="flake8 .",
             test_command="pytest -q",
-            instructions_path="docs/DEV_GUIDE.md",
-            architecture_path="ARCH.md",
+            instructions_paths=["docs/DEV_GUIDE.md", "ARCH.md"],
         )
 
-        assert saved.docs.instructions_path == "docs/DEV_GUIDE.md"
-        assert saved.docs.architecture_path == "ARCH.md"
+        assert "docs/DEV_GUIDE.md" in saved.docs.instructions_paths
+        assert "ARCH.md" in saved.docs.instructions_paths
 
         ref_text = build_doc_reference_text(tmp_path)
         assert str(custom_instructions.resolve()) in ref_text
@@ -385,8 +384,7 @@ class TestDocsConfig:
             tmp_path,
             lint_command="flake8 .",
             test_command="pytest -q",
-            instructions_path="docs/DEV_GUIDE.md",
-            architecture_path=None,
+            instructions_paths=["docs/DEV_GUIDE.md"],
         )
 
         manager = GitWorktreeManager(tmp_path)

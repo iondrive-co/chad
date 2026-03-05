@@ -47,6 +47,13 @@ export function ChatView({
   // Current task description (extracted from session_started events)
   const [taskDescription, setTaskDescription] = useState<string | null>(null);
 
+  // Track current project path for settings
+  const [currentProjectPath, setCurrentProjectPath] = useState(defaultProjectPath);
+  const [worktreeRefresh, setWorktreeRefresh] = useState(0);
+
+  // Override coding prompt from ProjectSettings
+  const [overrideCodingPrompt, setOverrideCodingPrompt] = useState<string | null>(null);
+
   // Track the event log position at which the current task started, so the
   // stream skips old milestones/events from previous tasks in the same session.
   const streamSinceSeqRef = useRef<number | undefined>(undefined);
@@ -227,7 +234,7 @@ export function ChatView({
       }
       const followupDesc = followupText.trim();
       await api.startTask(sessionId, {
-        project_path: session.project_path || defaultProjectPath,
+        project_path: session.project_path || currentProjectPath || defaultProjectPath,
         task_description: followupDesc,
         coding_agent: codingAgent,
         is_followup: true,
@@ -241,7 +248,7 @@ export function ChatView({
     } finally {
       setSending(false);
     }
-  }, [api, sessionId, followupText, reset, lastCodingAgent, defaultProjectPath]);
+  }, [api, sessionId, followupText, reset, lastCodingAgent, defaultProjectPath, currentProjectPath]);
 
   const handleFollowupKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -260,10 +267,6 @@ export function ChatView({
       e.data.type === "milestone",
   );
 
-  // Track current project path for settings
-  const [currentProjectPath, setCurrentProjectPath] = useState(defaultProjectPath);
-  const [worktreeRefresh, setWorktreeRefresh] = useState(0);
-
   // Fetch session to get project path
   useEffect(() => {
     api.getSession(sessionId).then((session) => {
@@ -281,6 +284,10 @@ export function ChatView({
       setWorktreeRefresh((v) => v + 1);
     }
   }, [completed]);
+
+  const handleProjectPathChange = useCallback((path: string) => {
+    setCurrentProjectPath(path);
+  }, []);
 
   return (
     <div className="chat-view">
@@ -302,10 +309,13 @@ export function ChatView({
         </div>
       )}
 
-      {/* Project settings (collapsible) */}
-      {currentProjectPath && (
-        <ProjectSettings api={api} projectPath={currentProjectPath} />
-      )}
+      {/* Project settings (collapsible) - always shown */}
+      <ProjectSettings
+        api={api}
+        projectPath={currentProjectPath || defaultProjectPath}
+        onProjectPathChange={handleProjectPathChange}
+        onPromptsChange={setOverrideCodingPrompt}
+      />
 
       {/* Task form or streaming output */}
       {!taskActive && !displayOutput && !showMerge && historyLoaded && (
@@ -313,7 +323,8 @@ export function ChatView({
           api={api}
           sessionId={sessionId}
           onStart={handleTaskStart}
-          defaultProjectPath={defaultProjectPath}
+          projectPath={currentProjectPath || defaultProjectPath}
+          overridePrompt={overrideCodingPrompt}
         />
       )}
 

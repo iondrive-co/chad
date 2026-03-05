@@ -467,7 +467,8 @@ def build_agent_command(
     # Build full prompt based on phase (use override if user edited the prompt)
     full_prompt: str | None = None
     if override_prompt:
-        full_prompt = override_prompt
+        full_prompt = override_prompt.replace("{task}", task_description or "")
+
     elif task_description:
         project_docs = _read_project_docs(project_path)
         if phase in ("combined", "exploration", "implementation"):

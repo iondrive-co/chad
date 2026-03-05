@@ -296,16 +296,19 @@ export interface ProjectSettings {
   project_type: string | null;
   lint_command: string | null;
   test_command: string | null;
-  instructions_path: string | null;
-  architecture_path: string | null;
+  instructions_paths: string[];
 }
 
 export interface ProjectSettingsUpdate {
   project_path: string;
   lint_command?: string | null;
   test_command?: string | null;
-  instructions_path?: string | null;
-  architecture_path?: string | null;
+  instructions_paths?: string[] | null;
+}
+
+export interface PromptPreviews {
+  coding: string;
+  verification: string;
 }
 
 // ── Session log ──
