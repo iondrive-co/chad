@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """Show the interrupt feature in the Chat tab."""
 
-import os
 import sys
-import time
 from pathlib import Path
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parents[0] / "src"))
 
-from chad.util.verification.ui_runner import (
+from chad.util.verification.ui_runner import (  # noqa: E402
     create_temp_env,
     open_playwright_page,
     start_chad,
     stop_chad,
 )
+
 
 def main():
     env = create_temp_env()
@@ -111,6 +110,7 @@ def main():
     finally:
         stop_chad(instance)
         env.cleanup()
+
 
 if __name__ == "__main__":
     main()

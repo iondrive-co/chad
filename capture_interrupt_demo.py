@@ -5,6 +5,7 @@ import time
 import asyncio
 from chad.util.verification.ui_runner import create_temp_env, start_chad, stop_chad, open_playwright_page
 
+
 async def capture_interrupt_demo():
     env = create_temp_env()
     instance = start_chad(env)

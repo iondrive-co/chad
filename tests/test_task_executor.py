@@ -1,5 +1,7 @@
 import json
+import re
 import subprocess
+import sys
 from pathlib import Path
 
 from chad.server.services.session_manager import SessionManager
@@ -634,6 +636,79 @@ def test_terminal_output_is_periodically_flushed_and_decoded(tmp_path, monkeypat
     # PTY callbacks may coalesce fast output into one read on some systems; in that
     # case we still expect at least one decoded terminal snapshot in the event log.
     assert len(terminal_events) >= 1, "Expected at least one terminal_output snapshot"
+
+
+def test_stream_json_terminal_output_keeps_message_line_breaks(tmp_path, monkeypatch):
+    """Stream-json providers should not collapse adjacent assistant messages onto one line."""
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"accounts": {"claude-test": {"provider": "anthropic"}}}), encoding="utf-8")
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+    session_manager = SessionManager()
+    session = session_manager.create_session(project_path=str(repo_path), name="stream-json-lines")
+    executor = TaskExecutor(
+        ConfigManager(),
+        session_manager,
+        inactivity_timeout=10.0,
+        terminal_flush_interval=0.05,
+    )
+
+    import chad.server.services.task_executor as te
+
+    script = "\n".join([
+        "import json",
+        "events = [",
+        '    {"type": "assistant", "message": {"content": [{"type": "text", "text": "First line"}]}},',
+        '    {"type": "assistant", "message": {"content": [{"type": "text", "text": "Second line"}]}},',
+        "]",
+        "for event in events:",
+        "    print(json.dumps(event), flush=True)",
+        'print("```json", flush=True)',
+        'print(json.dumps({"change_summary": "Done", "files_changed": ["src/main.py"], "completion_status": "success"}), flush=True)',
+        'print("```", flush=True)',
+    ])
+
+    def anthropic_command(provider, account_name, project_path, task_description=None,
+                          screenshots=None, phase="combined", exploration_output=None, **kwargs):
+        return [sys.executable, "-c", script], {}, None
+
+    monkeypatch.setattr(te, "build_agent_command", anthropic_command)
+
+    task = executor.start_task(
+        session_id=session.id,
+        project_path=str(repo_path),
+        task_description="Preserve Claude line breaks",
+        coding_account="claude-test",
+    )
+    task._thread.join(timeout=10)
+
+    assert task.state == TaskState.COMPLETED, f"Task state was {task.state}, error: {task.error}"
+    terminal_events = [e for e in task.event_log.get_events() if e.get("type") == "terminal_output"]
+    assert terminal_events, "Expected decoded terminal output from stream-json provider"
+    terminal_text = "\n".join((e.get("data", "") or "") for e in terminal_events)
+    assert "First line\nSecond line" in terminal_text
+
+
+class TestChatUILayoutSource:
+    """Source-level regression checks for the main chat layout."""
+
+    def test_follow_up_composer_uses_compact_rows(self):
+        """The composer should leave room for the conversation history."""
+        chat_view = Path("ui/src/components/ChatView.tsx").read_text(encoding="utf-8")
+        assert "rows={5}" in chat_view
+
+    def test_desktop_chat_layout_places_conversation_beside_terminal(self):
+        """Desktop layouts should not stack the terminal under the chat by default."""
+        css = Path("ui/src/styles/main.css").read_text(encoding="utf-8")
+        assert re.search(
+            r"@media\s*\(min-width:\s*1100px\)\s*\{.*?\.chat-body\s*\{\s*flex-direction:\s*row;",
+            css,
+            re.DOTALL,
+        )
 
 
 def test_coding_status_events_are_logged_for_streaming(tmp_path, monkeypatch):

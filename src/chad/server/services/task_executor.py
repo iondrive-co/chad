@@ -347,6 +347,14 @@ class ClaudeStreamJsonParser:
         return [summary]
 
 
+def _render_stream_json_text_chunks(text_chunks: list[str]) -> str:
+    """Join parsed stream-json chunks into readable terminal text."""
+    cleaned = [chunk.rstrip("\r\n") for chunk in text_chunks if chunk]
+    if not cleaned:
+        return ""
+    return "\n".join(cleaned) + "\n"
+
+
 def _read_project_docs(project_path: Path) -> str | None:
     """Read project documentation if present.
 
@@ -1046,7 +1054,9 @@ class TaskExecutor:
                 if json_parser:
                     text_chunks = json_parser.feed(chunk_bytes)
                     if text_chunks:
-                        readable_text = "\n".join(text_chunks)
+                        readable_text = _render_stream_json_text_chunks(text_chunks)
+                        if not readable_text:
+                            return
                         # Replace PTY payload with human-readable text for subscribers
                         event.data = readable_text
                         event.has_ansi = False
@@ -1241,13 +1251,16 @@ class TaskExecutor:
         if json_parser:
             remaining = json_parser.flush()
             if remaining:
-                readable_text = "\n".join(remaining)
+                readable_text = _render_stream_json_text_chunks(remaining)
+                if not readable_text:
+                    readable_text = ""
                 # Emit final parsed output to stream and logs
-                emit("stream", chunk=base64.b64encode(readable_text.encode()).decode())
-                with terminal_lock:
-                    terminal_buffer.extend(readable_text.encode())
-                _feed_captured(readable_text)
-                captured_output.extend(remaining)
+                if readable_text:
+                    emit("stream", chunk=base64.b64encode(readable_text.encode()).decode())
+                    with terminal_lock:
+                        terminal_buffer.extend(readable_text.encode())
+                    _feed_captured(readable_text)
+                    captured_output.append(readable_text)
 
         flush_terminal_buffer()
         pty_service.cleanup_session(stream_id)

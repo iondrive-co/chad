@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """Create a visual demonstration of the interrupt feature."""
 
-import os
 import sys
 from pathlib import Path
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parents[0] / "src"))
 
-from chad.util.verification.ui_runner import (
+from chad.util.verification.ui_runner import (  # noqa: E402
     create_temp_env,
     open_playwright_page,
     start_chad,
     stop_chad,
 )
+
 
 def main():
     env = create_temp_env()
@@ -27,7 +27,7 @@ def main():
 
             # Take a screenshot of the default state
             page.screenshot(path="/tmp/chad/interrupt_demo.png", full_page=True)
-            print(f"Screenshot saved to /tmp/chad/interrupt_demo.png")
+            print("Screenshot saved to /tmp/chad/interrupt_demo.png")
 
             # Print page content for debugging
             print("Page title:", page.title())
@@ -35,6 +35,7 @@ def main():
     finally:
         stop_chad(instance)
         env.cleanup()
+
 
 if __name__ == "__main__":
     main()

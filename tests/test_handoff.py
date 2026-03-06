@@ -400,7 +400,7 @@ class TestBuildResumePrompt:
 
         assert "<previous_session>" in prompt
         assert "Fix the bug" in prompt
-        assert "Continue with: Continue fixing" in prompt
+        assert "Continue fixing" in prompt
 
     def test_resume_without_new_message(self, event_log):
         """Test resume prompt without new instructions."""
@@ -410,7 +410,7 @@ class TestBuildResumePrompt:
 
         assert "<previous_session>" in prompt
         assert "Original task" in prompt
-        assert "Continue with:" not in prompt
+        assert "## Resume Instructions" not in prompt
 
     def test_resume_builds_from_session_started(self, event_log):
         """Test that resume builds from session_started event."""
@@ -421,7 +421,7 @@ class TestBuildResumePrompt:
 
         assert "<previous_session>" in prompt
         assert "Build feature X" in prompt
-        assert "Continue with: Add tests" in prompt
+        assert "Add tests" in prompt
 
     def test_resume_formats_for_target_provider(self, event_log):
         """Test that resume formats for the target provider."""
@@ -458,6 +458,24 @@ class TestBuildResumePrompt:
         assert "First response" in prompt
         assert "Second request" in prompt
         assert "Second response" in prompt
+
+    def test_resume_prompt_preserves_coding_agent_contract(self, event_log):
+        """Provider handoff should keep the normal coding prompt contract intact."""
+        event_log.log(SessionStartedEvent(
+            task_description="Fix the regression and keep progress visible",
+            project_path="/project",
+        ))
+        event_log.log(MilestoneEvent(
+            milestone_type="exploration",
+            summary="The regression starts in ui/src/components/ChatView.tsx",
+        ))
+
+        prompt = build_resume_prompt(event_log, "Keep going", target_provider="anthropic")
+
+        assert "EXPLORATION_RESULT:" in prompt
+        assert '"change_summary"' in prompt
+        assert "<previous_session>" in prompt
+        assert "Keep going" in prompt
 
     def test_resume_prompt_with_terminal_only_session(self, temp_log_dir):
         """Test resume prompt for stream-json provider sessions (no assistant_message).
@@ -497,7 +515,7 @@ class TestBuildResumePrompt:
 
         # Should include original task and continuation
         assert "Fix 3 bugs in auth module" in prompt
-        assert "Continue with: Continue fixing" in prompt
+        assert "Continue fixing" in prompt
 
 
 class TestGetLastCheckpointProviderSessionId:
@@ -682,7 +700,8 @@ class TestConversationHandoff:
         assert "[Tool: Read] /src/Header.tsx" in prompt
         assert "[Result]:" in prompt
         assert "I've added the logout button" in prompt
-        assert "Continue with: Now add click handler" in prompt
+        assert "## Resume Instructions" in prompt
+        assert "Now add click handler" in prompt
 
     def test_multiple_turns_preserved(self, event_log):
         """Test that multiple conversation turns are preserved."""
@@ -869,7 +888,8 @@ class TestMockProviderHandoffIntegration:
         assert "onClick handler" in resume_prompt
 
         # Verify the new message is included
-        assert "Continue with: Continue adding the click handler" in resume_prompt
+        assert "## Resume Instructions" in resume_prompt
+        assert "Continue adding the click handler" in resume_prompt
 
         # Verify files modified section
         assert "## Files Modified" in resume_prompt

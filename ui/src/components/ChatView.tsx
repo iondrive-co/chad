@@ -23,6 +23,10 @@ function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
 }
 
+function normalizeLineEndings(text: string): string {
+  return text.replace(/\r\n?/g, "\n");
+}
+
 export function ChatView({
   api,
   sessionId,
@@ -70,7 +74,7 @@ export function ChatView({
   );
 
   // Combined output: live streaming output or historical output for finished sessions
-  const displayOutput = terminalOutput || historicalOutput;
+  const displayOutput = normalizeLineEndings(terminalOutput || historicalOutput);
 
   const mapEventToConversationItem = useCallback(
     (data: any, seq: number | null): ConversationItem | null => {
@@ -133,7 +137,7 @@ export function ChatView({
             .filter((e) => e.type === "terminal_output" && e.data);
           if (terminalEvents.length > 0) {
             const output = terminalEvents.map((e) => e.data || "").join("");
-            setHistoricalOutput(output);
+            setHistoricalOutput(normalizeLineEndings(output));
           }
 
           const starts = (data.events as { type: string; task_description?: string }[])
@@ -526,7 +530,7 @@ export function ChatView({
                 onKeyDown={handleInputKeyDown}
                 placeholder={taskActive ? "Type a clarification or additional context for the agent…" : "Type a task or follow-up message"}
                 disabled={sending}
-                rows={8}
+                rows={5}
               />
               <div className="composer-actions">
                 {conversationError && <span className="error-text">{conversationError}</span>}

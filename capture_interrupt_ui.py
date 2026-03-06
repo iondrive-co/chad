@@ -40,7 +40,7 @@ try:
         page.wait_for_selector('.chat-view', timeout=10000)
 
         # Click on our session in the sidebar
-        page.locator(f'.session-item:has-text("Interrupt Demo")').click()
+        page.locator('.session-item:has-text("Interrupt Demo")').click()
         time.sleep(1)  # Wait for session to load
 
         # Type an interrupt message to show the UI state
