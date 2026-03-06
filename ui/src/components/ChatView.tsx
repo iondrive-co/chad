@@ -340,7 +340,7 @@ export function ChatView({
   }, [api, sessionId]);
 
   const handleSendMessage = useCallback(async () => {
-    if (!inputText.trim() || sending) return;
+    if (sending) return;
 
     // Handle interrupt during task execution
     if (taskActive) {
@@ -348,8 +348,10 @@ export function ChatView({
       setSending(true);
       try {
         const message = inputText.trim();
-        // Send interrupt input directly to the PTY
-        const encodedData = btoa(message + "\n");
+        // Send Ctrl+C first to interrupt the agent, then the message if any
+        const ctrlC = "\x03";
+        const payload = message ? ctrlC + "\n" + message + "\n" : ctrlC + "\n";
+        const encodedData = btoa(payload);
         await api.sendInput(sessionId, encodedData);
 
         // Add the interrupt to the conversation as a special user message
@@ -359,12 +361,12 @@ export function ChatView({
             seq: conversationSeqRef.current + 1,
             ts: new Date().toISOString(),
             type: "user",
-            content: `[Interrupt] ${message}`,
+            content: `[Interrupt] ${message || "(interrupted)"}`,
           },
         ]);
         conversationSeqRef.current += 1;
 
-        setInputText("");
+        if (message) setInputText("");
       } catch (e) {
         if (e instanceof Error) {
           setConversationError(e.message);
@@ -378,6 +380,7 @@ export function ChatView({
     }
 
     // Handle normal message (start new task)
+    if (!inputText.trim()) return;
     if (!codingAccount) {
       setConversationError("Select a coding agent first");
       return;
@@ -538,9 +541,9 @@ export function ChatView({
                   {taskActive && <span className="running-indicator">Running…</span>}
                   <button
                     onClick={handleSendMessage}
-                    disabled={sending || !inputText.trim()}
+                    disabled={sending || (!taskActive && !inputText.trim())}
                   >
-                    {sending ? "Sending..." : taskActive ? "Send Interrupt" : hasRunTask ? "Send follow-up" : "Start task"}
+                    {sending ? "Sending..." : taskActive ? (inputText.trim() ? "Send Interrupt" : "Interrupt") : hasRunTask ? "Send follow-up" : "Start task"}
                   </button>
                 </div>
               </div>
