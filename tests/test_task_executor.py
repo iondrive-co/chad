@@ -12,6 +12,7 @@ from chad.server.services.task_executor import (
     build_agent_command,
     ClaudeStreamJsonParser,
     _strip_binary_garbage,
+    _tool_call_event,
 )
 from chad.util.config_manager import ConfigManager
 
@@ -234,6 +235,71 @@ class TestClaudeStreamJsonParser:
         parser = ClaudeStreamJsonParser()
         parser.feed(b"   \n")  # This gets consumed by feed, leaving empty buffer
         assert parser.flush() == []
+
+    def test_pending_tool_calls_accumulates_structured_data(self):
+        """Parser records structured tool call data for event logging."""
+        parser = ClaudeStreamJsonParser()
+        parser.feed(
+            b'{"type":"assistant","message":{"content":['
+            b'{"type":"tool_use","id":"toolu_abc","name":"Edit","input":{"file_path":"/src/app.py","old_string":"a","new_string":"b"}},'
+            b'{"type":"tool_use","id":"toolu_def","name":"Bash","input":{"command":"pytest -x"}}'
+            b']}}\n'
+        )
+
+        assert len(parser.pending_tool_calls) == 2
+        assert parser.pending_tool_calls[0]["id"] == "toolu_abc"
+        assert parser.pending_tool_calls[0]["name"] == "Edit"
+        assert parser.pending_tool_calls[0]["input"]["file_path"] == "/src/app.py"
+        assert parser.pending_tool_calls[1]["name"] == "Bash"
+        assert parser.pending_tool_calls[1]["input"]["command"] == "pytest -x"
+
+    def test_pending_tool_calls_cleared_manually(self):
+        """Caller is responsible for draining pending_tool_calls."""
+        parser = ClaudeStreamJsonParser()
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/f"}}]}}\n')
+        assert len(parser.pending_tool_calls) == 1
+        parser.pending_tool_calls.clear()
+        assert len(parser.pending_tool_calls) == 0
+
+        # New tool calls still accumulate after clearing
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Grep","input":{"pattern":"foo"}}]}}\n')
+        assert len(parser.pending_tool_calls) == 1
+        assert parser.pending_tool_calls[0]["name"] == "Grep"
+
+
+class TestToolCallEvent:
+    """Tests for _tool_call_event helper."""
+
+    def test_edit_maps_file_path(self):
+        ev = _tool_call_event({"id": "t1", "name": "Edit", "input": {"file_path": "/src/main.py", "old_string": "a", "new_string": "b"}})
+        assert ev.tool == "Edit"
+        assert ev.path == "/src/main.py"
+        assert ev.command is None
+        assert ev.args is None
+
+    def test_bash_maps_command(self):
+        ev = _tool_call_event({"id": "t2", "name": "Bash", "input": {"command": "pytest -x"}})
+        assert ev.tool == "Bash"
+        assert ev.command == "pytest -x"
+        assert ev.path is None
+
+    def test_grep_maps_pattern_and_path(self):
+        ev = _tool_call_event({"id": "t3", "name": "Grep", "input": {"pattern": "TODO", "path": "/src"}})
+        assert ev.tool == "Grep"
+        assert ev.path == "/src"
+        assert ev.args == {"pattern": "TODO"}
+
+    def test_read_maps_file_path(self):
+        ev = _tool_call_event({"id": "t4", "name": "Read", "input": {"file_path": "/etc/hosts"}})
+        assert ev.tool == "Read"
+        assert ev.path == "/etc/hosts"
+
+    def test_unknown_tool_stores_full_args(self):
+        ev = _tool_call_event({"id": "t5", "name": "WebSearch", "input": {"query": "python asyncio"}})
+        assert ev.tool == "WebSearch"
+        assert ev.args == {"query": "python asyncio"}
+        assert ev.path is None
+        assert ev.command is None
 
 
 class TestBuildAgentCommand:
