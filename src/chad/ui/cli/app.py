@@ -13,7 +13,6 @@ from chad.ui.cli.terminal_io import (
     save_terminal,
     restore_terminal,
     enter_raw_mode,
-    poll_stdin,
 )
 from chad.ui.client import APIClient
 from chad.ui.client.stream_client import SyncStreamClient, decode_terminal_data

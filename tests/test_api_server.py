@@ -208,15 +208,16 @@ class TestUIServing:
         assert "<div id=\"root\"></div>" in body
 
     def test_static_assets_are_served(self, client):
-        ui_root = Path(resources.files("chad.ui_dist"))
-        assets_dir = ui_root / "assets"
-        js_files = [p for p in assets_dir.iterdir() if p.suffix == ".js"]
-        assert js_files, "Expected at least one JS asset in chad.ui_dist/assets"
+        # Use as_file context manager for compatibility with Python 3.13
+        with resources.as_file(resources.files("chad.ui_dist")) as ui_root:
+            assets_dir = ui_root / "assets"
+            js_files = [p for p in assets_dir.iterdir() if p.suffix == ".js"]
+            assert js_files, "Expected at least one JS asset in chad.ui_dist/assets"
 
-        asset_name = js_files[0].name
-        response = client.get(f"/assets/{asset_name}")
-        assert response.status_code == 200
-        assert response.content == (assets_dir / asset_name).read_bytes()
+            asset_name = js_files[0].name
+            response = client.get(f"/assets/{asset_name}")
+            assert response.status_code == 200
+            assert response.content == (assets_dir / asset_name).read_bytes()
 
     def test_get_verification_settings(self, client):
         """Can get verification settings."""

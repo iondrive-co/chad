@@ -663,6 +663,12 @@ label {
   align-self: flex-end;
 }
 
+.chat-bubble.user.interrupt {
+  background: var(--bubble-interrupt-bg, #fff3cd);
+  color: var(--bubble-interrupt-text, #3d2803);
+  border: 1px solid var(--bubble-interrupt-border, #ffd89b);
+}
+
 .chat-bubble.assistant {
   background: var(--bubble-assistant-bg, #ffffff);
   color: var(--text);
