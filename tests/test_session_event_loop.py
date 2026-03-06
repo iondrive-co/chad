@@ -1391,11 +1391,65 @@ class TestSessionLimitActionBridge:
         # Should keep the existing action, not overwrite
         assert loop._pending_action is existing
 
-    def test_session_limit_ignores_non_session_usage_rules(self):
-        """Only session_usage rules trigger the bridge, not weekly or context."""
+    def test_session_limit_matches_weekly_usage_rule_on_weekly_limit(self):
+        """weekly_limit_reached triggers weekly_usage switch_provider rules."""
+        terminated = []
+
+        def weekly_quota_checker(output_tail):
+            import re
+            if re.search(r"You['\u2018\u2019]ve hit your limit", output_tail):
+                return "weekly_limit_reached"
+            return None
+
         loop, event_log, emitted = self._make_loop(
             action_settings=[
-                {"event": "weekly_usage", "threshold": 90, "action": "await_reset"},
+                {"event": "weekly_usage", "threshold": 100, "action": "switch_provider",
+                 "target_account": "backup"},
+            ],
+            terminate_pty_fn=lambda: terminated.append(True),
+            quota_checker=weekly_quota_checker,
+        )
+
+        loop.feed_output("You've hit your limit\n")
+        loop._analyze_output()
+
+        assert loop._session_limit_detected
+        assert loop._pending_action is not None
+        assert loop._pending_action["action"] == "switch_provider"
+        assert loop._pending_action["target_account"] == "backup"
+        assert loop._pending_action["label"] == "weekly"
+        assert len(terminated) == 1
+
+    def test_session_limit_falls_back_to_weekly_rule_on_misclassification(self):
+        """session_limit_reached (misclassified) still matches weekly_usage rules.
+
+        When the usage API fails at quota, is_quota_exhausted may return
+        session_limit_reached even for weekly limits.  The bridge should
+        still find and trigger weekly_usage switch_provider rules.
+        """
+        terminated = []
+        loop, event_log, emitted = self._make_loop(
+            action_settings=[
+                {"event": "weekly_usage", "threshold": 100, "action": "switch_provider",
+                 "target_account": "backup"},
+            ],
+            terminate_pty_fn=lambda: terminated.append(True),
+            # Default checker returns "session_limit_reached"
+        )
+
+        loop.feed_output("You've hit your limit\n")
+        loop._analyze_output()
+
+        assert loop._session_limit_detected
+        assert loop._pending_action is not None
+        assert loop._pending_action["action"] == "switch_provider"
+        assert loop._pending_action["target_account"] == "backup"
+        assert len(terminated) == 1
+
+    def test_context_usage_rules_not_matched_by_session_limit(self):
+        """context_usage rules are not triggered by session/weekly limit detection."""
+        loop, event_log, emitted = self._make_loop(
+            action_settings=[
                 {"event": "context_usage", "threshold": 90, "action": "switch_provider",
                  "target_account": "backup"},
             ],

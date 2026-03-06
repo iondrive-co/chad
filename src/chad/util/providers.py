@@ -1548,11 +1548,20 @@ class ClaudeCodeProvider(AIProvider):
         self._usage_data_fetched_at: float = 0.0
 
     def _get_usage_data(self) -> dict | None:
-        """Return Anthropic usage data, refreshing after the cache TTL."""
+        """Return Anthropic usage data, refreshing after the cache TTL.
+
+        On API failure, preserves the last successful result so that
+        threshold checks and limit-type classification don't see a
+        spurious drop to 0%.
+        """
         import time
         now = time.monotonic()
         if now - self._usage_data_fetched_at >= self._USAGE_CACHE_TTL:
-            self._usage_data_cache = _fetch_claude_usage_data(self.config.account_name)
+            fresh = _fetch_claude_usage_data(self.config.account_name)
+            if fresh is not None:
+                self._usage_data_cache = fresh
+            # On failure (fresh is None), keep the previous cache so callers
+            # see the last known-good values instead of falling back to 0%.
             self._usage_data_fetched_at = now
         return self._usage_data_cache
 
