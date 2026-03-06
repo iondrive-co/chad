@@ -50,7 +50,6 @@ export function App() {
   const [token, setToken] = useState<string | undefined>(undefined);
   const api = useMemo(() => new ChadAPI(apiBaseUrl, token), [apiBaseUrl, token]);
   const [connected, setConnected] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("settings");
   const [sessionVersion, setSessionVersion] = useState(0);
@@ -63,21 +62,20 @@ export function App() {
     if (!apiBaseUrl) {
       // No URL set yet — stay disconnected, don't retry
       setConnected(false);
-      setError(null);
+
       return;
     }
     hasUrl.current = true;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     setConnected(false);
-    setError(null);
     const tryConnect = async () => {
       try {
         await api.getStatus();
         const prefs = await api.getPreferences().catch(() => null);
         if (!cancelled) {
           setConnected(true);
-          setError(null);
+    
           if (prefs?.last_project_path) {
             setDefaultProjectPath(prefs.last_project_path);
           }
@@ -89,7 +87,6 @@ export function App() {
         }
       } catch {
         if (!cancelled) {
-          setError("Waiting for Chad server...");
           timer = setTimeout(tryConnect, 1000);
         }
       }
@@ -109,14 +106,6 @@ export function App() {
   const refreshSessions = useCallback(() => {
     setSessionVersion((v) => v + 1);
   }, []);
-
-  const connect = useCallback(() => {
-    const parsed = parseConnectionInput(connectionInput);
-    if (!parsed.url) return;
-    setApiBaseUrl(parsed.url);
-    setToken(parsed.token);
-    setSelectedSession(null);
-  }, [connectionInput]);
 
   // On initial mount, check for #pair=... hash (from QR code scan) or
   // auto-detect if we're served by the API (not file://)
@@ -162,13 +151,7 @@ export function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>Chad</h1>
-        <span className={`status-dot${connected ? " connected" : ""}`} />
-        {!connected && (
-          <span className="connect-status">
-            {error ?? (apiBaseUrl ? "Connecting..." : "Not connected")}
-          </span>
-        )}
+        <h1 className={connected ? "connected" : ""}>Chad</h1>
         <nav className="tabs">
           <button className={tab === "providers" ? "active" : ""} onClick={() => setTab("providers")}>
             Providers
@@ -212,28 +195,11 @@ export function App() {
             </button>
           )}
         </nav>
-        <div style={{ marginLeft: "auto", display: "flex", gap: "0.25rem", alignItems: "center" }}>
-          {!connected && (
-            <>
-              <input
-                type="text"
-                placeholder="Server URL or pairing code"
-                value={connectionInput}
-                onChange={(e) => setConnectionInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && connect()}
-                style={{ width: "14rem", padding: "0.2rem 0.4rem", fontSize: "0.85rem" }}
-              />
-              <button onClick={connect} style={{ fontSize: "0.85rem", padding: "0.2rem 0.6rem" }}>
-                Connect
-              </button>
-            </>
-          )}
-          {connected && apiBaseUrl && (
-            <span style={{ fontSize: "0.8rem", opacity: 0.7 }}>
-              Remote: {apiBaseUrl.replace("https://", "").replace("http://", "").replace(".trycloudflare.com", "")}
-            </span>
-          )}
-        </div>
+        {connected && apiBaseUrl && (
+          <span style={{ marginLeft: "auto", fontSize: "0.8rem", opacity: 0.7 }}>
+            {apiBaseUrl.replace("https://", "").replace("http://", "").replace(".trycloudflare.com", "")}
+          </span>
+        )}
       </header>
 
       <div className="app-body">

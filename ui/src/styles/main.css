@@ -69,8 +69,8 @@ body {
 .app-header {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 8px 16px;
+  gap: 8px;
+  padding: 8px 12px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
 }
@@ -78,7 +78,12 @@ body {
 .app-header h1 {
   font-size: 18px;
   font-weight: 700;
-  color: var(--accent);
+  color: var(--error);
+  flex-shrink: 0;
+}
+
+.app-header h1.connected {
+  color: var(--success);
 }
 
 .app-body {
@@ -242,25 +247,6 @@ body {
   background: var(--bg-tertiary);
   color: var(--text);
   border-color: var(--accent);
-}
-
-/* ── Connection Status ── */
-
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--error);
-  flex-shrink: 0;
-}
-
-.status-dot.connected {
-  background: var(--success);
-}
-
-.connect-status {
-  color: var(--text-muted);
-  font-size: 13px;
 }
 
 /* ── Forms & Inputs ── */
