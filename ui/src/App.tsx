@@ -3,7 +3,6 @@ import { ChadAPI } from "chad-client";
 import { ChatView } from "./components/ChatView.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { ProvidersPanel } from "./components/ProvidersPanel.tsx";
-import { QRScanner } from "./components/QRScanner.tsx";
 import { useSessions } from "./hooks/useSessions.ts";
 
 type Tab = "chat" | "providers" | "settings";
@@ -53,10 +52,9 @@ export function App() {
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("providers");
+  const [tab, setTab] = useState<Tab>("settings");
   const [sessionVersion, setSessionVersion] = useState(0);
   const [defaultProjectPath, setDefaultProjectPath] = useState("");
-  const [scanning, setScanning] = useState(false);
   // Track whether the user has ever set a URL (vs initial empty state)
   const hasUrl = useRef(false);
 
@@ -242,53 +240,7 @@ export function App() {
         {/* Chat view - only when Chat tab is active */}
         <div style={{ display: tab === "chat" ? "contents" : "none" }}>
           <main className="main">
-            {!connected ? (
-              <div className="placeholder">
-                <div className="placeholder-card">
-                  {scanning ? (
-                    <QRScanner
-                      onScan={(code) => {
-                        setScanning(false);
-                        const parsed = parseConnectionInput(code);
-                        if (parsed.url) {
-                          setConnectionInput(code);
-                          setApiBaseUrl(parsed.url);
-                          setToken(parsed.token);
-                          setSelectedSession(null);
-                        }
-                      }}
-                      onCancel={() => setScanning(false)}
-                    />
-                  ) : (
-                    <>
-                      <h3>Connect to a Chad server</h3>
-                      <div className="placeholder-steps">
-                        <p>
-                          1) Get the latest Chad server from{" "}
-                          <a
-                            href="https://github.com/iondrive-co/chad/releases"
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            the releases page
-                          </a>
-                          .
-                        </p>
-                        <p>
-                          2) Run it on an isolated machine with <code>chad --tunnel</code>.
-                        </p>
-                        <p>
-                          3) Scan the QR code it displays, or paste the pairing key above.
-                        </p>
-                      </div>
-                      <button className="scan-qr-btn" onClick={() => setScanning(true)}>
-                        Scan QR Code
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            ) : selectedSession ? (
+            {selectedSession ? (
               <ChatView
                 key={selectedSession}
                 api={api}
@@ -313,7 +265,17 @@ export function App() {
         )}
         {tab === "settings" && (
           <main className="main full-width">
-            <SettingsPanel api={api} connected={connected} />
+            <SettingsPanel
+              api={api}
+              connected={connected}
+              connectionInput={connectionInput}
+              onConnectionInputChange={setConnectionInput}
+              onConnect={(url, newToken) => {
+                setApiBaseUrl(url);
+                setToken(newToken);
+                setSelectedSession(null);
+              }}
+            />
           </main>
         )}
       </div>
