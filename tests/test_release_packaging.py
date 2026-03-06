@@ -362,7 +362,11 @@ class TestBuildReleaseScript:
                                 with patch.object(
                                     build_release, "_find_built_artifact", return_value=mock_artifact
                                 ):
-                                    build_release.build_installer(output_dir=tmp_path)
+                                    with patch.object(
+                                        build_release, "_build_windows_msi",
+                                        return_value=tmp_path / "chad.msi"
+                                    ):
+                                        build_release.build_installer(output_dir=tmp_path)
 
             pyinstaller_call = [c for c in captured_args if "pyinstaller" in str(c[0]).lower()]
             assert pyinstaller_call
@@ -393,6 +397,16 @@ class TestBuildReleaseScript:
 
             def fake_run_command(cmd, cwd=None):
                 run_calls.append(cmd)
+                if Path(cmd[0]).name == "heat.exe":
+                    harvest_path = Path(cmd[cmd.index("-o") + 1])
+                    harvest_path.write_text(
+                        """<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment />
+</Wix>
+""",
+                        encoding="utf-8",
+                    )
 
             tools = {
                 "heat.exe": Path("C:/wix/heat.exe"),

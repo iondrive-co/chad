@@ -141,7 +141,7 @@ function getEventSummary(event: SessionEvent): string {
     case "session_started":
       return (event.task_description as string) || "Session started";
     case "user_message":
-      return truncate((event.content as string) || "", 80);
+      return (event.content as string) || "";
     case "assistant_message": {
       const blocks = Array.isArray(event.blocks) ? event.blocks : [];
       const textParts = (blocks as { kind?: string; content?: string }[])
@@ -149,7 +149,7 @@ function getEventSummary(event: SessionEvent): string {
         .map((b) => (b.content ?? "").trim())
         .filter(Boolean);
       if (textParts.length > 0) {
-        return truncate(textParts.join(" "), 120);
+        return textParts.join(" ");
       }
       return "Assistant response";
     }
@@ -172,8 +172,12 @@ function getEventSummary(event: SessionEvent): string {
       if (result) return `${name}: ${truncate(result, 80)}`;
       return `${name}: done`;
     }
-    case "milestone":
-      return (event.title as string) || (event.summary as string) || "Milestone";
+    case "milestone": {
+      const title = (event.title as string) || "";
+      const summary = (event.summary as string) || "";
+      if (title && summary) return `${title}: ${summary}`;
+      return title || summary || "Milestone";
+    }
     case "session_ended":
       return (event.reason as string) || "Session ended";
     default:

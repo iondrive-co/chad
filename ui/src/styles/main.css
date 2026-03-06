@@ -1586,7 +1586,7 @@ label {
 
 .session-event {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 8px;
   padding: 4px 8px;
   border-radius: 4px;
@@ -1629,9 +1629,7 @@ label {
 .event-summary {
   color: var(--text);
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  word-break: break-word;
 }
 
 /* ── Project Settings ── */
