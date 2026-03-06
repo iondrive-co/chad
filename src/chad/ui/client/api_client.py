@@ -335,6 +335,19 @@ class APIClient:
         resp.raise_for_status()
         return resp.json().get("milestones", [])
 
+    def get_conversation(
+        self,
+        session_id: str,
+        since_seq: int = 0,
+    ) -> dict[str, Any]:
+        """Get the conversation timeline for the latest task in a session."""
+        resp = self._client.get(
+            self._url(f"/sessions/{session_id}/conversation"),
+            params={"since_seq": since_seq},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     # Tasks
     def start_task(
         self,

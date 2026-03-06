@@ -9,6 +9,7 @@ import type {
   DiffFull,
   DiffSummary,
   MergeResult,
+  ConversationResponse,
   ProviderList,
   ServerStatus,
   Session,
@@ -186,6 +187,15 @@ export class ChadAPI {
   ): Promise<{ milestones: unknown[]; latest_seq: number }> {
     return this.get(
       `/api/v1/sessions/${sessionId}/milestones?since_seq=${sinceSeq}`,
+    );
+  }
+
+  getConversation(
+    sessionId: string,
+    sinceSeq = 0,
+  ): Promise<ConversationResponse> {
+    return this.get(
+      `/api/v1/sessions/${sessionId}/conversation?since_seq=${sinceSeq}`,
     );
   }
 

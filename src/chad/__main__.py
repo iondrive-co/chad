@@ -366,6 +366,19 @@ def main() -> int:
     project_root = Path(__file__).resolve().parents[2]
     ensure_project_root_env(project_root)
 
+    # Auto-rebuild UI bundles when launched from PyCharm (PYCHARM_HOSTED)
+    # or when explicitly requested via env flag.
+    if os.environ.get("PYCHARM_HOSTED") and "CHAD_AUTO_REBUILD_UI" not in os.environ:
+        os.environ["CHAD_AUTO_REBUILD_UI"] = "1"
+
+    auto_rebuild = os.environ.get("CHAD_AUTO_REBUILD_UI") == "1"
+    if auto_rebuild:
+        try:
+            from chad.util.ui_build import ensure_ui_built
+            ensure_ui_built(force=os.environ.get("CHAD_AUTO_REBUILD_UI") == "1")
+        except Exception as exc:  # pragma: no cover - best effort
+            print(f"UI autobuild skipped: {exc}")
+
     # Run startup cleanup (worktrees, logs, screenshots older than N days)
     config_mgr = ConfigManager()
     cleanup_days = config_mgr.get_cleanup_days()

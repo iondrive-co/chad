@@ -966,15 +966,6 @@ def run_task_with_streaming(
                 exit_code = 1
                 break
 
-            # Check for user input (non-blocking)
-            if old_settings and poll_stdin():
-                try:
-                    input_data = os.read(sys.stdin.fileno(), 1024)
-                    if input_data:
-                        stream_client.send_input(session_id, input_data)
-                except OSError:
-                    pass
-
     finally:
         milestone_poll_stop.set()
         milestone_poll_thread.join(timeout=1.0)
@@ -1160,6 +1151,25 @@ def run_cli(client: APIClient) -> None:
                 print()
                 print("-" * 60)
                 print(f"Agent exited with code: {exit_code}")
+
+                # Show conversation timeline for this task
+                try:
+                    convo = client.get_conversation(session.id)
+                    items = convo.get("items", [])
+                    if items:
+                        print("\nConversation:")
+                        for item in items:
+                            itype = item.get("type")
+                            if itype == "user":
+                                print(f"  Pleb: {item.get('content', '').strip()}")
+                            elif itype == "assistant":
+                                print(f"  Agent: {item.get('content', '').strip()}")
+                            elif itype == "milestone":
+                                title = item.get("title") or "Milestone"
+                                summary = item.get("summary", "")
+                                print(f"  [{title}] {summary}")
+                except Exception:
+                    pass
 
                 # Check for changes via API
                 try:

@@ -1,11 +1,11 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import type { ChadAPI, StreamEvent } from "chad-client";
+import type { ChadAPI, ConversationItem, Account } from "chad-client";
 import { useStream } from "../hooks/useStream.ts";
-import { TaskForm } from "./TaskForm.tsx";
 import { MergePanel } from "./MergePanel.tsx";
 import { WorktreeInfo } from "./WorktreeInfo.tsx";
 import { SessionLog } from "./SessionLog.tsx";
 import { ProjectSettings } from "./ProjectSettings.tsx";
+import { AccountPicker } from "./AccountPicker.tsx";
 
 interface Props {
   api: ChadAPI;
@@ -33,16 +33,20 @@ export function ChatView({
   sessionActive = false,
 }: Props) {
   const [taskActive, setTaskActive] = useState(false);
-  const [followupText, setFollowupText] = useState("");
   const [sending, setSending] = useState(false);
   const [showMerge, setShowMerge] = useState(false);
-  const [lastCodingAgent, setLastCodingAgent] = useState<string | null>(null);
+  const [codingAccount, setCodingAccount] = useState<Account | null>(null);
+  const [conversation, setConversation] = useState<ConversationItem[]>([]);
+  const [conversationError, setConversationError] = useState<string | null>(null);
+  const conversationSeqRef = useRef(0);
+  const [inputText, setInputText] = useState("");
+  const [hasRunTask, setHasRunTask] = useState(false);
+  const [wasCancelled, setWasCancelled] = useState(false);
   const outputRef = useRef<HTMLPreElement>(null);
+  const convoRef = useRef<HTMLDivElement>(null);
 
   // Historical output/events loaded from persisted log for finished sessions
   const [historicalOutput, setHistoricalOutput] = useState("");
-  const [historicalEvents, setHistoricalEvents] = useState<StreamEvent[]>([]);
-  const [historyLoaded, setHistoryLoaded] = useState(false);
 
   // Current task description (extracted from session_started events)
   const [taskDescription, setTaskDescription] = useState<string | null>(null);
@@ -67,67 +71,140 @@ export function ChatView({
 
   // Combined output: live streaming output or historical output for finished sessions
   const displayOutput = terminalOutput || historicalOutput;
-  const displayEvents = events.length > 0 ? events : historicalEvents;
 
-  // Load historical events when session is selected and not active
-  // This allows viewing finished sessions from any UI instance
+  const mapEventToConversationItem = useCallback(
+    (data: any, seq: number | null): ConversationItem | null => {
+      const type = data.type || data.event_type;
+      if (!type) return null;
+
+      if (type === "user_message") {
+        return {
+          seq: seq ?? 0,
+          ts: data.ts ?? "",
+          type: "user",
+          content: String(data.content ?? ""),
+        };
+      }
+
+      if (type === "assistant_message") {
+        const blocks = Array.isArray(data.blocks) ? data.blocks : [];
+        const textParts = blocks
+          .filter((b: any) => ["text", "thinking", "error"].includes(b.kind))
+          .map((b: any) => String(b.content ?? "").trim())
+          .filter(Boolean);
+        return {
+          seq: seq ?? 0,
+          ts: data.ts ?? "",
+          type: "assistant",
+          content: textParts.join("\n"),
+          blocks,
+        };
+      }
+
+      if (type === "milestone") {
+        return {
+          seq: seq ?? 0,
+          ts: data.ts ?? "",
+          type: "milestone",
+          milestone_type: data.milestone_type ?? "",
+          title: data.title ?? "",
+          summary: data.summary ?? "",
+        };
+      }
+
+      return null;
+    },
+    [],
+  );
+
+  // Load historical output when session is selected and not active
   useEffect(() => {
     let cancelled = false;
-
-    // Reset history when session changes
     setHistoricalOutput("");
-    setHistoricalEvents([]);
-    setHistoryLoaded(false);
     setTaskDescription(null);
 
     if (!sessionActive && !taskActive) {
       (async () => {
         try {
-          // Fetch all events from the persisted log
-          const data = await api.getEvents(sessionId, 0);
+          const data = await api.getEvents(sessionId, 0, "terminal_output,session_started,session_ended");
           if (cancelled) return;
 
-          // Extract terminal output from terminal_output events
           const terminalEvents = (data.events as { type: string; data?: string }[])
             .filter((e) => e.type === "terminal_output" && e.data);
           if (terminalEvents.length > 0) {
-            // Combine all terminal output chunks
             const output = terminalEvents.map((e) => e.data || "").join("");
             setHistoricalOutput(output);
           }
 
-          // Convert events to StreamEvent format for milestones display
-          const streamEvents: StreamEvent[] = (data.events as { type: string; seq?: number }[])
-            .map((e) => ({
-              event_type: "event",
-              data: e,
-              seq: e.seq ?? null,
-            }));
-          setHistoricalEvents(streamEvents);
-          setHistoryLoaded(true);
-
-          // Extract task description from the most recent session_started event
-          const sessionStartedEvents = (data.events as { type: string; task_description?: string }[])
+          const starts = (data.events as { type: string; task_description?: string }[])
             .filter((e) => e.type === "session_started" && e.task_description);
-          if (sessionStartedEvents.length > 0) {
-            const latestStart = sessionStartedEvents[sessionStartedEvents.length - 1];
+          if (starts.length > 0) {
+            const latestStart = starts[starts.length - 1];
             setTaskDescription(latestStart.task_description ?? null);
+            setHasRunTask(true);
+          } else {
+            setHasRunTask(false);
           }
 
-          // Check for pending worktree changes to merge
+          // Check if the last session_ended was a cancellation
+          const ends = (data.events as { type: string; reason?: string }[])
+            .filter((e) => e.type === "session_ended");
+          if (ends.length > 0) {
+            const lastEnd = ends[ends.length - 1];
+            setWasCancelled(lastEnd.reason === "cancelled");
+          }
+
           const status = await api.getWorktreeStatus(sessionId);
           if (!cancelled && status.exists && status.has_changes) {
             setShowMerge(true);
           }
         } catch {
-          // Ignore errors loading history
-          setHistoryLoaded(true);
+          /* ignore */
         }
       })();
     }
 
     return () => { cancelled = true; };
   }, [api, sessionId, sessionActive, taskActive]);
+
+  // Load latest conversation for this session (latest task only)
+  useEffect(() => {
+    let cancelled = false;
+    setConversation([]);
+    conversationSeqRef.current = 0;
+
+    (async () => {
+      try {
+        const convo = await api.getConversation(sessionId, 0);
+        if (cancelled) return;
+        setConversation(convo.items);
+        setTaskDescription(convo.task.task_description || null);
+        setHasRunTask(true);
+        conversationSeqRef.current = convo.latest_seq;
+      } catch {
+        if (!cancelled) {
+          setConversation([]);
+          setHasRunTask(false);
+          setTaskDescription(null);
+        }
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [api, sessionId]);
+
+  // Load default coding account
+  useEffect(() => {
+    let cancelled = false;
+    api.listAccounts().then((res) => {
+      if (cancelled) return;
+      const coding = res.accounts.find((a) => a.role === "CODING") || res.accounts[0] || null;
+      setCodingAccount(coding || null);
+    }).catch(() => {
+      if (!cancelled) setCodingAccount(null);
+    });
+    return () => { cancelled = true; };
+  }, [api]);
 
   // React to session becoming active (from polling or on mount).
   // When another UI starts a task, the polled sessionActive prop flips to true
@@ -155,12 +232,57 @@ export function ChatView({
     return () => { cancelled = true; };
   }, [sessionActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Append conversation items from streaming events
+  useEffect(() => {
+    if (events.length === 0) return;
+
+    setConversation((prev) => {
+      let updated = [...prev];
+
+      for (const ev of events) {
+        const seq = ev.seq ?? 0;
+        if (seq && seq <= conversationSeqRef.current) continue;
+        const data: any = ev.data || {};
+        const evtType = data.type || data.event_type;
+
+        if (evtType === "session_started") {
+          updated = [];
+          setTaskDescription(data.task_description ?? null);
+          setHasRunTask(true);
+          if (seq) conversationSeqRef.current = seq;
+          continue;
+        }
+
+        const item = mapEventToConversationItem(data, seq);
+        if (item) {
+          updated.push(item);
+          if (seq) {
+            conversationSeqRef.current = Math.max(conversationSeqRef.current, seq);
+          }
+        }
+      }
+
+      return updated;
+    });
+  }, [events, mapEventToConversationItem]);
+
   // Auto-scroll terminal output (live or historical)
   useEffect(() => {
     if (outputRef.current) {
       outputRef.current.scrollTop = outputRef.current.scrollHeight;
     }
   }, [terminalOutput, historicalOutput]);
+
+  // Auto-scroll conversation to bottom when new messages arrive
+  useEffect(() => {
+    if (convoRef.current) {
+      requestAnimationFrame(() => {
+        if (convoRef.current) {
+          convoRef.current.scrollTop = convoRef.current.scrollHeight;
+        }
+      });
+    }
+  }, [conversation]);
 
   // Mark task inactive when stream completes, check for worktree changes
   useEffect(() => {
@@ -178,7 +300,7 @@ export function ChatView({
     }
   }, [api, completed, sessionId, onSessionChange]);
 
-  const handleTaskStart = useCallback(async (codingAgent: string, taskDesc: string) => {
+  const handleTaskStart = useCallback(async (taskDesc: string) => {
     // Capture the current event log position before the task starts, so the
     // stream only shows events from this task (not old milestones/output).
     try {
@@ -190,11 +312,13 @@ export function ChatView({
     reset();
     // Clear historical output when starting a new task
     setHistoricalOutput("");
-    setHistoricalEvents([]);
     setTaskActive(true);
     setShowMerge(false);
-    setLastCodingAgent(codingAgent);
+    setWasCancelled(false);
     setTaskDescription(taskDesc);
+    setConversation([]);
+    conversationSeqRef.current = 0;
+    setHasRunTask(true);
   }, [api, sessionId, reset]);
 
   const handleMergeDone = useCallback(() => {
@@ -205,67 +329,77 @@ export function ChatView({
   const handleCancel = useCallback(async () => {
     try {
       await api.cancelSession(sessionId);
+      setWasCancelled(true);
     } catch {
       // ignore
     }
   }, [api, sessionId]);
 
-  const handleFollowup = useCallback(async () => {
-    if (!followupText.trim()) return;
+  const handleSendMessage = useCallback(async () => {
+    if (!inputText.trim() || sending || taskActive) return;
+    if (!codingAccount) {
+      setConversationError("Select a coding agent first");
+      return;
+    }
+    setConversationError(null);
     setSending(true);
     try {
-      // Resolve the coding agent: prefer lastCodingAgent, fall back to session's coding_account
-      let codingAgent = lastCodingAgent;
-      if (!codingAgent) {
-        const session = await api.getSession(sessionId);
-        codingAgent = session.coding_account ?? null;
-      }
-      if (!codingAgent) {
+      const session = await api.getSession(sessionId);
+      const projectPath = session.project_path || currentProjectPath || defaultProjectPath;
+      if (!projectPath) {
+        setConversationError("Set a project path first");
         setSending(false);
         return;
       }
-      const session = await api.getSession(sessionId);
-      // Capture event log position before follow-up starts
+
+      // Capture event log position before the task starts
       try {
         const data = await api.getEvents(sessionId, 0, "session_started");
         streamSinceSeqRef.current = data.latest_seq;
       } catch {
         streamSinceSeqRef.current = undefined;
       }
-      const followupDesc = followupText.trim();
+
+      const message = inputText.trim();
       await api.startTask(sessionId, {
-        project_path: session.project_path || currentProjectPath || defaultProjectPath,
-        task_description: followupDesc,
-        coding_agent: codingAgent,
-        is_followup: true,
+        project_path: projectPath,
+        task_description: message,
+        coding_agent: codingAccount.name,
+        override_prompt: overrideCodingPrompt || undefined,
+        is_followup: hasRunTask,
       });
-      setFollowupText("");
-      reset();
-      setTaskActive(true);
-      setTaskDescription(followupDesc);
-    } catch {
-      // ignore
+
+      handleTaskStart(message);
+      setInputText("");
+    } catch (e) {
+      if (e instanceof Error) {
+        setConversationError(e.message);
+      } else {
+        setConversationError("Failed to start task");
+      }
     } finally {
       setSending(false);
     }
-  }, [api, sessionId, followupText, reset, lastCodingAgent, defaultProjectPath, currentProjectPath]);
+  }, [
+    api,
+    sessionId,
+    inputText,
+    sending,
+    taskActive,
+    codingAccount,
+    currentProjectPath,
+    defaultProjectPath,
+    overrideCodingPrompt,
+    hasRunTask,
+    handleTaskStart,
+  ]);
 
-  const handleFollowupKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        handleFollowup();
-      }
-    },
-    [handleFollowup],
-  );
-
-  // Show milestones from structured events (live or historical)
-  const milestones = displayEvents.filter(
-    (e) =>
-      e.data.event_type === "milestone" ||
-      e.data.type === "milestone",
-  );
+  const handleInputKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage();
+    }
+  }, [handleSendMessage]);
 
   // Fetch session to get project path
   useEffect(() => {
@@ -317,19 +451,60 @@ export function ChatView({
         onPromptsChange={setOverrideCodingPrompt}
       />
 
-      {/* Task form or streaming output */}
-      {!taskActive && !displayOutput && !showMerge && historyLoaded && (
-        <TaskForm
-          api={api}
-          sessionId={sessionId}
-          onStart={handleTaskStart}
-          projectPath={currentProjectPath || defaultProjectPath}
-          overridePrompt={overrideCodingPrompt}
-        />
-      )}
+      <div className="chat-body">
+        {/* Conversation (takes more space) */}
+        <div className="chat-shell">
+          <div className="chat-frame">
+            <div className="chat-header">
+              <div className="chat-agent-picker">
+                <span className="field-label">Coding Agent</span>
+                <AccountPicker api={api} selected={codingAccount} onSelect={setCodingAccount} />
+              </div>
+              <div className="chat-status">{taskActive ? "Running…" : hasRunTask ? "Ready for follow-up" : "Ready to start"}</div>
+            </div>
 
-      {/* Terminal output (live or historical) */}
-      {(taskActive || displayOutput) && (
+            <div className="chat-messages" ref={convoRef}>
+              {conversation.map((item) => {
+                const label = item.type === "user" ? "Pleb" : item.type === "assistant" ? "Agent" : item.title || "Milestone";
+                const content = item.type === "milestone" ? (item.summary || "") : (item.content || "");
+                const align = item.type === "user" ? "end" : item.type === "assistant" ? "start" : "center";
+                return (
+                  <div key={item.seq} className={`chat-item ${align}`}>
+                    <div className={`chat-bubble ${item.type}`}>
+                      <div className="chat-bubble-label">{label}</div>
+                      <div className="chat-bubble-text">{content}</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="chat-composer">
+              <textarea
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                onKeyDown={handleInputKeyDown}
+                placeholder={taskActive ? "Agent is working…" : "Type a task or follow-up message"}
+                disabled={taskActive || sending}
+                rows={8}
+              />
+              <div className="composer-actions">
+                {conversationError && <span className="error-text">{conversationError}</span>}
+                <div className="composer-right">
+                  {taskActive && <span className="running-indicator">Running…</span>}
+                  <button
+                    onClick={handleSendMessage}
+                    disabled={taskActive || sending || !inputText.trim()}
+                  >
+                    {sending ? "Sending..." : taskActive ? "Running" : hasRunTask ? "Send follow-up" : "Start task"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Terminal output (live or historical) */}
         <div className="terminal-area">
           <div className="terminal-header">
             {taskActive && !completed && (
@@ -340,29 +515,19 @@ export function ChatView({
                 </button>
               </>
             )}
-            {/* Show completed for live completion or historical sessions with output */}
             {(completed || (historicalOutput && !taskActive)) && (
-              <span className="done-indicator">Completed</span>
+              <span className={wasCancelled ? "cancelled-indicator" : "done-indicator"}>
+                {wasCancelled ? "Cancelled" : "Completed"}
+              </span>
             )}
             {error && <span className="error-text">{error}</span>}
           </div>
-
-          {/* Milestones */}
-          {milestones.length > 0 && (
-            <div className="milestones">
-              {milestones.map((m, i) => (
-                <div key={i} className="milestone">
-                  {String(m.data.summary ?? m.data.text ?? "")}
-                </div>
-              ))}
-            </div>
-          )}
 
           <pre ref={outputRef} className="terminal-output">
             {stripAnsi(displayOutput)}
           </pre>
         </div>
-      )}
+      </div>
 
       {/* Merge panel - show when task completes with changes */}
       {showMerge && !taskActive && (
@@ -372,25 +537,6 @@ export function ChatView({
           onMerged={handleMergeDone}
           onDismiss={handleMergeDone}
         />
-      )}
-
-      {/* Follow-up input */}
-      {displayOutput && !taskActive && (
-        <div className="followup-bar">
-          <textarea
-            value={followupText}
-            onChange={(e) => setFollowupText(e.target.value)}
-            onKeyDown={handleFollowupKeyDown}
-            placeholder="Send a follow-up message..."
-            rows={2}
-          />
-          <button
-            onClick={handleFollowup}
-            disabled={sending || !followupText.trim()}
-          >
-            {sending ? "Sending..." : "Send"}
-          </button>
-        </div>
       )}
     </div>
   );

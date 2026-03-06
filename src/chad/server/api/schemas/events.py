@@ -182,6 +182,45 @@ class MilestoneEventSchema(EventBaseSchema):
     details: dict[str, Any] = Field(default_factory=dict, description="Structured milestone details")
 
 
+# Conversation timeline -----------------------------------------------------
+
+
+class ConversationItemSchema(BaseModel):
+    """A single conversation item derived from the event log."""
+
+    seq: int = Field(description="Event sequence number")
+    ts: datetime = Field(description="Timestamp of the underlying event")
+    type: Literal["user", "assistant", "milestone"] = Field(description="Item role/type")
+    content: str | None = Field(default=None, description="Plain text content for user/assistant")
+    blocks: list[MessageBlockSchema] | None = Field(
+        default=None,
+        description="Structured assistant message blocks when available",
+    )
+    milestone_type: str | None = Field(default=None, description="Milestone category")
+    title: str | None = Field(default=None, description="Milestone display title")
+    summary: str | None = Field(default=None, description="Milestone summary text")
+
+
+class ConversationTaskSchema(BaseModel):
+    """Metadata about the task that owns the conversation window."""
+
+    seq: int = Field(description="Sequence number of the session_started event")
+    task_description: str = Field(description="Original task description")
+    project_path: str = Field(description="Project path for the task")
+    coding_provider: str = Field(description="Provider used for coding")
+    coding_account: str = Field(description="Account used for coding")
+    coding_model: str | None = Field(default=None, description="Model used for coding")
+
+
+class ConversationResponseSchema(BaseModel):
+    """Response shape for conversation timelines."""
+
+    session_id: str = Field(description="Session identifier")
+    task: ConversationTaskSchema = Field(description="Metadata for the current task")
+    items: list[ConversationItemSchema] = Field(description="Conversation items in order")
+    latest_seq: int = Field(description="Latest sequence number included")
+
+
 class SessionEndedEventSchema(EventBaseSchema):
     """Session ended event."""
 

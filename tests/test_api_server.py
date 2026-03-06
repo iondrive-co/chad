@@ -772,6 +772,115 @@ class TestHistoricalSessionEvents:
         assert seqs == [3, 4, 5]
 
 
+class TestConversationEndpoint:
+    """Tests for the conversation timeline endpoint."""
+
+    def test_conversation_returns_latest_task_only(self, client, tmp_path, monkeypatch):
+        """Conversation should include only the latest task's items."""
+        from chad.util.event_log import (
+            EventLog,
+            SessionStartedEvent,
+            UserMessageEvent,
+            MilestoneEvent,
+            AssistantMessageEvent,
+        )
+
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        monkeypatch.setenv("CHAD_LOG_DIR", str(log_dir))
+
+        create_resp = client.post("/api/v1/sessions", json={"name": "Conversation Test"})
+        session_id = create_resp.json()["id"]
+
+        event_log = EventLog(session_id, base_dir=log_dir)
+
+        # Task 1
+        event_log.log(SessionStartedEvent(
+            task_description="Old task",
+            project_path="/test/path",
+            coding_provider="mock",
+            coding_account="acc-old",
+        ))
+        event_log.log(UserMessageEvent(content="First message"))
+        event_log.log(MilestoneEvent(
+            milestone_type="exploration",
+            title="Discovery",
+            summary="Explored project",
+        ))
+
+        # Task 2 (latest)
+        event_log.log(SessionStartedEvent(
+            task_description="New task",
+            project_path="/test/path",
+            coding_provider="mock",
+            coding_account="acc-new",
+        ))
+        event_log.log(UserMessageEvent(content="Second message"))
+        event_log.log(MilestoneEvent(
+            milestone_type="coding_complete",
+            title="Coding Complete",
+            summary="Finished coding",
+        ))
+        event_log.log(AssistantMessageEvent(blocks=[{"kind": "text", "content": "All done"}]))
+        event_log.close()
+
+        resp = client.get(f"/api/v1/sessions/{session_id}/conversation")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        assert data["task"]["task_description"] == "New task"
+        item_types = [item["type"] for item in data["items"]]
+        assert item_types == ["user", "milestone", "assistant"]
+        assert data["items"][0]["content"] == "Second message"
+        assert "Finished coding" in data["items"][1]["summary"]
+        assert "All done" in data["items"][2]["content"]
+
+    def test_conversation_since_seq_filters_items(self, client, tmp_path, monkeypatch):
+        """Conversation should honor since_seq for incremental fetches."""
+        from chad.util.event_log import (
+            EventLog,
+            SessionStartedEvent,
+            UserMessageEvent,
+            MilestoneEvent,
+        )
+
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        monkeypatch.setenv("CHAD_LOG_DIR", str(log_dir))
+
+        create_resp = client.post("/api/v1/sessions", json={"name": "Conversation Incremental"})
+        session_id = create_resp.json()["id"]
+
+        event_log = EventLog(session_id, base_dir=log_dir)
+        event_log.log(SessionStartedEvent(
+            task_description="Incremental",
+            project_path="/test/path",
+            coding_provider="mock",
+            coding_account="acc-new",
+        ))
+        event_log.log(UserMessageEvent(content="Start"))
+        first_seq = event_log._seq
+        event_log.log(MilestoneEvent(
+            milestone_type="coding_complete",
+            title="Done",
+            summary="Finished",
+        ))
+        event_log.close()
+
+        resp_all = client.get(f"/api/v1/sessions/{session_id}/conversation")
+        assert resp_all.status_code == 200
+        assert len(resp_all.json()["items"]) == 2
+
+        resp_filtered = client.get(
+            f"/api/v1/sessions/{session_id}/conversation",
+            params={"since_seq": first_seq},
+        )
+        assert resp_filtered.status_code == 200
+        filtered_items = resp_filtered.json()["items"]
+        assert len(filtered_items) == 1
+        assert filtered_items[0]["type"] == "milestone"
+
+
 class TestUploadEndpoint:
     """Tests for file upload functionality."""
 

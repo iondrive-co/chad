@@ -125,7 +125,7 @@ export function ProjectSettings({ api, projectPath, onProjectPathChange, onPromp
         onClick={() => setExpanded(!expanded)}
       >
         {expanded ? "▼" : "▶"} Project Settings
-        {settings?.project_type && (
+        {settings?.project_type && settings.project_type !== "unknown" && (
           <span className="project-type">({settings.project_type})</span>
         )}
         {status && <span className="save-status">{status}</span>}

@@ -44,6 +44,10 @@
     --diff-add-bg: #283b28;
     --conflict-ours-bg: #3b2828;
     --conflict-theirs-bg: #283b28;
+    --bubble-user-bg: #1a3a2a;
+    --bubble-user-text: #d0f0d0;
+    --bubble-assistant-bg: #1e2a40;
+    --bubble-milestone-bg: #1e1e3a;
   }
 }
 
@@ -532,11 +536,185 @@ label {
   height: 100%;
 }
 
-.terminal-area {
-  flex: 1;
+.chat-body {
   display: flex;
   flex-direction: column;
+  gap: 16px;
+  flex: 1;
   min-height: 0;
+}
+
+.chat-shell {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  width: 100%;
+  max-width: none;
+  min-height: 300px;
+  padding: 0;
+}
+
+.chat-frame {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px;
+}
+
+.chat-header {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.chat-agent-picker {
+  flex: 1;
+  min-width: 240px;
+}
+
+.chat-status {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding-top: 6px;
+}
+
+.chat-messages {
+  flex: 1;
+  min-height: 80px;
+  overflow-y: auto;
+  padding: 20px 16px;
+  background: linear-gradient(180deg, var(--bg) 0%, var(--bg-secondary) 100%);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.chat-placeholder {
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.chat-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 92%;
+}
+
+.chat-item.end {
+  align-self: flex-end;
+  text-align: right;
+}
+
+.chat-item.start {
+  align-self: flex-start;
+}
+
+.chat-item.center {
+  align-self: center;
+  max-width: 90%;
+  text-align: center;
+}
+
+.chat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.chat-bubble {
+  border-radius: 18px;
+  padding: 14px 18px;
+  font-size: 16px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  box-shadow: 0 2px 6px #00000012;
+}
+
+.chat-bubble-label {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: inherit;
+  opacity: 0.7;
+}
+
+.chat-bubble-text {
+  font-size: 17px;
+  line-height: 1.5;
+}
+
+.chat-bubble.user {
+  background: var(--bubble-user-bg, #d7f7d9);
+  color: var(--bubble-user-text, #0c2c0e);
+  align-self: flex-end;
+}
+
+.chat-bubble.assistant {
+  background: var(--bubble-assistant-bg, #ffffff);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.chat-bubble.milestone {
+  background: var(--bubble-milestone-bg, #eef2ff);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.chat-composer {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+}
+
+.chat-composer textarea {
+  width: 100%;
+  resize: vertical;
+  border-radius: 8px;
+}
+
+.composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.composer-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.terminal-area {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 240px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  background: var(--bg-secondary);
 }
 
 .terminal-header {
@@ -558,6 +736,12 @@ label {
   font-weight: 600;
 }
 
+.cancelled-indicator {
+  color: var(--warning, #f0ad4e);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .cancel-btn {
   background: transparent;
   border: 1px solid var(--error);
@@ -570,7 +754,7 @@ label {
   flex: 1;
   background: var(--terminal-bg);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: 8px;
   padding: 12px;
   overflow: auto;
   font-family: var(--font-mono);
@@ -1314,6 +1498,7 @@ label {
 
 .session-log {
   flex: 1;
+  position: relative;
 }
 
 .session-log-toggle {

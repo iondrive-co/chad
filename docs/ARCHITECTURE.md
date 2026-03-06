@@ -34,6 +34,7 @@ Base path `/api/v1` (except `/status`).
 - `POST /sessions/{id}/input` — base64 `data` to PTY
 - `POST /sessions/{id}/resize` — resize PTY (`rows`, `cols`)
 - `GET /sessions/{id}/events` — fetch EventLog (query: `since_seq`, `event_types`)
+- `GET /sessions/{id}/conversation` — task-scoped conversation timeline (latest task only; user messages, milestones, assistant messages)
 
 **Worktree**
 - `POST /sessions/{id}/worktree` — create worktree
@@ -198,6 +199,10 @@ When switching providers (due to quota exhaustion or user preference), Chad pres
 2. **Business Logic in Server**: ALL business logic, validation, calculations, and persistent state management MUST live in the server (`src/chad/server`). The server is the single source of truth for all operations.
 
 3. **No UI-Specific Server Code**: The server must not contain UI-specific code paths. The server provides a uniform API consumed by all UIs equally.
+
+## UI Flows (current)
+- **React Chat tab:** A conversation view (latest task) sits above the live terminal stream. The text area starts the first task; once a task finishes it sends follow-ups as new tasks in the same session. Input is disabled while a task is running. Milestones and assistant messages surface inside the thread; raw PTY output still streams below.
+- **CLI UI:** Shows the live terminal stream; after completion it prints the conversation timeline for the task. User input is disabled during runs for now.
 
 4. **Complete Session Logging**: All agent output displayed to users MUST also be recorded in the session log (EventLog). This ensures:
    - Provider handoffs have access to complete context

@@ -53,7 +53,7 @@ export function App() {
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("chat");
+  const [tab, setTab] = useState<Tab>("providers");
   const [sessionVersion, setSessionVersion] = useState(0);
   const [defaultProjectPath, setDefaultProjectPath] = useState("");
   const [scanning, setScanning] = useState(false);
@@ -172,9 +172,6 @@ export function App() {
           </span>
         )}
         <nav className="tabs">
-          <button className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}>
-            Chat
-          </button>
           <button className={tab === "providers" ? "active" : ""} onClick={() => setTab("providers")}>
             Providers
           </button>
@@ -184,7 +181,7 @@ export function App() {
           {connected && sessions.length > 0 && (
             <>
               <span className="tab-separator" />
-              {sessions.map((s) => (
+              {[...sessions].reverse().map((s) => (
                 <button
                   key={s.id}
                   className={`session-tab ${s.id === selectedSession && tab === "chat" ? "active" : ""}`}
@@ -213,7 +210,7 @@ export function App() {
               disabled={sessionsLoading}
               title="New session"
             >
-              +
+              New
             </button>
           )}
         </nav>
@@ -242,7 +239,7 @@ export function App() {
       </header>
 
       <div className="app-body">
-        {/* Keep chat content mounted so form state and merge panel survive tab switches */}
+        {/* Chat view - only when Chat tab is active */}
         <div style={{ display: tab === "chat" ? "contents" : "none" }}>
           <main className="main">
             {!connected ? (

@@ -1,5 +1,6 @@
 """Session management endpoints."""
 
+import asyncio
 import base64
 
 from fastapi import APIRouter, HTTPException, Query
@@ -19,6 +20,7 @@ from chad.server.api.schemas.events import (
     SendInputRequest,
     SendMessageRequest,
     ResizeTerminalRequest,
+    ConversationResponseSchema,
 )
 from chad.server.services import Session, get_session_manager, get_task_executor, TaskState
 from chad.server.services.pty_stream import get_pty_stream_service
@@ -47,6 +49,84 @@ def _session_to_response(session: Session) -> SessionResponse:
 def _task_state_to_status(state: TaskState) -> TaskStatus:
     """Convert TaskState enum to TaskStatus literal."""
     return state.value
+
+
+def _build_conversation(event_log: EventLog, since_seq: int = 0) -> ConversationResponseSchema:
+    """Build a conversation timeline for the latest task in the event log."""
+    # Find the latest task start
+    starts = event_log.get_events(event_types=["session_started"])
+    if not starts:
+        raise HTTPException(status_code=404, detail="No tasks found for this session")
+
+    latest_start = starts[-1]
+    start_seq = int(latest_start.get("seq", 0))
+
+    # Fetch conversation events after the start
+    convo_events = event_log.get_events(
+        since_seq=max(start_seq, since_seq),
+        event_types=["user_message", "assistant_message", "milestone"],
+    )
+
+    items: list[dict] = []
+    latest_seq = event_log.get_latest_seq()
+
+    for event in convo_events:
+        seq = int(event.get("seq", 0))
+        ts = event.get("ts")
+        etype = event.get("type")
+
+        if etype == "user_message":
+            content = str(event.get("content", ""))
+            items.append({
+                "seq": seq,
+                "ts": ts,
+                "type": "user",
+                "content": content,
+            })
+
+        elif etype == "assistant_message":
+            blocks = event.get("blocks", [])
+            # Derive a plain-text summary for quick display
+            text_parts = []
+            for block in blocks:
+                if block.get("kind") in ("text", "thinking", "error"):
+                    part = str(block.get("content", ""))
+                    if part:
+                        text_parts.append(part)
+            content = "\n".join(text_parts).strip() if text_parts else None
+            items.append({
+                "seq": seq,
+                "ts": ts,
+                "type": "assistant",
+                "content": content,
+                "blocks": blocks,
+            })
+
+        elif etype == "milestone":
+            items.append({
+                "seq": seq,
+                "ts": ts,
+                "type": "milestone",
+                "milestone_type": event.get("milestone_type", ""),
+                "title": event.get("title", ""),
+                "summary": event.get("summary", ""),
+            })
+
+    task_meta = {
+        "seq": start_seq,
+        "task_description": latest_start.get("task_description", ""),
+        "project_path": latest_start.get("project_path", ""),
+        "coding_provider": latest_start.get("coding_provider", ""),
+        "coding_account": latest_start.get("coding_account", ""),
+        "coding_model": latest_start.get("coding_model", None),
+    }
+
+    return ConversationResponseSchema(
+        session_id=event_log.session_id,
+        task=task_meta,
+        items=items,
+        latest_seq=latest_seq,
+    )
 
 
 @router.post("", response_model=SessionResponse, status_code=201)
@@ -190,10 +270,19 @@ async def start_task(session_id: str, request: TaskCreate) -> TaskStatusResponse
     executor = get_task_executor()
     running_task = executor.get_running_task_for_session(session_id)
     if running_task is not None:
-        raise HTTPException(
-            status_code=409,
-            detail=f"A task is already running in this session (task_id={running_task.id})",
-        )
+        # If the running task has been cancelled but hasn't finished yet, wait
+        # for it to wind down rather than returning 409.
+        if running_task.cancel_requested:
+            for _ in range(50):  # up to 5 seconds
+                await asyncio.sleep(0.1)
+                running_task = executor.get_running_task_for_session(session_id)
+                if running_task is None:
+                    break
+        if running_task is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"A task is already running in this session (task_id={running_task.id})",
+            )
 
     try:
         task = executor.start_task(
@@ -470,6 +559,26 @@ async def get_session_events(
         "latest_seq": latest_seq,
         "session_id": session_id,
     }
+
+
+@router.get("/{session_id}/conversation", response_model=ConversationResponseSchema)
+async def get_conversation(
+    session_id: str,
+    since_seq: int = Query(default=0, description="Return items after this sequence (within current task)"),
+) -> ConversationResponseSchema:
+    """Get the conversation timeline for the latest task in a session."""
+    manager = get_session_manager()
+    session = manager.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+    executor = get_task_executor()
+    task = executor.get_latest_task_for_session(session_id)
+
+    # Prefer in-memory log for active task; otherwise read from disk
+    event_log = task.event_log if task and task.event_log else EventLog(session_id)
+
+    return _build_conversation(event_log, since_seq=since_seq)
 
 
 @router.get("/{session_id}/log")
