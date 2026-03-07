@@ -1074,6 +1074,87 @@ class TestFinalThresholdCheckAfterPhase:
         assert loop._pending_action is not None
         assert loop._pending_action["action"] == "await_reset"
 
+    def test_weekly_limit_with_await_reset_emits_only_paused_milestone(self):
+        """A hard weekly limit with await_reset should emit one actionable milestone.
+
+        Reproducer:
+        1. Weekly usage is already at 100%, so threshold rules could fire.
+        2. The provider also prints the explicit weekly limit message.
+        3. The loop should surface only the paused/waiting milestone, not the raw
+           weekly-limit milestone plus extra threshold warnings.
+        """
+        event_log = FakeEventLog()
+        emitted = []
+
+        def emit_fn(event_type, **kwargs):
+            emitted.append((event_type, kwargs))
+
+        def weekly_quota_checker(output_tail):
+            if "You've hit your limit" in output_tail:
+                return "weekly_limit_reached"
+            return None
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=type("Task", (), {"cancel_requested": False, "stream_id": None})(),
+            run_phase_fn=None,
+            emit_fn=emit_fn,
+            worktree_path="/tmp/test",
+            is_quota_exhausted_fn=weekly_quota_checker,
+            get_weekly_usage_fn=lambda: 100.0,
+            action_settings=[
+                {"event": "weekly_usage", "threshold": 90, "action": "notify"},
+                {"event": "weekly_usage", "threshold": 100, "action": "await_reset"},
+            ],
+            terminate_pty_fn=lambda: None,
+            get_weekly_reset_eta_fn=lambda: "30m",
+        )
+
+        def fake_run_phase(**kwargs):
+            output = "You've hit your limit · resets 3pm (Australia/Melbourne)"
+            loop.feed_output(output)
+            return 0, output
+
+        loop._run_phase_fn = fake_run_phase
+        loop._running = True
+
+        def fake_handle_await_reset(*args, **kwargs):
+            loop._emit_milestone(
+                "usage_threshold",
+                "Paused, waiting for weekly reset (ETA: 30m)",
+            )
+            return ""
+
+        loop._handle_await_reset = fake_handle_await_reset
+
+        try:
+            loop._run_coding_phase(
+                session=None,
+                task_description="trigger weekly limit",
+                coding_account="primary",
+                coding_provider="anthropic",
+                screenshots=None,
+                rows=24,
+                cols=80,
+                git_mgr=None,
+            )
+        finally:
+            loop._running = False
+
+        milestones = [e for e in emitted if e[0] == "milestone"]
+        assert milestones == [
+            (
+                "milestone",
+                {
+                    "milestone_type": "usage_threshold",
+                    "title": "Usage Warning",
+                    "summary": "Paused, waiting for weekly reset (ETA: 30m)",
+                    "details": {},
+                },
+            )
+        ]
+
 
 class TestMessageForwarding:
     """Tests for forwarding queued user messages to the active PTY."""

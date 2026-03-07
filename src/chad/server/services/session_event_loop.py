@@ -370,8 +370,13 @@ class SessionEventLoop:
                                 summary = meaningful_summary
 
                             self._session_limit_summary = summary
-                            self._emit_milestone(limit_type, summary)
                             self._check_session_limit_action(limit_type)
+
+                            with self._pending_action_lock:
+                                has_pending_action = self._pending_action is not None
+
+                            if not has_pending_action:
+                                self._emit_milestone(limit_type, summary)
 
         # Scan for coding completion JSON
         if not self._coding_complete_detected:
@@ -418,6 +423,10 @@ class SessionEventLoop:
 
     def _check_usage_thresholds(self) -> None:
         """Check provider usage metrics for threshold crossings based on action_settings."""
+        with self._pending_action_lock:
+            if self._pending_action is not None:
+                return
+
         # Cache current values per event type so we only call each usage fn once
         current_cache: dict[str, float | None] = {}
 
