@@ -278,8 +278,13 @@ class SessionManager:
                 coding_account = first_event.get("coding_account")
                 provider_type = first_event.get("coding_provider")
 
-                # Determine status from last event
+                # Only sessions that did not finish cleanly should come back
+                # automatically, unless a worktree still has pending changes.
+                ended_reason = None
                 if last_event.get("type") == "session_ended":
+                    ended_reason = str(last_event.get("reason") or "")
+
+                if ended_reason == "completed":
                     status: SessionStatus = "completed"
                 else:
                     status = "interrupted"

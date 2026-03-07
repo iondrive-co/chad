@@ -82,14 +82,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan context manager."""
     init_start_time()
 
-    # Restore previous sessions from event logs on disk
-    from .services import get_session_manager
-    from chad.util.config_manager import ConfigManager
-    manager = get_session_manager()
-    cleanup_days = ConfigManager().get_cleanup_days()
-    restored = manager.load_from_logs(max_age_days=cleanup_days)
-    if restored:
-        print(f"Restored {restored} previous session(s)")
+    if getattr(app.state, "resume_sessions", False):
+        # Restore previous sessions from event logs on disk only when
+        # explicitly requested on the command line.
+        from .services import get_session_manager
+        from chad.util.config_manager import ConfigManager
+        manager = get_session_manager()
+        cleanup_days = ConfigManager().get_cleanup_days()
+        restored = manager.load_from_logs(max_age_days=cleanup_days)
+        if restored:
+            print(f"Restored {restored} previous session(s)")
 
     yield
 
@@ -102,6 +104,7 @@ def create_app(
     debug: bool = False,
     cors_origins: list[str] | None = None,
     auth_token: str | None = None,
+    resume_sessions: bool = False,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -110,6 +113,7 @@ def create_app(
         debug: Enable debug mode
         cors_origins: List of allowed CORS origins (None = allow all)
         auth_token: Bearer token for API authentication (None = no auth)
+        resume_sessions: Restore historical sessions from disk on startup
 
     Returns:
         Configured FastAPI application
@@ -124,6 +128,7 @@ def create_app(
 
     # Store auth token on app state for WebSocket auth
     app.state.auth_token = auth_token
+    app.state.resume_sessions = resume_sessions
 
     # Configure CORS
     if cors_origins is None:

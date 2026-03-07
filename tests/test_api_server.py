@@ -1,5 +1,7 @@
 """Tests for Chad server API endpoints."""
 
+import json
+from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 
@@ -82,6 +84,94 @@ class TestSessionEndpoints:
         data = response.json()
         assert data["total"] == 2
         assert len(data["sessions"]) == 2
+
+    def test_startup_skips_completed_historical_sessions_without_changes(self, tmp_path, monkeypatch):
+        """Startup should not surface cleanly completed historical sessions."""
+        temp_config = tmp_path / "test_chad.conf"
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        monkeypatch.setenv("CHAD_CONFIG", str(temp_config))
+        monkeypatch.setenv("CHAD_LOG_DIR", str(log_dir))
+
+        now = datetime.now(timezone.utc).isoformat()
+        (log_dir / "historical.jsonl").write_text(
+            "\n".join([
+                json.dumps({
+                    "type": "session_started",
+                    "seq": 1,
+                    "ts": now,
+                    "task_description": "Old finished task",
+                    "project_path": "/tmp/project",
+                    "coding_account": "codex-main",
+                    "coding_provider": "openai",
+                }),
+                json.dumps({
+                    "type": "session_ended",
+                    "seq": 2,
+                    "ts": now,
+                    "success": True,
+                    "reason": "completed",
+                }),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+
+        reset_session_manager()
+        reset_task_executor()
+        reset_state()
+
+        app = create_app()
+        with TestClient(app) as isolated_client:
+            response = isolated_client.get("/api/v1/sessions")
+
+        data = response.json()
+        assert response.status_code == 200
+        assert data["total"] == 0
+        assert data["sessions"] == []
+
+    def test_startup_restores_historical_sessions_when_resume_enabled(self, tmp_path, monkeypatch):
+        """Startup restores prior sessions only when resume mode is enabled."""
+        temp_config = tmp_path / "test_chad.conf"
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        monkeypatch.setenv("CHAD_CONFIG", str(temp_config))
+        monkeypatch.setenv("CHAD_LOG_DIR", str(log_dir))
+
+        now = datetime.now(timezone.utc).isoformat()
+        (log_dir / "historical.jsonl").write_text(
+            "\n".join([
+                json.dumps({
+                    "type": "session_started",
+                    "seq": 1,
+                    "ts": now,
+                    "task_description": "Old finished task",
+                    "project_path": "/tmp/project",
+                    "coding_account": "codex-main",
+                    "coding_provider": "openai",
+                }),
+                json.dumps({
+                    "type": "session_ended",
+                    "seq": 2,
+                    "ts": now,
+                    "success": True,
+                    "reason": "completed",
+                }),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+
+        reset_session_manager()
+        reset_task_executor()
+        reset_state()
+
+        app = create_app(resume_sessions=True)
+        with TestClient(app) as isolated_client:
+            response = isolated_client.get("/api/v1/sessions")
+
+        data = response.json()
+        assert response.status_code == 200
+        assert data["total"] == 1
+        assert data["sessions"][0]["id"] == "historical"
 
     def test_get_session(self, client):
         """Can get a specific session."""
