@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, DragEvent } from "react";
 import type { ChadAPI, ConversationItem, Account } from "chad-client";
 import { useStream } from "../hooks/useStream.ts";
 import { MergePanel } from "./MergePanel.tsx";
@@ -6,6 +6,12 @@ import { WorktreeInfo } from "./WorktreeInfo.tsx";
 import { SessionLog } from "./SessionLog.tsx";
 import { ProjectSettings } from "./ProjectSettings.tsx";
 import { AccountPicker } from "./AccountPicker.tsx";
+
+interface UploadedScreenshot {
+  path: string;
+  filename: string;
+  previewUrl: string;
+}
 
 interface Props {
   api: ChadAPI;
@@ -48,6 +54,12 @@ export function ChatView({
   const [wasCancelled, setWasCancelled] = useState(false);
   const outputRef = useRef<HTMLPreElement>(null);
   const convoRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Screenshot attachments for task creation
+  const [screenshots, setScreenshots] = useState<UploadedScreenshot[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
 
   // Historical output/events loaded from persisted log for finished sessions
   const [historicalOutput, setHistoricalOutput] = useState("");
@@ -345,6 +357,62 @@ export function ChatView({
     }
   }, [api, sessionId]);
 
+  // Screenshot upload handlers
+  const handleFiles = useCallback(async (files: FileList | File[]) => {
+    const imageFiles = Array.from(files).filter((f) =>
+      f.type.startsWith("image/")
+    );
+    if (imageFiles.length === 0) return;
+
+    setUploading(true);
+    setConversationError(null);
+
+    for (const file of imageFiles) {
+      try {
+        const result = await api.uploadFile(file);
+        const previewUrl = URL.createObjectURL(file);
+        setScreenshots((prev) => [
+          ...prev,
+          { path: result.path, filename: result.filename, previewUrl },
+        ]);
+      } catch (e) {
+        setConversationError(e instanceof Error ? e.message : "Failed to upload screenshot");
+      }
+    }
+    setUploading(false);
+  }, [api]);
+
+  const handleDrop = useCallback(
+    (e: DragEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      setDragOver(false);
+      if (e.dataTransfer.files.length > 0) {
+        handleFiles(e.dataTransfer.files);
+      }
+    },
+    [handleFiles]
+  );
+
+  const handleDragOver = useCallback((e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragOver(false);
+  }, []);
+
+  const removeScreenshot = useCallback((index: number) => {
+    setScreenshots((prev) => {
+      const removed = prev[index];
+      if (removed?.previewUrl) {
+        URL.revokeObjectURL(removed.previewUrl);
+      }
+      return prev.filter((_, i) => i !== index);
+    });
+  }, []);
+
   const handleSendMessage = useCallback(async () => {
     if (sending) return;
 
@@ -417,10 +485,14 @@ export function ChatView({
         coding_agent: codingAccount.name,
         override_prompt: overrideCodingPrompt || undefined,
         is_followup: hasRunTask,
+        screenshots: screenshots.length > 0 ? screenshots.map((s) => s.path) : undefined,
       });
 
       handleTaskStart(message);
       setInputText("");
+      // Clear screenshots after starting task
+      screenshots.forEach((s) => URL.revokeObjectURL(s.previewUrl));
+      setScreenshots([]);
     } catch (e) {
       if (e instanceof Error) {
         setConversationError(e.message);
@@ -443,6 +515,7 @@ export function ChatView({
     hasRunTask,
     handleTaskStart,
     conversationSeqRef,
+    screenshots,
   ]);
 
   const handleInputKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -535,22 +608,66 @@ export function ChatView({
               })}
             </div>
 
-            <div className="chat-composer">
+            <div
+              className={`chat-composer ${dragOver ? "drag-over" : ""}`}
+              onDrop={handleDrop}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+            >
+              {/* Screenshot previews */}
+              {screenshots.length > 0 && (
+                <div className="screenshot-previews">
+                  {screenshots.map((s, i) => (
+                    <div key={s.path} className="screenshot-preview">
+                      <img src={s.previewUrl} alt={s.filename} />
+                      <button
+                        type="button"
+                        className="screenshot-remove"
+                        onClick={() => removeScreenshot(i)}
+                        title="Remove"
+                      >
+                        x
+                      </button>
+                      <span className="screenshot-name">{s.filename}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
               <textarea
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
                 onKeyDown={handleInputKeyDown}
-                placeholder={taskActive ? "Type a clarification or additional context for the agent…" : "Type a task or follow-up message"}
-                disabled={sending}
+                placeholder={taskActive ? "Type a clarification or additional context for the agent…" : "Type a task or follow-up message (drop images here)"}
+                disabled={sending || uploading}
                 rows={5}
+              />
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                style={{ display: "none" }}
+                onChange={(e) => e.target.files && handleFiles(e.target.files)}
               />
               <div className="composer-actions">
                 {conversationError && <span className="error-text">{conversationError}</span>}
                 <div className="composer-right">
+                  {uploading && <span className="running-indicator">Uploading…</span>}
                   {taskActive && <span className="running-indicator">Running…</span>}
+                  {!taskActive && (
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={uploading || sending}
+                      className="attach-btn"
+                      title="Attach screenshots"
+                    >
+                      Attach
+                    </button>
+                  )}
                   <button
                     onClick={handleSendMessage}
-                    disabled={sending || (!taskActive && !inputText.trim())}
+                    disabled={sending || uploading || (!taskActive && !inputText.trim())}
                   >
                     {sending ? "Sending..." : taskActive ? (inputText.trim() ? "Send Interrupt" : "Interrupt") : hasRunTask ? "Send follow-up" : "Start task"}
                   </button>
