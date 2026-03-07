@@ -1850,3 +1850,153 @@ label {
   resize: vertical;
   min-height: 100px;
 }
+
+/* ── Mobile Settings ── */
+
+@media (max-width: 640px) {
+  /* Increase base font sizes for mobile readability */
+  .settings-panel {
+    gap: 20px;
+  }
+
+  .settings-panel h2 {
+    font-size: 20px;
+  }
+
+  .settings-panel h3 {
+    font-size: 16px;
+    margin-bottom: 12px;
+  }
+
+  .settings-panel section {
+    gap: 12px;
+  }
+
+  /* Larger form elements for touch targets */
+  .settings-panel input,
+  .settings-panel textarea,
+  .settings-panel select {
+    font-size: 16px;
+    padding: 12px 14px;
+    border-radius: 8px;
+  }
+
+  .settings-panel label {
+    font-size: 15px;
+    gap: 8px;
+  }
+
+  .settings-panel button {
+    font-size: 16px;
+    padding: 12px 20px;
+    border-radius: 8px;
+  }
+
+  .toggle-label {
+    font-size: 16px;
+    gap: 12px;
+    padding: 8px 0;
+  }
+
+  .toggle-label input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+  }
+
+  /* Stack action rule elements vertically */
+  .action-rule-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .action-rule-row select {
+    width: 100%;
+    min-width: auto;
+  }
+
+  .threshold-group {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .threshold-group input[type="range"] {
+    flex: 1;
+    width: auto;
+  }
+
+  .delete-rule-btn {
+    align-self: flex-start;
+    padding: 8px 16px;
+    font-size: 14px;
+  }
+
+  .add-rule-btn {
+    font-size: 14px;
+    padding: 10px 16px;
+  }
+
+  /* Connection section */
+  .connection-section input {
+    font-size: 16px;
+    padding: 12px 14px;
+  }
+
+  .scan-qr-btn {
+    width: 100%;
+    padding: 14px 24px;
+    font-size: 16px;
+  }
+
+  /* Providers panel mobile adjustments */
+  .providers-panel h2 {
+    font-size: 20px;
+  }
+
+  .providers-panel h3 {
+    font-size: 16px;
+    margin-bottom: 12px;
+  }
+
+  .account-card {
+    padding: 16px;
+  }
+
+  .account-name {
+    font-size: 16px;
+  }
+
+  .account-provider {
+    font-size: 14px;
+    padding: 4px 10px;
+  }
+
+  .account-details {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .account-field {
+    font-size: 15px;
+  }
+
+  .account-field select {
+    font-size: 16px;
+    padding: 10px 12px;
+    min-width: auto;
+    width: 100%;
+  }
+
+  .add-provider-row {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .add-provider-row input,
+  .add-provider-row select {
+    width: 100%;
+    min-width: auto;
+    font-size: 16px;
+    padding: 12px 14px;
+  }
+}
