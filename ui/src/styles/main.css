@@ -17,7 +17,7 @@
   --success: #16a34a;
   --error: #dc2626;
   --running: #2563eb;
-  --terminal-bg: #1a1a2e;
+  --terminal-bg: #ffffff;
   --diff-delete-bg: #fecaca;
   --diff-add-bg: #bbf7d0;
   --conflict-ours-bg: #fecaca;
@@ -758,7 +758,7 @@ label {
   white-space: pre-wrap;
   word-break: break-all;
   min-height: 200px;
-  color: #e0e0e0; /* Terminal text always light on dark */
+  color: var(--text);
 }
 
 @media (min-width: 1100px) {
