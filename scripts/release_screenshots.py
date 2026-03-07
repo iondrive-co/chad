@@ -3,7 +3,7 @@
 
 This script captures the three main views for the README carousel:
 1. providers-tab.png - Full providers view with multiple accounts
-2. run-task-input.png - Task input panel (top section)
+2. screenshot-task-input.png - Chat view with example conversation and agent output
 3. settings.png - Settings pane with action rules
 
 Usage:
@@ -48,100 +48,208 @@ def screenshot_page(page, output_path: Path) -> Path:
     return output_path
 
 
+def fill_task_form(page):
+    """Create a session and seed the task form before injecting the chat view."""
+    page.locator("button.new-session-btn").click()
+    page.wait_for_timeout(2000)
+
+    task_input = page.locator(".task-form textarea")
+    if task_input.count() > 0:
+        task_input.fill(
+            "Add a REST API endpoint for user profile updates with validation, "
+            "rate limiting, and comprehensive test coverage"
+        )
+        page.wait_for_timeout(300)
+
+
 def inject_followup_visible(page):
-    """Make the follow-up input row visible for the conversation screenshot."""
+    """Force the follow-up composer to remain visible in the screenshot."""
     page.evaluate(
-        """
+        r"""
     () => {
-        // Show the follow-up row - handle visibility
-        const followupRow = document.getElementById('followup-row');
-        if (followupRow) {
-            followupRow.style.setProperty('display', 'flex', 'important');
-            followupRow.style.visibility = 'visible';
-            followupRow.style.opacity = '1';
-            followupRow.classList.remove('hidden', 'hide', 'invisible');
-
-            // Show parent wrappers that might be hidden
-            let parent = followupRow.parentElement;
-            while (parent && parent.id !== 'component-0') {
-                parent.style.display = '';
-                parent.classList.remove('hidden', 'hide');
-                parent = parent.parentElement;
-            }
+        const composer = document.querySelector('.chat-composer');
+        if (composer) {
+            composer.style.display = 'grid';
+            composer.style.visibility = 'visible';
+            composer.style.opacity = '1';
         }
 
-        // Add text to follow-up input
-        const followupInput = document.getElementById('followup-input');
-        if (followupInput) {
-            followupInput.style.display = 'block';
-            const textarea = followupInput.querySelector('textarea');
-            if (textarea) {
-                textarea.value = 'Now add unit tests for the new capacity tracking feature';
-                textarea.dispatchEvent(new Event('input', { bubbles: true }));
-            }
+        const textarea = document.querySelector('.chat-composer textarea');
+        if (textarea) {
+            textarea.value = 'Now add pagination support for the user listing endpoint';
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
         }
 
-        // Enable send button
-        const sendBtn = document.getElementById('send-followup-btn');
-        if (sendBtn) {
-            sendBtn.disabled = false;
-            sendBtn.classList.remove('disabled');
-            sendBtn.style.display = 'block';
-        }
-
-        // Scroll to show follow-up
-        if (followupRow) {
-            followupRow.scrollIntoView({ behavior: 'instant', block: 'end' });
+        const sendButton = document.querySelector('.chat-composer button[type="submit"]');
+        if (sendButton) {
+            sendButton.disabled = false;
         }
     }
     """
     )
 
 
-def fill_task_form(page):
-    """Fill the task form with realistic data for the screenshot."""
-    # Create a session first — the task form only appears when one is selected
-    page.locator("button:has-text('New Session')").click()
-    page.wait_for_timeout(2000)
+def crop_whitespace(image_path: Path) -> None:
+    """Crop trailing whitespace rows from the bottom of a screenshot."""
+    try:
+        from PIL import Image
+        import numpy as np
+    except ImportError:
+        return
+    img = Image.open(image_path)
+    arr = np.array(img)
+    bg = arr[-1, arr.shape[1] // 2]
+    row_is_bg = np.all(np.all(arr == bg, axis=2), axis=1)
+    last_content = arr.shape[0] - 1
+    for i in range(arr.shape[0] - 1, -1, -1):
+        if not row_is_bg[i]:
+            last_content = i
+            break
+    crop_bottom = min(last_content + 20, arr.shape[0])
+    img.crop((0, 0, img.width, crop_bottom)).save(image_path)
 
-    # The AccountPicker auto-selects the CODING-role account (claude-pro).
-    # Wait for the coding agent select to have a selected value.
-    page.wait_for_timeout(1000)
 
-    # Fill task description
-    page.locator(".task-form textarea").fill(
-        "Add a REST API endpoint for user profile updates with "
-        "validation, rate limiting, and comprehensive test coverage"
+def inject_conversation_view(page):
+    """Inject a fake conversation with agent output for the screenshot."""
+    # Inject conversation messages, task description bar, terminal output,
+    # and status indicators directly into the DOM via JavaScript.
+    page.evaluate(
+        r"""
+    () => {
+        // --- Task description bar ---
+        const taskBar = document.querySelector('.task-description-bar');
+        if (!taskBar) {
+            const chatView = document.querySelector('.chat-view');
+            if (chatView) {
+                const bar = document.createElement('div');
+                bar.className = 'task-description-bar';
+                bar.innerHTML = '<span class="task-description-label">Task:</span> <span class="task-description-text">Add a REST API endpoint for user profile updates with validation, rate limiting, and comprehensive test coverage</span> <span class="verification-agent-badge">Verification: codex-work</span>';
+                const body = chatView.querySelector('.chat-body');
+                if (body) chatView.insertBefore(bar, body);
+            }
+        }
+
+        // --- Conversation messages ---
+        // NOTE: .chat-bubble has white-space:pre-wrap, so we must avoid
+        // indentation inside the template — every space/newline is rendered.
+        const messagesDiv = document.querySelector('.chat-messages');
+        if (messagesDiv) {
+            messagesDiv.innerHTML =
+'<div class="chat-item end"><div class="chat-bubble user">' +
+'<div class="chat-bubble-label">Pleb</div>' +
+'<div class="chat-bubble-text">Add a REST API endpoint for user profile updates with validation, rate limiting, and test coverage</div>' +
+'</div></div>' +
+'<div class="chat-item start"><div class="chat-bubble assistant">' +
+'<div class="chat-bubble-label">Agent</div>' +
+'<div class="chat-bubble-text">I\'ll implement the user profile update endpoint. I\'ve added:\n\n1. PUT /api/v1/users/{user_id}/profile with Pydantic validation\n2. Rate limiting middleware (60 req/min per user)\n3. Input sanitization for all string fields\n4. 14 unit tests covering validation, auth, and rate limits</div>' +
+'</div></div>' +
+'<div class="chat-item center"><div class="chat-bubble milestone">' +
+'<div class="chat-bubble-label">Verification Complete</div>' +
+'<div class="chat-bubble-text clamped">All 14 tests passing. Linting clean. No security issues found.</div>' +
+'</div></div>' +
+'<div class="chat-item end"><div class="chat-bubble user">' +
+'<div class="chat-bubble-label">Pleb</div>' +
+'<div class="chat-bubble-text">Also add email validation and include updated_at in the response</div>' +
+'</div></div>' +
+'<div class="chat-item start"><div class="chat-bubble assistant">' +
+'<div class="chat-bubble-label">Agent</div>' +
+'<div class="chat-bubble-text">Done! Added email format validation and an updated_at ISO timestamp in the response. Both new test cases are passing.</div>' +
+'</div></div>';
+        }
+
+        // --- Chat status ---
+        const chatStatus = document.querySelector('.chat-status');
+        if (chatStatus) chatStatus.textContent = 'Ready for follow-up';
+
+        // --- Composer ---
+        const composer = document.querySelector('.chat-composer textarea');
+        if (composer) {
+            composer.value = 'Now add pagination support for the user listing endpoint';
+            composer.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+
+        // --- Terminal output ---
+        const terminalOutput = document.querySelector('.terminal-output');
+        if (terminalOutput) {
+            terminalOutput.textContent = [
+                '$ cd /home/user/my-webapp',
+                '',
+                'Reading src/api/routes/__init__.py...',
+                'Reading src/api/models/user.py...',
+                'Reading src/api/middleware/rate_limit.py...',
+                '',
+                'Writing src/api/routes/profile.py...',
+                '  + PUT /api/v1/users/{user_id}/profile',
+                '  + ProfileUpdateRequest schema',
+                '  + email format validation via regex',
+                '  + updated_at timestamp in response',
+                '',
+                'Writing src/api/middleware/rate_limit.py...',
+                '  + RateLimiter class (sliding window)',
+                '  + Per-user tracking with cleanup',
+                '',
+                'Writing tests/test_profile_endpoint.py...',
+                '  + test_update_profile_success',
+                '  + test_update_profile_invalid_email',
+                '  + test_update_profile_name_too_long',
+                '  + test_update_profile_unauthorized',
+                '  + test_update_profile_rate_limited',
+                '  + test_update_profile_not_found',
+                '  + test_update_profile_empty_body',
+                '  + test_update_profile_xss_sanitization',
+                '  + test_update_profile_sql_injection',
+                '  + test_update_profile_concurrent',
+                '  + test_update_profile_partial',
+                '  + test_update_profile_email_format',
+                '  + test_update_profile_updated_at',
+                '  + test_update_profile_idempotent',
+                '',
+                'Running: pytest tests/test_profile_endpoint.py -v',
+                '======== test session starts ========',
+                'collected 14 items',
+                '',
+                'test_profile_endpoint.py::test_success PASSED',
+                'test_profile_endpoint.py::test_invalid_email PASSED',
+                'test_profile_endpoint.py::test_name_too_long PASSED',
+                'test_profile_endpoint.py::test_unauthorized PASSED',
+                'test_profile_endpoint.py::test_rate_limited PASSED',
+                'test_profile_endpoint.py::test_not_found PASSED',
+                'test_profile_endpoint.py::test_empty_body PASSED',
+                'test_profile_endpoint.py::test_xss PASSED',
+                'test_profile_endpoint.py::test_sql_injection PASSED',
+                'test_profile_endpoint.py::test_concurrent PASSED',
+                'test_profile_endpoint.py::test_partial PASSED',
+                'test_profile_endpoint.py::test_email_format PASSED',
+                'test_profile_endpoint.py::test_updated_at PASSED',
+                'test_profile_endpoint.py::test_idempotent PASSED',
+                '',
+                '======== 14 passed in 2.31s ========',
+                '',
+                'Running: flake8 src/api/routes/profile.py',
+                'All checks passed.',
+            ].join('\n');
+        }
+
+        // --- Terminal header (show completed) ---
+        const terminalHeader = document.querySelector('.terminal-header');
+        if (terminalHeader) {
+            terminalHeader.innerHTML = '<span class="done-indicator">Completed</span>';
+        }
+
+        // --- Hide the task form if visible ---
+        const taskForm = document.querySelector('.task-form');
+        if (taskForm) taskForm.style.display = 'none';
+
+        // --- Hide project settings ---
+        const projectSettings = document.querySelector('.project-settings');
+        if (projectSettings) projectSettings.style.display = 'none';
+
+        // --- Hide session info bar to save space ---
+        const sessionInfoBar = document.querySelector('.session-info-bar');
+        if (sessionInfoBar) sessionInfoBar.style.display = 'none';
+    }
+    """
     )
-
-    # Wait for model override dropdown to appear (async fetch)
-    page.wait_for_timeout(1000)
-
-    # Select model override for coding agent
-    model_select = page.locator(".task-form > label:has-text('Model Override') select")
-    if model_select.count() > 0:
-        model_select.select_option(label="claude-opus-4-20250514")
-
-    # Enable verification
-    page.locator(".verification-section input[type='checkbox']").check()
-    page.wait_for_timeout(500)
-
-    # Select verification agent (codex-work)
-    verification_select = page.locator(
-        ".verification-section label:has-text('Verification Agent') select"
-    )
-    if verification_select.count() > 0:
-        verification_select.select_option(label="codex-work (openai / o3-pro)")
-
-    # Wait for verification models and reasoning to appear
-    page.wait_for_timeout(1000)
-
-    # Select verification reasoning
-    reasoning_select = page.locator(
-        ".verification-section label:has-text('Verification Reasoning') select"
-    )
-    if reasoning_select.count() > 0:
-        reasoning_select.select_option(value="high")
 
 
 def main():
@@ -157,10 +265,10 @@ def main():
         instance = start_chad(env)
         print(f"Chad running on port {instance.port}")
 
-        viewport_large = {"width": 1280, "height": 900}
+        viewport_large = {"width": 1400, "height": 1350}
         viewport_medium = {"width": 1280, "height": 800}
 
-        # Screenshot 1: Providers tab
+        # Screenshot 1: Providers tab (cropped to content)
         print("\n[1/3] Capturing providers tab...")
         output_path = DOCS_DIR / "screenshot-providers.png"
         with open_playwright_page(
@@ -172,20 +280,22 @@ def main():
             render_delay=2.0,
         ) as page:
             screenshot_page(page, output_path)
+            crop_whitespace(output_path)
             print(f"  Saved: {output_path}")
 
-        # Screenshot 2: Run task input (top section)
-        print("\n[2/3] Capturing task input panel...")
+        # Screenshot 2: Chat view with conversation and agent output
+        print("\n[2/3] Capturing chat conversation view...")
         output_path = DOCS_DIR / "screenshot-task-input.png"
         with open_playwright_page(
             instance.port,
-            tab="chat",
             headless=True,
-            viewport=viewport_medium,
+            viewport=viewport_large,
             color_scheme="light",
             render_delay=2.0,
         ) as page:
             fill_task_form(page)
+            inject_conversation_view(page)
+            inject_followup_visible(page)
             page.wait_for_timeout(500)
             screenshot_page(page, output_path)
             print(f"  Saved: {output_path}")

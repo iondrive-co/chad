@@ -487,6 +487,18 @@ export class ChadAPI {
     return this.get(`/api/v1/config/prompt-previews${params}`);
   }
 
+  // ── Config Export / Import ──
+
+  exportConfig(): Promise<Record<string, unknown>> {
+    return this.get("/api/v1/config/export");
+  }
+
+  importConfig(
+    config: Record<string, unknown>,
+  ): Promise<{ ok: boolean; message: string; install_errors?: Record<string, string> }> {
+    return this.post("/api/v1/config/import", { config });
+  }
+
   // ── Session Log ──
 
   getSessionLog(

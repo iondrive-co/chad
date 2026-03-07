@@ -20,6 +20,9 @@ class Session:
     created_at: datetime
     last_activity: datetime
     coding_account: str | None = None
+    task_description: str | None = None
+    status: str = "active"
+    resumable: bool = False
 
 
 @dataclass
@@ -206,6 +209,9 @@ class APIClient:
             has_worktree=data.get("has_worktree", False),
             has_changes=data.get("has_changes", False),
             coding_account=data.get("coding_account"),
+            task_description=data.get("task_description"),
+            status=data.get("status", "active"),
+            resumable=data.get("resumable", False),
             created_at=self._parse_datetime(data["created_at"]),
             last_activity=self._parse_datetime(data["last_activity"]),
         )
@@ -824,5 +830,31 @@ class APIClient:
             Dict with ok (bool) and error (str|None)
         """
         resp = self._client.post(self._url("/slack/test"))
+        resp.raise_for_status()
+        return resp.json()
+
+    # Config export/import
+    def export_config(self) -> dict:
+        """Export the full config for transfer to another machine.
+
+        Returns:
+            The full config dictionary (accounts have encrypted keys).
+        """
+        resp = self._client.get(self._url("/config/export"))
+        resp.raise_for_status()
+        return resp.json()
+
+    def import_config(self, config_data: dict) -> dict:
+        """Import a config exported from another machine.
+
+        Args:
+            config_data: Config dictionary from export_config().
+
+        Returns:
+            Dict with ok and message.
+        """
+        resp = self._client.post(
+            self._url("/config/import"), json={"config": config_data}
+        )
         resp.raise_for_status()
         return resp.json()

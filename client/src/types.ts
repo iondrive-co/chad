@@ -9,6 +9,9 @@ export interface Session {
   has_worktree: boolean;
   has_changes: boolean;
   coding_account: string | null;
+  task_description: string | null;
+  status: "active" | "completed" | "interrupted";
+  resumable: boolean;
   created_at: string;
   last_activity: string;
 }

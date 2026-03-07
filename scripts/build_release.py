@@ -406,7 +406,7 @@ def _build_windows_msi(build_root: Path, version: str, output_dir: Path) -> Path
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product Id="*" Name="Chad" Manufacturer="Chad AI" Version="{version}" Language="1033" UpgradeCode="6f0d5c39-5f9f-4b64-8cb6-9a7f3e9c5a9c">
     <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine"/>
-    <MediaTemplate/>
+    <MediaTemplate EmbedCab="yes"/>
     <MajorUpgrade AllowDowngrades="no" DowngradeErrorMessage="A newer version of Chad is already installed."/>
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFilesFolder">
@@ -468,6 +468,7 @@ def _build_windows_msi(build_root: Path, version: str, output_dir: Path) -> Path
         str(tools["light.exe"]),
         "-ext",
         "WixUIExtension",
+        "-spdb",
         "-out",
         str(final_path),
         str(product_obj),

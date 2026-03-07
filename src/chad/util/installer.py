@@ -154,14 +154,63 @@ class AIToolInstaller:
             return self._install_binary(spec)
         return False, f"No installer configured for {spec.name}"
 
+    def _binary_asset(self, spec: CLIToolSpec) -> tuple[str, str]:
+        """Return the download URL and output filename for a binary tool."""
+        import platform
+
+        system = platform.system().lower()
+        machine = platform.machine().lower()
+
+        if system == "darwin":
+            os_name = "darwin"
+            ext = ""
+        elif system == "linux":
+            os_name = "linux"
+            ext = ""
+        elif system == "windows":
+            os_name = "windows"
+            ext = ".exe"
+        else:
+            raise ValueError(f"Unsupported platform: {system}")
+
+        if machine in ("x86_64", "amd64"):
+            arch = "amd64"
+        elif machine in ("aarch64", "arm64"):
+            arch = "arm64"
+        else:
+            raise ValueError(f"Unsupported architecture: {machine}")
+
+        asset = f"{spec.binary}-{os_name}-{arch}{ext}"
+        url = f"{spec.package}/{asset}"
+        target_name = f"{spec.binary}{ext}" if ext else spec.binary
+        return url, target_name
+
+    def _manual_binary_install_command(self, url: str, target_name: str) -> str:
+        """Return an exact manual install command for the current platform."""
+        target = self.bin_dir / target_name
+
+        if target_name.endswith(".exe"):
+            return (
+                f'powershell -NoProfile -Command '
+                f'"New-Item -ItemType Directory -Force -Path \'{self.bin_dir}\' | Out-Null; '
+                f'Invoke-WebRequest -Uri \'{url}\' -OutFile \'{target}\'"'
+            )
+
+        return (
+            f"mkdir -p {self.bin_dir} && "
+            f"curl -fsSL {url} -o {target} && "
+            f"chmod +x {target}"
+        )
+
     def _install_with_npm(self, spec: CLIToolSpec) -> tuple[bool, str]:
         if not self._check_node_npm():
-            return False, (
-                f"Node.js and npm are required to install {spec.name}.\n\n"
-                f"Please install Node.js from https://nodejs.org/ then try again.\n\n"
-                f"Or install {spec.name} manually:\n"
-                f"```\nnpm install -g {spec.package}\n```"
-            )
+            ok, err = self._install_node()
+            if not ok:
+                return False, (
+                    f"Node.js is required to install {spec.name} but auto-install failed:\n"
+                    f"{err}\n\n"
+                    f"Please install Node.js manually from https://nodejs.org/ then try again."
+                )
 
         ensure_directory(self.tools_dir)
         ensure_directory(self.bin_dir)
@@ -244,6 +293,102 @@ class AIToolInstaller:
     def _check_node_npm(self) -> bool:
         return is_tool_installed("node") and is_tool_installed("npm")
 
+    def _install_node(self) -> tuple[bool, str]:
+        """Install a local Node.js into the managed tools directory."""
+        import logging
+        import platform
+        import tarfile
+        import urllib.request
+        import zipfile
+
+        log = logging.getLogger("chad.installer")
+        node_dir = self.tools_dir / "node"
+
+        # Already installed locally in a previous run?
+        local_node = node_dir / "bin" / "node"
+        local_npm = node_dir / "bin" / "npm"
+        if local_node.exists() and local_npm.exists():
+            self._add_node_to_path(node_dir)
+            return True, str(local_node)
+
+        system = platform.system().lower()
+        machine = platform.machine().lower()
+
+        if machine in ("x86_64", "amd64"):
+            arch = "x64"
+        elif machine in ("aarch64", "arm64"):
+            arch = "arm64"
+        else:
+            return False, f"Unsupported architecture: {machine}"
+
+        node_version = "v22.16.0"
+
+        if system == "linux":
+            archive = f"node-{node_version}-linux-{arch}.tar.xz"
+        elif system == "darwin":
+            archive = f"node-{node_version}-darwin-{arch}.tar.gz"
+        elif system == "windows":
+            archive = f"node-{node_version}-win-{arch}.zip"
+        else:
+            return False, f"Unsupported platform: {system}"
+
+        url = f"https://nodejs.org/dist/{node_version}/{archive}"
+        download_path = self.tools_dir / archive
+
+        log.info("Downloading Node.js %s for %s/%s...", node_version, system, arch)
+        try:
+            urllib.request.urlretrieve(url, str(download_path))
+        except Exception as e:
+            return False, f"Failed to download Node.js: {e}"
+
+        log.info("Extracting Node.js...")
+        try:
+            ensure_directory(node_dir)
+
+            if archive.endswith(".zip"):
+                with zipfile.ZipFile(download_path) as zf:
+                    zf.extractall(self.tools_dir)
+            elif archive.endswith(".tar.xz"):
+                with tarfile.open(download_path, "r:xz") as tf:
+                    tf.extractall(self.tools_dir)
+            elif archive.endswith(".tar.gz"):
+                with tarfile.open(download_path, "r:gz") as tf:
+                    tf.extractall(self.tools_dir)
+
+            # The archive extracts to a versioned directory — rename to "node"
+            extracted_name = archive.replace(".tar.xz", "").replace(".tar.gz", "").replace(".zip", "")
+            extracted_dir = self.tools_dir / extracted_name
+            if extracted_dir.exists() and extracted_dir != node_dir:
+                if node_dir.exists():
+                    import shutil
+                    shutil.rmtree(node_dir)
+                extracted_dir.rename(node_dir)
+        except Exception as e:
+            return False, f"Failed to extract Node.js: {e}"
+        finally:
+            try:
+                download_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        self._add_node_to_path(node_dir)
+
+        # Verify it works
+        if not self._check_node_npm():
+            return False, "Node.js was extracted but node/npm not found on PATH"
+
+        log.info("Node.js %s installed to %s", node_version, node_dir)
+        return True, str(local_node)
+
+    def _add_node_to_path(self, node_dir: Path) -> None:
+        """Add the managed Node.js bin directory to PATH."""
+        import os
+
+        bin_dir = str(node_dir / "bin")
+        path = os.environ.get("PATH", "")
+        if bin_dir not in path.split(os.pathsep):
+            os.environ["PATH"] = bin_dir + os.pathsep + path
+
     def _install_with_shell(self, spec: CLIToolSpec) -> tuple[bool, str]:
         """Install a tool by running a shell script from a URL."""
         import os
@@ -321,49 +466,28 @@ class AIToolInstaller:
 
     def _install_binary(self, spec: CLIToolSpec) -> tuple[bool, str]:
         """Install a tool by downloading a platform-appropriate binary."""
-        import platform
         import stat
         import urllib.request
 
         ensure_directory(self.tools_dir)
         ensure_directory(self.bin_dir)
 
-        system = platform.system().lower()
-        machine = platform.machine().lower()
+        try:
+            url, target_name = self._binary_asset(spec)
+        except ValueError as e:
+            return False, str(e)
 
-        if system == "darwin":
-            os_name = "darwin"
-            ext = ""
-        elif system == "linux":
-            os_name = "linux"
-            ext = ""
-        elif system == "windows":
-            os_name = "windows"
-            ext = ".exe"
-        else:
-            return False, f"Unsupported platform: {system}"
-
-        if machine in ("x86_64", "amd64"):
-            arch = "amd64"
-        elif machine in ("aarch64", "arm64"):
-            arch = "arm64"
-        else:
-            return False, f"Unsupported architecture: {machine}"
-
-        asset = f"{spec.binary}-{os_name}-{arch}{ext}"
-        url = f"{spec.package}/{asset}"
-        target_name = f"{spec.binary}{ext}" if ext else spec.binary
         target = self.bin_dir / target_name
 
         try:
             urllib.request.urlretrieve(url, str(target))
-            if ext != ".exe":
+            if not target_name.endswith(".exe"):
                 target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         except Exception as e:
             return False, (
                 f"Failed to download {spec.name}: {e}\n\n"
-                f"You can install it manually from:\n"
-                f"  {url}"
+                f"Install it manually:\n"
+                f"{self._manual_binary_install_command(url, target_name)}"
             )
 
         resolved = self.resolve_tool_path(spec.binary)

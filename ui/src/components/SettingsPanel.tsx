@@ -36,6 +36,7 @@ export function SettingsPanel({
   const [status, setStatus] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [localConnectionInput, setLocalConnectionInput] = useState(connectionInput);
+  const [importing, setImporting] = useState(false);
 
   const flash = useCallback((msg: string) => {
     setStatus(msg);
@@ -295,6 +296,69 @@ export function SettingsPanel({
         <button onClick={toggleTunnel} disabled={tunnelLoading || dis}>
           {tunnelLoading ? "..." : tunnelRunning ? "Stop Tunnel" : "Start Tunnel"}
         </button>
+      </section>
+
+      {/* ── Config Export / Import ── */}
+      <section>
+        <h3>Config Transfer</h3>
+        <p style={{ fontSize: "0.85rem", color: "#999", marginBottom: "0.5rem" }}>
+          Export your config (with encrypted keys) to set up a headless server.
+        </p>
+        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+          <button
+            disabled={dis}
+            onClick={async () => {
+              try {
+                const data = await api.exportConfig();
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = "chad-config.json";
+                a.click();
+                URL.revokeObjectURL(url);
+                flash("Config exported");
+              } catch {
+                flash("Export failed");
+              }
+            }}
+          >
+            Export Config
+          </button>
+          <button
+            disabled={dis || importing}
+            onClick={() => {
+              const input = document.createElement("input");
+              input.type = "file";
+              input.accept = ".json";
+              input.onchange = async () => {
+                const file = input.files?.[0];
+                if (!file) return;
+                setImporting(true);
+                try {
+                  const text = await file.text();
+                  const data = JSON.parse(text);
+                  const result = await api.importConfig(data);
+                  if (result.install_errors && Object.keys(result.install_errors).length > 0) {
+                    const failed = Object.entries(result.install_errors)
+                      .map(([tool, err]) => `${tool}: ${err.split("\n")[0]}`)
+                      .join("; ");
+                    flash(`Config imported but some tools failed: ${failed}`);
+                  } else {
+                    flash("Config imported successfully");
+                  }
+                } catch {
+                  flash("Import failed — check file format");
+                } finally {
+                  setImporting(false);
+                }
+              };
+              input.click();
+            }}
+          >
+            {importing ? "Importing…" : "Import Config"}
+          </button>
+        </div>
       </section>
 
       {/* ── Slack ── */}

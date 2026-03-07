@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from chad.__main__ import (
     main,
     _start_parent_watchdog,
+    _start_tunnel,
     write_server_port,
     read_server_port,
     get_chad_dir,
@@ -136,10 +137,113 @@ class TestMain:
             result = main()
 
         assert result == 0
-        mock_run_server.assert_called_once()
+        mock_run_server.assert_called_once_with(
+            host="0.0.0.0",
+            port=3184,
+            tunnel=False,
+            resume_sessions=False,
+        )
         # Should NOT prompt for password in server mode
         mock_config.verify_main_password.assert_not_called()
         mock_config.setup_main_password.assert_not_called()
+
+    @patch("chad.__main__.run_server")
+    @patch("chad.__main__.ConfigManager")
+    def test_main_server_only_mode_with_resume(self, mock_config_class, mock_run_server):
+        """Server mode forwards --resume to startup."""
+        mock_config = Mock()
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad", "--mode", "server", "--resume"]):
+            result = main()
+
+        assert result == 0
+        mock_run_server.assert_called_once_with(
+            host="0.0.0.0",
+            port=3184,
+            tunnel=False,
+            resume_sessions=True,
+        )
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.run_server")
+    @patch("chad.__main__.ConfigManager")
+    def test_main_tunnel_mode_is_headless(self, mock_config_class, mock_run_server, mock_run_unified):
+        """Tunnel mode should take the headless server path and set up password."""
+        mock_config = Mock()
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.is_first_run.return_value = True
+        mock_config.setup_main_password.return_value = "test"
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad", "--tunnel"]):
+            with patch.dict(os.environ, {}, clear=True):
+                os.environ.pop("CHAD_PASSWORD", None)
+                result = main()
+
+        assert result == 0
+        mock_run_server.assert_called_once_with(
+            host="0.0.0.0",
+            port=3184,
+            tunnel=True,
+            resume_sessions=False,
+        )
+        mock_run_unified.assert_not_called()
+        mock_config.setup_main_password.assert_called_once()
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.run_server")
+    @patch("chad.__main__.ConfigManager")
+    def test_main_tunnel_mode_verifies_existing_password(self, mock_config_class, mock_run_server, mock_run_unified):
+        """Tunnel mode should verify password when config already exists."""
+        mock_config = Mock()
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.is_first_run.return_value = False
+        mock_config.verify_main_password.return_value = "test"
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad", "--tunnel"]):
+            with patch.dict(os.environ, {}, clear=True):
+                os.environ.pop("CHAD_PASSWORD", None)
+                result = main()
+
+        assert result == 0
+        mock_config.verify_main_password.assert_called_once()
+        mock_config.setup_main_password.assert_not_called()
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.run_server")
+    @patch("chad.__main__.ConfigManager")
+    def test_main_tunnel_mode_uses_env_password(self, mock_config_class, mock_run_server, mock_run_unified):
+        """Tunnel mode should use CHAD_PASSWORD env var when set."""
+        mock_config = Mock()
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad", "--tunnel"]):
+            with patch.dict(os.environ, {"CHAD_PASSWORD": "mypass"}, clear=False):
+                result = main()
+
+        assert result == 0
+        mock_config.setup_main_password.assert_not_called()
+        mock_config.verify_main_password.assert_not_called()
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.run_server")
+    @patch("chad.__main__.ConfigManager")
+    def test_main_rejects_tunnel_with_server_url(self, mock_config_class, mock_run_server, mock_run_unified):
+        """Tunnel mode should not accept an existing remote server URL."""
+        mock_config = Mock()
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad", "--tunnel", "--server-url", "http://127.0.0.1:9999"]):
+            result = main()
+
+        assert result == 1
+        mock_run_server.assert_not_called()
+        mock_run_unified.assert_not_called()
 
     @patch("chad.__main__.run_unified")
     @patch("chad.__main__.ConfigManager")
@@ -161,6 +265,27 @@ class TestMain:
         mock_run_unified.assert_called_once()
         call_kwargs = mock_run_unified.call_args.kwargs
         assert call_kwargs.get("ui_mode") == "cli"
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.ConfigManager")
+    def test_main_resume_flag_passed_to_unified(self, mock_config_class, mock_run_unified):
+        """Unified mode forwards --resume to the local server startup path."""
+        mock_config = Mock()
+        mock_config.is_first_run.return_value = False
+        mock_config.verify_main_password.return_value = "password"
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.get_ui_mode.return_value = "cli"
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad", "--resume"]):
+            with patch.dict(os.environ, {}, clear=True):
+                os.environ.pop("CHAD_PASSWORD", None)
+                result = main()
+
+        assert result == 0
+        mock_run_unified.assert_called_once()
+        call_kwargs = mock_run_unified.call_args.kwargs
+        assert call_kwargs.get("resume_sessions") is True
 
     @patch("chad.__main__.run_unified")
     @patch("chad.__main__.ConfigManager")
@@ -280,6 +405,28 @@ class TestParentWatchdog:
         # Give thread time to start
         time.sleep(0.05)
         assert thread.is_alive()
+
+
+class TestTunnelStartup:
+    """Test startup messaging for tunnel mode."""
+
+    def test_start_tunnel_prints_manual_install_instruction(self, capsys):
+        """Tunnel startup should surface the exact manual install command."""
+        mock_service = Mock()
+        mock_service.start.return_value = None
+        mock_service._error = (
+            "Failed to download Cloudflared: network blocked\n\n"
+            "Install it manually:\n"
+            "mkdir -p ~/.chad/tools/bin && curl -fsSL https://example.invalid/cloudflared-linux-amd64 "
+            "-o ~/.chad/tools/bin/cloudflared && chmod +x ~/.chad/tools/bin/cloudflared"
+        )
+
+        with patch("chad.server.services.tunnel_service.get_tunnel_service", return_value=mock_service):
+            _start_tunnel(3184, token="test-token")
+
+        captured = capsys.readouterr()
+        assert "Install it manually:" in captured.out
+        assert "curl -fsSL https://example.invalid/cloudflared-linux-amd64" in captured.out
 
 
 class TestServerPortAutodiscovery:

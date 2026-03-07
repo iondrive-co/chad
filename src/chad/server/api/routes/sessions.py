@@ -32,6 +32,14 @@ router = APIRouter()
 
 def _session_to_response(session: Session) -> SessionResponse:
     """Convert a Session object to a SessionResponse."""
+    status = getattr(session, "status", "active")
+    # A session is resumable if it has a task description, is not currently active,
+    # and has an event log on disk
+    resumable = (
+        not session.active
+        and bool(session.task_description)
+        and status in ("completed", "interrupted")
+    )
     return SessionResponse(
         id=session.id,
         name=session.name,
@@ -41,6 +49,9 @@ def _session_to_response(session: Session) -> SessionResponse:
         has_worktree=session.worktree_path is not None,
         has_changes=session.has_worktree_changes,
         coding_account=getattr(session, "coding_account", None),
+        task_description=session.task_description,
+        status=status,
+        resumable=resumable,
         created_at=session.created_at,
         last_activity=session.last_activity,
     )

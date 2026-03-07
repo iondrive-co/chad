@@ -1218,7 +1218,9 @@ class TaskExecutor:
         )
         task.stream_id = stream_id
         session.active = True
+        session.status = "active"
         session.coding_account = coding_account
+        session.task_description = task_description
 
         # Send initial input if needed
         if initial_input:
@@ -1377,8 +1379,22 @@ class TaskExecutor:
                     pass
 
         try:
+            # Detect resume: session has a previous event log on disk
+            is_resume = False
+            if not override_prompt and task.event_log and task.event_log.get_latest_seq() > 0:
+                # There are existing events — this is a restored session being resumed
+                is_resume = True
+                emit("status", status="Resuming previous session...")
+                from chad.util.handoff import build_resume_prompt
+                override_prompt = build_resume_prompt(
+                    task.event_log,
+                    new_message=task_description,
+                    target_provider=coding_provider,
+                )
+
             # Create or reuse worktree
-            if is_followup and session.worktree_path and Path(session.worktree_path).exists():
+            reuse_worktree = is_followup or is_resume
+            if reuse_worktree and session.worktree_path and Path(session.worktree_path).exists():
                 emit("status", status="Reusing existing worktree...")
                 worktree_path = Path(session.worktree_path)
                 session.project_path = str(project_path)
@@ -1495,6 +1511,7 @@ class TaskExecutor:
                 task.state = TaskState.CANCELLED
                 task.completed_at = datetime.now(timezone.utc)
                 session.active = False
+                session.status = "interrupted"
                 if task.event_log:
                     task.event_log.log(SessionEndedEvent(success=False, reason="cancelled"))
                 return
@@ -1507,6 +1524,7 @@ class TaskExecutor:
                 task.error = "Agent timed out"
                 task.completed_at = datetime.now(timezone.utc)
                 session.active = False
+                session.status = "interrupted"
                 session.has_worktree_changes = git_mgr.has_changes(task.session_id)
                 if task.event_log:
                     task.event_log.log(SessionEndedEvent(success=False, reason="timeout"))
@@ -1519,6 +1537,7 @@ class TaskExecutor:
                 task.state = TaskState.COMPLETED
                 task.result = "Task completed successfully"
                 session.has_worktree_changes = git_mgr.has_changes(task.session_id)
+                session.status = "completed"
                 emit(
                     "complete",
                     success=True,
@@ -1529,6 +1548,7 @@ class TaskExecutor:
             else:
                 task.state = TaskState.FAILED
                 task.error = f"Agent exited with code {final_exit_code}"
+                session.status = "completed"
                 emit(
                     "complete",
                     success=False,
@@ -1552,6 +1572,7 @@ class TaskExecutor:
             task.state = TaskState.FAILED
             task.error = str(e)
             task.completed_at = datetime.now(timezone.utc)
+            session.status = "interrupted"
 
             if task.event_log:
                 task.event_log.log(SessionEndedEvent(

@@ -251,6 +251,94 @@ class ConfigManager:
         config = self.load_config()
         return "password_hash" not in config
 
+    def export_config(self) -> dict[str, Any]:
+        """Export the full config for transfer to another machine.
+
+        Includes provider auth files (Claude OAuth, Codex tokens, etc.)
+        so the destination can run tasks without re-authenticating.
+
+        Returns:
+            The full config dictionary with provider_auth embedded.
+        """
+        data = self.load_config()
+        data["provider_auth"] = self._collect_provider_auth(data)
+        return data
+
+    def import_config(self, data: dict[str, Any]) -> None:
+        """Import a config exported from another machine.
+
+        Replaces the current config entirely and restores provider auth
+        files. Requires the same master password on the destination.
+
+        Args:
+            data: Config dictionary from export_config().
+
+        Raises:
+            ValueError: If the data is missing required fields.
+        """
+        if "password_hash" not in data or "encryption_salt" not in data:
+            raise ValueError(
+                "Invalid config: missing password_hash or encryption_salt"
+            )
+        # Extract provider_auth before saving (it's not a config key)
+        provider_auth = data.pop("provider_auth", {})
+        self.save_config(data)
+        self._restore_provider_auth(provider_auth)
+
+    # ── Provider auth file helpers ──
+
+    # Maps provider type → (home_subdir, auth_file_relative_path)
+    _PROVIDER_AUTH_PATHS: dict[str, tuple[str, str]] = {
+        "anthropic": ("claude-configs", ".claude.json"),
+        "openai": ("codex-homes", ".codex/auth.json"),
+        "kimi": ("kimi-homes", ".kimi/config.toml"),
+    }
+
+    def _collect_provider_auth(self, config: dict[str, Any]) -> dict[str, str]:
+        """Read provider auth files for all accounts, return base64-encoded."""
+        auth_files: dict[str, str] = {}
+        chad_dir = Path.home() / ".chad"
+        accounts = config.get("accounts", {})
+
+        for account_name, account in accounts.items():
+            provider = account.get("provider", "") if isinstance(account, dict) else account
+            spec = self._PROVIDER_AUTH_PATHS.get(provider)
+            if not spec:
+                continue
+            home_subdir, rel_path = spec
+            auth_path = chad_dir / home_subdir / account_name / rel_path
+            if auth_path.exists():
+                try:
+                    content = auth_path.read_bytes()
+                    key = f"{provider}/{account_name}/{rel_path}"
+                    auth_files[key] = base64.b64encode(content).decode("ascii")
+                except OSError:
+                    continue
+        return auth_files
+
+    def _restore_provider_auth(self, auth_files: dict[str, str]) -> None:
+        """Write provider auth files from base64-encoded export data."""
+        chad_dir = Path.home() / ".chad"
+
+        for key, b64_content in auth_files.items():
+            parts = key.split("/", 2)
+            if len(parts) != 3:
+                continue
+            provider, account_name, rel_path = parts
+            spec = self._PROVIDER_AUTH_PATHS.get(provider)
+            if not spec:
+                continue
+            home_subdir, expected_rel = spec
+            if rel_path != expected_rel:
+                continue
+
+            dest = chad_dir / home_subdir / account_name / rel_path
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(base64.b64decode(b64_content))
+            except (OSError, ValueError):
+                continue
+
     def setup_main_password(self) -> str:
         """Prompt user to create a main password.
 

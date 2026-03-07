@@ -38,12 +38,23 @@ def _safe_run(cmd: list[str], cwd: Path) -> None:
     run(cmd, cwd=cwd, check=True)
 
 
-def ensure_ui_built(force: bool = False) -> None:
+def _log(message: str, *, verbose: bool) -> None:
+    if verbose:
+        print(message)
+
+
+def ensure_ui_built(
+    force: bool = False,
+    *,
+    project_root: Path | None = None,
+    verbose: bool = True,
+) -> None:
     """Rebuild client + UI if source is newer than dist, then sync to ui_dist.
 
     Safe to call on every launch; it skips work when bundles are fresh.
     """
-    project_root, _reason = resolve_project_root()
+    if project_root is None:
+        project_root, _reason = resolve_project_root()
     client_src = project_root / "client" / "src"
     client_dist = project_root / "client" / "dist" / "index.js"
     ui_src = project_root / "ui" / "src"
@@ -52,16 +63,18 @@ def ensure_ui_built(force: bool = False) -> None:
 
     try:
         if force or _is_stale(client_src, client_dist):
-            print("↻ Rebuilding chad-client…")
+            _log("↻ Rebuilding chad-client…", verbose=verbose)
             _safe_run(["npm", "run", "build"], cwd=client_src.parent)
 
         if force or _is_stale(ui_src, ui_dist):
-            print("↻ Rebuilding React UI…")
+            _log("↻ Rebuilding React UI…", verbose=verbose)
             _safe_run(["npm", "run", "build"], cwd=ui_src.parent)
 
         # Always sync dist → packaged assets if dist exists
         if ui_dist.exists():
-            print("↻ Syncing ui/dist → src/chad/ui_dist …")
+            _log("↻ Syncing ui/dist → src/chad/ui_dist …", verbose=verbose)
+            packaged_ui.mkdir(parents=True, exist_ok=True)
+            (packaged_ui / "__init__.py").touch()
             # Clean packaged directory except for __init__.py / __pycache__
             for child in packaged_ui.iterdir():
                 if child.name in {"__init__.py", "__pycache__"}:
@@ -72,6 +85,6 @@ def ensure_ui_built(force: bool = False) -> None:
                     child.unlink()
             shutil.copytree(ui_dist.parent, packaged_ui, dirs_exist_ok=True)
     except FileNotFoundError as exc:
-        print(f"UI autobuild skipped (missing tool): {exc}")
+        _log(f"UI autobuild skipped (missing tool): {exc}", verbose=verbose)
     except CalledProcessError as exc:
-        print(f"UI autobuild failed: {exc}")
+        _log(f"UI autobuild failed: {exc}", verbose=verbose)

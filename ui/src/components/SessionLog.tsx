@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { ChadAPI } from "chad-client";
 
 interface Props {
@@ -29,6 +29,7 @@ export function SessionLog({ api, sessionId }: Props) {
   const [logPath, setLogPath] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
+  const retryCountRef = useRef(0);
 
   const loadEvents = useCallback(async () => {
     setLoading(true);
@@ -39,16 +40,36 @@ export function SessionLog({ api, sessionId }: Props) {
       ]);
       setEvents(eventsData.events as SessionEvent[]);
       setLogPath(logData.log_path);
+      return eventsData.events as SessionEvent[];
     } catch {
       // Ignore errors
+      return [];
     } finally {
       setLoading(false);
     }
   }, [api, sessionId]);
 
-  // Load log path and events immediately on mount
+  // Load log path and events immediately on mount, with retry if no events found
   useEffect(() => {
-    loadEvents();
+    let cancelled = false;
+    retryCountRef.current = 0;
+
+    const loadWithRetry = async () => {
+      const loadedEvents = await loadEvents();
+      if (cancelled) return;
+
+      // If no visible events found and we haven't retried too many times, retry after a delay
+      const hasVisibleEvents = loadedEvents.some((e) => VISIBLE_TYPES.has(e.type));
+      if (!hasVisibleEvents && retryCountRef.current < 3) {
+        retryCountRef.current++;
+        setTimeout(() => {
+          if (!cancelled) loadWithRetry();
+        }, 500);
+      }
+    };
+
+    loadWithRetry();
+    return () => { cancelled = true; };
   }, [loadEvents]);
 
   // Auto-refresh while expanded

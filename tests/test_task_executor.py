@@ -776,6 +776,29 @@ class TestChatUILayoutSource:
             re.DOTALL,
         )
 
+    def test_verification_agent_picker_in_chat_header(self):
+        """The verification agent picker should be next to the coding agent picker."""
+        chat_view = Path("ui/src/components/ChatView.tsx").read_text(encoding="utf-8")
+        # Should have verification agent picker with label in chat-header
+        assert "Verification Agent" in chat_view
+        # Should have verificationAccount state
+        assert "verificationAccount" in chat_view
+        # Should use AccountPicker for verification agent, showing null when disabled
+        assert "verificationSettings?.enabled === false ? null : verificationAccount" in chat_view
+
+    def test_verification_agent_picker_css_exists(self):
+        """CSS should define chat-verification-picker styling."""
+        css = Path("ui/src/styles/main.css").read_text(encoding="utf-8")
+        # Should have chat-verification-picker class for the new picker
+        assert ".chat-verification-picker" in css
+
+    def test_external_followup_resume_anchors_to_latest_task_start(self):
+        """Externally-started follow-ups should replay the new task, not skip to the log head."""
+        chat_view = Path("ui/src/components/ChatView.tsx").read_text(encoding="utf-8")
+        assert "function getSessionActivationSinceSeq" in chat_view
+        assert "Math.max(0, latestStartSeq - 1)" in chat_view
+        assert "streamSinceSeqRef.current = getSessionActivationSinceSeq(" in chat_view
+
 
 def test_coding_status_events_are_logged_for_streaming(tmp_path, monkeypatch):
     """Event log should include coding status events."""

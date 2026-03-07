@@ -1,6 +1,11 @@
 """Configuration management endpoints."""
 
+import os
+from pathlib import Path
+from typing import Any
+
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from chad.server.api.schemas import (
@@ -158,9 +163,17 @@ async def get_preferences() -> UserPreferences:
     """Get user preferences."""
     config_mgr = get_config_manager()
     prefs = config_mgr.load_preferences()
+    project_path = prefs.get("project_path") if prefs else None
+
+    # If the saved project path doesn't exist on this machine (e.g. imported
+    # config from another host), fall back to the server's launch directory.
+    if project_path and not Path(project_path).is_dir():
+        project_path = None
+    if not project_path:
+        project_path = os.getcwd()
 
     return UserPreferences(
-        last_project_path=prefs.get("project_path") if prefs else None,
+        last_project_path=project_path,
         ui_mode=config_mgr.get_ui_mode(),
     )
 
@@ -407,7 +420,6 @@ async def get_project_settings(
     if not project_path:
         raise HTTPException(status_code=400, detail="project_path parameter required")
 
-    from pathlib import Path
     from chad.util.project_setup import load_project_config, detect_project_type
 
     path = Path(project_path).expanduser().resolve()
@@ -439,7 +451,6 @@ async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSetting
 
     Saves lint/test commands and documentation paths for a project.
     """
-    from pathlib import Path
     from chad.util.project_setup import save_project_settings
 
     path = Path(request.project_path).expanduser().resolve()
@@ -478,3 +489,100 @@ async def get_prompt_previews(
         coding=previews.coding,
         verification=previews.verification,
     )
+
+
+# ── Config Export / Import ──
+
+
+@router.get("/export")
+async def export_config() -> JSONResponse:
+    """Export the full config for transfer to another machine.
+
+    The exported data contains encrypted API keys (not plaintext),
+    so it requires the same master password on the destination.
+    """
+    config_mgr = get_config_manager()
+    data = config_mgr.export_config()
+    return JSONResponse(content=data)
+
+
+class ConfigImportRequest(BaseModel):
+    """Request body for config import."""
+
+    config: dict[str, Any] = Field(description="Full config dictionary from export")
+
+
+PROVIDER_TO_TOOL_KEY: dict[str, str] = {
+    "anthropic": "claude",
+    "openai": "codex",
+    "gemini": "gemini",
+    "qwen": "qwen",
+    "opencode": "opencode",
+    "kimi": "kimi",
+    "mistral": "vibe",
+}
+
+
+def _install_provider_tools(config_data: dict[str, Any]) -> dict[str, str]:
+    """Install CLI binaries for every provider found in a config.
+
+    Returns a dict mapping tool_key to error message for any that failed.
+    """
+    import logging
+
+    from chad.util.installer import AIToolInstaller
+
+    log = logging.getLogger("chad.config.import")
+    accounts = config_data.get("accounts", {})
+    seen_tools: set[str] = set()
+    errors: dict[str, str] = {}
+
+    for account_name, account in accounts.items():
+        provider = account.get("provider", "") if isinstance(account, dict) else account
+        tool_key = PROVIDER_TO_TOOL_KEY.get(provider)
+        if not tool_key or tool_key in seen_tools:
+            continue
+        seen_tools.add(tool_key)
+
+        log.info("Installing %s CLI for provider %s (account %s)...", tool_key, provider, account_name)
+        installer = AIToolInstaller()
+        ok, detail = installer.ensure_tool(tool_key)
+        if ok:
+            log.info("Installed %s: %s", tool_key, detail)
+        else:
+            log.warning("Failed to install %s: %s", tool_key, detail)
+            errors[tool_key] = detail
+
+    return errors
+
+
+@router.post("/import")
+async def import_config(request: ConfigImportRequest) -> JSONResponse:
+    """Import a config exported from another machine.
+
+    Replaces the current config entirely. Requires the same master
+    password that was used on the source machine.  After importing,
+    installs the CLI binaries for every provider in the config.
+    """
+    import asyncio
+
+    config_mgr = get_config_manager()
+    try:
+        config_mgr.import_config(request.config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    loop = asyncio.get_running_loop()
+    install_errors = await loop.run_in_executor(
+        None, _install_provider_tools, request.config
+    )
+
+    if install_errors:
+        details = "; ".join(f"{k}: {v}" for k, v in install_errors.items())
+        return JSONResponse(content={
+            "ok": True,
+            "message": f"Config imported. Some tools failed to install: {details}",
+            "install_errors": install_errors,
+        })
+
+    return JSONResponse(content={"ok": True, "message": "Config imported successfully"})

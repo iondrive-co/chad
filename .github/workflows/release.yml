@@ -9,6 +9,9 @@ name: Release Build
         description: 'Tag to build (e.g., v0.11.0)'
         required: false
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ${{ matrix.os }}
@@ -76,14 +79,20 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: chad-${{ runner.os }}
-          path: release/*
+          path: |
+            release/*.msi
+            release/*.deb
+            release/*.pkg
           retention-days: 7
 
       - name: Upload to release
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          files: release/*
+          files: |
+            release/*.msi
+            release/*.deb
+            release/*.pkg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

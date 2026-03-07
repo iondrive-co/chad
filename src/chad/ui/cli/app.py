@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 from chad.ui.cli.terminal_io import (
@@ -399,6 +400,7 @@ def run_settings_menu(client: APIClient) -> None:
         print("  [6] Action rules")
         print("  [7] Slack integration")
         print("  [8] Remote access (tunnel)")
+        print("  [9] Export/import config")
         print("  [b] Back to main menu")
         print()
 
@@ -699,6 +701,38 @@ def run_settings_menu(client: APIClient) -> None:
                             print(f"Failed: {result.get('error', 'unknown error')}")
             except (ValueError, EOFError):
                 pass
+            input("Press Enter to continue...")
+
+        elif choice == "9":
+            # Config export/import
+            print()
+            print("Config Transfer")
+            print("-" * 30)
+            print("  [e] Export config to file")
+            print("  [i] Import config from file")
+            print()
+            try:
+                sub = input("Choice (or Enter to skip): ").strip().lower()
+                if sub == "e":
+                    data = client.export_config()
+                    path = Path.home() / "chad-config.json"
+                    import json as _json
+                    path.write_text(_json.dumps(data, indent=2))
+                    print(f"Config exported to {path}")
+                    print("Transfer this file to the target machine and import it there.")
+                elif sub == "i":
+                    path_str = input("Path to config file: ").strip()
+                    if path_str:
+                        import json as _json
+                        path = Path(path_str).expanduser()
+                        if not path.exists():
+                            print(f"File not found: {path}")
+                        else:
+                            data = _json.loads(path.read_text())
+                            result = client.import_config(data)
+                            print(result.get("message", "Config imported"))
+            except (ValueError, EOFError) as e:
+                print(f"Error: {e}")
             input("Press Enter to continue...")
 
 
@@ -1024,9 +1058,15 @@ def run_cli(client: APIClient) -> None:
                 print(f"Agent:   {coding_account} ({coding_provider})")
             print()
 
+            # Check for resumable sessions
+            all_sessions = client.list_sessions()
+            resumable_sessions = [s for s in all_sessions if s.resumable]
+
             # Main menu
             print("What would you like to do?")
             print("  [1] Start a task")
+            if resumable_sessions:
+                print(f"  [r] Resume a session ({len(resumable_sessions)} available)")
             print("  [2] Change project path")
             print("  [3] Change agent")
             print("  [s] Settings")
@@ -1043,6 +1083,68 @@ def run_cli(client: APIClient) -> None:
 
             elif choice == "s":
                 run_settings_menu(client)
+
+            elif choice == "r" and resumable_sessions:
+                # Resume a previous session
+                print()
+                now = datetime.now(tz=timezone.utc)
+                options = []
+                for s in resumable_sessions:
+                    age = now - s.last_activity
+                    if age.total_seconds() < 3600:
+                        age_str = f"{int(age.total_seconds() / 60)}m ago"
+                    elif age.total_seconds() < 86400:
+                        age_str = f"{int(age.total_seconds() / 3600)}h ago"
+                    else:
+                        age_str = f"{int(age.total_seconds() / 86400)}d ago"
+                    label = f"{s.name} ({s.status}, {age_str})"
+                    options.append((label, s.id))
+
+                selected_id = select_from_list("Select session to resume:", options)
+                if selected_id:
+                    selected_session = next(s for s in resumable_sessions if s.id == selected_id)
+                    print()
+                    print(f"Original task: {selected_session.task_description}")
+                    print()
+                    try:
+                        followup = input("Follow-up message (or Enter to continue): ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        followup = ""
+                    if not followup:
+                        followup = "Continue where you left off."
+
+                    resume_project = selected_session.project_path or default_project
+                    if not resume_project:
+                        print("\nNo project path available for this session.")
+                        input("Press Enter to continue...")
+                        continue
+
+                    if not coding_account or not coding_provider:
+                        print("\nPlease select a coding agent first.")
+                        input("Press Enter to continue...")
+                        continue
+
+                    clear_screen()
+                    print(f"Resuming session {selected_id} with {coding_provider} agent...")
+                    print(f"Project: {resume_project}")
+                    print(f"Message: {followup}")
+                    print("-" * 60)
+                    print()
+
+                    exit_code = run_task_with_streaming(
+                        client=client,
+                        stream_client=stream_client,
+                        session_id=selected_id,
+                        project_path=resume_project,
+                        task_description=followup,
+                        coding_account=coding_account,
+                        verification_account=verification_account,
+                    )
+
+                    print()
+                    print("-" * 60)
+                    print(f"Agent exited with code: {exit_code}")
+                    input("\nPress Enter to continue...")
 
             elif choice == "2":
                 # Change project path

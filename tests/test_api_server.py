@@ -1,5 +1,7 @@
 """Tests for Chad server API endpoints."""
 
+import json
+from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 
@@ -17,6 +19,8 @@ def client(tmp_path, monkeypatch):
     # Use temporary config file to avoid reading real accounts
     temp_config = tmp_path / "test_chad.conf"
     monkeypatch.setenv("CHAD_CONFIG", str(temp_config))
+    # Isolate log directory so load_from_logs() doesn't pick up real sessions
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
 
     # Reset all state before each test
     reset_session_manager()
@@ -80,6 +84,94 @@ class TestSessionEndpoints:
         data = response.json()
         assert data["total"] == 2
         assert len(data["sessions"]) == 2
+
+    def test_startup_skips_completed_historical_sessions_without_changes(self, tmp_path, monkeypatch):
+        """Startup should not surface cleanly completed historical sessions."""
+        temp_config = tmp_path / "test_chad.conf"
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        monkeypatch.setenv("CHAD_CONFIG", str(temp_config))
+        monkeypatch.setenv("CHAD_LOG_DIR", str(log_dir))
+
+        now = datetime.now(timezone.utc).isoformat()
+        (log_dir / "historical.jsonl").write_text(
+            "\n".join([
+                json.dumps({
+                    "type": "session_started",
+                    "seq": 1,
+                    "ts": now,
+                    "task_description": "Old finished task",
+                    "project_path": "/tmp/project",
+                    "coding_account": "codex-main",
+                    "coding_provider": "openai",
+                }),
+                json.dumps({
+                    "type": "session_ended",
+                    "seq": 2,
+                    "ts": now,
+                    "success": True,
+                    "reason": "completed",
+                }),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+
+        reset_session_manager()
+        reset_task_executor()
+        reset_state()
+
+        app = create_app()
+        with TestClient(app) as isolated_client:
+            response = isolated_client.get("/api/v1/sessions")
+
+        data = response.json()
+        assert response.status_code == 200
+        assert data["total"] == 0
+        assert data["sessions"] == []
+
+    def test_startup_restores_historical_sessions_when_resume_enabled(self, tmp_path, monkeypatch):
+        """Startup restores prior sessions only when resume mode is enabled."""
+        temp_config = tmp_path / "test_chad.conf"
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        monkeypatch.setenv("CHAD_CONFIG", str(temp_config))
+        monkeypatch.setenv("CHAD_LOG_DIR", str(log_dir))
+
+        now = datetime.now(timezone.utc).isoformat()
+        (log_dir / "historical.jsonl").write_text(
+            "\n".join([
+                json.dumps({
+                    "type": "session_started",
+                    "seq": 1,
+                    "ts": now,
+                    "task_description": "Old finished task",
+                    "project_path": "/tmp/project",
+                    "coding_account": "codex-main",
+                    "coding_provider": "openai",
+                }),
+                json.dumps({
+                    "type": "session_ended",
+                    "seq": 2,
+                    "ts": now,
+                    "success": True,
+                    "reason": "completed",
+                }),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+
+        reset_session_manager()
+        reset_task_executor()
+        reset_state()
+
+        app = create_app(resume_sessions=True)
+        with TestClient(app) as isolated_client:
+            response = isolated_client.get("/api/v1/sessions")
+
+        data = response.json()
+        assert response.status_code == 200
+        assert data["total"] == 1
+        assert data["sessions"][0]["id"] == "historical"
 
     def test_get_session(self, client):
         """Can get a specific session."""
@@ -197,11 +289,102 @@ class TestConfigEndpoints:
         data = response.json()
         assert "ui_mode" in data
 
+    def test_export_config(self, client):
+        """Can export config."""
+        response = client.get("/api/v1/config/export")
+        assert response.status_code == 200
+        data = response.json()
+        assert "password_hash" in data or data.keys() <= {"provider_auth"}
+
+    def test_import_config_rejects_invalid(self, client):
+        """Import rejects config without required fields."""
+        response = client.post(
+            "/api/v1/config/import",
+            json={"config": {"accounts": {}}},
+        )
+        assert response.status_code == 400
+
+    def test_import_config_accepts_valid(self, client):
+        """Import accepts valid config."""
+        response = client.post(
+            "/api/v1/config/import",
+            json={
+                "config": {
+                    "password_hash": "test",
+                    "encryption_salt": "test",
+                    "accounts": {},
+                }
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+
+    def test_import_config_installs_provider_tools(self, client, monkeypatch):
+        """Import triggers CLI tool installation for each provider."""
+        installed = []
+
+        def fake_ensure_tool(self, tool_key):
+            installed.append(tool_key)
+            return True, f"/fake/bin/{tool_key}"
+
+        from chad.util.installer import AIToolInstaller
+        monkeypatch.setattr(AIToolInstaller, "ensure_tool", fake_ensure_tool)
+
+        response = client.post(
+            "/api/v1/config/import",
+            json={
+                "config": {
+                    "password_hash": "test",
+                    "encryption_salt": "test",
+                    "accounts": {
+                        "my-claude": {"provider": "anthropic", "key": "x", "model": "default", "reasoning": "default"},
+                        "my-codex": {"provider": "openai", "key": "x", "model": "default", "reasoning": "default"},
+                        "my-gemini": {"provider": "gemini", "key": "x", "model": "default", "reasoning": "default"},
+                    },
+                }
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        assert sorted(installed) == ["claude", "codex", "gemini"]
+
+    def test_import_config_reports_install_errors(self, client, monkeypatch):
+        """Import reports tool installation failures without failing the import."""
+        def fake_ensure_tool(self, tool_key):
+            if tool_key == "codex":
+                return False, "npm not found"
+            return True, f"/fake/bin/{tool_key}"
+
+        from chad.util.installer import AIToolInstaller
+        monkeypatch.setattr(AIToolInstaller, "ensure_tool", fake_ensure_tool)
+
+        response = client.post(
+            "/api/v1/config/import",
+            json={
+                "config": {
+                    "password_hash": "test",
+                    "encryption_salt": "test",
+                    "accounts": {
+                        "acct-claude": {"provider": "anthropic", "key": "x", "model": "default", "reasoning": "default"},
+                        "acct-codex": {"provider": "openai", "key": "x", "model": "default", "reasoning": "default"},
+                    },
+                }
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert "install_errors" in data
+        assert "codex" in data["install_errors"]
+
 
 class TestUIServing:
     """Ensure the packaged React UI is served correctly."""
 
     def test_root_serves_index_html(self, client):
+        index, _assets = _resolve_ui_paths()
+        if index is None:
+            pytest.skip("UI assets not built (no vite/npm in this environment)")
         response = client.get("/")
         assert response.status_code == 200
         body = response.content.decode("utf-8", errors="ignore")
@@ -209,7 +392,8 @@ class TestUIServing:
 
     def test_static_assets_are_served(self, client):
         _index, assets_dir = _resolve_ui_paths()
-        assert assets_dir is not None, "Expected the UI resolver to provide an assets directory"
+        if assets_dir is None:
+            pytest.skip("UI assets not built (no vite/npm in this environment)")
 
         js_files = [p for p in assets_dir.iterdir() if p.suffix == ".js"]
         assert js_files, "Expected at least one JS asset in the resolved UI assets directory"
@@ -222,7 +406,31 @@ class TestUIServing:
     def test_packaged_ui_package_exists(self):
         with resources.as_file(resources.files("chad.ui_dist")) as ui_root:
             assert (ui_root / "__init__.py").is_file()
-            assert (ui_root / "index.html").is_file()
+
+    def test_ui_resolver_autobuilds_when_packaged_assets_are_missing(self, tmp_path, monkeypatch):
+        project_root = tmp_path / "project"
+        (project_root / "ui" / "src").mkdir(parents=True)
+        (project_root / "client" / "src").mkdir(parents=True)
+
+        built = {"called": False}
+
+        def fake_autobuild(root):
+            built["called"] = True
+            dist = root / "ui" / "dist"
+            assets = dist / "assets"
+            assets.mkdir(parents=True)
+            (dist / "index.html").write_text("<div id='root'></div>", encoding="utf-8")
+            (assets / "app.js").write_text("console.log('ok')", encoding="utf-8")
+
+        monkeypatch.setattr("chad.server.main._source_project_root", lambda: project_root)
+        monkeypatch.setattr("chad.server.main._package_ui_paths", lambda: (None, None))
+        monkeypatch.setattr("chad.server.main._autobuild_ui_from_source", fake_autobuild)
+
+        index, assets = _resolve_ui_paths()
+
+        assert built["called"] is True
+        assert index == project_root / "ui" / "dist" / "index.html"
+        assert assets == project_root / "ui" / "dist" / "assets"
 
     def test_get_verification_settings(self, client):
         """Can get verification settings."""

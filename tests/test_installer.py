@@ -68,6 +68,92 @@ def test_cloudflared_installer_windows(monkeypatch, tmp_path):
     assert resolved.exists()
 
 
+def test_cloudflared_download_failure_includes_manual_install_command(monkeypatch, tmp_path):
+    """Binary installer failures should tell the user exactly how to install cloudflared."""
+    installer = AIToolInstaller(tools_dir=tmp_path / "tools")
+    spec = installer.tool_specs["cloudflared"]
+
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+    monkeypatch.setattr("platform.machine", lambda: "x86_64")
+
+    def fake_urlretrieve(_url, _target):
+        raise OSError("network blocked")
+
+    monkeypatch.setattr("urllib.request.urlretrieve", fake_urlretrieve)
+
+    ok, detail = installer._install_binary(spec)
+
+    assert not ok
+    assert "Install it manually:" in detail
+    assert f"mkdir -p {installer.bin_dir}" in detail
+    assert "curl -fsSL" in detail
+    assert str(installer.bin_dir / "cloudflared") in detail
+
+
+def test_node_auto_install_for_npm_tools(monkeypatch, tmp_path):
+    """When node/npm are missing, _install_with_npm auto-installs Node.js."""
+    installer = AIToolInstaller(tools_dir=tmp_path / "tools")
+    spec = installer.tool_specs["claude"]
+
+    # Simulate node/npm not on PATH initially
+    original_which = __import__("shutil").which
+
+    def fake_which(name):
+        # After _install_node adds node_dir/bin to PATH, node/npm become available
+        node_bin = tmp_path / "tools" / "node" / "bin"
+        if name in ("node", "npm") and str(node_bin) in __import__("os").environ.get("PATH", ""):
+            return str(node_bin / name)
+        if name in ("node", "npm"):
+            return None
+        return original_which(name)
+
+    monkeypatch.setattr("shutil.which", fake_which)
+
+    # Mock the download/extract to just create the node directory
+    def fake_urlretrieve(url, target):
+        Path(target).write_bytes(b"fake")
+        return target, None
+
+    monkeypatch.setattr("urllib.request.urlretrieve", fake_urlretrieve)
+
+    class FakeTarFile:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def extractall(self, dest):
+            # Simulate what the real tarball would produce
+            node_bin = Path(dest) / "node-v22.16.0-linux-x64" / "bin"
+            node_bin.mkdir(parents=True, exist_ok=True)
+            (node_bin / "node").write_text("#!/bin/sh\n")
+            (node_bin / "npm").write_text("#!/bin/sh\n")
+
+    monkeypatch.setattr("tarfile.open", FakeTarFile)
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+    monkeypatch.setattr("platform.machine", lambda: "x86_64")
+
+    # Mock npm install to succeed and create the binary
+    def fake_run_command(cmd, cwd=None):
+        if cmd[0] == "npm":
+            npm_bin = installer.tools_dir / "node_modules" / ".bin"
+            npm_bin.mkdir(parents=True, exist_ok=True)
+            (npm_bin / "claude").write_text("#!/bin/sh\n")
+            return 0, "", ""
+        return 1, "", "unexpected command"
+
+    monkeypatch.setattr("chad.util.installer.run_command", fake_run_command)
+
+    ok, detail = installer._install_with_npm(spec)
+
+    assert ok, detail
+    assert "claude" in detail
+
+
 def test_resolve_prefers_windows_suffix(monkeypatch, tmp_path):
     """resolve_tool_path should return .exe when both bare and .exe exist."""
     installer = AIToolInstaller(tools_dir=tmp_path / "tools")

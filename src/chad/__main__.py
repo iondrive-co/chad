@@ -178,13 +178,19 @@ def _start_tunnel(port: int, token: str | None = None) -> None:
         print(f"Failed to start tunnel: {svc._error}")
 
 
-def run_server(host: str = "0.0.0.0", port: int = 0, tunnel: bool = False) -> None:
+def run_server(
+    host: str = "0.0.0.0",
+    port: int = 0,
+    tunnel: bool = False,
+    resume_sessions: bool = False,
+) -> None:
     """Run the Chad API server.
 
     Args:
         host: Host to bind to
         port: Port to run on (0 for ephemeral)
         tunnel: Start a Cloudflare tunnel for remote access
+        resume_sessions: Restore historical sessions from disk on startup
     """
     import uvicorn
     from chad.server.main import create_app
@@ -200,7 +206,7 @@ def run_server(host: str = "0.0.0.0", port: int = 0, tunnel: bool = False) -> No
         from chad.server.auth import generate_token
         auth_token = generate_token()
 
-    app = create_app(auth_token=auth_token)
+    app = create_app(auth_token=auth_token, resume_sessions=resume_sessions)
 
     if tunnel:
         # Start uvicorn in a thread so the server is listening before the
@@ -236,6 +242,7 @@ def run_unified(
     ui_mode: str = "react",
     server_url: str | None = None,
     tunnel: bool = False,
+    resume_sessions: bool = False,
 ) -> None:
     """Run UI, optionally with a local API server.
 
@@ -250,6 +257,7 @@ def run_unified(
         ui_mode: UI mode - "react" (default) or "cli"
         server_url: External server URL to connect to (skips local server)
         tunnel: Start a Cloudflare tunnel for remote access
+        resume_sessions: Restore historical sessions from disk on startup
     """
     import webbrowser
 
@@ -273,7 +281,7 @@ def run_unified(
             from chad.server.auth import generate_token
             auth_token = generate_token()
 
-        app = create_app(auth_token=auth_token)
+        app = create_app(auth_token=auth_token, resume_sessions=resume_sessions)
         server_config = uvicorn.Config(app, host="127.0.0.1", port=api_port, log_level="warning")
         server = uvicorn.Server(server_config)
 
@@ -350,6 +358,11 @@ def main() -> int:
         "--tunnel", action="store_true", help="Start a Cloudflare tunnel for remote access"
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Restore previous sessions from disk on startup",
+    )
+    parser.add_argument(
         "--ui",
         type=str,
         choices=["react", "cli"],
@@ -391,10 +404,37 @@ def main() -> int:
     atexit.register(cleanup_on_shutdown)
 
     try:
+        if args.tunnel and args.server_url is not None:
+            raise ValueError("--tunnel cannot be used with --server-url")
+
+        # Tunnel mode is always headless: run only the local API server and
+        # expose it through cloudflared. There is no local UI/browser flow.
+        # Still need password setup for config encryption (user has a terminal via SSH).
+        if args.tunnel:
+            main_password = os.environ.get("CHAD_PASSWORD")
+            if main_password is None:
+                if config_mgr.is_first_run():
+                    main_password = config_mgr.setup_main_password()
+                else:
+                    main_password = config_mgr.verify_main_password()
+
+            run_server(
+                host=args.api_host,
+                port=args.api_port,
+                tunnel=True,
+                resume_sessions=args.resume,
+            )
+            return 0
+
         # Server-only mode — no password needed (provider CLIs authenticate
         # via their own isolated config dirs, not chad's encrypted keys)
         if args.mode == "server":
-            run_server(host=args.api_host, port=args.api_port, tunnel=args.tunnel)
+            run_server(
+                host=args.api_host,
+                port=args.api_port,
+                tunnel=args.tunnel,
+                resume_sessions=args.resume,
+            )
             return 0
 
         # Handle server URL autodiscovery early so we can skip password prompt when connecting
@@ -432,6 +472,7 @@ def main() -> int:
             ui_mode=ui_mode,
             server_url=server_url,
             tunnel=args.tunnel,
+            resume_sessions=args.resume,
         )
 
         return 0
