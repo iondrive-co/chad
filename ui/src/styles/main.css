@@ -563,14 +563,21 @@ label {
   margin-bottom: 6px;
 }
 
+.chat-agent-pickers {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  flex: 1;
+}
+
 .chat-agent-picker {
   flex: 1;
-  min-width: 200px;
+  min-width: 180px;
 }
 
 .chat-verification-picker {
   flex: 1;
-  min-width: 200px;
+  min-width: 180px;
 }
 
 .chat-status {

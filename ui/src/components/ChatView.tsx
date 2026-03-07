@@ -646,20 +646,22 @@ export function ChatView({
         <div className="chat-shell">
           <div className="chat-frame">
             <div className="chat-header">
-              <div className="chat-agent-picker">
-                <span className="field-label">Coding Agent</span>
-                <AccountPicker api={api} selected={codingAccount} onSelect={setCodingAccount} />
-              </div>
-              <div className="chat-verification-picker">
-                <span className="field-label">Verification Agent</span>
-                <AccountPicker
-                  api={api}
-                  selected={verificationAccount}
-                  onSelect={setVerificationAccount}
-                  disabled={verificationSettings?.enabled === false}
-                  placeholder={verificationSettings?.enabled === false ? "Disabled" : "None (coding agent verifies)"}
-                  allowNone
-                />
+              <div className="chat-agent-pickers">
+                <div className="chat-agent-picker">
+                  <span className="field-label">Coding Agent</span>
+                  <AccountPicker api={api} selected={codingAccount} onSelect={setCodingAccount} />
+                </div>
+                <div className="chat-verification-picker">
+                  <span className="field-label">Verification Agent</span>
+                  <AccountPicker
+                    api={api}
+                    selected={verificationSettings?.enabled === false ? null : verificationAccount}
+                    onSelect={setVerificationAccount}
+                    disabled={verificationSettings?.enabled === false}
+                    placeholder="None"
+                    allowNone
+                  />
+                </div>
               </div>
               <div className="chat-status">{taskActive ? "Running…" : hasRunTask ? "Ready for follow-up" : "Ready to start"}</div>
             </div>

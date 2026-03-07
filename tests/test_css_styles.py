@@ -104,3 +104,45 @@ class TestTerminalStylingMatchesMilestone:
             "#1a1a1a",
             "#0d0d0d",
         ), f"Light mode terminal text should be dark, got: {terminal_text}"
+
+
+class TestChatViewLayoutClasses:
+    """Verify CSS classes for chat view agent picker layout."""
+
+    def test_agent_pickers_container_exists(self):
+        """The .chat-agent-pickers container should exist for grouping pickers."""
+        content = CSS_FILE.read_text()
+        assert ".chat-agent-pickers" in content, (
+            "CSS should define .chat-agent-pickers for grouping coding and verification pickers"
+        )
+
+    def test_agent_pickers_uses_flexbox(self):
+        """The agent pickers container should use flexbox for side-by-side layout."""
+        content = CSS_FILE.read_text()
+        # Find .chat-agent-pickers rule
+        match = re.search(r"\.chat-agent-pickers\s*\{([^}]+)\}", content)
+        assert match, "Should have .chat-agent-pickers rule"
+        rule_content = match.group(1)
+        assert "display: flex" in rule_content, (
+            "Agent pickers container should use flexbox"
+        )
+
+    def test_agent_picker_has_min_width(self):
+        """Individual agent pickers should have min-width for responsive layout."""
+        content = CSS_FILE.read_text()
+        match = re.search(r"\.chat-agent-picker\s*\{([^}]+)\}", content)
+        assert match, "Should have .chat-agent-picker rule"
+        rule_content = match.group(1)
+        assert "min-width" in rule_content, (
+            "Agent picker should have min-width for proper layout"
+        )
+
+    def test_verification_picker_has_min_width(self):
+        """Verification picker should have min-width for responsive layout."""
+        content = CSS_FILE.read_text()
+        match = re.search(r"\.chat-verification-picker\s*\{([^}]+)\}", content)
+        assert match, "Should have .chat-verification-picker rule"
+        rule_content = match.group(1)
+        assert "min-width" in rule_content, (
+            "Verification picker should have min-width for proper layout"
+        )
