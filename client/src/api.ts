@@ -495,7 +495,7 @@ export class ChadAPI {
 
   importConfig(
     config: Record<string, unknown>,
-  ): Promise<{ ok: boolean; message: string }> {
+  ): Promise<{ ok: boolean; message: string; install_errors?: Record<string, string> }> {
     return this.post("/api/v1/config/import", { config });
   }
 

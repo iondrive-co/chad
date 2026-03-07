@@ -36,6 +36,7 @@ export function SettingsPanel({
   const [status, setStatus] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [localConnectionInput, setLocalConnectionInput] = useState(connectionInput);
+  const [importing, setImporting] = useState(false);
 
   const flash = useCallback((msg: string) => {
     setStatus(msg);
@@ -325,6 +326,7 @@ export function SettingsPanel({
             Export Config
           </button>
           <button
+            disabled={dis || importing}
             onClick={() => {
               const input = document.createElement("input");
               input.type = "file";
@@ -332,19 +334,29 @@ export function SettingsPanel({
               input.onchange = async () => {
                 const file = input.files?.[0];
                 if (!file) return;
+                setImporting(true);
                 try {
                   const text = await file.text();
                   const data = JSON.parse(text);
-                  await api.importConfig(data);
-                  flash("Config imported — reload to apply");
+                  const result = await api.importConfig(data);
+                  if (result.install_errors && Object.keys(result.install_errors).length > 0) {
+                    const failed = Object.entries(result.install_errors)
+                      .map(([tool, err]) => `${tool}: ${err.split("\n")[0]}`)
+                      .join("; ");
+                    flash(`Config imported but some tools failed: ${failed}`);
+                  } else {
+                    flash("Config imported successfully");
+                  }
                 } catch {
                   flash("Import failed — check file format");
+                } finally {
+                  setImporting(false);
                 }
               };
               input.click();
             }}
           >
-            Import Config
+            {importing ? "Importing…" : "Import Config"}
           </button>
         </div>
       </section>

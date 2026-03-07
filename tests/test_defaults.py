@@ -46,8 +46,11 @@ def test_ui_connection_default_is_localhost_3184():
 
 def test_ui_project_path_prefers_preferences_over_cwd():
     text = Path("ui/src/App.tsx").read_text()
-    assert "status.cwd" not in text
     assert "getPreferences" in text
+    # Preferences should be checked first, with server cwd as fallback
+    prefs_idx = text.index("last_project_path")
+    cwd_idx = text.index("status.cwd")
+    assert prefs_idx < cwd_idx, "Preferences should be checked before server cwd"
 
 
 def test_ui_tabs_start_with_settings_and_new_button():

@@ -16,9 +16,11 @@ consider using a cheap isolated cloud server, the [Weft](https://github.com/iond
 ### Blah blah how do I run it?
 
 - Install the latest version from the [releases page](https://github.com/iondrive-co/chad/releases) or with
-[`pipx`](https://pipx.pypa.io/stable/) `pipx install chad-ai`
+[pipx](https://pipx.pypa.io/stable/) by using the command `pipx install chad-ai`
 - Run it locally with the `chad` command OR
-- Run it remotely with the `chad --tunnel` command and connect at https://iondrive.co/Chad
+- Run it remotely with the `chad --tunnel` command and connect at https://iondrive.co/Chad. If your server is headless,
+it is easiest to setup your providers via oauth with a chad server on a desktop and then use the export->import function
+in the settings to move your encrypted provider config to the server and setup the required provider binaries there
 
 ### How is this better than $Grug?
 
@@ -42,15 +44,6 @@ consider using a cheap isolated cloud server, the [Weft](https://github.com/iond
 #### Run tasks with selected coding and verification agents
 <img src="https://raw.githubusercontent.com/iondrive-co/chad/main/docs/screenshot-task-input.png" width="800" alt="Task input panel">
 </details>
-
-### Resuming Sessions
-
-Chad only restores previous sessions when you start it with `--resume`. That keeps a normal startup clean; use
-`chad --resume` (or `chad --mode server --resume`) when you want recent sessions to reappear in the session list
-so you can send a follow-up message and pick up where you left off. You can resume with a different provider than
-the one that originally did the work; Chad reconstructs the conversation context from its session logs. If the
-session's git worktree is still around, work continues there. Session history is retained according to the
-cleanup days setting (default: 3 days).
 
 ### Is this satire? What are you even doing here?
 

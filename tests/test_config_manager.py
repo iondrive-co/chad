@@ -122,7 +122,7 @@ class TestConfigManager:
         assert mgr.is_first_run() is False
 
     def test_export_config(self, tmp_path):
-        """Test exporting config returns the full config."""
+        """Test exporting config returns the full config with provider_auth."""
         config_path = tmp_path / "test.conf"
         mgr = ConfigManager(config_path)
         config = {
@@ -136,6 +136,7 @@ class TestConfigManager:
         assert exported["password_hash"] == "hash123"
         assert exported["encryption_salt"] == "salt123"
         assert "myaccount" in exported["accounts"]
+        assert "provider_auth" in exported
 
     def test_import_config(self, tmp_path):
         """Test importing config replaces existing config."""
@@ -180,6 +181,50 @@ class TestConfigManager:
         dst.import_config(exported)
 
         assert dst.load_config() == src.load_config()
+
+    def test_export_import_provider_auth_roundtrip(self, tmp_path, monkeypatch):
+        """Test that provider auth files are included in export and restored on import."""
+        # Set up fake .chad home with auth files
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr("pathlib.Path.home", lambda: fake_home)
+
+        # Create Claude auth file
+        claude_auth = fake_home / ".chad" / "claude-configs" / "my-claude" / ".claude.json"
+        claude_auth.parent.mkdir(parents=True)
+        claude_auth.write_text('{"oauthAccount": "test@example.com"}')
+
+        # Create Codex auth file
+        codex_auth = fake_home / ".chad" / "codex-homes" / "my-codex" / ".codex" / "auth.json"
+        codex_auth.parent.mkdir(parents=True)
+        codex_auth.write_text('{"tokens": {"access_token": "tok123"}}')
+
+        config_path = tmp_path / "source.conf"
+        mgr = ConfigManager(config_path)
+        mgr.save_config({
+            "password_hash": "h", "encryption_salt": "s",
+            "accounts": {
+                "my-claude": {"provider": "anthropic", "key": "k"},
+                "my-codex": {"provider": "openai", "key": "k"},
+            },
+        })
+
+        exported = mgr.export_config()
+        assert len(exported["provider_auth"]) == 2
+
+        # Wipe the auth files and import into a new config
+        claude_auth.unlink()
+        codex_auth.unlink()
+
+        dst_path = tmp_path / "dest.conf"
+        dst = ConfigManager(dst_path)
+        dst.import_config(exported)
+
+        # Auth files should be restored
+        assert claude_auth.exists()
+        assert '"oauthAccount"' in claude_auth.read_text()
+        assert codex_auth.exists()
+        assert '"access_token"' in codex_auth.read_text()
 
     @patch("getpass.getpass")
     def test_setup_main_password(self, mock_getpass, tmp_path):

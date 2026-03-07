@@ -48,6 +48,15 @@ def find_npm() -> str:
 
 def build_client(npm: str) -> None:
     run([npm, "run", "build"], CLIENT_DIR, "Building client library")
+    # npm copies file: deps on install, so ui/node_modules/chad-client/ goes
+    # stale after a client rebuild.  Sync the fresh build directly so the UI
+    # sees the updated types/code without a full npm install.
+    ui_client = UI_DIR / "node_modules" / "chad-client"
+    if ui_client.is_dir():
+        dest = ui_client / "dist"
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(CLIENT_DIR / "dist", dest)
 
 
 def build_ui(npm: str) -> None:

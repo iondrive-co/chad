@@ -289,13 +289,12 @@ class TestConfigEndpoints:
         data = response.json()
         assert "ui_mode" in data
 
-
     def test_export_config(self, client):
         """Can export config."""
         response = client.get("/api/v1/config/export")
         assert response.status_code == 200
         data = response.json()
-        assert "password_hash" in data or data == {}
+        assert "password_hash" in data or data.keys() <= {"provider_auth"}
 
     def test_import_config_rejects_invalid(self, client):
         """Import rejects config without required fields."""
@@ -319,6 +318,64 @@ class TestConfigEndpoints:
         )
         assert response.status_code == 200
         assert response.json()["ok"] is True
+
+    def test_import_config_installs_provider_tools(self, client, monkeypatch):
+        """Import triggers CLI tool installation for each provider."""
+        installed = []
+
+        def fake_ensure_tool(self, tool_key):
+            installed.append(tool_key)
+            return True, f"/fake/bin/{tool_key}"
+
+        from chad.util.installer import AIToolInstaller
+        monkeypatch.setattr(AIToolInstaller, "ensure_tool", fake_ensure_tool)
+
+        response = client.post(
+            "/api/v1/config/import",
+            json={
+                "config": {
+                    "password_hash": "test",
+                    "encryption_salt": "test",
+                    "accounts": {
+                        "my-claude": {"provider": "anthropic", "key": "x", "model": "default", "reasoning": "default"},
+                        "my-codex": {"provider": "openai", "key": "x", "model": "default", "reasoning": "default"},
+                        "my-gemini": {"provider": "gemini", "key": "x", "model": "default", "reasoning": "default"},
+                    },
+                }
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        assert sorted(installed) == ["claude", "codex", "gemini"]
+
+    def test_import_config_reports_install_errors(self, client, monkeypatch):
+        """Import reports tool installation failures without failing the import."""
+        def fake_ensure_tool(self, tool_key):
+            if tool_key == "codex":
+                return False, "npm not found"
+            return True, f"/fake/bin/{tool_key}"
+
+        from chad.util.installer import AIToolInstaller
+        monkeypatch.setattr(AIToolInstaller, "ensure_tool", fake_ensure_tool)
+
+        response = client.post(
+            "/api/v1/config/import",
+            json={
+                "config": {
+                    "password_hash": "test",
+                    "encryption_salt": "test",
+                    "accounts": {
+                        "acct-claude": {"provider": "anthropic", "key": "x", "model": "default", "reasoning": "default"},
+                        "acct-codex": {"provider": "openai", "key": "x", "model": "default", "reasoning": "default"},
+                    },
+                }
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert "install_errors" in data
+        assert "codex" in data["install_errors"]
 
 
 class TestUIServing:
