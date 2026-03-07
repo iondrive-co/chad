@@ -222,7 +222,31 @@ class TestUIServing:
     def test_packaged_ui_package_exists(self):
         with resources.as_file(resources.files("chad.ui_dist")) as ui_root:
             assert (ui_root / "__init__.py").is_file()
-            assert (ui_root / "index.html").is_file()
+
+    def test_ui_resolver_autobuilds_when_packaged_assets_are_missing(self, tmp_path, monkeypatch):
+        project_root = tmp_path / "project"
+        (project_root / "ui" / "src").mkdir(parents=True)
+        (project_root / "client" / "src").mkdir(parents=True)
+
+        built = {"called": False}
+
+        def fake_autobuild(root):
+            built["called"] = True
+            dist = root / "ui" / "dist"
+            assets = dist / "assets"
+            assets.mkdir(parents=True)
+            (dist / "index.html").write_text("<div id='root'></div>", encoding="utf-8")
+            (assets / "app.js").write_text("console.log('ok')", encoding="utf-8")
+
+        monkeypatch.setattr("chad.server.main._source_project_root", lambda: project_root)
+        monkeypatch.setattr("chad.server.main._package_ui_paths", lambda: (None, None))
+        monkeypatch.setattr("chad.server.main._autobuild_ui_from_source", fake_autobuild)
+
+        index, assets = _resolve_ui_paths()
+
+        assert built["called"] is True
+        assert index == project_root / "ui" / "dist" / "index.html"
+        assert assets == project_root / "ui" / "dist" / "assets"
 
     def test_get_verification_settings(self, client):
         """Can get verification settings."""

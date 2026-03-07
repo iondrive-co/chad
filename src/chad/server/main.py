@@ -15,15 +15,22 @@ from .state import init_start_time
 from .api.routes import health, sessions, providers, worktree, config, ws, slack, tunnel, uploads
 
 
-def _resolve_ui_paths() -> tuple[Path | None, Path | None]:
-    """Return the UI index and assets directory if available."""
-    # Prefer the source-tree build for editable installs and local development.
-    repo_dist = Path(__file__).resolve().parents[3] / "ui" / "dist" / "index.html"
+def _source_project_root() -> Path:
+    """Return the repository root when running from a source checkout."""
+    return Path(__file__).resolve().parents[3]
+
+
+def _repo_ui_paths(project_root: Path) -> tuple[Path | None, Path | None]:
+    """Return the source-tree UI build if it exists."""
+    repo_dist = project_root / "ui" / "dist" / "index.html"
     if repo_dist.is_file():
         assets = repo_dist.parent / "assets"
         return repo_dist, assets if assets.is_dir() else None
+    return None, None
 
-    # Fall back to packaged assets bundled in the Python package.
+
+def _package_ui_paths() -> tuple[Path | None, Path | None]:
+    """Return packaged UI assets bundled in the Python package if present."""
     try:
         package_dist = resources.files("chad.ui_dist")
         index = Path(package_dist) / "index.html"
@@ -32,8 +39,42 @@ def _resolve_ui_paths() -> tuple[Path | None, Path | None]:
             return index, assets if assets.is_dir() else None
     except Exception:
         pass
-
     return None, None
+
+
+def _autobuild_ui_from_source(project_root: Path) -> None:
+    """Materialize a build from source when committed package assets are absent."""
+    if not (project_root / "ui" / "src").is_dir():
+        return
+    if not (project_root / "client" / "src").is_dir():
+        return
+
+    try:
+        from chad.util.ui_build import ensure_ui_built
+        ensure_ui_built(project_root=project_root, verbose=False)
+    except Exception:
+        pass
+
+
+def _resolve_ui_paths() -> tuple[Path | None, Path | None]:
+    """Return the UI index and assets directory if available."""
+    project_root = _source_project_root()
+
+    repo_index, repo_assets = _repo_ui_paths(project_root)
+    if repo_index:
+        return repo_index, repo_assets
+
+    package_index, package_assets = _package_ui_paths()
+    if package_index:
+        return package_index, package_assets
+
+    _autobuild_ui_from_source(project_root)
+
+    repo_index, repo_assets = _repo_ui_paths(project_root)
+    if repo_index:
+        return repo_index, repo_assets
+
+    return _package_ui_paths()
 
 
 @asynccontextmanager

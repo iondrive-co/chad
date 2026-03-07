@@ -19,9 +19,9 @@ consider using a cheap isolated cloud server, the [Weft](https://github.com/iond
 
 ### Blah blah how do I run it?
 
-- Install the latest version from the [releases page](https://github.com/iondrive-co/chad/releases) or by running 
-`pip install chad-ai`. 
-- Run it locally with the `chad` command
+- Install the latest version from the [releases page](https://github.com/iondrive-co/chad/releases) or by getting 
+[pip](https://pip.pypa.io/en/stable/installation/) and then running `pip install chad-ai`. 
+- Run it locally with the `chad` command OR
 - Run it remotely with the `chad --tunnel` command and connect at https://iondrive.co/Chad
 
 ### How is this better than $Grug?
