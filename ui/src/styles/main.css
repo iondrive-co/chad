@@ -229,8 +229,13 @@ body {
   display: flex;
   gap: 4px;
   overflow-x: auto;
+  scrollbar-width: none;
   align-items: center;
   min-width: 0;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .tabs button {
