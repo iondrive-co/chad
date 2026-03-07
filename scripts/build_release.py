@@ -139,8 +139,26 @@ def _require_min_python(*, allow_reexec: bool = False) -> None:
     )
 
 
+def build_client_lib() -> None:
+    """Build the chad-client TypeScript library (required by the React UI)."""
+    client_dir = ROOT / "client"
+    if not (client_dir / "package.json").exists():
+        print("Skipping client lib build - client/package.json not found")
+        return
+
+    npm = shutil.which("npm")
+    if npm is None:
+        raise SystemExit("npm is not installed. Install Node.js to build the client library.")
+
+    print("Building client library ...")
+    run_command([npm, "install"], cwd=client_dir)
+    run_command([npm, "run", "build"], cwd=client_dir)
+
+
 def build_ui() -> None:
     """Build the React UI and bundle it into the Python package."""
+    build_client_lib()
+
     if not BUILD_UI_SCRIPT.exists():
         print("Skipping UI build - build_ui.py not found")
         return
