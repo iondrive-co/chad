@@ -23,7 +23,7 @@ consider using a cheap isolated cloud server, the [Weft](https://github.com/iond
 ### How is this better than $Grug?
 
 - Switch between agents (tokens encrypted with a master password you create and provide for each session)
-- Optional remote access at no cost
+- Optional remote access which can be shared with multiple users
 - Display usage from multiple providers
 - Await reset or switch providers when a desired hourly or weekly usage level is reached
 - Run multiple tasks in parallel with git worktrees

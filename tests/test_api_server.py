@@ -1,6 +1,7 @@
 """Tests for Chad server API endpoints."""
 
 import json
+import subprocess
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -314,6 +315,25 @@ class TestUIServing:
     def test_packaged_ui_package_exists(self):
         with resources.as_file(resources.files("chad.ui_dist")) as ui_root:
             assert (ui_root / "__init__.py").is_file()
+
+    def test_packaged_ui_assets_are_not_gitignored(self):
+        project_root = Path(__file__).resolve().parents[1]
+        ui_root = project_root / "src" / "chad" / "ui_dist"
+        assets = sorted((ui_root / "assets").glob("*"))
+
+        assert (ui_root / "index.html").is_file()
+        assert assets, "Packaged UI assets must exist in src/chad/ui_dist."
+
+        for path in [(ui_root / "index.html"), assets[0]]:
+            result = subprocess.run(
+                ["git", "check-ignore", "-q", str(path.relative_to(project_root))],
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+            )
+            assert result.returncode == 1, (
+                f"{path.relative_to(project_root)} must not be ignored; local untracked UI builds hide CI failures."
+            )
 
     def test_ui_resolver_autobuilds_when_packaged_assets_are_missing(self, tmp_path, monkeypatch):
         project_root = tmp_path / "project"
