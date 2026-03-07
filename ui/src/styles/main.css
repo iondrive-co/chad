@@ -668,6 +668,17 @@ label {
   border: 1px solid var(--border);
 }
 
+.chat-bubble.clickable {
+  cursor: pointer;
+}
+
+.chat-bubble-text.clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .chat-composer {
   margin-top: 10px;
   display: flex;

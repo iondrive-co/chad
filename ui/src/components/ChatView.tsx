@@ -52,6 +52,7 @@ export function ChatView({
   const [inputText, setInputText] = useState("");
   const [hasRunTask, setHasRunTask] = useState(false);
   const [wasCancelled, setWasCancelled] = useState(false);
+  const [expandedMilestones, setExpandedMilestones] = useState<Set<number>>(new Set());
   const outputRef = useRef<HTMLPreElement>(null);
   const convoRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -597,11 +598,24 @@ export function ChatView({
                 const content = item.type === "milestone" ? (item.summary || "") : (isInterrupt ? item.content?.replace("[Interrupt] ", "") || "" : item.content || "");
                 const align = item.type === "user" ? "end" : item.type === "assistant" ? "start" : "center";
                 const bubbleClass = isInterrupt ? "user interrupt" : item.type;
+                const isMilestone = item.type === "milestone";
+                const isExpanded = isMilestone && expandedMilestones.has(item.seq);
+                const toggleExpand = isMilestone ? () => {
+                  setExpandedMilestones(prev => {
+                    const next = new Set(prev);
+                    if (next.has(item.seq)) next.delete(item.seq);
+                    else next.add(item.seq);
+                    return next;
+                  });
+                } : undefined;
                 return (
                   <div key={item.seq} className={`chat-item ${align}`}>
-                    <div className={`chat-bubble ${bubbleClass}`}>
+                    <div
+                      className={`chat-bubble ${bubbleClass}${isMilestone ? " clickable" : ""}`}
+                      onClick={toggleExpand}
+                    >
                       <div className="chat-bubble-label">{label}</div>
-                      <div className="chat-bubble-text">{content}</div>
+                      <div className={`chat-bubble-text${isMilestone && !isExpanded ? " clamped" : ""}`}>{content}</div>
                     </div>
                   </div>
                 );

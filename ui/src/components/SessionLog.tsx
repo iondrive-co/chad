@@ -60,6 +60,14 @@ export function SessionLog({ api, sessionId }: Props) {
 
   const visibleEvents = events.filter((e) => VISIBLE_TYPES.has(e.type));
 
+  // Build tool_call_id → tool name map for correlating finished events
+  const toolCallNames = new Map<string, string>();
+  for (const e of events) {
+    if (e.type === "tool_call_started" && e.tool_call_id && e.tool) {
+      toolCallNames.set(e.tool_call_id as string, e.tool as string);
+    }
+  }
+
   return (
     <div className="session-log">
       <button
@@ -97,7 +105,7 @@ export function SessionLog({ api, sessionId }: Props) {
                     {formatTime(event.ts)}
                   </span>
                   <span className="event-summary">
-                    {getEventSummary(event)}
+                    {getEventSummary(event, toolCallNames)}
                   </span>
                 </div>
               ))
@@ -136,7 +144,7 @@ function formatEventType(type: string): string {
   }
 }
 
-function getEventSummary(event: SessionEvent): string {
+function getEventSummary(event: SessionEvent, toolCallNames: Map<string, string>): string {
   switch (event.type) {
     case "session_started":
       return (event.task_description as string) || "Session started";
@@ -154,23 +162,28 @@ function getEventSummary(event: SessionEvent): string {
       return "Assistant response";
     }
     case "tool_call_started": {
-      const name = (event.name as string) || "unknown";
+      const tool = (event.tool as string) || "unknown";
+      // For file ops show path, for bash show command, for MCP show tool_name, otherwise show args
+      const detail = (event.path as string) || (event.command as string) || (event.tool_name as string);
+      if (detail) {
+        return `${tool}(${truncate(detail, 80)})`;
+      }
       const args = event.args;
       if (args && typeof args === "object") {
         const argStr = Object.entries(args as Record<string, unknown>)
           .map(([k, v]) => `${k}=${typeof v === "string" ? truncate(v, 30) : String(v)}`)
           .join(", ");
-        return `${name}(${truncate(argStr, 80)})`;
+        return `${tool}(${truncate(argStr, 80)})`;
       }
-      return `${name}()`;
+      return `${tool}()`;
     }
     case "tool_call_finished": {
-      const name = (event.name as string) || "unknown";
+      const tool = toolCallNames.get(event.tool_call_id as string) || (event.tool_call_id as string) || "unknown";
       const isError = event.is_error;
-      const result = (event.result as string) || "";
-      if (isError) return `${name}: ERROR ${truncate(result, 60)}`;
-      if (result) return `${name}: ${truncate(result, 80)}`;
-      return `${name}: done`;
+      const summary = (event.llm_summary as string) || "";
+      if (isError) return `${tool}: ERROR ${truncate(summary, 60)}`;
+      if (summary) return `${tool}: ${truncate(summary, 80)}`;
+      return `${tool}: done`;
     }
     case "milestone": {
       const title = (event.title as string) || "";
