@@ -1,5 +1,7 @@
 import json
+import re
 import subprocess
+import sys
 from pathlib import Path
 
 from chad.server.services.session_manager import SessionManager
@@ -10,6 +12,7 @@ from chad.server.services.task_executor import (
     build_agent_command,
     ClaudeStreamJsonParser,
     _strip_binary_garbage,
+    _tool_call_event,
 )
 from chad.util.config_manager import ConfigManager
 
@@ -232,6 +235,71 @@ class TestClaudeStreamJsonParser:
         parser = ClaudeStreamJsonParser()
         parser.feed(b"   \n")  # This gets consumed by feed, leaving empty buffer
         assert parser.flush() == []
+
+    def test_pending_tool_calls_accumulates_structured_data(self):
+        """Parser records structured tool call data for event logging."""
+        parser = ClaudeStreamJsonParser()
+        parser.feed(
+            b'{"type":"assistant","message":{"content":['
+            b'{"type":"tool_use","id":"toolu_abc","name":"Edit","input":{"file_path":"/src/app.py","old_string":"a","new_string":"b"}},'
+            b'{"type":"tool_use","id":"toolu_def","name":"Bash","input":{"command":"pytest -x"}}'
+            b']}}\n'
+        )
+
+        assert len(parser.pending_tool_calls) == 2
+        assert parser.pending_tool_calls[0]["id"] == "toolu_abc"
+        assert parser.pending_tool_calls[0]["name"] == "Edit"
+        assert parser.pending_tool_calls[0]["input"]["file_path"] == "/src/app.py"
+        assert parser.pending_tool_calls[1]["name"] == "Bash"
+        assert parser.pending_tool_calls[1]["input"]["command"] == "pytest -x"
+
+    def test_pending_tool_calls_cleared_manually(self):
+        """Caller is responsible for draining pending_tool_calls."""
+        parser = ClaudeStreamJsonParser()
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/f"}}]}}\n')
+        assert len(parser.pending_tool_calls) == 1
+        parser.pending_tool_calls.clear()
+        assert len(parser.pending_tool_calls) == 0
+
+        # New tool calls still accumulate after clearing
+        parser.feed(b'{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Grep","input":{"pattern":"foo"}}]}}\n')
+        assert len(parser.pending_tool_calls) == 1
+        assert parser.pending_tool_calls[0]["name"] == "Grep"
+
+
+class TestToolCallEvent:
+    """Tests for _tool_call_event helper."""
+
+    def test_edit_maps_file_path(self):
+        ev = _tool_call_event({"id": "t1", "name": "Edit", "input": {"file_path": "/src/main.py", "old_string": "a", "new_string": "b"}})
+        assert ev.tool == "Edit"
+        assert ev.path == "/src/main.py"
+        assert ev.command is None
+        assert ev.args is None
+
+    def test_bash_maps_command(self):
+        ev = _tool_call_event({"id": "t2", "name": "Bash", "input": {"command": "pytest -x"}})
+        assert ev.tool == "Bash"
+        assert ev.command == "pytest -x"
+        assert ev.path is None
+
+    def test_grep_maps_pattern_and_path(self):
+        ev = _tool_call_event({"id": "t3", "name": "Grep", "input": {"pattern": "TODO", "path": "/src"}})
+        assert ev.tool == "Grep"
+        assert ev.path == "/src"
+        assert ev.args == {"pattern": "TODO"}
+
+    def test_read_maps_file_path(self):
+        ev = _tool_call_event({"id": "t4", "name": "Read", "input": {"file_path": "/etc/hosts"}})
+        assert ev.tool == "Read"
+        assert ev.path == "/etc/hosts"
+
+    def test_unknown_tool_stores_full_args(self):
+        ev = _tool_call_event({"id": "t5", "name": "WebSearch", "input": {"query": "python asyncio"}})
+        assert ev.tool == "WebSearch"
+        assert ev.args == {"query": "python asyncio"}
+        assert ev.path is None
+        assert ev.command is None
 
 
 class TestBuildAgentCommand:
@@ -634,6 +702,79 @@ def test_terminal_output_is_periodically_flushed_and_decoded(tmp_path, monkeypat
     # PTY callbacks may coalesce fast output into one read on some systems; in that
     # case we still expect at least one decoded terminal snapshot in the event log.
     assert len(terminal_events) >= 1, "Expected at least one terminal_output snapshot"
+
+
+def test_stream_json_terminal_output_keeps_message_line_breaks(tmp_path, monkeypatch):
+    """Stream-json providers should not collapse adjacent assistant messages onto one line."""
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"accounts": {"claude-test": {"provider": "anthropic"}}}), encoding="utf-8")
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+    session_manager = SessionManager()
+    session = session_manager.create_session(project_path=str(repo_path), name="stream-json-lines")
+    executor = TaskExecutor(
+        ConfigManager(),
+        session_manager,
+        inactivity_timeout=10.0,
+        terminal_flush_interval=0.05,
+    )
+
+    import chad.server.services.task_executor as te
+
+    script = "\n".join([
+        "import json",
+        "events = [",
+        '    {"type": "assistant", "message": {"content": [{"type": "text", "text": "First line"}]}},',
+        '    {"type": "assistant", "message": {"content": [{"type": "text", "text": "Second line"}]}},',
+        "]",
+        "for event in events:",
+        "    print(json.dumps(event), flush=True)",
+        'print("```json", flush=True)',
+        'print(json.dumps({"change_summary": "Done", "files_changed": ["src/main.py"], "completion_status": "success"}), flush=True)',
+        'print("```", flush=True)',
+    ])
+
+    def anthropic_command(provider, account_name, project_path, task_description=None,
+                          screenshots=None, phase="combined", exploration_output=None, **kwargs):
+        return [sys.executable, "-c", script], {}, None
+
+    monkeypatch.setattr(te, "build_agent_command", anthropic_command)
+
+    task = executor.start_task(
+        session_id=session.id,
+        project_path=str(repo_path),
+        task_description="Preserve Claude line breaks",
+        coding_account="claude-test",
+    )
+    task._thread.join(timeout=10)
+
+    assert task.state == TaskState.COMPLETED, f"Task state was {task.state}, error: {task.error}"
+    terminal_events = [e for e in task.event_log.get_events() if e.get("type") == "terminal_output"]
+    assert terminal_events, "Expected decoded terminal output from stream-json provider"
+    terminal_text = "\n".join((e.get("data", "") or "") for e in terminal_events)
+    assert "First line\nSecond line" in terminal_text
+
+
+class TestChatUILayoutSource:
+    """Source-level regression checks for the main chat layout."""
+
+    def test_follow_up_composer_uses_compact_rows(self):
+        """The composer should leave room for the conversation history."""
+        chat_view = Path("ui/src/components/ChatView.tsx").read_text(encoding="utf-8")
+        assert "rows={5}" in chat_view
+
+    def test_desktop_chat_layout_places_conversation_beside_terminal(self):
+        """Desktop layouts should not stack the terminal under the chat by default."""
+        css = Path("ui/src/styles/main.css").read_text(encoding="utf-8")
+        assert re.search(
+            r"@media\s*\(min-width:\s*1100px\)\s*\{.*?\.chat-body\s*\{\s*flex-direction:\s*row;",
+            css,
+            re.DOTALL,
+        )
 
 
 def test_coding_status_events_are_logged_for_streaming(tmp_path, monkeypatch):

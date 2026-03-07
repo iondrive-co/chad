@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chad-ai"
-version = "0.12.0"
+version = "0.13.1"
 description = "Chad: YOLO AI"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -63,6 +63,9 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "chad.ui_dist" = ["**/*"]
+
+[tool.setuptools.exclude-package-data]
+"chad.ui_dist" = ["__pycache__/*"]
 
 [tool.black]
 line-length = 120

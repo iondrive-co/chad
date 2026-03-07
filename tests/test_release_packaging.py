@@ -189,15 +189,43 @@ class TestBuildReleaseScript:
             output_dir = tmp_path / "dist" / "installers"
 
             with patch("shutil.which", return_value=None):
-                with patch.object(
-                    build_release,
-                    "run_command",
-                    side_effect=subprocess.CalledProcessError(1, ["pip"]),
-                ):
-                    with pytest.raises(subprocess.CalledProcessError):
-                        build_release.build_installer(output_dir=output_dir)
+                with patch.object(build_release, "_ensure_build_dependencies"):
+                    with patch.object(
+                        build_release,
+                        "run_command",
+                        side_effect=subprocess.CalledProcessError(1, ["pip"]),
+                    ):
+                        with pytest.raises(subprocess.CalledProcessError):
+                            build_release.build_installer(output_dir=output_dir)
 
             assert not output_dir.exists()
+        finally:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    def test_ensure_build_dependencies_installs_missing(self):
+        """Missing build deps should trigger requirements install."""
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import build_release
+
+            calls = []
+            state = {"installed": False}
+
+            def fake_find_spec(name):
+                if state["installed"]:
+                    return object()
+                return None
+
+            def fake_run_command(cmd, cwd=None):
+                calls.append(cmd)
+                state["installed"] = True
+
+            with patch.object(build_release.importlib.util, "find_spec", side_effect=fake_find_spec):
+                with patch.object(build_release, "run_command", side_effect=fake_run_command):
+                    build_release._ensure_build_dependencies()
+
+            assert calls
+            assert calls[0][:4] == [sys.executable, "-m", "pip", "install"]
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 
@@ -216,15 +244,16 @@ class TestBuildReleaseScript:
 
             # We need to patch at the module level where it's imported
             with patch("shutil.which", return_value="/usr/bin/pyinstaller"):
-                with patch.object(build_release, "run_command"):
-                    with patch.object(build_release, "build_ui"):
-                        with patch.object(
-                            build_release, "_find_built_artifact", return_value=mock_artifact
-                        ):
+                with patch.object(build_release, "_ensure_build_dependencies"):
+                    with patch.object(build_release, "run_command"):
+                        with patch.object(build_release, "build_ui"):
                             with patch.object(
-                                build_release, "_build_linux_deb", return_value=output_dir / "chad.deb"
+                                build_release, "_find_built_artifact", return_value=mock_artifact
                             ):
-                                build_release.build_installer(output_dir=output_dir)
+                                with patch.object(
+                                    build_release, "_build_linux_deb", return_value=output_dir / "chad.deb"
+                                ):
+                                    build_release.build_installer(output_dir=output_dir)
 
             # Output directory should be created
             assert output_dir.exists()
@@ -275,16 +304,17 @@ class TestBuildReleaseScript:
             mock_artifact.write_text("mock")
 
             with patch("shutil.which", return_value="/usr/bin/pyinstaller"):
-                with patch.object(build_release, "run_command", side_effect=capture_command):
-                    with patch.object(build_release, "build_ui"):
-                        with patch.object(
-                            build_release, "_find_built_artifact", return_value=mock_artifact
-                        ):
+                with patch.object(build_release, "_ensure_build_dependencies"):
+                    with patch.object(build_release, "run_command", side_effect=capture_command):
+                        with patch.object(build_release, "build_ui"):
                             with patch.object(
-                                build_release, "_build_linux_deb",
-                                return_value=tmp_path / "chad.deb"
+                                build_release, "_find_built_artifact", return_value=mock_artifact
                             ):
-                                build_release.build_installer(output_dir=tmp_path)
+                                with patch.object(
+                                    build_release, "_build_linux_deb",
+                                    return_value=tmp_path / "chad.deb"
+                                ):
+                                    build_release.build_installer(output_dir=tmp_path)
 
             # Find the PyInstaller invocation
             pyinstaller_call = [c for c in captured_args if "pyinstaller" in str(c[0]).lower()]
@@ -302,6 +332,10 @@ class TestBuildReleaseScript:
 
             # Should include --collect-submodules chad
             assert "--collect-submodules" in args, "Should collect chad submodules"
+            assert "--collect-all" in args, "Should collect pyte for PyInstaller"
+            collect_all = [args[i + 1] for i, val in enumerate(args) if val == "--collect-all"]
+            assert "pyte" in collect_all, "Should collect pyte modules/data for PyInstaller"
+            assert "--additional-hooks-dir" in args, "Should include PyInstaller hooks dir"
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 
@@ -322,12 +356,17 @@ class TestBuildReleaseScript:
 
             with patch("sys.platform", "win32"):
                 with patch("shutil.which", return_value="C:/pyinstaller.exe"):
-                    with patch.object(build_release, "run_command", side_effect=capture_command):
-                        with patch.object(build_release, "build_ui"):
-                            with patch.object(
-                                build_release, "_find_built_artifact", return_value=mock_artifact
-                            ):
-                                build_release.build_installer(output_dir=tmp_path)
+                    with patch.object(build_release, "_ensure_build_dependencies"):
+                        with patch.object(build_release, "run_command", side_effect=capture_command):
+                            with patch.object(build_release, "build_ui"):
+                                with patch.object(
+                                    build_release, "_find_built_artifact", return_value=mock_artifact
+                                ):
+                                    with patch.object(
+                                        build_release, "_build_windows_msi",
+                                        return_value=tmp_path / "chad.msi"
+                                    ):
+                                        build_release.build_installer(output_dir=tmp_path)
 
             pyinstaller_call = [c for c in captured_args if "pyinstaller" in str(c[0]).lower()]
             assert pyinstaller_call
@@ -342,8 +381,8 @@ class TestBuildReleaseScript:
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 
-    def test_windows_onedir_is_zipped(self, tmp_path):
-        """Windows build should zip the onedir bundle instead of copying the exe."""
+    def test_windows_builds_msi(self, tmp_path):
+        """Windows build should produce an MSI via WiX tools."""
         sys.path.insert(0, str(SCRIPTS_DIR))
         try:
             import build_release
@@ -354,29 +393,258 @@ class TestBuildReleaseScript:
             artifact.write_text("bin")
             (artifact_dir / "_internal").mkdir()
 
-            zip_call = {}
+            run_calls = []
 
-            def fake_make_archive(base_name, format, root_dir=None, base_dir=None):
-                zip_call["base_name"] = Path(base_name)
-                zip_call["format"] = format
-                zip_call["root_dir"] = Path(root_dir)
-                zip_call["base_dir"] = base_dir
-                return str(Path(base_name).with_suffix(".zip"))
+            def fake_run_command(cmd, cwd=None):
+                run_calls.append(cmd)
+                if Path(cmd[0]).name == "heat.exe":
+                    harvest_path = Path(cmd[cmd.index("-o") + 1])
+                    harvest_path.write_text(
+                        """<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment />
+</Wix>
+""",
+                        encoding="utf-8",
+                    )
+
+            tools = {
+                "heat.exe": Path("C:/wix/heat.exe"),
+                "candle.exe": Path("C:/wix/candle.exe"),
+                "light.exe": Path("C:/wix/light.exe"),
+            }
+
+            version = build_release.get_current_version()
 
             with patch("sys.platform", "win32"):
                 with patch("shutil.which", side_effect=lambda name: f"C:/{name}.exe"):
-                    with patch.object(build_release, "run_command"):
-                        with patch.object(build_release, "build_ui"):
-                            with patch.object(
-                                build_release, "_find_built_artifact", return_value=artifact
-                            ):
-                                with patch("shutil.make_archive", side_effect=fake_make_archive):
-                                    final_path = build_release.build_installer(output_dir=tmp_path)
+                    with patch.object(build_release, "_ensure_build_dependencies"):
+                        with patch.object(build_release, "_ensure_wix_tools", return_value=tools):
+                            with patch.object(build_release, "run_command", side_effect=fake_run_command):
+                                with patch.object(build_release, "build_ui"):
+                                    with patch.object(
+                                        build_release, "_find_built_artifact", return_value=artifact
+                                    ):
+                                        with patch.object(build_release.shutil, "rmtree"):
+                                            final_path = build_release.build_installer(output_dir=tmp_path)
 
-            assert final_path.suffix == ".zip"
-            assert zip_call["format"] == "zip"
-            assert zip_call["root_dir"] == artifact_dir.parent
-            assert zip_call["base_dir"] == artifact_dir.name
+            assert final_path.suffix == ".msi"
+            assert any(Path(c[0]).name == "heat.exe" for c in run_calls)
+            assert any(Path(c[0]).name == "candle.exe" for c in run_calls)
+            assert any(Path(c[0]).name == "light.exe" for c in run_calls)
+            expected_staging = tmp_path / f"chad-{version}-msi"
+            assert any(str(expected_staging / "harvest.wxs") in map(str, cmd) for cmd in run_calls)
+        finally:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    def test_windows_harvest_adds_language_for_versioned_files(self, tmp_path):
+        """Harvested WiX files should add Language for versioned File entries."""
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import build_release
+
+            artifact_dir = tmp_path / "dist" / "chad"
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "chad.exe").write_text("bin")
+            (artifact_dir / "_internal").mkdir()
+
+            tools = {
+                "heat.exe": Path("C:/wix/heat.exe"),
+                "candle.exe": Path("C:/wix/candle.exe"),
+                "light.exe": Path("C:/wix/light.exe"),
+            }
+
+            def fake_run_command(cmd, cwd=None):
+                if Path(cmd[0]).name == "heat.exe":
+                    harvest_path = Path(cmd[cmd.index("-o") + 1])
+                    harvest_path.write_text(
+                        """<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="cmp1" Guid="*">
+        <File Id="fil1" Source="foo.dll" Version="1.0.0.0" />
+        <File Id="fil2" Source="bar.txt" />
+        <File Id="fil3" Source="baz.dll" Version="2.0.0.0" Language="1033" />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>
+""",
+                        encoding="utf-8",
+                    )
+
+            with patch("sys.platform", "win32"):
+                with patch.object(build_release, "_ensure_wix_tools", return_value=tools):
+                    with patch.object(build_release, "run_command", side_effect=fake_run_command):
+                        with patch.object(build_release.shutil, "rmtree"):
+                            build_release._build_windows_msi(artifact_dir, "0.12.0", tmp_path)
+
+            harvest_path = tmp_path / "chad-0.12.0-msi" / "harvest.wxs"
+            content = harvest_path.read_text(encoding="utf-8")
+            assert 'File Id="fil1"' in content
+            assert 'Language="0"' in content
+            assert 'File Id="fil3"' in content
+            assert 'Language="1033"' in content
+        finally:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    def test_windows_heat_disables_self_reg(self, tmp_path):
+        """Heat should disable self-reg harvesting to avoid HEAT5150 warnings."""
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import build_release
+
+            artifact_dir = tmp_path / "dist" / "chad"
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "chad.exe").write_text("bin")
+            (artifact_dir / "_internal").mkdir()
+
+            tools = {
+                "heat.exe": Path("C:/wix/heat.exe"),
+                "candle.exe": Path("C:/wix/candle.exe"),
+                "light.exe": Path("C:/wix/light.exe"),
+            }
+
+            run_calls = []
+
+            def fake_run_command(cmd, cwd=None):
+                run_calls.append(cmd)
+                if Path(cmd[0]).name == "heat.exe":
+                    harvest_path = Path(cmd[cmd.index("-o") + 1])
+                    harvest_path.write_text(
+                        """<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment />
+</Wix>
+""",
+                        encoding="utf-8",
+                    )
+
+            with patch("sys.platform", "win32"):
+                with patch.object(build_release, "_ensure_wix_tools", return_value=tools):
+                    with patch.object(build_release, "run_command", side_effect=fake_run_command):
+                        with patch.object(build_release.shutil, "rmtree"):
+                            build_release._build_windows_msi(artifact_dir, "0.12.0", tmp_path)
+
+            heat_calls = [c for c in run_calls if Path(c[0]).name == "heat.exe"]
+            assert heat_calls
+            assert "-sreg" in heat_calls[0]
+        finally:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    def test_windows_product_path_prepends_install_dir(self, tmp_path):
+        """Product.wxs should prepend the install directory to PATH."""
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import build_release
+
+            artifact_dir = tmp_path / "dist" / "chad"
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "chad.exe").write_text("bin")
+            (artifact_dir / "_internal").mkdir()
+
+            tools = {
+                "heat.exe": Path("C:/wix/heat.exe"),
+                "candle.exe": Path("C:/wix/candle.exe"),
+                "light.exe": Path("C:/wix/light.exe"),
+            }
+
+            def fake_run_command(cmd, cwd=None):
+                if Path(cmd[0]).name == "heat.exe":
+                    harvest_path = Path(cmd[cmd.index("-o") + 1])
+                    harvest_path.write_text(
+                        """<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment />
+</Wix>
+""",
+                        encoding="utf-8",
+                    )
+
+            with patch("sys.platform", "win32"):
+                with patch.object(build_release, "_ensure_wix_tools", return_value=tools):
+                    with patch.object(build_release, "run_command", side_effect=fake_run_command):
+                        with patch.object(build_release.shutil, "rmtree"):
+                            build_release._build_windows_msi(artifact_dir, "0.12.0", tmp_path)
+
+            product_path = tmp_path / "chad-0.12.0-msi" / "product.wxs"
+            content = product_path.read_text(encoding="utf-8")
+            assert 'Part="first"' in content
+        finally:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    def test_windows_product_uses_license_rtf(self, tmp_path):
+        """Product.wxs should reference the WiX license RTF."""
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import build_release
+
+            artifact_dir = tmp_path / "dist" / "chad"
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "chad.exe").write_text("bin")
+            (artifact_dir / "_internal").mkdir()
+
+            tools = {
+                "heat.exe": Path("C:/wix/heat.exe"),
+                "candle.exe": Path("C:/wix/candle.exe"),
+                "light.exe": Path("C:/wix/light.exe"),
+            }
+
+            def fake_run_command(cmd, cwd=None):
+                if Path(cmd[0]).name == "heat.exe":
+                    harvest_path = Path(cmd[cmd.index("-o") + 1])
+                    harvest_path.write_text(
+                        """<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment />
+</Wix>
+""",
+                        encoding="utf-8",
+                    )
+
+            with patch("sys.platform", "win32"):
+                with patch.object(build_release, "_ensure_wix_tools", return_value=tools):
+                    with patch.object(build_release, "run_command", side_effect=fake_run_command):
+                        with patch.object(build_release.shutil, "rmtree"):
+                            build_release._build_windows_msi(artifact_dir, "0.12.0", tmp_path)
+
+            product_path = tmp_path / "chad-0.12.0-msi" / "product.wxs"
+            content = product_path.read_text(encoding="utf-8")
+            assert "WixUILicenseRtf" in content
+        finally:
+            sys.path.remove(str(SCRIPTS_DIR))
+
+    def test_ensure_wix_tools_accepts_winget_no_upgrade(self):
+        """WiX install via winget should not fail if winget reports no upgrade."""
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        try:
+            import build_release
+
+            state = {"installed": False}
+
+            def fake_which(name):
+                if name in {"heat.exe", "candle.exe", "light.exe"}:
+                    return f"C:/wix/{name}" if state["installed"] else None
+                if name == "winget":
+                    return "C:/winget.exe"
+                if name == "choco":
+                    return None
+                return None
+
+            class FakeResult:
+                def __init__(self, returncode):
+                    self.returncode = returncode
+
+            def fake_run(*args, **kwargs):
+                state["installed"] = True
+                return FakeResult(2316632107)
+
+            with patch.object(build_release.shutil, "which", side_effect=fake_which):
+                with patch.object(build_release.subprocess, "run", side_effect=fake_run):
+                    tools = build_release._ensure_wix_tools()
+
+            assert set(tools.keys()) == {"heat.exe", "candle.exe", "light.exe"}
         finally:
             sys.path.remove(str(SCRIPTS_DIR))
 
@@ -399,13 +667,14 @@ class TestBuildReleaseScript:
 
             with patch("sys.platform", "darwin"):
                 with patch("shutil.which", side_effect=lambda name: f"/usr/bin/{name}"):
-                    with patch.object(build_release, "run_command", side_effect=fake_run_command):
-                        with patch.object(build_release, "build_ui"):
-                            with patch.object(
-                                build_release, "_find_built_artifact", return_value=artifact
-                            ):
-                                with patch.object(build_release.shutil, "rmtree"):
-                                    final_path = build_release.build_installer(output_dir=tmp_path)
+                    with patch.object(build_release, "_ensure_build_dependencies"):
+                        with patch.object(build_release, "run_command", side_effect=fake_run_command):
+                            with patch.object(build_release, "build_ui"):
+                                with patch.object(
+                                    build_release, "_find_built_artifact", return_value=artifact
+                                ):
+                                    with patch.object(build_release.shutil, "rmtree"):
+                                        final_path = build_release.build_installer(output_dir=tmp_path)
 
             pkgbuild_calls = [c for c in run_calls if Path(c[0]).name == "pkgbuild"]
             assert pkgbuild_calls, "pkgbuild should be invoked to create the .pkg"
@@ -536,6 +805,6 @@ class TestInstallerNaming:
             # Test Windows
             with patch("sys.platform", "win32"):
                 name = build_release.get_installer_filename("0.11.0")
-                assert name == "chad-0.11.0-windows.zip"
+                assert name == "chad-0.11.0-windows.msi"
         finally:
             sys.path.remove(str(SCRIPTS_DIR))

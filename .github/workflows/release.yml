@@ -44,6 +44,10 @@ jobs:
           cd ui
           npm install
 
+      - name: Install WiX Toolset (Windows)
+        if: runner.os == 'Windows'
+        run: choco install wixtoolset -y --no-progress
+
       - name: Build installer
         run: |
           python scripts/build_release.py --output release
@@ -53,7 +57,7 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            ARTIFACT=$(ls release/*.zip 2>/dev/null || ls release/*.exe 2>/dev/null | head -1)
+            ARTIFACT=$(ls release/*.msi 2>/dev/null || ls release/*.exe 2>/dev/null || ls release/*.zip 2>/dev/null | head -1)
           elif [[ "${{ runner.os }}" == "macOS" ]]; then
             ARTIFACT=$(ls release/*.pkg 2>/dev/null || ls release/*macos* 2>/dev/null | head -1)
           else

@@ -828,6 +828,106 @@ class TestCancelSession:
         assert second_start.status_code == 409
         assert "already running" in second_start.json().get("detail", "").lower()
 
+    def test_followup_immediately_after_cancel(self, client, git_repo, monkeypatch):
+        """Starting a follow-up task right after cancel should succeed, not 409."""
+        import chad.server.services.task_executor as task_executor_module
+
+        def build_followup_command(
+            provider,
+            account_name,
+            project_path,
+            task_description=None,
+            screenshots=None,
+            phase="exploration",
+            exploration_output=None,
+            model=None,
+            reasoning_effort=None,
+            mock_run_duration_seconds=0,
+            override_prompt=None,
+        ):
+            del (
+                provider,
+                account_name,
+                project_path,
+                screenshots,
+                phase,
+                exploration_output,
+                model,
+                reasoning_effort,
+                mock_run_duration_seconds,
+                override_prompt,
+            )
+            if task_description == "first-task":
+                # Long-running task that handles SIGTERM
+                script = (
+                    "import signal,time,sys\n"
+                    "def _on_term(sig, frame):\n"
+                    "    raise SystemExit(0)\n"
+                    "signal.signal(signal.SIGTERM, _on_term)\n"
+                    "print('RUNNING')\n"
+                    "sys.stdout.flush()\n"
+                    "while True:\n"
+                    "    time.sleep(0.1)\n"
+                )
+            else:
+                # Quick follow-up task
+                script = (
+                    "import sys\n"
+                    "print('{\"change_summary\":\"done\",\"files_changed\":[],\"completion_status\":\"success\"}')\n"
+                    "sys.stdout.flush()\n"
+                )
+            return ["python3", "-c", script], {}, None
+
+        monkeypatch.setattr(task_executor_module, "build_agent_command", build_followup_command)
+
+        session_resp = client.post("/api/v1/sessions", json={"name": "Followup After Cancel"})
+        session_id = session_resp.json()["id"]
+        account_resp = client.post("/api/v1/accounts", json={"name": "followup-cancel", "provider": "mock"})
+        assert account_resp.status_code in (200, 201, 409)
+
+        # Start first task
+        first_start = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "first-task",
+                "coding_agent": "followup-cancel",
+            },
+        )
+        assert first_start.status_code == 201
+
+        time.sleep(0.25)  # Let it start running
+
+        # Cancel and immediately start follow-up (without waiting for CANCELLED state)
+        cancel_resp = client.post(f"/api/v1/sessions/{session_id}/cancel")
+        assert cancel_resp.status_code == 200
+        assert cancel_resp.json()["cancel_requested"] is True
+
+        # Start follow-up immediately — previously this would 409 due to race condition
+        followup_resp = client.post(
+            f"/api/v1/sessions/{session_id}/tasks",
+            json={
+                "project_path": str(git_repo),
+                "task_description": "followup-task",
+                "coding_agent": "followup-cancel",
+                "is_followup": True,
+            },
+        )
+        assert followup_resp.status_code == 201, (
+            f"Expected 201 but got {followup_resp.status_code}: {followup_resp.json()}"
+        )
+        followup_task_id = followup_resp.json()["task_id"]
+
+        # Follow-up task should complete
+        final_status = None
+        for _ in range(50):
+            status_resp = client.get(f"/api/v1/sessions/{session_id}/tasks/{followup_task_id}")
+            final_status = status_resp.json()["status"]
+            if final_status in ("completed", "failed", "cancelled"):
+                break
+            time.sleep(0.1)
+        assert final_status == "completed"
+
     def test_milestones_include_cancelled_task_after_restart(self, client, git_repo, monkeypatch):
         """Milestone polling should keep milestones from cancelled tasks after restart."""
         import chad.server.services.task_executor as task_executor_module

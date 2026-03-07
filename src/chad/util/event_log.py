@@ -97,6 +97,7 @@ class SessionStartedEvent(EventBase):
     coding_provider: str = ""
     coding_account: str = ""
     coding_model: str | None = None
+    verification_account: str | None = None
 
 
 @dataclass

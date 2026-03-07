@@ -1,5 +1,17 @@
-# Core dependencies
+# Core dependencies (synced with pyproject.toml [project.dependencies])
 requests>=2.31.0
 bcrypt>=4.0.0
 cryptography>=41.0.0
 pexpect>=4.9.0; platform_system != "Windows"
+filelock>=3.0.0
+# Server API dependencies
+fastapi>=0.100.0
+python-multipart>=0.0.9
+uvicorn[standard]>=0.20.0
+websockets>=11.0
+httpx>=0.24.0
+pydantic>=2.0.0
+# Terminal emulation
+pyte>=0.8.0
+# QR code generation
+segno>=1.6.0

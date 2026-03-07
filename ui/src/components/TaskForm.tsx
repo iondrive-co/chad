@@ -6,7 +6,8 @@ interface Props {
   api: ChadAPI;
   sessionId: string;
   onStart: (codingAgent: string, taskDescription: string) => void;
-  defaultProjectPath?: string;
+  projectPath: string;
+  overridePrompt?: string | null;
 }
 
 interface UploadedScreenshot {
@@ -17,9 +18,8 @@ interface UploadedScreenshot {
 
 const REASONING_OPTIONS = ["", "low", "medium", "high"];
 
-export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: Props) {
+export function TaskForm({ api, sessionId, onStart, projectPath, overridePrompt }: Props) {
   const [description, setDescription] = useState("");
-  const [projectPath, setProjectPath] = useState(defaultProjectPath);
   const [account, setAccount] = useState<Account | null>(null);
   const [modelOverride, setModelOverride] = useState("");
   const [models, setModels] = useState<string[]>([]);
@@ -60,12 +60,12 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
       .then((settings) => {
         if (cancelled) return;
         setVerificationSettings(settings);
-        // On first load, align toggle with auto_run; if disabled, force off.
+        // On first load, enable verification toggle if verification is enabled.
         if (!settings.enabled) {
           setUseVerification(false);
           setVerificationAccount(null);
         } else if (!verificationDefaultsApplied.current) {
-          setUseVerification(settings.auto_run);
+          setUseVerification(true);
           verificationDefaultsApplied.current = true;
         }
       })
@@ -98,13 +98,6 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
   // Check if verification account's provider supports reasoning
   const verificationProvider = providers.find((p) => p.type === verificationAccount?.provider);
   const verificationSupportsReasoning = verificationProvider?.supports_reasoning ?? false;
-
-  // Sync project path when default arrives from preferences (async)
-  useEffect(() => {
-    if (defaultProjectPath && !projectPath) {
-      setProjectPath(defaultProjectPath);
-    }
-  }, [defaultProjectPath]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch available models when coding account changes
   useEffect(() => {
@@ -187,7 +180,7 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
   }, []);
 
   const missingFields: string[] = [];
-  if (!projectPath.trim()) missingFields.push("project path");
+  if (!projectPath?.trim()) missingFields.push("project path");
   if (!description.trim()) missingFields.push("task description");
   if (!account) missingFields.push("coding agent");
   const canStart = missingFields.length === 0 && !starting && !uploading;
@@ -206,7 +199,7 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
     try {
       const verificationAllowed = verificationSettings?.enabled && useVerification;
       await api.startTask(sessionId, {
-        project_path: projectPath.trim(),
+        project_path: (projectPath || "").trim(),
         task_description: description.trim(),
         coding_agent: account!.name,
         coding_model: modelOverride || undefined,
@@ -215,6 +208,7 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
         verification_model: verificationAllowed && verificationModel ? verificationModel : undefined,
         verification_reasoning: verificationAllowed && verificationReasoning ? verificationReasoning : undefined,
         screenshots: screenshots.length > 0 ? screenshots.map((s) => s.path) : undefined,
+        override_prompt: overridePrompt || undefined,
       });
       onStart(account!.name, description.trim());
     } catch (e) {
@@ -226,21 +220,12 @@ export function TaskForm({ api, sessionId, onStart, defaultProjectPath = "" }: P
     api, sessionId, description, projectPath, account, modelOverride,
     codingReasoning, useVerification, verificationAccount, verificationModel,
     verificationReasoning, verificationSettings, onStart, canStart, screenshots,
+    overridePrompt,
   ]);
 
   return (
     <div className="task-form">
       <h3>Start a Task</h3>
-
-      <label>
-        Project Path
-        <input
-          type="text"
-          value={projectPath}
-          onChange={(e) => setProjectPath(e.target.value)}
-          placeholder="/home/user/project"
-        />
-      </label>
 
       <label>
         Task Description

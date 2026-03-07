@@ -22,6 +22,7 @@ from chad.util.event_log import (
     ProgressEvent,
     UserMessageEvent,
     TerminalOutputEvent,
+    ToolCallStartedEvent,
     SessionEndedEvent,
 )
 from chad.util.prompts import (
@@ -67,6 +68,9 @@ class ClaudeStreamJsonParser:
         # Usage stats captured from result events (Gemini stream-json)
         self.result_stats: dict = {}
         self.init_model: str | None = None
+        # Structured tool call records for event logging.
+        # Each entry: {"id": str, "name": str, "input": dict}
+        self.pending_tool_calls: list[dict] = []
 
     def feed(self, data: bytes) -> list[str]:
         """Feed raw bytes and return list of human-readable text chunks.
@@ -157,6 +161,7 @@ class ClaudeStreamJsonParser:
                 elif item_type == "tool_use":
                     tool_name = item.get("name", "unknown")
                     tool_input = item.get("input", {})
+                    tool_id = item.get("id", "")
                     # Accumulate tool for collapsed summary instead of showing each one
                     self._tool_counts[tool_name] = self._tool_counts.get(tool_name, 0) + 1
                     tool_desc = self._format_tool_use(tool_name, tool_input)
@@ -164,6 +169,12 @@ class ClaudeStreamJsonParser:
                         self._tool_details.append(tool_desc)
                     self._pending_summary = True
                     outputs.extend(self._emit_summary_if_changed())
+                    # Record structured tool call for event logging
+                    self.pending_tool_calls.append({
+                        "id": tool_id,
+                        "name": tool_name,
+                        "input": tool_input,
+                    })
 
             # Emit any pending summary ahead of text if counts changed during this message
             if parts:
@@ -347,6 +358,34 @@ class ClaudeStreamJsonParser:
         return [summary]
 
 
+def _tool_call_event(tc: dict) -> ToolCallStartedEvent:
+    """Build a ToolCallStartedEvent from a parsed stream-json tool_use item."""
+    name = tc["name"]
+    inp = tc["input"]
+    ev = ToolCallStartedEvent(
+        tool_call_id=tc.get("id") or "",
+        tool=name,
+    )
+    if name in ("Read", "Write", "Edit"):
+        ev.path = inp.get("file_path")
+    elif name == "Bash":
+        ev.command = inp.get("command")
+    elif name in ("Glob", "Grep"):
+        ev.path = inp.get("path")
+        ev.args = {"pattern": inp.get("pattern", "")}
+    else:
+        ev.args = inp
+    return ev
+
+
+def _render_stream_json_text_chunks(text_chunks: list[str]) -> str:
+    """Join parsed stream-json chunks into readable terminal text."""
+    cleaned = [chunk.rstrip("\r\n") for chunk in text_chunks if chunk]
+    if not cleaned:
+        return ""
+    return "\n".join(cleaned) + "\n"
+
+
 def _read_project_docs(project_path: Path) -> str | None:
     """Read project documentation if present.
 
@@ -467,7 +506,8 @@ def build_agent_command(
     # Build full prompt based on phase (use override if user edited the prompt)
     full_prompt: str | None = None
     if override_prompt:
-        full_prompt = override_prompt
+        full_prompt = override_prompt.replace("{task}", task_description or "")
+
     elif task_description:
         project_docs = _read_project_docs(project_path)
         if phase in ("combined", "exploration", "implementation"):
@@ -839,7 +879,7 @@ class TaskExecutor:
 
         # Build verification config gated by runtime verification settings
         verification_config = None
-        ver_enabled, ver_auto_run = self.config_manager.get_runtime_verification_settings()
+        ver_enabled = self.config_manager.get_runtime_verification_settings()
 
         if ver_enabled:
             if verification_account:
@@ -848,8 +888,8 @@ class TaskExecutor:
                     "verification_model": verification_model,
                     "verification_reasoning": verification_reasoning,
                 }
-            elif ver_auto_run:
-                # Auto-run verification when enabled+auto_run, using configured verification agent
+            else:
+                # Run verification using configured verification agent when enabled
                 try:
                     auto_account = self.config_manager.get_verification_agent()
                 except Exception:
@@ -1044,8 +1084,15 @@ class TaskExecutor:
                 # For anthropic/qwen, parse stream-json and convert to readable text
                 if json_parser:
                     text_chunks = json_parser.feed(chunk_bytes)
+                    # Log any tool calls that were parsed from this chunk
+                    if json_parser.pending_tool_calls and task.event_log:
+                        for tc in json_parser.pending_tool_calls:
+                            task.event_log.log(_tool_call_event(tc))
+                        json_parser.pending_tool_calls.clear()
                     if text_chunks:
-                        readable_text = "\n".join(text_chunks)
+                        readable_text = _render_stream_json_text_chunks(text_chunks)
+                        if not readable_text:
+                            return
                         # Replace PTY payload with human-readable text for subscribers
                         event.data = readable_text
                         event.has_ansi = False
@@ -1240,13 +1287,16 @@ class TaskExecutor:
         if json_parser:
             remaining = json_parser.flush()
             if remaining:
-                readable_text = "\n".join(remaining)
+                readable_text = _render_stream_json_text_chunks(remaining)
+                if not readable_text:
+                    readable_text = ""
                 # Emit final parsed output to stream and logs
-                emit("stream", chunk=base64.b64encode(readable_text.encode()).decode())
-                with terminal_lock:
-                    terminal_buffer.extend(readable_text.encode())
-                _feed_captured(readable_text)
-                captured_output.extend(remaining)
+                if readable_text:
+                    emit("stream", chunk=base64.b64encode(readable_text.encode()).decode())
+                    with terminal_lock:
+                        terminal_buffer.extend(readable_text.encode())
+                    _feed_captured(readable_text)
+                    captured_output.append(readable_text)
 
         flush_terminal_buffer()
         pty_service.cleanup_session(stream_id)
@@ -1351,12 +1401,14 @@ class TaskExecutor:
 
             # Log session start
             if task.event_log:
+                verification_account = verification_config.get("verification_account") if verification_config else None
                 task.event_log.log(SessionStartedEvent(
                     task_description=task_description,
                     project_path=str(project_path),
                     coding_provider=coding_provider,
                     coding_account=coding_account,
                     coding_model=coding_model,
+                    verification_account=verification_account,
                 ))
                 task.event_log.start_turn()
                 task.event_log.log(UserMessageEvent(content=task_description))

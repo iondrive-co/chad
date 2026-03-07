@@ -106,29 +106,47 @@ async def websocket_endpoint(
         executor = get_task_executor()
 
         async def stream_events():
-            """Stream events to WebSocket using EventMultiplexer."""
-            task = executor.get_latest_task_for_session(session_id)
+            """Stream events to WebSocket using EventMultiplexer.
 
-            # Create multiplexer with task's EventLog
-            event_log = task.event_log if task else None
-            mux = EventMultiplexer(session_id, event_log)
+            Loops after task completion so follow-up tasks on the same
+            session are streamed without requiring a WebSocket reconnect.
+            """
+            current_since_seq = since_seq
 
-            # Use stream_with_since for catch-up support on reconnection
-            async for event in mux.stream_with_since(
-                pty_service,
-                since_seq=since_seq,
-                include_terminal=True,
-                include_events=True,
-            ):
-                message = {
-                    "type": event.type,
-                    "session_id": session_id,
-                    "data": {**event.data, "seq": event.seq},
-                }
-                await manager.send_to_session(session_id, message)
+            while True:
+                task = executor.get_latest_task_for_session(session_id)
+                completed_task_id = task.id if task else None
 
-                if event.type in ("complete", "error"):
-                    return
+                # Create multiplexer with task's EventLog
+                event_log = task.event_log if task else None
+                mux = EventMultiplexer(session_id, event_log)
+
+                # Stream events for the current task
+                async for event in mux.stream_with_since(
+                    pty_service,
+                    since_seq=current_since_seq,
+                    include_terminal=True,
+                    include_events=True,
+                ):
+                    message = {
+                        "type": event.type,
+                        "session_id": session_id,
+                        "data": {**event.data, "seq": event.seq},
+                    }
+                    await manager.send_to_session(session_id, message)
+
+                    if event.type in ("complete", "error"):
+                        break
+
+                # Task finished — wait for a new task to appear on this session
+                # so follow-up messages stream correctly.
+                while True:
+                    await asyncio.sleep(0.3)
+                    new_task = executor.get_latest_task_for_session(session_id)
+                    if new_task and new_task.id != completed_task_id:
+                        # New task started — stream from where we left off
+                        current_since_seq = mux._seq
+                        break
 
         # Start background task for streaming
         stream_task = asyncio.create_task(stream_events())

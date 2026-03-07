@@ -1074,6 +1074,87 @@ class TestFinalThresholdCheckAfterPhase:
         assert loop._pending_action is not None
         assert loop._pending_action["action"] == "await_reset"
 
+    def test_weekly_limit_with_await_reset_emits_only_paused_milestone(self):
+        """A hard weekly limit with await_reset should emit one actionable milestone.
+
+        Reproducer:
+        1. Weekly usage is already at 100%, so threshold rules could fire.
+        2. The provider also prints the explicit weekly limit message.
+        3. The loop should surface only the paused/waiting milestone, not the raw
+           weekly-limit milestone plus extra threshold warnings.
+        """
+        event_log = FakeEventLog()
+        emitted = []
+
+        def emit_fn(event_type, **kwargs):
+            emitted.append((event_type, kwargs))
+
+        def weekly_quota_checker(output_tail):
+            if "You've hit your limit" in output_tail:
+                return "weekly_limit_reached"
+            return None
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=type("Task", (), {"cancel_requested": False, "stream_id": None})(),
+            run_phase_fn=None,
+            emit_fn=emit_fn,
+            worktree_path="/tmp/test",
+            is_quota_exhausted_fn=weekly_quota_checker,
+            get_weekly_usage_fn=lambda: 100.0,
+            action_settings=[
+                {"event": "weekly_usage", "threshold": 90, "action": "notify"},
+                {"event": "weekly_usage", "threshold": 100, "action": "await_reset"},
+            ],
+            terminate_pty_fn=lambda: None,
+            get_weekly_reset_eta_fn=lambda: "30m",
+        )
+
+        def fake_run_phase(**kwargs):
+            output = "You've hit your limit · resets 3pm (Australia/Melbourne)"
+            loop.feed_output(output)
+            return 0, output
+
+        loop._run_phase_fn = fake_run_phase
+        loop._running = True
+
+        def fake_handle_await_reset(*args, **kwargs):
+            loop._emit_milestone(
+                "usage_threshold",
+                "Paused, waiting for weekly reset (ETA: 30m)",
+            )
+            return ""
+
+        loop._handle_await_reset = fake_handle_await_reset
+
+        try:
+            loop._run_coding_phase(
+                session=None,
+                task_description="trigger weekly limit",
+                coding_account="primary",
+                coding_provider="anthropic",
+                screenshots=None,
+                rows=24,
+                cols=80,
+                git_mgr=None,
+            )
+        finally:
+            loop._running = False
+
+        milestones = [e for e in emitted if e[0] == "milestone"]
+        assert milestones == [
+            (
+                "milestone",
+                {
+                    "milestone_type": "usage_threshold",
+                    "title": "Usage Warning",
+                    "summary": "Paused, waiting for weekly reset (ETA: 30m)",
+                    "details": {},
+                },
+            )
+        ]
+
 
 class TestMessageForwarding:
     """Tests for forwarding queued user messages to the active PTY."""
@@ -1391,11 +1472,65 @@ class TestSessionLimitActionBridge:
         # Should keep the existing action, not overwrite
         assert loop._pending_action is existing
 
-    def test_session_limit_ignores_non_session_usage_rules(self):
-        """Only session_usage rules trigger the bridge, not weekly or context."""
+    def test_session_limit_matches_weekly_usage_rule_on_weekly_limit(self):
+        """weekly_limit_reached triggers weekly_usage switch_provider rules."""
+        terminated = []
+
+        def weekly_quota_checker(output_tail):
+            import re
+            if re.search(r"You['\u2018\u2019]ve hit your limit", output_tail):
+                return "weekly_limit_reached"
+            return None
+
         loop, event_log, emitted = self._make_loop(
             action_settings=[
-                {"event": "weekly_usage", "threshold": 90, "action": "await_reset"},
+                {"event": "weekly_usage", "threshold": 100, "action": "switch_provider",
+                 "target_account": "backup"},
+            ],
+            terminate_pty_fn=lambda: terminated.append(True),
+            quota_checker=weekly_quota_checker,
+        )
+
+        loop.feed_output("You've hit your limit\n")
+        loop._analyze_output()
+
+        assert loop._session_limit_detected
+        assert loop._pending_action is not None
+        assert loop._pending_action["action"] == "switch_provider"
+        assert loop._pending_action["target_account"] == "backup"
+        assert loop._pending_action["label"] == "weekly"
+        assert len(terminated) == 1
+
+    def test_session_limit_falls_back_to_weekly_rule_on_misclassification(self):
+        """session_limit_reached (misclassified) still matches weekly_usage rules.
+
+        When the usage API fails at quota, is_quota_exhausted may return
+        session_limit_reached even for weekly limits.  The bridge should
+        still find and trigger weekly_usage switch_provider rules.
+        """
+        terminated = []
+        loop, event_log, emitted = self._make_loop(
+            action_settings=[
+                {"event": "weekly_usage", "threshold": 100, "action": "switch_provider",
+                 "target_account": "backup"},
+            ],
+            terminate_pty_fn=lambda: terminated.append(True),
+            # Default checker returns "session_limit_reached"
+        )
+
+        loop.feed_output("You've hit your limit\n")
+        loop._analyze_output()
+
+        assert loop._session_limit_detected
+        assert loop._pending_action is not None
+        assert loop._pending_action["action"] == "switch_provider"
+        assert loop._pending_action["target_account"] == "backup"
+        assert len(terminated) == 1
+
+    def test_context_usage_rules_not_matched_by_session_limit(self):
+        """context_usage rules are not triggered by session/weekly limit detection."""
+        loop, event_log, emitted = self._make_loop(
+            action_settings=[
                 {"event": "context_usage", "threshold": 90, "action": "switch_provider",
                  "target_account": "backup"},
             ],

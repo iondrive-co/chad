@@ -1,13 +1,24 @@
 import { useState, useEffect, useCallback } from "react";
 import type { ChadAPI, VerificationSettings, Account } from "chad-client";
 import { ActionRules } from "./ActionRules.tsx";
+import { QRScanner } from "./QRScanner.tsx";
+import { parseConnectionInput } from "../App.tsx";
 
 interface Props {
   api: ChadAPI;
   connected: boolean;
+  connectionInput?: string;
+  onConnectionInputChange?: (value: string) => void;
+  onConnect?: (url: string, token?: string) => void;
 }
 
-export function SettingsPanel({ api, connected }: Props) {
+export function SettingsPanel({
+  api,
+  connected,
+  connectionInput = "",
+  onConnectionInputChange,
+  onConnect,
+}: Props) {
   const [verification, setVerification] = useState<VerificationSettings | null>(null);
   const [maxAttempts, setMaxAttempts] = useState<number>(3);
   const [verificationAgent, setVerificationAgent] = useState<string | null>(null);
@@ -23,6 +34,8 @@ export function SettingsPanel({ api, connected }: Props) {
   const [tunnelLoading, setTunnelLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  const [scanning, setScanning] = useState(false);
+  const [localConnectionInput, setLocalConnectionInput] = useState(connectionInput);
 
   const flash = useCallback((msg: string) => {
     setStatus(msg);
@@ -124,6 +137,25 @@ export function SettingsPanel({ api, connected }: Props) {
     }
   }, [api, tunnelRunning]);
 
+  // ── Connection ──
+
+  const handleConnect = useCallback(() => {
+    const parsed = parseConnectionInput(localConnectionInput);
+    if (parsed.url && onConnect) {
+      onConnect(parsed.url, parsed.token);
+    }
+  }, [localConnectionInput, onConnect]);
+
+  const handleScan = useCallback((code: string) => {
+    setScanning(false);
+    const parsed = parseConnectionInput(code);
+    if (parsed.url && onConnect) {
+      setLocalConnectionInput(code);
+      onConnectionInputChange?.(code);
+      onConnect(parsed.url, parsed.token);
+    }
+  }, [onConnect, onConnectionInputChange]);
+
   const dis = !connected;
 
   return (
@@ -133,8 +165,61 @@ export function SettingsPanel({ api, connected }: Props) {
         {status && <span className="save-status">{status}</span>}
       </div>
 
+      {/* ── Connection (shown when not connected) ── */}
       {dis && (
-        <p style={{ color: "#999", fontStyle: "italic" }}>Connect to a server to change settings.</p>
+        <section className="connection-section">
+          <div className="placeholder-card">
+            {scanning ? (
+              <QRScanner onScan={handleScan} onCancel={() => setScanning(false)} />
+            ) : (
+              <>
+                <h3>Connect to a Chad server</h3>
+                <div className="placeholder-steps">
+                  <p>
+                    1) Get the latest Chad server from{" "}
+                    <a
+                      href="https://github.com/iondrive-co/chad/releases"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      the releases page
+                    </a>
+                    .
+                  </p>
+                  <p>
+                    2) Run it on an isolated machine with <code>chad --tunnel</code>.
+                  </p>
+                  <p>
+                    3) Scan the QR code it displays, or paste the pairing key below.
+                  </p>
+                </div>
+                <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem", flexWrap: "wrap" }}>
+                  <input
+                    type="text"
+                    placeholder="Server URL or pairing code"
+                    value={localConnectionInput}
+                    onChange={(e) => {
+                      setLocalConnectionInput(e.target.value);
+                      onConnectionInputChange?.(e.target.value);
+                    }}
+                    onKeyDown={(e) => e.key === "Enter" && handleConnect()}
+                    style={{ flex: "1", minWidth: "12rem", padding: "0.4rem 0.6rem" }}
+                  />
+                  <button onClick={handleConnect} style={{ padding: "0.4rem 1rem" }}>
+                    Connect
+                  </button>
+                </div>
+                <button
+                  className="scan-qr-btn"
+                  onClick={() => setScanning(true)}
+                  style={{ marginTop: "1rem" }}
+                >
+                  Scan QR Code
+                </button>
+              </>
+            )}
+          </div>
+        </section>
       )}
 
       {/* ── Verification ── */}
@@ -146,11 +231,6 @@ export function SettingsPanel({ api, connected }: Props) {
               <input type="checkbox" checked={verification.enabled}
                 onChange={() => toggleVerification("enabled")} disabled={saving || dis} />
               Verification enabled
-            </label>
-            <label className="toggle-label">
-              <input type="checkbox" checked={verification.auto_run}
-                onChange={() => toggleVerification("auto_run")} disabled={saving || dis} />
-              Auto-run verification
             </label>
           </>
         )}

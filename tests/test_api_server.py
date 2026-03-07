@@ -1,11 +1,12 @@
 """Tests for Chad server API endpoints."""
 
+from importlib import resources
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from chad.server.main import create_app
+from chad.server.main import create_app, _resolve_ui_paths
 from chad.server.services import reset_session_manager, reset_task_executor
 from chad.server.state import get_config_manager, reset_state
 
@@ -196,13 +197,39 @@ class TestConfigEndpoints:
         data = response.json()
         assert "ui_mode" in data
 
+
+class TestUIServing:
+    """Ensure the packaged React UI is served correctly."""
+
+    def test_root_serves_index_html(self, client):
+        response = client.get("/")
+        assert response.status_code == 200
+        body = response.content.decode("utf-8", errors="ignore")
+        assert "<div id=\"root\"></div>" in body
+
+    def test_static_assets_are_served(self, client):
+        _index, assets_dir = _resolve_ui_paths()
+        assert assets_dir is not None, "Expected the UI resolver to provide an assets directory"
+
+        js_files = [p for p in assets_dir.iterdir() if p.suffix == ".js"]
+        assert js_files, "Expected at least one JS asset in the resolved UI assets directory"
+
+        asset_name = js_files[0].name
+        response = client.get(f"/assets/{asset_name}")
+        assert response.status_code == 200
+        assert response.content == (assets_dir / asset_name).read_bytes()
+
+    def test_packaged_ui_package_exists(self):
+        with resources.as_file(resources.files("chad.ui_dist")) as ui_root:
+            assert (ui_root / "__init__.py").is_file()
+            assert (ui_root / "index.html").is_file()
+
     def test_get_verification_settings(self, client):
         """Can get verification settings."""
         response = client.get("/api/v1/config/verification")
         assert response.status_code == 200
         data = response.json()
         assert "enabled" in data
-        assert "auto_run" in data
 
     def test_get_verification_agent_default(self, client):
         """Returns None when no verification agent is set."""
@@ -253,29 +280,25 @@ class TestConfigEndpoints:
         get_data = get_response.json()
         assert get_data["account_name"] is None
 
-    def test_update_verification_settings_partial(self, client):
-        """Can partially update verification settings and disable verification."""
-        # Disable verification only
+    def test_update_verification_settings(self, client):
+        """Can update verification settings and disable verification."""
+        # Disable verification
         resp = client.put("/api/v1/config/verification", json={"enabled": False})
         assert resp.status_code == 200
         data = resp.json()
         assert data["enabled"] is False
-        # auto_run should remain default True
-        assert data["auto_run"] is True
 
-        # Disable auto_run while enabled already false
-        resp2 = client.put("/api/v1/config/verification", json={"auto_run": False})
+        # GET should reflect latest value
+        resp2 = client.get("/api/v1/config/verification")
         assert resp2.status_code == 200
         data2 = resp2.json()
         assert data2["enabled"] is False
-        assert data2["auto_run"] is False
 
-        # GET should reflect latest values
-        resp3 = client.get("/api/v1/config/verification")
+        # Re-enable verification
+        resp3 = client.put("/api/v1/config/verification", json={"enabled": True})
         assert resp3.status_code == 200
         data3 = resp3.json()
-        assert data3["enabled"] is False
-        assert data3["auto_run"] is False
+        assert data3["enabled"] is True
 
     def test_set_action_settings_invalid_account_returns_400(self, client):
         """Action settings with invalid switch target should return 400."""
@@ -529,14 +552,14 @@ class TestProjectSettingsEndpoints:
                 "project_path": project_path,
                 "lint_command": "flake8 .",
                 "test_command": "pytest tests/",
-                "instructions_path": "AGENTS.md",
+                "instructions_paths": ["AGENTS.md"],
             },
         )
         assert response.status_code == 200
         data = response.json()
         assert data["lint_command"] == "flake8 ."
         assert data["test_command"] == "pytest tests/"
-        assert data["instructions_path"] == "AGENTS.md"
+        assert data["instructions_paths"] == ["AGENTS.md"]
 
     def test_get_project_settings_after_save(self, client, tmp_path):
         """Saved project settings are returned on GET."""
@@ -748,6 +771,115 @@ class TestHistoricalSessionEvents:
         assert len(data["events"]) == 3  # seqs 3, 4, 5
         seqs = [e["seq"] for e in data["events"]]
         assert seqs == [3, 4, 5]
+
+
+class TestConversationEndpoint:
+    """Tests for the conversation timeline endpoint."""
+
+    def test_conversation_returns_latest_task_only(self, client, tmp_path, monkeypatch):
+        """Conversation should include only the latest task's items."""
+        from chad.util.event_log import (
+            EventLog,
+            SessionStartedEvent,
+            UserMessageEvent,
+            MilestoneEvent,
+            AssistantMessageEvent,
+        )
+
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        monkeypatch.setenv("CHAD_LOG_DIR", str(log_dir))
+
+        create_resp = client.post("/api/v1/sessions", json={"name": "Conversation Test"})
+        session_id = create_resp.json()["id"]
+
+        event_log = EventLog(session_id, base_dir=log_dir)
+
+        # Task 1
+        event_log.log(SessionStartedEvent(
+            task_description="Old task",
+            project_path="/test/path",
+            coding_provider="mock",
+            coding_account="acc-old",
+        ))
+        event_log.log(UserMessageEvent(content="First message"))
+        event_log.log(MilestoneEvent(
+            milestone_type="exploration",
+            title="Discovery",
+            summary="Explored project",
+        ))
+
+        # Task 2 (latest)
+        event_log.log(SessionStartedEvent(
+            task_description="New task",
+            project_path="/test/path",
+            coding_provider="mock",
+            coding_account="acc-new",
+        ))
+        event_log.log(UserMessageEvent(content="Second message"))
+        event_log.log(MilestoneEvent(
+            milestone_type="coding_complete",
+            title="Coding Complete",
+            summary="Finished coding",
+        ))
+        event_log.log(AssistantMessageEvent(blocks=[{"kind": "text", "content": "All done"}]))
+        event_log.close()
+
+        resp = client.get(f"/api/v1/sessions/{session_id}/conversation")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        assert data["task"]["task_description"] == "New task"
+        item_types = [item["type"] for item in data["items"]]
+        assert item_types == ["user", "milestone", "assistant"]
+        assert data["items"][0]["content"] == "Second message"
+        assert "Finished coding" in data["items"][1]["summary"]
+        assert "All done" in data["items"][2]["content"]
+
+    def test_conversation_since_seq_filters_items(self, client, tmp_path, monkeypatch):
+        """Conversation should honor since_seq for incremental fetches."""
+        from chad.util.event_log import (
+            EventLog,
+            SessionStartedEvent,
+            UserMessageEvent,
+            MilestoneEvent,
+        )
+
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        monkeypatch.setenv("CHAD_LOG_DIR", str(log_dir))
+
+        create_resp = client.post("/api/v1/sessions", json={"name": "Conversation Incremental"})
+        session_id = create_resp.json()["id"]
+
+        event_log = EventLog(session_id, base_dir=log_dir)
+        event_log.log(SessionStartedEvent(
+            task_description="Incremental",
+            project_path="/test/path",
+            coding_provider="mock",
+            coding_account="acc-new",
+        ))
+        event_log.log(UserMessageEvent(content="Start"))
+        first_seq = event_log._seq
+        event_log.log(MilestoneEvent(
+            milestone_type="coding_complete",
+            title="Done",
+            summary="Finished",
+        ))
+        event_log.close()
+
+        resp_all = client.get(f"/api/v1/sessions/{session_id}/conversation")
+        assert resp_all.status_code == 200
+        assert len(resp_all.json()["items"]) == 2
+
+        resp_filtered = client.get(
+            f"/api/v1/sessions/{session_id}/conversation",
+            params={"since_seq": first_seq},
+        )
+        assert resp_filtered.status_code == 200
+        filtered_items = resp_filtered.json()["items"]
+        assert len(filtered_items) == 1
+        assert filtered_items[0]["type"] == "milestone"
 
 
 class TestUploadEndpoint:

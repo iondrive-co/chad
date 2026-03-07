@@ -139,6 +139,8 @@ class SessionEventLoop:
         "weekly_limit_reached": "Weekly Limit",
         "usage_threshold": "Usage Warning",
         "verification_started": "Verification",
+        "verification_automated": "Automated Verification",
+        "verification_llm": "LLM Verification",
         "verification_passed": "Verification Passed",
         "verification_failed": "Verification Failed",
         "revision_started": "Re-coding",
@@ -368,8 +370,13 @@ class SessionEventLoop:
                                 summary = meaningful_summary
 
                             self._session_limit_summary = summary
-                            self._emit_milestone(limit_type, summary)
-                            self._check_session_limit_action()
+                            self._check_session_limit_action(limit_type)
+
+                            with self._pending_action_lock:
+                                has_pending_action = self._pending_action is not None
+
+                            if not has_pending_action:
+                                self._emit_milestone(limit_type, summary)
 
         # Scan for coding completion JSON
         if not self._coding_complete_detected:
@@ -416,6 +423,10 @@ class SessionEventLoop:
 
     def _check_usage_thresholds(self) -> None:
         """Check provider usage metrics for threshold crossings based on action_settings."""
+        with self._pending_action_lock:
+            if self._pending_action is not None:
+                return
+
         # Cache current values per event type so we only call each usage fn once
         current_cache: dict[str, float | None] = {}
 
@@ -467,41 +478,61 @@ class SessionEventLoop:
                 if self._terminate_pty_fn:
                     self._terminate_pty_fn()
 
-    def _check_session_limit_action(self) -> None:
-        """Bridge session limit detection into the action system.
+    def _check_session_limit_action(self, limit_type: str = "session_limit_reached") -> None:
+        """Bridge limit detection into the action system.
 
-        When _analyze_output detects quota exhaustion via terminal text, check
-        if any action_settings rule for session_usage has an await_reset or
-        switch_provider action.  If so, set _pending_action and terminate the
-        PTY — the same path taken by _check_usage_thresholds on a crossing.
+        When _analyze_output detects quota exhaustion via terminal text, find
+        the matching action_settings rule and set _pending_action, then
+        terminate the PTY — the same path taken by _check_usage_thresholds
+        on a crossing.
 
-        This handles the case where a session starts already at quota limit
-        (so the threshold-crossing logic never fires) but the CLI outputs a
-        quota error message and exits quickly.
+        This handles the case where the CLI outputs a quota error message
+        (so the percentage-based threshold-crossing logic never fires or
+        the usage API returns stale/failed data at the moment of exhaustion).
+
+        Args:
+            limit_type: "session_limit_reached" or "weekly_limit_reached",
+                as returned by the provider's is_quota_exhausted().
         """
         with self._pending_action_lock:
             if self._pending_action is not None:
                 return  # Already have a pending action, don't overwrite
 
-        for setting in self._action_settings:
-            if setting.get("event") != "session_usage":
-                continue
-            action = setting.get("action", "notify")
-            if action not in ("await_reset", "switch_provider"):
-                continue
+        # Map limit_type → event types to match, in priority order.
+        # "weekly_limit_reached" should match weekly_usage rules first,
+        # then fall back to session_usage rules (weekly exhaustion implies
+        # session exhaustion too).
+        # "session_limit_reached" matches session_usage rules, but also
+        # weekly_usage rules since the usage API may misclassify weekly
+        # limits as session limits when the API call fails at quota.
+        if limit_type == "weekly_limit_reached":
+            match_events = ("weekly_usage", "session_usage")
+        else:
+            match_events = ("session_usage", "weekly_usage")
 
-            with self._pending_action_lock:
-                if self._pending_action is not None:
-                    return
-                self._pending_action = {
-                    **setting,
-                    "current_pct": 100.0,
-                    "label": "session",
-                }
+        for match_event in match_events:
+            for setting in self._action_settings:
+                if setting.get("event") != match_event:
+                    continue
+                action = setting.get("action", "notify")
+                if action not in ("await_reset", "switch_provider"):
+                    continue
 
-            if self._terminate_pty_fn:
-                self._terminate_pty_fn()
-            return
+                mapping = self._EVENT_USAGE_MAP.get(match_event)
+                label = mapping[1] if mapping else match_event
+
+                with self._pending_action_lock:
+                    if self._pending_action is not None:
+                        return
+                    self._pending_action = {
+                        **setting,
+                        "current_pct": 100.0,
+                        "label": label,
+                    }
+
+                if self._terminate_pty_fn:
+                    self._terminate_pty_fn()
+                return
 
     def run(
         self,

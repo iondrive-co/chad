@@ -172,6 +172,7 @@ wrong thing. Here are some suggested steps for proving:
    from chad.util.verification.tools import verify
    result = verify()  # Runs flake8 + all tests
    # Or: verify(lint_only=True)  # Just flake8
+   # Or: verify(changed_files=["src/chad/util/providers.py"])  # Targeted tests + tsc if TS changed
    ```
 2. **Run startup sanity checks** to catch import/runtime errors not covered by tests:
    ```bash
@@ -193,6 +194,12 @@ wrong thing. Here are some suggested steps for proving:
 each one is a problem that will require rework of your changes. If any do, then go back and rework and then go through
 this process again
 5. All tests must pass even if you did not break them, never skip tests for any reason.
+6. When you touch `client/` or `ui/src/`, rebuild and sync all UI assets:
+   ```bash
+   .venv/bin/python scripts/build_all_ui.py        # full: client + ui + sync
+   .venv/bin/python scripts/build_all_ui.py --quick # ui-only changes (skip client lib)
+   ```
+   This builds client lib, React UI, portable build, and syncs to `src/chad/ui_dist/`.
 
 ## Screenshots
 

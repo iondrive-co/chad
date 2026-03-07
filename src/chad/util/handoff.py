@@ -11,9 +11,11 @@ This module provides functions to:
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from .event_log import ContextCondensedEvent, EventLog
 from .message_converter import extract_conversation_from_events, format_for_provider
+from .prompts import build_prompt
 
 
 # Patterns indicating credit/quota exhaustion across different providers.
@@ -341,11 +343,31 @@ def build_resume_prompt(
     if not task:
         task = "Continue previous work"
 
+    project_path = None
+    if started:
+        project_path = started[-1].get("project_path")
+
     context = build_handoff_summary(task, event_log, target_provider=target_provider)
 
+    resume_sections = [
+        "Continue the in-flight task using the handoff context below.",
+        "Build on the previous work instead of restarting discovery from scratch.",
+        "",
+        "## Provider Handoff Context",
+        context,
+    ]
     if new_message:
-        return f"{context}\n\nContinue with: {new_message}"
-    return context
+        resume_sections.extend([
+            "",
+            "## Resume Instructions",
+            new_message,
+        ])
+
+    resume_task = "\n".join(resume_sections)
+    return build_prompt(
+        resume_task,
+        project_path=Path(project_path) if project_path else None,
+    )
 
 
 def get_last_checkpoint_provider_session_id(event_log: EventLog) -> str | None:

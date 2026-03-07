@@ -9,6 +9,7 @@ import type {
   DiffFull,
   DiffSummary,
   MergeResult,
+  ConversationResponse,
   ProviderList,
   ServerStatus,
   Session,
@@ -186,6 +187,15 @@ export class ChadAPI {
   ): Promise<{ milestones: unknown[]; latest_seq: number }> {
     return this.get(
       `/api/v1/sessions/${sessionId}/milestones?since_seq=${sinceSeq}`,
+    );
+  }
+
+  getConversation(
+    sessionId: string,
+    sinceSeq = 0,
+  ): Promise<ConversationResponse> {
+    return this.get(
+      `/api/v1/sessions/${sessionId}/conversation?since_seq=${sinceSeq}`,
     );
   }
 
@@ -444,8 +454,7 @@ export class ChadAPI {
     project_type: string | null;
     lint_command: string | null;
     test_command: string | null;
-    instructions_path: string | null;
-    architecture_path: string | null;
+    instructions_paths: string[];
   }> {
     return this.get(
       `/api/v1/config/project?project_path=${encodeURIComponent(projectPath)}`,
@@ -457,18 +466,25 @@ export class ChadAPI {
       project_path: string;
       lint_command?: string | null;
       test_command?: string | null;
-      instructions_path?: string | null;
-      architecture_path?: string | null;
+      instructions_paths?: string[] | null;
     },
   ): Promise<{
     project_path: string;
     project_type: string | null;
     lint_command: string | null;
     test_command: string | null;
-    instructions_path: string | null;
-    architecture_path: string | null;
+    instructions_paths: string[];
   }> {
     return this.put("/api/v1/config/project", settings);
+  }
+
+  getPromptPreviews(
+    projectPath?: string,
+  ): Promise<{ coding: string; verification: string }> {
+    const params = projectPath
+      ? `?project_path=${encodeURIComponent(projectPath)}`
+      : "";
+    return this.get(`/api/v1/config/prompt-previews${params}`);
   }
 
   // ── Session Log ──

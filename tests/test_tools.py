@@ -98,6 +98,120 @@ class TestVerify:
         assert result["success"] is False
         assert "not supported" in result["error"]
 
+    def test_verify_with_changed_files_targets_tests(self):
+        """verify(changed_files=...) should run only relevant test files."""
+        from chad.util.verification.tools import verify
+
+        commands = []
+
+        def fake_run(cmd, **kwargs):
+            commands.append(cmd)
+            return type("Proc", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+        with patch("chad.util.verification.tools.subprocess.run", fake_run):
+            result = verify(
+                changed_files=["src/chad/util/providers.py"]
+            )
+
+        assert result["success"] is True
+        # Should have targeted test files in the pytest command
+        pytest_cmd = [c for c in commands if any("pytest" in str(x) for x in c)]
+        assert len(pytest_cmd) == 1
+        cmd_str = " ".join(str(x) for x in pytest_cmd[0])
+        assert "test_providers.py" in cmd_str
+
+    def test_verify_with_changed_files_fallback_to_full(self):
+        """verify(changed_files=...) with unmapped files falls back to full suite."""
+        from chad.util.verification.tools import verify
+
+        commands = []
+
+        def fake_run(cmd, **kwargs):
+            commands.append(cmd)
+            return type("Proc", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+        with patch("chad.util.verification.tools.subprocess.run", fake_run):
+            result = verify(
+                changed_files=["some/unknown/file.py"]
+            )
+
+        assert result["success"] is True
+        pytest_cmd = [c for c in commands if any("pytest" in str(x) for x in c)]
+        assert len(pytest_cmd) == 1
+        cmd_str = " ".join(str(x) for x in pytest_cmd[0])
+        assert "tests/" in cmd_str
+
+    def test_verify_with_ts_files_runs_tsc(self):
+        """verify(changed_files=...) with TS files should run tsc."""
+        from chad.util.verification.tools import verify
+
+        commands = []
+
+        def fake_run(cmd, **kwargs):
+            commands.append(cmd)
+            return type("Proc", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+        with patch("chad.util.verification.tools.subprocess.run", fake_run):
+            with patch("chad.util.verification.tools.shutil.which", return_value="/usr/bin/npx"):
+                result = verify(
+                    changed_files=["ui/src/components/ChatView.tsx"]
+                )
+
+        assert result["tsc"] is not None
+        assert result["tsc"]["passed"] is True
+
+
+class TestFileToTestMapping:
+    """Test the source-file-to-test-file mapping."""
+
+    def test_maps_provider_source_to_test(self):
+        from chad.util.verification.tools import find_tests_for_files
+        tests = find_tests_for_files(["src/chad/util/providers.py"])
+        assert "test_providers.py" in tests
+
+    def test_maps_task_executor_to_multiple_tests(self):
+        from chad.util.verification.tools import find_tests_for_files
+        tests = find_tests_for_files(
+            ["src/chad/server/services/task_executor.py"]
+        )
+        assert "test_task_executor.py" in tests
+        assert "test_unified_streaming.py" in tests
+
+    def test_maps_multiple_files(self):
+        from chad.util.verification.tools import find_tests_for_files
+        tests = find_tests_for_files([
+            "src/chad/util/providers.py",
+            "src/chad/util/config_manager.py",
+        ])
+        assert "test_providers.py" in tests
+        assert "test_config_manager.py" in tests
+
+    def test_unknown_file_returns_empty(self):
+        from chad.util.verification.tools import find_tests_for_files
+        tests = find_tests_for_files(["src/chad/nonexistent_module.py"])
+        assert tests == []
+
+    def test_non_python_file_ignored(self):
+        from chad.util.verification.tools import find_tests_for_files
+        tests = find_tests_for_files(["ui/src/App.tsx", "README.md"])
+        assert tests == []
+
+    def test_source_path_to_module(self):
+        from chad.util.verification.tools import _source_path_to_module
+        assert _source_path_to_module("src/chad/util/providers.py") == "util.providers"
+        assert _source_path_to_module("src/chad/__main__.py") == "__main__"
+        assert _source_path_to_module(
+            "src/chad/server/services/task_executor.py"
+        ) == "server.services.task_executor"
+        assert _source_path_to_module("ui/src/App.tsx") is None
+
+    def test_has_ts_files(self):
+        from chad.util.verification.tools import _has_ts_files
+        assert _has_ts_files(["ui/src/components/ChatView.tsx"]) is True
+        assert _has_ts_files(["client/src/api.ts"]) is True
+        assert _has_ts_files(["src/chad/util/providers.py"]) is False
+        assert _has_ts_files([]) is False
+
 
 class TestParseVerificationResponse:
     """Test parse_verification_response with various inputs."""

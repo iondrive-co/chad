@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 import type { ChadAPI, DiffFull, MergeConflict } from "chad-client";
+import { ChadAPIError } from "chad-client";
 import { DiffViewer } from "./DiffViewer.tsx";
 import { ConflictViewer } from "./ConflictViewer.tsx";
 
@@ -105,7 +106,14 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
         setPhase("error");
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Merge failed");
+      if (e instanceof ChadAPIError && e.status === 404) {
+        setError(
+          "Session was not found on the server (it may have expired or the server restarted). " +
+          "Please reopen the session and rerun the task before merging. You can discard this worktree if it is stale.",
+        );
+      } else {
+        setError(e instanceof Error ? e.message : "Merge failed");
+      }
       setPhase("error");
     }
   }, [api, sessionId, targetBranch, commitMessage, onMerged]);

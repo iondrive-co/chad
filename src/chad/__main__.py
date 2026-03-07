@@ -14,6 +14,7 @@ from pathlib import Path
 from .util.cleanup import cleanup_on_startup, cleanup_on_shutdown
 from .util.config_manager import ConfigManager
 from .util.config import ensure_project_root_env
+from . import __version__
 
 
 def _start_parent_watchdog() -> threading.Thread | None:
@@ -318,6 +319,11 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="Chad: YOLO AI")
     parser.add_argument(
+        "--version",
+        action="version",
+        version=f"chad {__version__}",
+    )
+    parser.add_argument(
         "--mode",
         type=str,
         choices=["unified", "server"],
@@ -359,6 +365,19 @@ def main() -> int:
     # Ensure all child agents inherit the active project root
     project_root = Path(__file__).resolve().parents[2]
     ensure_project_root_env(project_root)
+
+    # Auto-rebuild UI bundles when launched from PyCharm (PYCHARM_HOSTED)
+    # or when explicitly requested via env flag.
+    if os.environ.get("PYCHARM_HOSTED") and "CHAD_AUTO_REBUILD_UI" not in os.environ:
+        os.environ["CHAD_AUTO_REBUILD_UI"] = "1"
+
+    auto_rebuild = os.environ.get("CHAD_AUTO_REBUILD_UI") == "1"
+    if auto_rebuild:
+        try:
+            from chad.util.ui_build import ensure_ui_built
+            ensure_ui_built(force=os.environ.get("CHAD_AUTO_REBUILD_UI") == "1")
+        except Exception as exc:  # pragma: no cover - best effort
+            print(f"UI autobuild skipped: {exc}")
 
     # Run startup cleanup (worktrees, logs, screenshots older than N days)
     config_mgr = ConfigManager()

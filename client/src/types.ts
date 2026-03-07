@@ -144,7 +144,6 @@ export interface AccountUsage {
 
 export interface VerificationSettings {
   enabled: boolean;
-  auto_run: boolean;
 }
 
 export interface CleanupSettings {
@@ -263,6 +262,38 @@ export interface StreamEvent {
   seq: number | null;
 }
 
+// ── Conversation timeline ──
+
+export type ConversationItemType = "user" | "assistant" | "milestone";
+
+export interface ConversationItem {
+  seq: number;
+  ts: string;
+  type: ConversationItemType;
+  content?: string | null;
+  blocks?: Array<Record<string, unknown>> | null;
+  milestone_type?: string | null;
+  title?: string | null;
+  summary?: string | null;
+}
+
+export interface ConversationTask {
+  seq: number;
+  task_description: string;
+  project_path: string;
+  coding_provider: string;
+  coding_account: string;
+  coding_model: string | null;
+  verification_account: string | null;
+}
+
+export interface ConversationResponse {
+  session_id: string;
+  task: ConversationTask;
+  items: ConversationItem[];
+  latest_seq: number;
+}
+
 // ── WebSocket types ──
 
 export type WSClientMessageType = "input" | "resize" | "cancel" | "ping";
@@ -296,16 +327,19 @@ export interface ProjectSettings {
   project_type: string | null;
   lint_command: string | null;
   test_command: string | null;
-  instructions_path: string | null;
-  architecture_path: string | null;
+  instructions_paths: string[];
 }
 
 export interface ProjectSettingsUpdate {
   project_path: string;
   lint_command?: string | null;
   test_command?: string | null;
-  instructions_path?: string | null;
-  architecture_path?: string | null;
+  instructions_paths?: string[] | null;
+}
+
+export interface PromptPreviews {
+  coding: string;
+  verification: string;
 }
 
 // ── Session log ──

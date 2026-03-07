@@ -17,6 +17,31 @@ from chad.util.prompts import (
 
 MAX_VERIFICATION_PROMPT_CHARS = 6000
 
+# Milestone titles - must match session_event_loop._MILESTONE_TITLES
+_MILESTONE_TITLES = {
+    "verification_automated": "Automated Verification",
+    "verification_llm": "LLM Verification",
+}
+
+
+def _emit_milestone(
+    emit: Callable | None,
+    milestone_type: str,
+    summary: str,
+    details: dict | None = None,
+) -> None:
+    """Emit a milestone event if emit callback is provided."""
+    if emit is None:
+        return
+    title = _MILESTONE_TITLES.get(milestone_type, milestone_type)
+    emit(
+        "milestone",
+        milestone_type=milestone_type,
+        title=title,
+        summary=summary,
+        details=details or {},
+    )
+
 
 def _truncate_verification_output(text: str, limit: int = MAX_VERIFICATION_PROMPT_CHARS) -> str:
     """Compact the coding agent output for verification prompts."""
@@ -39,6 +64,8 @@ def _truncate_verification_output(text: str, limit: int = MAX_VERIFICATION_PROMP
 def _run_automated_verification(
     project_path: str,
     on_activity: Callable | None = None,
+    emit: Callable | None = None,
+    attempt: int = 1,
 ) -> tuple[bool, str | None]:
     """Run automated verification (flake8/linting).
 
@@ -49,6 +76,13 @@ def _run_automated_verification(
         from chad.util.verification.tools import verify as run_verify
         if on_activity:
             on_activity("system", "Running verification (flake8)...")
+
+        _emit_milestone(
+            emit,
+            "verification_automated",
+            "Running flake8 and linting checks",
+            {"attempt": attempt},
+        )
 
         verify_result = run_verify(project_root=project_path, lint_only=True)
 
@@ -158,7 +192,9 @@ def run_verification(
         return None, "Verification aborted: coding agent output was empty."
 
     # Step 1: Run automated verification (flake8/linting)
-    auto_passed, auto_feedback = _run_automated_verification(project_path, on_activity)
+    auto_passed, auto_feedback = _run_automated_verification(
+        project_path, on_activity, emit=emit, attempt=attempt,
+    )
     if not auto_passed:
         return False, auto_feedback or "Automated verification failed"
 
@@ -173,6 +209,7 @@ def run_verification(
             verification_model=verification_model,
             verification_reasoning=verification_reasoning,
             on_activity=on_activity,
+            emit=emit,
             attempt=attempt,
         )
 
@@ -186,6 +223,13 @@ def run_verification(
 
     # Run verification agent via PTY - two phase: explore then conclude
     combined_prompt = exploration_prompt + "\n\n" + conclusion_prompt
+
+    _emit_milestone(
+        emit,
+        "verification_llm",
+        "Running LLM verification agent",
+        {"attempt": attempt},
+    )
 
     exit_code, response = run_phase_fn(
         task=task,
@@ -240,6 +284,7 @@ def _run_provider_verification(
     verification_model: str | None = None,
     verification_reasoning: str | None = None,
     on_activity: Callable | None = None,
+    emit: Callable | None = None,
     attempt: int = 1,
 ) -> tuple[bool | None, str]:
     """Fallback: Run LLM verification using the AIProvider abstraction."""
@@ -268,12 +313,19 @@ def _run_provider_verification(
     )
     conclusion_prompt = get_verification_conclusion_prompt()
 
+    _emit_milestone(
+        emit,
+        "verification_llm",
+        "Running LLM verification agent",
+        {"attempt": attempt},
+    )
+
     try:
         max_parse_attempts = 2
         last_error = None
         retry_conclusion_prompt = conclusion_prompt
 
-        for attempt in range(max_parse_attempts):
+        for parse_attempt in range(max_parse_attempts):
             verifier = create_provider(verification_config)
             if on_activity:
                 verifier.set_activity_callback(on_activity)
@@ -306,7 +358,7 @@ def _run_provider_verification(
                     return False, feedback
                 except VerificationParseError as e:
                     last_error = str(e)
-                    if attempt < max_parse_attempts - 1:
+                    if parse_attempt < max_parse_attempts - 1:
                         retry_conclusion_prompt = (
                             "Your previous response was not valid JSON. "
                             "You MUST respond with ONLY a JSON object like:\n"

@@ -35,7 +35,7 @@ export function useStream(
   sinceSeqRef.current = sinceSeq;
 
   const decodeTerminal = useCallback((data: string, isText: boolean): string => {
-    const normalize = (text: string) => text.replace(/(?<!\r)\n/g, "\r\n");
+    const normalize = (text: string) => text.replace(/\r\n?/g, "\n");
 
     if (isText) {
       return normalize(data);

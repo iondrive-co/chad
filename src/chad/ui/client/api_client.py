@@ -335,6 +335,19 @@ class APIClient:
         resp.raise_for_status()
         return resp.json().get("milestones", [])
 
+    def get_conversation(
+        self,
+        session_id: str,
+        since_seq: int = 0,
+    ) -> dict[str, Any]:
+        """Get the conversation timeline for the latest task in a session."""
+        resp = self._client.get(
+            self._url(f"/sessions/{session_id}/conversation"),
+            params={"since_seq": since_seq},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     # Tasks
     def start_task(
         self,
@@ -503,14 +516,11 @@ class APIClient:
     def update_verification_settings(
         self,
         enabled: bool | None = None,
-        auto_run: bool | None = None,
     ) -> dict[str, Any]:
         """Update verification settings."""
         data = {}
         if enabled is not None:
             data["enabled"] = enabled
-        if auto_run is not None:
-            data["auto_run"] = auto_run
 
         resp = self._client.put(self._url("/config/verification"), json=data)
         resp.raise_for_status()

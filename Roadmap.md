@@ -1,9 +1,10 @@
-v0.13 Intentionality Reduction
+Chad 0.13: Intentionality Reduction
 
-- Planning agent
-- Queue of bugs/features. Get agent to add to this list as it finds issues while coding
-
-v0.14 Slip Slop Slap
-
+Chat view
+Agent interruption
+Improvements to mobile, handoff
 Resume session at startup
-Session branching
+
+Chad 1.0: Slip Slop Slap
+
+Bug fixes and stability

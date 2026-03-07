@@ -1,10 +1,8 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { ChadAPI } from "chad-client";
-import { SessionList } from "./components/SessionList.tsx";
 import { ChatView } from "./components/ChatView.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { ProvidersPanel } from "./components/ProvidersPanel.tsx";
-import { QRScanner } from "./components/QRScanner.tsx";
 import { useSessions } from "./hooks/useSessions.ts";
 
 type Tab = "chat" | "providers" | "settings";
@@ -52,12 +50,10 @@ export function App() {
   const [token, setToken] = useState<string | undefined>(undefined);
   const api = useMemo(() => new ChadAPI(apiBaseUrl, token), [apiBaseUrl, token]);
   const [connected, setConnected] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("chat");
+  const [tab, setTab] = useState<Tab>("settings");
   const [sessionVersion, setSessionVersion] = useState(0);
   const [defaultProjectPath, setDefaultProjectPath] = useState("");
-  const [scanning, setScanning] = useState(false);
   // Track whether the user has ever set a URL (vs initial empty state)
   const hasUrl = useRef(false);
 
@@ -66,21 +62,20 @@ export function App() {
     if (!apiBaseUrl) {
       // No URL set yet — stay disconnected, don't retry
       setConnected(false);
-      setError(null);
+
       return;
     }
     hasUrl.current = true;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     setConnected(false);
-    setError(null);
     const tryConnect = async () => {
       try {
         await api.getStatus();
         const prefs = await api.getPreferences().catch(() => null);
         if (!cancelled) {
           setConnected(true);
-          setError(null);
+    
           if (prefs?.last_project_path) {
             setDefaultProjectPath(prefs.last_project_path);
           }
@@ -92,7 +87,6 @@ export function App() {
         }
       } catch {
         if (!cancelled) {
-          setError("Waiting for Chad server...");
           timer = setTimeout(tryConnect, 1000);
         }
       }
@@ -113,14 +107,6 @@ export function App() {
     setSessionVersion((v) => v + 1);
   }, []);
 
-  const connect = useCallback(() => {
-    const parsed = parseConnectionInput(connectionInput);
-    if (!parsed.url) return;
-    setApiBaseUrl(parsed.url);
-    setToken(parsed.token);
-    setSelectedSession(null);
-  }, [connectionInput]);
-
   // On initial mount, check for #pair=... hash (from QR code scan) or
   // auto-detect if we're served by the API (not file://)
   useEffect(() => {
@@ -139,115 +125,88 @@ export function App() {
     }
   }, []);
 
+  const handleNewSession = useCallback(async () => {
+    const session = await createSession();
+    if (session) {
+      setSelectedSession(session.id);
+      setTab("chat");
+      refreshSessions();
+    }
+  }, [createSession, refreshSessions]);
+
+  const handleDeleteSession = useCallback(async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    await deleteSession(id);
+    if (selectedSession === id) {
+      setSelectedSession(sessions.find(s => s.id !== id)?.id ?? null);
+    }
+    refreshSessions();
+  }, [deleteSession, selectedSession, sessions, refreshSessions]);
+
+  const handleSelectSession = useCallback((id: string) => {
+    setSelectedSession(id);
+    setTab("chat");
+  }, []);
+
   return (
     <div className="app">
       <header className="app-header">
-        <h1>Chad</h1>
-        <span className={`status-dot${connected ? " connected" : ""}`} />
-        {!connected && (
-          <span className="connect-status">
-            {error ?? (apiBaseUrl ? "Connecting..." : "Not connected")}
-          </span>
-        )}
+        <h1 className={connected ? "connected" : ""}>Chad</h1>
         <nav className="tabs">
-          <button className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}>
-            Chat
-          </button>
           <button className={tab === "providers" ? "active" : ""} onClick={() => setTab("providers")}>
             Providers
           </button>
           <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>
             Settings
           </button>
-        </nav>
-        <div style={{ marginLeft: "auto", display: "flex", gap: "0.25rem", alignItems: "center" }}>
-          {!connected && (
+          {connected && sessions.length > 0 && (
             <>
-              <input
-                type="text"
-                placeholder="Server URL or pairing code"
-                value={connectionInput}
-                onChange={(e) => setConnectionInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && connect()}
-                style={{ width: "14rem", padding: "0.2rem 0.4rem", fontSize: "0.85rem" }}
-              />
-              <button onClick={connect} style={{ fontSize: "0.85rem", padding: "0.2rem 0.6rem" }}>
-                Connect
-              </button>
+              <span className="tab-separator" />
+              {[...sessions].reverse().map((s) => (
+                <button
+                  key={s.id}
+                  className={`session-tab ${s.id === selectedSession && tab === "chat" ? "active" : ""}`}
+                  onClick={() => handleSelectSession(s.id)}
+                  title={s.name}
+                >
+                  <span className="session-tab-name">{s.name}</span>
+                  {s.active && !s.paused && <span className="badge running-badge">R</span>}
+                  {s.paused && <span className="badge paused-badge">P</span>}
+                  {s.has_changes && !s.active && <span className="badge changes-badge">C</span>}
+                  <span
+                    className="session-tab-close"
+                    onClick={(e) => handleDeleteSession(e, s.id)}
+                    title="Delete session"
+                  >
+                    x
+                  </span>
+                </button>
+              ))}
             </>
           )}
-          {connected && apiBaseUrl && (
-            <span style={{ fontSize: "0.8rem", opacity: 0.7 }}>
-              Remote: {apiBaseUrl.replace("https://", "").replace("http://", "").replace(".trycloudflare.com", "")}
-            </span>
+          {connected && (
+            <button
+              className="new-session-btn"
+              onClick={handleNewSession}
+              disabled={sessionsLoading}
+              title="New session"
+            >
+              New
+            </button>
           )}
-        </div>
+        </nav>
+        {connected && apiBaseUrl && (
+          <span style={{ marginLeft: "auto", fontSize: "0.8rem", opacity: 0.7 }}>
+            {apiBaseUrl.replace("https://", "").replace("http://", "").replace(".trycloudflare.com", "")}
+          </span>
+        )}
       </header>
 
       <div className="app-body">
-        {/* Keep chat content mounted so form state and merge panel survive tab switches */}
+        {/* Chat view - only when Chat tab is active */}
         <div style={{ display: tab === "chat" ? "contents" : "none" }}>
-          <aside className="sidebar">
-            <SessionList
-              api={api}
-              sessions={sessions}
-              loading={sessionsLoading}
-              createSession={createSession}
-              deleteSession={deleteSession}
-              selectedId={selectedSession}
-              onSelect={setSelectedSession}
-              onRefresh={refreshSessions}
-              connected={connected}
-            />
-          </aside>
           <main className="main">
-            {!connected ? (
-              <div className="placeholder">
-                <div className="placeholder-card">
-                  {scanning ? (
-                    <QRScanner
-                      onScan={(code) => {
-                        setScanning(false);
-                        const parsed = parseConnectionInput(code);
-                        if (parsed.url) {
-                          setConnectionInput(code);
-                          setApiBaseUrl(parsed.url);
-                          setToken(parsed.token);
-                          setSelectedSession(null);
-                        }
-                      }}
-                      onCancel={() => setScanning(false)}
-                    />
-                  ) : (
-                    <>
-                      <h3>Connect to a Chad server</h3>
-                      <div className="placeholder-steps">
-                        <p>
-                          1) Get the latest Chad server from{" "}
-                          <a
-                            href="https://github.com/iondrive-co/chad/releases"
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            the releases page
-                          </a>
-                          .
-                        </p>
-                        <p>
-                          2) Run it on an isolated machine with <code>chad --tunnel</code>.
-                        </p>
-                        <p>
-                          3) Scan the QR code it displays, or paste the pairing key above.
-                        </p>
-                      </div>
-                      <button className="scan-qr-btn" onClick={() => setScanning(true)}>
-                        Scan QR Code
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            ) : selectedSession ? (
+            {selectedSession ? (
               <ChatView
                 key={selectedSession}
                 api={api}
@@ -272,7 +231,17 @@ export function App() {
         )}
         {tab === "settings" && (
           <main className="main full-width">
-            <SettingsPanel api={api} connected={connected} />
+            <SettingsPanel
+              api={api}
+              connected={connected}
+              connectionInput={connectionInput}
+              onConnectionInputChange={setConnectionInput}
+              onConnect={(url, newToken) => {
+                setApiBaseUrl(url);
+                setToken(newToken);
+                setSelectedSession(null);
+              }}
+            />
           </main>
         )}
       </div>
