@@ -2830,6 +2830,57 @@ class TestUsagePercentageCalculation:
         assert pct1b == pytest.approx(10.0)   # cached, not re-fetched
         assert pct2 == pytest.approx(20.0)    # fresh data after TTL
 
+    def test_claude_provider_usage_cache_expires_after_prolonged_api_failure(self, tmp_path):
+        """Stale cache is cleared after prolonged API failures so await_reset can resume."""
+        from chad.util.providers import ClaudeCodeProvider, ModelConfig
+
+        account = "claude-stale-cache"
+        self._write_claude_creds(tmp_path, account)
+
+        call_count = [0]
+
+        def mock_success(*args, **kwargs):
+            call_count[0] += 1
+            r = Mock()
+            r.status_code = 200
+            r.json.return_value = {
+                "five_hour": {"utilization": 0.5},
+                "seven_day": {"utilization": 100.0},  # 100% weekly
+            }
+            return r
+
+        def mock_failure(*args, **kwargs):
+            call_count[0] += 1
+            r = Mock()
+            r.status_code = 429  # Rate limited
+            return r
+
+        provider = ClaudeCodeProvider(ModelConfig(
+            provider="anthropic", model_name="default", account_name=account,
+        ))
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            # First call succeeds → cache has 100% weekly
+            with patch("requests.get", side_effect=mock_success):
+                pct = provider.get_weekly_usage_percentage()
+            assert pct == pytest.approx(100.0)
+
+            # API starts failing → cache preserved (short failures are OK)
+            provider._usage_data_fetched_at -= provider._USAGE_CACHE_TTL + 1
+            with patch("requests.get", side_effect=mock_failure):
+                pct = provider.get_weekly_usage_percentage()
+            assert pct == pytest.approx(100.0), "Short failures should preserve cache"
+
+            # Simulate prolonged API failure (> 30 min since last success)
+            provider._usage_data_fetched_at -= provider._USAGE_CACHE_TTL + 1
+            provider._usage_data_last_success -= provider._USAGE_CACHE_STALE_TTL + 1
+            with patch("requests.get", side_effect=mock_failure):
+                pct = provider.get_weekly_usage_percentage()
+            # Cache should be expired → returns 0.0 (credentials exist but no data)
+            assert pct == pytest.approx(0.0), (
+                "Prolonged API failure should expire cache so await_reset can resume"
+            )
+
     def test_claude_provider_usage_reset_eta_format(self, tmp_path):
         """Reset ETA is formatted correctly for hours and minutes."""
         from datetime import datetime, timezone, timedelta

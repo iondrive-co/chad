@@ -17,7 +17,13 @@ from .api.routes import health, sessions, providers, worktree, config, ws, slack
 
 def _resolve_ui_paths() -> tuple[Path | None, Path | None]:
     """Return the UI index and assets directory if available."""
-    # Prefer packaged assets (bundled in wheel)
+    # Prefer the source-tree build for editable installs and local development.
+    repo_dist = Path(__file__).resolve().parents[3] / "ui" / "dist" / "index.html"
+    if repo_dist.is_file():
+        assets = repo_dist.parent / "assets"
+        return repo_dist, assets if assets.is_dir() else None
+
+    # Fall back to packaged assets bundled in the Python package.
     try:
         package_dist = resources.files("chad.ui_dist")
         index = Path(package_dist) / "index.html"
@@ -27,11 +33,6 @@ def _resolve_ui_paths() -> tuple[Path | None, Path | None]:
     except Exception:
         pass
 
-    # Fallback to portable build in repository (useful in editable installs)
-    repo_portable = Path(__file__).resolve().parents[3] / "ui" / "dist-portable" / "index.html"
-    if repo_portable.is_file():
-        assets = repo_portable.parent / "assets"
-        return repo_portable, assets if assets.is_dir() else None
     return None, None
 
 

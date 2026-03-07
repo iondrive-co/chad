@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from chad.server.main import create_app
+from chad.server.main import create_app, _resolve_ui_paths
 from chad.server.services import reset_session_manager, reset_task_executor
 from chad.server.state import get_config_manager, reset_state
 
@@ -208,16 +208,21 @@ class TestUIServing:
         assert "<div id=\"root\"></div>" in body
 
     def test_static_assets_are_served(self, client):
-        # Use as_file context manager for compatibility with Python 3.13
-        with resources.as_file(resources.files("chad.ui_dist")) as ui_root:
-            assets_dir = ui_root / "assets"
-            js_files = [p for p in assets_dir.iterdir() if p.suffix == ".js"]
-            assert js_files, "Expected at least one JS asset in chad.ui_dist/assets"
+        _index, assets_dir = _resolve_ui_paths()
+        assert assets_dir is not None, "Expected the UI resolver to provide an assets directory"
 
-            asset_name = js_files[0].name
-            response = client.get(f"/assets/{asset_name}")
-            assert response.status_code == 200
-            assert response.content == (assets_dir / asset_name).read_bytes()
+        js_files = [p for p in assets_dir.iterdir() if p.suffix == ".js"]
+        assert js_files, "Expected at least one JS asset in the resolved UI assets directory"
+
+        asset_name = js_files[0].name
+        response = client.get(f"/assets/{asset_name}")
+        assert response.status_code == 200
+        assert response.content == (assets_dir / asset_name).read_bytes()
+
+    def test_packaged_ui_package_exists(self):
+        with resources.as_file(resources.files("chad.ui_dist")) as ui_root:
+            assert (ui_root / "__init__.py").is_file()
+            assert (ui_root / "index.html").is_file()
 
     def test_get_verification_settings(self, client):
         """Can get verification settings."""

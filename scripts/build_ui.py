@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Build the React UI and bundle it into the Python package.
 
-Builds ui/ with Vite (portable single-file mode) and copies the output into
-src/chad/ui_dist/ so that setuptools includes it in the wheel.  Run this
-before ``python -m build``.
+Builds ``ui/dist`` and copies the packaged assets into ``src/chad/ui_dist`` so
+that setuptools includes the same asset layout the API serves in development
+and tests. Run this before ``python -m build``.
 
 Usage:
     python scripts/build_ui.py              # build + copy
@@ -19,12 +19,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 UI_DIR = ROOT / "ui"
-PORTABLE_DIST = UI_DIR / "dist-portable"
+UI_DIST = UI_DIR / "dist"
 PACKAGE_DIST = ROOT / "src" / "chad" / "ui_dist"
 
 
 def build_ui() -> None:
-    """Run the Vite portable (single-file) production build inside ui/."""
+    """Run the production build inside ui/."""
     if not (UI_DIR / "package.json").exists():
         raise SystemExit(f"ui/package.json not found at {UI_DIR}")
 
@@ -35,35 +35,37 @@ def build_ui() -> None:
     print("Installing UI dependencies ...")
     subprocess.run([npm, "install"], cwd=str(UI_DIR), check=True)
 
-    npx = shutil.which("npx")
-    print("Building portable single-file UI ...")
-    subprocess.run(
-        [npx, "vite", "build", "--config", "vite.portable.config.ts"],
-        cwd=str(UI_DIR), check=True,
-    )
+    print("Building React UI ...")
+    subprocess.run([npm, "run", "build"], cwd=str(UI_DIR), check=True)
 
-    if not PORTABLE_DIST.is_dir():
-        raise SystemExit(f"Build succeeded but {PORTABLE_DIST} was not created.")
+    if not UI_DIST.is_dir():
+        raise SystemExit(f"Build succeeded but {UI_DIST} was not created.")
 
 
 def copy_to_package() -> None:
-    """Copy the portable build into src/chad/ui_dist/ for packaging."""
-    if not PORTABLE_DIST.is_dir():
+    """Copy the production build into src/chad/ui_dist/ for packaging."""
+    if not UI_DIST.is_dir():
         raise SystemExit(
-            f"{PORTABLE_DIST} does not exist. Run the build first (drop --skip-build)."
+            f"{UI_DIST} does not exist. Run the build first (drop --skip-build)."
         )
 
-    # Wipe previous bundled copy
-    if PACKAGE_DIST.exists():
-        shutil.rmtree(PACKAGE_DIST)
-
-    PACKAGE_DIST.mkdir(parents=True)
-
-    # Copy just the single index.html
-    shutil.copy2(PORTABLE_DIST / "index.html", PACKAGE_DIST / "index.html")
-
-    # Add __init__.py so importlib.resources can find it as a package
+    PACKAGE_DIST.mkdir(parents=True, exist_ok=True)
     (PACKAGE_DIST / "__init__.py").touch()
+
+    for item in ("assets", "index.html"):
+        dest = PACKAGE_DIST / item
+        src = UI_DIST / item
+        if not src.exists():
+            continue
+        if dest.exists():
+            if dest.is_dir():
+                shutil.rmtree(dest)
+            else:
+                dest.unlink()
+        if src.is_dir():
+            shutil.copytree(src, dest)
+        else:
+            shutil.copy2(src, dest)
 
     size_kb = (PACKAGE_DIST / "index.html").stat().st_size / 1024
     print(f"Copied index.html ({size_kb:.0f} KB) to {PACKAGE_DIST.relative_to(ROOT)}")

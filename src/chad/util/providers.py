@@ -1539,6 +1539,11 @@ class ClaudeCodeProvider(AIProvider):
     # one HTTP request.
     _USAGE_CACHE_TTL: float = 10.0
 
+    # Expire stale cache after 30 minutes of continuous API failures.
+    # This prevents the await_reset poll loop from being stuck forever
+    # when the usage API itself is rate-limited (429).
+    _USAGE_CACHE_STALE_TTL: float = 1800.0
+
     def __init__(self, config: ModelConfig):
         super().__init__(config)
         self.process: object | None = None
@@ -1546,13 +1551,17 @@ class ClaudeCodeProvider(AIProvider):
         self.accumulated_text: list[str] = []
         self._usage_data_cache: dict | None = None
         self._usage_data_fetched_at: float = 0.0
+        self._usage_data_last_success: float = 0.0
 
     def _get_usage_data(self) -> dict | None:
         """Return Anthropic usage data, refreshing after the cache TTL.
 
         On API failure, preserves the last successful result so that
         threshold checks and limit-type classification don't see a
-        spurious drop to 0%.
+        spurious drop to 0%.  However, if the API has been failing
+        continuously for longer than _USAGE_CACHE_STALE_TTL, the cache
+        is expired so callers fall back to None rather than being stuck
+        on a stale 100% value forever.
         """
         import time
         now = time.monotonic()
@@ -1560,8 +1569,10 @@ class ClaudeCodeProvider(AIProvider):
             fresh = _fetch_claude_usage_data(self.config.account_name)
             if fresh is not None:
                 self._usage_data_cache = fresh
-            # On failure (fresh is None), keep the previous cache so callers
-            # see the last known-good values instead of falling back to 0%.
+                self._usage_data_last_success = now
+            elif (self._usage_data_last_success > 0
+                  and now - self._usage_data_last_success > self._USAGE_CACHE_STALE_TTL):
+                self._usage_data_cache = None
             self._usage_data_fetched_at = now
         return self._usage_data_cache
 
