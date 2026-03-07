@@ -565,7 +565,12 @@ label {
 
 .chat-agent-picker {
   flex: 1;
-  min-width: 240px;
+  min-width: 200px;
+}
+
+.chat-verification-picker {
+  flex: 1;
+  min-width: 200px;
 }
 
 .chat-status {

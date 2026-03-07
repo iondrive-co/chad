@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect, DragEvent } from "react";
-import type { ChadAPI, ConversationItem, Account } from "chad-client";
+import type { ChadAPI, ConversationItem, Account, VerificationSettings } from "chad-client";
 import { useStream } from "../hooks/useStream.ts";
 import { MergePanel } from "./MergePanel.tsx";
 import { WorktreeInfo } from "./WorktreeInfo.tsx";
@@ -75,6 +75,11 @@ export function ChatView({
 
   // Override coding prompt from ProjectSettings
   const [overrideCodingPrompt, setOverrideCodingPrompt] = useState<string | null>(null);
+
+  // Verification agent selection for new tasks
+  const [verificationAccount, setVerificationAccount] = useState<Account | null>(null);
+  const [verificationSettings, setVerificationSettings] = useState<VerificationSettings | null>(null);
+  const verificationDefaultsApplied = useRef(false);
 
   // Track the event log position at which the current task started, so the
   // stream skips old milestones/events from previous tasks in the same session.
@@ -225,6 +230,45 @@ export function ChatView({
     }).catch(() => {
       if (!cancelled) setCodingAccount(null);
     });
+    return () => { cancelled = true; };
+  }, [api]);
+
+  // Load verification settings and default verification agent
+  useEffect(() => {
+    let cancelled = false;
+
+    api.getVerificationSettings()
+      .then((settings) => {
+        if (cancelled) return;
+        setVerificationSettings(settings);
+        // On first load, if verification is disabled clear the account
+        if (!settings.enabled) {
+          setVerificationAccount(null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setVerificationSettings({ enabled: true });
+        }
+      });
+
+    api.getVerificationAgent()
+      .then((r) => {
+        if (cancelled) return;
+        const name = r.account_name;
+        if (!name || name === "__verification_none__") return;
+        if (verificationDefaultsApplied.current) return;
+        api.getAccount(name)
+          .then((acct) => {
+            if (!cancelled) {
+              setVerificationAccount(acct);
+              verificationDefaultsApplied.current = true;
+            }
+          })
+          .catch(() => { /* ignore missing account */ });
+      })
+      .catch(() => {});
+
     return () => { cancelled = true; };
   }, [api]);
 
@@ -480,10 +524,12 @@ export function ChatView({
       }
 
       const message = inputText.trim();
+      const verificationAllowed = verificationSettings?.enabled && verificationAccount;
       await api.startTask(sessionId, {
         project_path: projectPath,
         task_description: message,
         coding_agent: codingAccount.name,
+        verification_agent: verificationAllowed ? verificationAccount.name : undefined,
         override_prompt: overrideCodingPrompt || undefined,
         is_followup: hasRunTask,
         screenshots: screenshots.length > 0 ? screenshots.map((s) => s.path) : undefined,
@@ -510,6 +556,8 @@ export function ChatView({
     sending,
     taskActive,
     codingAccount,
+    verificationAccount,
+    verificationSettings,
     currentProjectPath,
     defaultProjectPath,
     overrideCodingPrompt,
@@ -587,6 +635,17 @@ export function ChatView({
               <div className="chat-agent-picker">
                 <span className="field-label">Coding Agent</span>
                 <AccountPicker api={api} selected={codingAccount} onSelect={setCodingAccount} />
+              </div>
+              <div className="chat-verification-picker">
+                <span className="field-label">Verification Agent</span>
+                <AccountPicker
+                  api={api}
+                  selected={verificationAccount}
+                  onSelect={setVerificationAccount}
+                  disabled={verificationSettings?.enabled === false}
+                  placeholder={verificationSettings?.enabled === false ? "Disabled" : "None (coding agent verifies)"}
+                  allowNone
+                />
               </div>
               <div className="chat-status">{taskActive ? "Running…" : hasRunTask ? "Ready for follow-up" : "Ready to start"}</div>
             </div>

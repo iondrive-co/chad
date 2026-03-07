@@ -776,6 +776,22 @@ class TestChatUILayoutSource:
             re.DOTALL,
         )
 
+    def test_verification_agent_picker_in_chat_header(self):
+        """The verification agent picker should be next to the coding agent picker."""
+        chat_view = Path("ui/src/components/ChatView.tsx").read_text(encoding="utf-8")
+        # Should have verification agent picker with label in chat-header
+        assert "Verification Agent" in chat_view
+        # Should have verificationAccount state
+        assert "verificationAccount" in chat_view
+        # Should use AccountPicker for verification agent
+        assert 'selected={verificationAccount}' in chat_view
+
+    def test_verification_agent_picker_css_exists(self):
+        """CSS should define chat-verification-picker styling."""
+        css = Path("ui/src/styles/main.css").read_text(encoding="utf-8")
+        # Should have chat-verification-picker class for the new picker
+        assert ".chat-verification-picker" in css
+
 
 def test_coding_status_events_are_logged_for_streaming(tmp_path, monkeypatch):
     """Event log should include coding status events."""
