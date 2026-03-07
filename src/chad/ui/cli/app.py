@@ -400,6 +400,7 @@ def run_settings_menu(client: APIClient) -> None:
         print("  [6] Action rules")
         print("  [7] Slack integration")
         print("  [8] Remote access (tunnel)")
+        print("  [9] Export/import config")
         print("  [b] Back to main menu")
         print()
 
@@ -700,6 +701,38 @@ def run_settings_menu(client: APIClient) -> None:
                             print(f"Failed: {result.get('error', 'unknown error')}")
             except (ValueError, EOFError):
                 pass
+            input("Press Enter to continue...")
+
+        elif choice == "9":
+            # Config export/import
+            print()
+            print("Config Transfer")
+            print("-" * 30)
+            print("  [e] Export config to file")
+            print("  [i] Import config from file")
+            print()
+            try:
+                sub = input("Choice (or Enter to skip): ").strip().lower()
+                if sub == "e":
+                    data = client.export_config()
+                    path = Path.home() / "chad-config.json"
+                    import json as _json
+                    path.write_text(_json.dumps(data, indent=2))
+                    print(f"Config exported to {path}")
+                    print("Transfer this file to the target machine and import it there.")
+                elif sub == "i":
+                    path_str = input("Path to config file: ").strip()
+                    if path_str:
+                        import json as _json
+                        path = Path(path_str).expanduser()
+                        if not path.exists():
+                            print(f"File not found: {path}")
+                        else:
+                            data = _json.loads(path.read_text())
+                            result = client.import_config(data)
+                            print(result.get("message", "Config imported"))
+            except (ValueError, EOFError) as e:
+                print(f"Error: {e}")
             input("Press Enter to continue...")
 
 

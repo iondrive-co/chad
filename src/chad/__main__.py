@@ -409,7 +409,15 @@ def main() -> int:
 
         # Tunnel mode is always headless: run only the local API server and
         # expose it through cloudflared. There is no local UI/browser flow.
+        # Still need password setup for config encryption (user has a terminal via SSH).
         if args.tunnel:
+            main_password = os.environ.get("CHAD_PASSWORD")
+            if main_password is None:
+                if config_mgr.is_first_run():
+                    main_password = config_mgr.setup_main_password()
+                else:
+                    main_password = config_mgr.verify_main_password()
+
             run_server(
                 host=args.api_host,
                 port=args.api_port,

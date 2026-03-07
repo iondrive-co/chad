@@ -1,6 +1,9 @@
 """Configuration management endpoints."""
 
+from typing import Any
+
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from chad.server.api.schemas import (
@@ -478,3 +481,39 @@ async def get_prompt_previews(
         coding=previews.coding,
         verification=previews.verification,
     )
+
+
+# ── Config Export / Import ──
+
+
+@router.get("/export")
+async def export_config() -> JSONResponse:
+    """Export the full config for transfer to another machine.
+
+    The exported data contains encrypted API keys (not plaintext),
+    so it requires the same master password on the destination.
+    """
+    config_mgr = get_config_manager()
+    data = config_mgr.export_config()
+    return JSONResponse(content=data)
+
+
+class ConfigImportRequest(BaseModel):
+    """Request body for config import."""
+
+    config: dict[str, Any] = Field(description="Full config dictionary from export")
+
+
+@router.post("/import")
+async def import_config(request: ConfigImportRequest) -> JSONResponse:
+    """Import a config exported from another machine.
+
+    Replaces the current config entirely. Requires the same master
+    password that was used on the source machine.
+    """
+    config_mgr = get_config_manager()
+    try:
+        config_mgr.import_config(request.config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(content={"ok": True, "message": "Config imported successfully"})

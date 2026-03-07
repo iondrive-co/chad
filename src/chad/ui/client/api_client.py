@@ -832,3 +832,29 @@ class APIClient:
         resp = self._client.post(self._url("/slack/test"))
         resp.raise_for_status()
         return resp.json()
+
+    # Config export/import
+    def export_config(self) -> dict:
+        """Export the full config for transfer to another machine.
+
+        Returns:
+            The full config dictionary (accounts have encrypted keys).
+        """
+        resp = self._client.get(self._url("/config/export"))
+        resp.raise_for_status()
+        return resp.json()
+
+    def import_config(self, config_data: dict) -> dict:
+        """Import a config exported from another machine.
+
+        Args:
+            config_data: Config dictionary from export_config().
+
+        Returns:
+            Dict with ok and message.
+        """
+        resp = self._client.post(
+            self._url("/config/import"), json={"config": config_data}
+        )
+        resp.raise_for_status()
+        return resp.json()

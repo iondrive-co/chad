@@ -290,6 +290,37 @@ class TestConfigEndpoints:
         assert "ui_mode" in data
 
 
+    def test_export_config(self, client):
+        """Can export config."""
+        response = client.get("/api/v1/config/export")
+        assert response.status_code == 200
+        data = response.json()
+        assert "password_hash" in data or data == {}
+
+    def test_import_config_rejects_invalid(self, client):
+        """Import rejects config without required fields."""
+        response = client.post(
+            "/api/v1/config/import",
+            json={"config": {"accounts": {}}},
+        )
+        assert response.status_code == 400
+
+    def test_import_config_accepts_valid(self, client):
+        """Import accepts valid config."""
+        response = client.post(
+            "/api/v1/config/import",
+            json={
+                "config": {
+                    "password_hash": "test",
+                    "encryption_salt": "test",
+                    "accounts": {},
+                }
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+
+
 class TestUIServing:
     """Ensure the packaged React UI is served correctly."""
 

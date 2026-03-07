@@ -170,9 +170,11 @@ class TestMain:
     @patch("chad.__main__.run_server")
     @patch("chad.__main__.ConfigManager")
     def test_main_tunnel_mode_is_headless(self, mock_config_class, mock_run_server, mock_run_unified):
-        """Tunnel mode should always take the headless server path."""
+        """Tunnel mode should take the headless server path and set up password."""
         mock_config = Mock()
         mock_config.get_cleanup_days.return_value = 3
+        mock_config.is_first_run.return_value = True
+        mock_config.setup_main_password.return_value = "test"
         mock_config_class.return_value = mock_config
 
         with patch.object(sys, "argv", ["chad", "--tunnel"]):
@@ -188,8 +190,44 @@ class TestMain:
             resume_sessions=False,
         )
         mock_run_unified.assert_not_called()
-        mock_config.verify_main_password.assert_not_called()
+        mock_config.setup_main_password.assert_called_once()
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.run_server")
+    @patch("chad.__main__.ConfigManager")
+    def test_main_tunnel_mode_verifies_existing_password(self, mock_config_class, mock_run_server, mock_run_unified):
+        """Tunnel mode should verify password when config already exists."""
+        mock_config = Mock()
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config.is_first_run.return_value = False
+        mock_config.verify_main_password.return_value = "test"
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad", "--tunnel"]):
+            with patch.dict(os.environ, {}, clear=True):
+                os.environ.pop("CHAD_PASSWORD", None)
+                result = main()
+
+        assert result == 0
+        mock_config.verify_main_password.assert_called_once()
         mock_config.setup_main_password.assert_not_called()
+
+    @patch("chad.__main__.run_unified")
+    @patch("chad.__main__.run_server")
+    @patch("chad.__main__.ConfigManager")
+    def test_main_tunnel_mode_uses_env_password(self, mock_config_class, mock_run_server, mock_run_unified):
+        """Tunnel mode should use CHAD_PASSWORD env var when set."""
+        mock_config = Mock()
+        mock_config.get_cleanup_days.return_value = 3
+        mock_config_class.return_value = mock_config
+
+        with patch.object(sys, "argv", ["chad", "--tunnel"]):
+            with patch.dict(os.environ, {"CHAD_PASSWORD": "mypass"}, clear=False):
+                result = main()
+
+        assert result == 0
+        mock_config.setup_main_password.assert_not_called()
+        mock_config.verify_main_password.assert_not_called()
 
     @patch("chad.__main__.run_unified")
     @patch("chad.__main__.run_server")

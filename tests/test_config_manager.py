@@ -121,6 +121,66 @@ class TestConfigManager:
 
         assert mgr.is_first_run() is False
 
+    def test_export_config(self, tmp_path):
+        """Test exporting config returns the full config."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+        config = {
+            "password_hash": "hash123",
+            "encryption_salt": "salt123",
+            "accounts": {"myaccount": {"provider": "anthropic", "key": "enc_key"}},
+        }
+        mgr.save_config(config)
+
+        exported = mgr.export_config()
+        assert exported["password_hash"] == "hash123"
+        assert exported["encryption_salt"] == "salt123"
+        assert "myaccount" in exported["accounts"]
+
+    def test_import_config(self, tmp_path):
+        """Test importing config replaces existing config."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+        mgr.save_config({"password_hash": "old", "encryption_salt": "old"})
+
+        new_config = {
+            "password_hash": "new_hash",
+            "encryption_salt": "new_salt",
+            "accounts": {"imported": {"provider": "openai", "key": "enc"}},
+        }
+        mgr.import_config(new_config)
+
+        loaded = mgr.load_config()
+        assert loaded["password_hash"] == "new_hash"
+        assert "imported" in loaded["accounts"]
+
+    def test_import_config_rejects_invalid(self, tmp_path):
+        """Test importing config without required fields raises ValueError."""
+        config_path = tmp_path / "test.conf"
+        mgr = ConfigManager(config_path)
+
+        import pytest
+        with pytest.raises(ValueError, match="missing password_hash"):
+            mgr.import_config({"accounts": {}})
+
+    def test_export_import_roundtrip(self, tmp_path):
+        """Test that export then import on another instance preserves config."""
+        src_path = tmp_path / "source.conf"
+        dst_path = tmp_path / "dest.conf"
+        src = ConfigManager(src_path)
+        dst = ConfigManager(dst_path)
+
+        src.save_config({
+            "password_hash": "h", "encryption_salt": "s",
+            "accounts": {"a": {"provider": "anthropic", "key": "k"}},
+            "ui_mode": "react",
+        })
+
+        exported = src.export_config()
+        dst.import_config(exported)
+
+        assert dst.load_config() == src.load_config()
+
     @patch("getpass.getpass")
     def test_setup_main_password(self, mock_getpass, tmp_path):
         """Test main password setup."""

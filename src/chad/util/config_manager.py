@@ -251,6 +251,36 @@ class ConfigManager:
         config = self.load_config()
         return "password_hash" not in config
 
+    def export_config(self) -> dict[str, Any]:
+        """Export the full config for transfer to another machine.
+
+        The exported data contains encrypted API keys (not plaintext),
+        so it is safe to transfer but requires the same master password
+        on the destination.
+
+        Returns:
+            The full config dictionary (accounts have encrypted keys).
+        """
+        return self.load_config()
+
+    def import_config(self, data: dict[str, Any]) -> None:
+        """Import a config exported from another machine.
+
+        Replaces the current config entirely. The imported config must
+        contain password_hash and encryption_salt at minimum.
+
+        Args:
+            data: Config dictionary from export_config().
+
+        Raises:
+            ValueError: If the data is missing required fields.
+        """
+        if "password_hash" not in data or "encryption_salt" not in data:
+            raise ValueError(
+                "Invalid config: missing password_hash or encryption_salt"
+            )
+        self.save_config(data)
+
     def setup_main_password(self) -> str:
         """Prompt user to create a main password.
 
