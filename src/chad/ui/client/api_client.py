@@ -20,6 +20,9 @@ class Session:
     created_at: datetime
     last_activity: datetime
     coding_account: str | None = None
+    task_description: str | None = None
+    status: str = "active"
+    resumable: bool = False
 
 
 @dataclass
@@ -206,6 +209,9 @@ class APIClient:
             has_worktree=data.get("has_worktree", False),
             has_changes=data.get("has_changes", False),
             coding_account=data.get("coding_account"),
+            task_description=data.get("task_description"),
+            status=data.get("status", "active"),
+            resumable=data.get("resumable", False),
             created_at=self._parse_datetime(data["created_at"]),
             last_activity=self._parse_datetime(data["last_activity"]),
         )

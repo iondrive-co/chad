@@ -82,8 +82,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan context manager."""
     init_start_time()
 
-    # Startup: initialize services
-    # TODO: Initialize session manager, etc.
+    # Restore previous sessions from event logs on disk
+    from .services import get_session_manager
+    from chad.util.config_manager import ConfigManager
+    manager = get_session_manager()
+    cleanup_days = ConfigManager().get_cleanup_days()
+    restored = manager.load_from_logs(max_age_days=cleanup_days)
+    if restored:
+        print(f"Restored {restored} previous session(s)")
 
     yield
 

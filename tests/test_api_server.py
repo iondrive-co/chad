@@ -17,6 +17,8 @@ def client(tmp_path, monkeypatch):
     # Use temporary config file to avoid reading real accounts
     temp_config = tmp_path / "test_chad.conf"
     monkeypatch.setenv("CHAD_CONFIG", str(temp_config))
+    # Isolate log directory so load_from_logs() doesn't pick up real sessions
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
 
     # Reset all state before each test
     reset_session_manager()

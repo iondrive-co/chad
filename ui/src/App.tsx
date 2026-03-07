@@ -173,6 +173,11 @@ export function App() {
                   {s.active && !s.paused && <span className="badge running-badge">R</span>}
                   {s.paused && <span className="badge paused-badge">P</span>}
                   {s.has_changes && !s.active && <span className="badge changes-badge">C</span>}
+                  {s.resumable && !s.active && !s.has_changes && (
+                    <span className="badge" title={`${s.status} - resumable`}>
+                      {s.status === "completed" ? "\u2713" : "\u25CB"}
+                    </span>
+                  )}
                   <span
                     className="session-tab-close"
                     onClick={(e) => handleDeleteSession(e, s.id)}

@@ -6,10 +6,6 @@ Add one or more OpenAI Codex, Claude Code, Google Gemini, Alibaba Qwen, Mistral 
 agents, decide what happens when you reach a limit (wait for the reset and continue, switch provider), ask for a coding 
 task, and Chad will ralph loop to deliver a one-shot result.
 
-<p style="text-align: center;">
-  <img src="https://raw.githubusercontent.com/iondrive-co/chad/main/docs/Chad.png" alt="Chad Code" width="80">
-</p>
-
 **The First Warning:** Chad was developed with...  Chad. Yes, this material writes itself. No, high quality robust code 
 this is not. 
 
@@ -20,16 +16,20 @@ consider using a cheap isolated cloud server, the [Weft](https://github.com/iond
 ### Blah blah how do I run it?
 
 - Install the latest version from the [releases page](https://github.com/iondrive-co/chad/releases) or by getting 
-[pip](https://pip.pypa.io/en/stable/installation/) and then running `pip install chad-ai`. 
+[pip](https://pip.pypa.io/en/stable/installation/) and then running `pip3 install chad-ai`. 
 - Run it locally with the `chad` command OR
 - Run it remotely with the `chad --tunnel` command and connect at https://iondrive.co/Chad
 
 ### How is this better than $Grug?
 
-Chad provides a CLI UI to switch between coding agents (tokens encrypted with a master password you create and
-provide for each session), monitors usage quotas, switches between providers, is able to send messages to slack,
-and runs multiple tasks in parallel with result merging from their worktrees. It can be run in tunnel mode and 
-connected to from a remote ui using a cloudflare tunnel.
+- Switch between agents (tokens encrypted with a master password you create and provide for each session)
+- Optional remote access at no cost
+- Display usage from multiple providers
+- Await reset or switch providers when a desired hourly or weekly usage level is reached
+- Run multiple tasks in parallel with git worktrees
+- Send progress messages to slack and notify you once a task is done
+- Chat view for continuing sessions or reviewing changes
+
 <details open>
 <summary><b>Screenshots</b></summary>
 
@@ -43,6 +43,16 @@ connected to from a remote ui using a cloudflare tunnel.
 <img src="https://raw.githubusercontent.com/iondrive-co/chad/main/docs/screenshot-task-input.png" width="800" alt="Task input panel">
 </details>
 
+### Resuming Sessions
+
+Chad remembers previous sessions. When you restart, past sessions appear in the session list — select one and
+send a follow-up message to pick up where you left off. You can resume with a different provider than the one
+that originally did the work; Chad reconstructs the conversation context from its session logs. If the session's
+git worktree is still around, work continues there. Session history is retained according to the cleanup days
+setting (default: 3 days).
+
 ### Is this satire? What are you even doing here?
 
-¯\_(ツ)_/¯
+<p style="text-align: center;">
+  <img src="https://raw.githubusercontent.com/iondrive-co/chad/main/docs/Chad.png" alt="Chad Code" width="80">
+</p>
