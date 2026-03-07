@@ -144,7 +144,6 @@ export interface AccountUsage {
 
 export interface VerificationSettings {
   enabled: boolean;
-  auto_run: boolean;
 }
 
 export interface CleanupSettings {
@@ -285,6 +284,7 @@ export interface ConversationTask {
   coding_provider: string;
   coding_account: string;
   coding_model: string | null;
+  verification_account: string | null;
 }
 
 export interface ConversationResponse {

@@ -516,14 +516,11 @@ class APIClient:
     def update_verification_settings(
         self,
         enabled: bool | None = None,
-        auto_run: bool | None = None,
     ) -> dict[str, Any]:
         """Update verification settings."""
         data = {}
         if enabled is not None:
             data["enabled"] = enabled
-        if auto_run is not None:
-            data["auto_run"] = auto_run
 
         resp = self._client.put(self._url("/config/verification"), json=data)
         resp.raise_for_status()

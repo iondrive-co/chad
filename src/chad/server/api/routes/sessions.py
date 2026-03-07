@@ -119,6 +119,7 @@ def _build_conversation(event_log: EventLog, since_seq: int = 0) -> Conversation
         "coding_provider": latest_start.get("coding_provider", ""),
         "coding_account": latest_start.get("coding_account", ""),
         "coding_model": latest_start.get("coding_model", None),
+        "verification_account": latest_start.get("verification_account", None),
     }
 
     return ConversationResponseSchema(

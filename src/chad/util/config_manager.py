@@ -32,7 +32,6 @@ CONFIG_BASE_KEYS: set[str] = {
     "mock_session_reset_time",  # Dict of account_name -> ISO 8601 datetime for mock session reset
     "max_verification_attempts",  # Maximum verification attempts before giving up (default 5)
     "verification_enabled",  # Whether verification is enabled (default True)
-    "verification_auto_run",  # Whether to auto-run verification after coding (default True)
     "slack_enabled",       # Whether Slack integration is active
     "slack_bot_token",     # Encrypted Slack bot token (xoxb-...)
     "slack_channel",       # Slack channel ID to post milestones to
@@ -591,34 +590,29 @@ class ConfigManager:
 
     # ── Verification settings ──
 
-    def get_runtime_verification_settings(self) -> tuple[bool, bool]:
-        """Return the persisted verification flags (enabled, auto_run)."""
+    def get_runtime_verification_settings(self) -> bool:
+        """Return whether verification is enabled."""
         config = self.load_config()
         enabled = config.get("verification_enabled", True)
-        auto_run = config.get("verification_auto_run", True)
-        return bool(enabled), bool(auto_run)
+        return bool(enabled)
 
     def set_runtime_verification_settings(
         self,
         enabled: bool | None = None,
-        auto_run: bool | None = None,
-    ) -> tuple[bool, bool]:
-        """Update and persist verification flags.
+    ) -> bool:
+        """Update and persist verification enabled flag.
 
         Args:
             enabled: Optional new value for verification enabled
-            auto_run: Optional new value for auto-run verification
 
         Returns:
-            Tuple of (enabled, auto_run) after applying updates
+            The enabled flag after applying updates
         """
         config = self.load_config()
         if enabled is not None:
             config["verification_enabled"] = bool(enabled)
-        if auto_run is not None:
-            config["verification_auto_run"] = bool(auto_run)
         self.save_config(config)
-        return bool(config.get("verification_enabled", True)), bool(config.get("verification_auto_run", True))
+        return bool(config.get("verification_enabled", True))
 
     # Special marker value indicating verification is disabled
     VERIFICATION_NONE = "__verification_none__"

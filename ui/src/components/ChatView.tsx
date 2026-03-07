@@ -52,8 +52,9 @@ export function ChatView({
   // Historical output/events loaded from persisted log for finished sessions
   const [historicalOutput, setHistoricalOutput] = useState("");
 
-  // Current task description (extracted from session_started events)
+  // Current task description and verification agent (extracted from session_started events)
   const [taskDescription, setTaskDescription] = useState<string | null>(null);
+  const [verificationAgent, setVerificationAgent] = useState<string | null>(null);
 
   // Track current project path for settings
   const [currentProjectPath, setCurrentProjectPath] = useState(defaultProjectPath);
@@ -126,6 +127,7 @@ export function ChatView({
     let cancelled = false;
     setHistoricalOutput("");
     setTaskDescription(null);
+    setVerificationAgent(null);
 
     if (!sessionActive && !taskActive) {
       (async () => {
@@ -140,11 +142,12 @@ export function ChatView({
             setHistoricalOutput(normalizeLineEndings(output));
           }
 
-          const starts = (data.events as { type: string; task_description?: string }[])
+          const starts = (data.events as { type: string; task_description?: string; verification_account?: string }[])
             .filter((e) => e.type === "session_started" && e.task_description);
           if (starts.length > 0) {
             const latestStart = starts[starts.length - 1];
             setTaskDescription(latestStart.task_description ?? null);
+            setVerificationAgent(latestStart.verification_account ?? null);
             setHasRunTask(true);
           } else {
             setHasRunTask(false);
@@ -183,6 +186,7 @@ export function ChatView({
         if (cancelled) return;
         setConversation(convo.items);
         setTaskDescription(convo.task.task_description || null);
+        setVerificationAgent((convo.task as { verification_account?: string }).verification_account || null);
         setHasRunTask(true);
         conversationSeqRef.current = convo.latest_seq;
       } catch {
@@ -190,6 +194,7 @@ export function ChatView({
           setConversation([]);
           setHasRunTask(false);
           setTaskDescription(null);
+          setVerificationAgent(null);
         }
       }
     })();
@@ -252,6 +257,7 @@ export function ChatView({
         if (evtType === "session_started") {
           updated = [];
           setTaskDescription(data.task_description ?? null);
+          setVerificationAgent(data.verification_account ?? null);
           setHasRunTask(true);
           if (seq) conversationSeqRef.current = seq;
           continue;
@@ -485,6 +491,9 @@ export function ChatView({
         <div className="task-description-bar">
           <span className="task-description-label">Task:</span>
           <span className="task-description-text">{taskDescription}</span>
+          {verificationAgent && (
+            <span className="verification-agent-badge">Verification: {verificationAgent}</span>
+          )}
         </div>
       )}
 

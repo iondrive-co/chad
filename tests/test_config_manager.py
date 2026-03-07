@@ -1049,12 +1049,11 @@ class TestVerificationSettings:
         config_path = tmp_path / "test.conf"
         return ConfigManager(config_path)
 
-    def test_defaults_are_enabled_and_auto_run(self, tmp_path):
-        """Fresh config returns enabled=True, auto_run=True."""
+    def test_defaults_are_enabled(self, tmp_path):
+        """Fresh config returns enabled=True."""
         mgr = self._make_mgr(tmp_path)
-        enabled, auto_run = mgr.get_runtime_verification_settings()
+        enabled = mgr.get_runtime_verification_settings()
         assert enabled is True
-        assert auto_run is True
 
     def test_set_enabled_false_persists(self, tmp_path):
         """Setting enabled=False is persisted to disk."""
@@ -1063,37 +1062,15 @@ class TestVerificationSettings:
         mgr1.set_runtime_verification_settings(enabled=False)
 
         mgr2 = ConfigManager(config_path)
-        enabled, auto_run = mgr2.get_runtime_verification_settings()
+        enabled = mgr2.get_runtime_verification_settings()
         assert enabled is False
-        assert auto_run is True  # unchanged
-
-    def test_set_auto_run_false_persists(self, tmp_path):
-        """Setting auto_run=False is persisted to disk."""
-        config_path = tmp_path / "test.conf"
-        mgr1 = ConfigManager(config_path)
-        mgr1.set_runtime_verification_settings(auto_run=False)
-
-        mgr2 = ConfigManager(config_path)
-        enabled, auto_run = mgr2.get_runtime_verification_settings()
-        assert enabled is True  # unchanged
-        assert auto_run is False
-
-    def test_partial_update_preserves_other_field(self, tmp_path):
-        """Updating one field does not reset the other."""
-        mgr = self._make_mgr(tmp_path)
-        mgr.set_runtime_verification_settings(enabled=False, auto_run=False)
-        mgr.set_runtime_verification_settings(enabled=True)
-        enabled, auto_run = mgr.get_runtime_verification_settings()
-        assert enabled is True
-        assert auto_run is False
 
     def test_settings_survive_restart(self, tmp_path):
-        """Both fields survive a full ConfigManager reinstantiation."""
+        """Enabled field survives a full ConfigManager reinstantiation."""
         config_path = tmp_path / "test.conf"
-        ConfigManager(config_path).set_runtime_verification_settings(enabled=False, auto_run=False)
-        enabled, auto_run = ConfigManager(config_path).get_runtime_verification_settings()
+        ConfigManager(config_path).set_runtime_verification_settings(enabled=False)
+        enabled = ConfigManager(config_path).get_runtime_verification_settings()
         assert enabled is False
-        assert auto_run is False
 
 
 class TestConfigUIParity:
@@ -1129,7 +1106,6 @@ class TestConfigUIParity:
         "mock_run_duration_seconds",  # Testing only - per-account mock via provider cards
         "mock_session_reset_time",  # Testing only - per-account mock reset time
         "verification_enabled",   # Managed via API/React UI (not CLI config panel)
-        "verification_auto_run",  # Managed via API/React UI (not CLI config panel)
     }
 
     # Config keys that MUST be editable in the CLI UI

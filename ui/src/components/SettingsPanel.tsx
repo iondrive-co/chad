@@ -232,11 +232,6 @@ export function SettingsPanel({
                 onChange={() => toggleVerification("enabled")} disabled={saving || dis} />
               Verification enabled
             </label>
-            <label className="toggle-label">
-              <input type="checkbox" checked={verification.auto_run}
-                onChange={() => toggleVerification("auto_run")} disabled={saving || dis} />
-              Auto-run verification
-            </label>
           </>
         )}
         <label>

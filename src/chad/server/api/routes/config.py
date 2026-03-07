@@ -19,7 +19,6 @@ class VerificationSettingsUpdate(BaseModel):
     """Partial update model for verification settings."""
 
     enabled: bool | None = Field(default=None, description="Whether verification is enabled")
-    auto_run: bool | None = Field(default=None, description="Whether to auto-run verification after coding")
 
 
 class VerificationAgentResponse(BaseModel):
@@ -107,11 +106,11 @@ class MockRunDurationUpdate(BaseModel):
 async def get_verification_settings() -> VerificationSettings:
     """Get verification agent settings.
 
-    Defaults are enabled=True, auto_run=True.
+    Default is enabled=True.
     """
     config_mgr = get_config_manager()
-    enabled, auto_run = config_mgr.get_runtime_verification_settings()
-    return VerificationSettings(enabled=enabled, auto_run=auto_run)
+    enabled = config_mgr.get_runtime_verification_settings()
+    return VerificationSettings(enabled=enabled)
 
 
 @router.put("/verification", response_model=VerificationSettings)
@@ -122,11 +121,10 @@ async def update_verification_settings(request: VerificationSettingsUpdate) -> V
     The verification agent account is configured separately via /verification-agent.
     """
     config_mgr = get_config_manager()
-    enabled, auto_run = config_mgr.set_runtime_verification_settings(
+    enabled = config_mgr.set_runtime_verification_settings(
         enabled=request.enabled,
-        auto_run=request.auto_run,
     )
-    return VerificationSettings(enabled=enabled, auto_run=auto_run)
+    return VerificationSettings(enabled=enabled)
 
 
 @router.get("/cleanup", response_model=CleanupSettings)

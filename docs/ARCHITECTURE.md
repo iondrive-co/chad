@@ -58,7 +58,7 @@ Base path `/api/v1` (except `/status`).
 - `GET /accounts/{name}/usage` — not implemented (501)
 
 **Configuration**
-- `GET/PUT /config/verification` — enabled/auto_run flags
+- `GET/PUT /config/verification` — enabled flag
 - `GET/PUT /config/cleanup` — `cleanup_days`, `auto_cleanup`
 - `GET/PUT /config/preferences` — `last_project_path`, `ui_mode`
 - `GET/PUT /config/verification-agent`

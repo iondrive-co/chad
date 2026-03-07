@@ -7,7 +7,6 @@ class VerificationSettings(BaseModel):
     """Settings for verification agent."""
 
     enabled: bool = Field(default=True, description="Whether verification is enabled")
-    auto_run: bool = Field(default=True, description="Whether to auto-run verification after coding")
 
 
 class CleanupSettings(BaseModel):

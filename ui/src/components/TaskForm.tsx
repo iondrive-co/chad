@@ -60,18 +60,18 @@ export function TaskForm({ api, sessionId, onStart, projectPath, overridePrompt 
       .then((settings) => {
         if (cancelled) return;
         setVerificationSettings(settings);
-        // On first load, align toggle with auto_run; if disabled, force off.
+        // On first load, enable verification toggle if verification is enabled.
         if (!settings.enabled) {
           setUseVerification(false);
           setVerificationAccount(null);
         } else if (!verificationDefaultsApplied.current) {
-          setUseVerification(settings.auto_run);
+          setUseVerification(true);
           verificationDefaultsApplied.current = true;
         }
       })
       .catch(() => {
         if (!cancelled) {
-          setVerificationSettings({ enabled: true, auto_run: true });
+          setVerificationSettings({ enabled: true });
         }
       });
 

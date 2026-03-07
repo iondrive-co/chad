@@ -879,7 +879,7 @@ class TaskExecutor:
 
         # Build verification config gated by runtime verification settings
         verification_config = None
-        ver_enabled, ver_auto_run = self.config_manager.get_runtime_verification_settings()
+        ver_enabled = self.config_manager.get_runtime_verification_settings()
 
         if ver_enabled:
             if verification_account:
@@ -888,8 +888,8 @@ class TaskExecutor:
                     "verification_model": verification_model,
                     "verification_reasoning": verification_reasoning,
                 }
-            elif ver_auto_run:
-                # Auto-run verification when enabled+auto_run, using configured verification agent
+            else:
+                # Run verification using configured verification agent when enabled
                 try:
                     auto_account = self.config_manager.get_verification_agent()
                 except Exception:
@@ -1401,12 +1401,14 @@ class TaskExecutor:
 
             # Log session start
             if task.event_log:
+                verification_account = verification_config.get("verification_account") if verification_config else None
                 task.event_log.log(SessionStartedEvent(
                     task_description=task_description,
                     project_path=str(project_path),
                     coding_provider=coding_provider,
                     coding_account=coding_account,
                     coding_model=coding_model,
+                    verification_account=verification_account,
                 ))
                 task.event_log.start_turn()
                 task.event_log.log(UserMessageEvent(content=task_description))
