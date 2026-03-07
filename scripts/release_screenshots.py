@@ -89,6 +89,26 @@ def inject_followup_visible(page):
     )
 
 
+def crop_whitespace(image_path: Path) -> None:
+    """Crop trailing whitespace rows from the bottom of a screenshot."""
+    try:
+        from PIL import Image
+        import numpy as np
+    except ImportError:
+        return
+    img = Image.open(image_path)
+    arr = np.array(img)
+    bg = arr[-1, arr.shape[1] // 2]
+    row_is_bg = np.all(np.all(arr == bg, axis=2), axis=1)
+    last_content = arr.shape[0] - 1
+    for i in range(arr.shape[0] - 1, -1, -1):
+        if not row_is_bg[i]:
+            last_content = i
+            break
+    crop_bottom = min(last_content + 20, arr.shape[0])
+    img.crop((0, 0, img.width, crop_bottom)).save(image_path)
+
+
 def inject_conversation_view(page):
     """Inject a fake conversation with agent output for the screenshot."""
     # Inject conversation messages, task description bar, terminal output,
@@ -259,34 +279,8 @@ def main():
             color_scheme="light",
             render_delay=2.0,
         ) as page:
-            # Full-page screenshot then crop to remove bottom whitespace
-            page.screenshot(path=os.fspath(output_path), full_page=True, clip={
-                "x": 0, "y": 0,
-                "width": viewport_large["width"],
-                "height": viewport_large["height"],
-            })
-            # Use Pillow to crop to actual content if available, otherwise
-            # just trim a fixed amount from the bottom
-            try:
-                from PIL import Image
-                img = Image.open(output_path)
-                # Find the last row that isn't all-white (background)
-                import numpy as np
-                arr = np.array(img)
-                # Check rows from bottom: find first non-background row
-                bg = arr[arr.shape[0] - 1, arr.shape[1] // 2]  # sample bg color
-                row_matches = np.all(np.all(arr == bg, axis=2), axis=1)
-                last_content = arr.shape[0] - 1
-                for i in range(arr.shape[0] - 1, -1, -1):
-                    if not row_matches[i]:
-                        last_content = i
-                        break
-                # Add small padding below content
-                crop_bottom = min(last_content + 20, arr.shape[0])
-                img_cropped = img.crop((0, 0, img.width, crop_bottom))
-                img_cropped.save(output_path)
-            except ImportError:
-                pass  # No Pillow, keep as-is
+            screenshot_page(page, output_path)
+            crop_whitespace(output_path)
             print(f"  Saved: {output_path}")
 
         # Screenshot 2: Chat view with conversation and agent output

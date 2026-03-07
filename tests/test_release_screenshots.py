@@ -78,7 +78,9 @@ def test_release_screenshots_use_light_mode(monkeypatch, tmp_path):
     monkeypatch.setattr(rs, "screenshot_page", fake_screenshot_page)
     monkeypatch.setattr(rs, "screenshot_element", fake_screenshot_element)
     monkeypatch.setattr(rs, "inject_followup_visible", lambda _page: None)
+    monkeypatch.setattr(rs, "inject_conversation_view", lambda _page: None)
     monkeypatch.setattr(rs, "fill_task_form", lambda _page: None)
+    monkeypatch.setattr(rs, "crop_whitespace", lambda _path: None)
 
     rs.main()
 
