@@ -68,6 +68,28 @@ def test_cloudflared_installer_windows(monkeypatch, tmp_path):
     assert resolved.exists()
 
 
+def test_cloudflared_download_failure_includes_manual_install_command(monkeypatch, tmp_path):
+    """Binary installer failures should tell the user exactly how to install cloudflared."""
+    installer = AIToolInstaller(tools_dir=tmp_path / "tools")
+    spec = installer.tool_specs["cloudflared"]
+
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+    monkeypatch.setattr("platform.machine", lambda: "x86_64")
+
+    def fake_urlretrieve(_url, _target):
+        raise OSError("network blocked")
+
+    monkeypatch.setattr("urllib.request.urlretrieve", fake_urlretrieve)
+
+    ok, detail = installer._install_binary(spec)
+
+    assert not ok
+    assert "Install it manually:" in detail
+    assert f"mkdir -p {installer.bin_dir}" in detail
+    assert "curl -fsSL" in detail
+    assert str(installer.bin_dir / "cloudflared") in detail
+
+
 def test_resolve_prefers_windows_suffix(monkeypatch, tmp_path):
     """resolve_tool_path should return .exe when both bare and .exe exist."""
     installer = AIToolInstaller(tools_dir=tmp_path / "tools")

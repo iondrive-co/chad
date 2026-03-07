@@ -154,6 +154,54 @@ class AIToolInstaller:
             return self._install_binary(spec)
         return False, f"No installer configured for {spec.name}"
 
+    def _binary_asset(self, spec: CLIToolSpec) -> tuple[str, str]:
+        """Return the download URL and output filename for a binary tool."""
+        import platform
+
+        system = platform.system().lower()
+        machine = platform.machine().lower()
+
+        if system == "darwin":
+            os_name = "darwin"
+            ext = ""
+        elif system == "linux":
+            os_name = "linux"
+            ext = ""
+        elif system == "windows":
+            os_name = "windows"
+            ext = ".exe"
+        else:
+            raise ValueError(f"Unsupported platform: {system}")
+
+        if machine in ("x86_64", "amd64"):
+            arch = "amd64"
+        elif machine in ("aarch64", "arm64"):
+            arch = "arm64"
+        else:
+            raise ValueError(f"Unsupported architecture: {machine}")
+
+        asset = f"{spec.binary}-{os_name}-{arch}{ext}"
+        url = f"{spec.package}/{asset}"
+        target_name = f"{spec.binary}{ext}" if ext else spec.binary
+        return url, target_name
+
+    def _manual_binary_install_command(self, url: str, target_name: str) -> str:
+        """Return an exact manual install command for the current platform."""
+        target = self.bin_dir / target_name
+
+        if target_name.endswith(".exe"):
+            return (
+                f'powershell -NoProfile -Command '
+                f'"New-Item -ItemType Directory -Force -Path \'{self.bin_dir}\' | Out-Null; '
+                f'Invoke-WebRequest -Uri \'{url}\' -OutFile \'{target}\'"'
+            )
+
+        return (
+            f"mkdir -p {self.bin_dir} && "
+            f"curl -fsSL {url} -o {target} && "
+            f"chmod +x {target}"
+        )
+
     def _install_with_npm(self, spec: CLIToolSpec) -> tuple[bool, str]:
         if not self._check_node_npm():
             return False, (
@@ -321,49 +369,28 @@ class AIToolInstaller:
 
     def _install_binary(self, spec: CLIToolSpec) -> tuple[bool, str]:
         """Install a tool by downloading a platform-appropriate binary."""
-        import platform
         import stat
         import urllib.request
 
         ensure_directory(self.tools_dir)
         ensure_directory(self.bin_dir)
 
-        system = platform.system().lower()
-        machine = platform.machine().lower()
+        try:
+            url, target_name = self._binary_asset(spec)
+        except ValueError as e:
+            return False, str(e)
 
-        if system == "darwin":
-            os_name = "darwin"
-            ext = ""
-        elif system == "linux":
-            os_name = "linux"
-            ext = ""
-        elif system == "windows":
-            os_name = "windows"
-            ext = ".exe"
-        else:
-            return False, f"Unsupported platform: {system}"
-
-        if machine in ("x86_64", "amd64"):
-            arch = "amd64"
-        elif machine in ("aarch64", "arm64"):
-            arch = "arm64"
-        else:
-            return False, f"Unsupported architecture: {machine}"
-
-        asset = f"{spec.binary}-{os_name}-{arch}{ext}"
-        url = f"{spec.package}/{asset}"
-        target_name = f"{spec.binary}{ext}" if ext else spec.binary
         target = self.bin_dir / target_name
 
         try:
             urllib.request.urlretrieve(url, str(target))
-            if ext != ".exe":
+            if not target_name.endswith(".exe"):
                 target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         except Exception as e:
             return False, (
                 f"Failed to download {spec.name}: {e}\n\n"
-                f"You can install it manually from:\n"
-                f"  {url}"
+                f"Install it manually:\n"
+                f"{self._manual_binary_install_command(url, target_name)}"
             )
 
         resolved = self.resolve_tool_path(spec.binary)

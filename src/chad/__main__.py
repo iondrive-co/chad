@@ -391,6 +391,15 @@ def main() -> int:
     atexit.register(cleanup_on_shutdown)
 
     try:
+        if args.tunnel and args.server_url is not None:
+            raise ValueError("--tunnel cannot be used with --server-url")
+
+        # Tunnel mode is always headless: run only the local API server and
+        # expose it through cloudflared. There is no local UI/browser flow.
+        if args.tunnel:
+            run_server(host=args.api_host, port=args.api_port, tunnel=True)
+            return 0
+
         # Server-only mode — no password needed (provider CLIs authenticate
         # via their own isolated config dirs, not chad's encrypted keys)
         if args.mode == "server":
