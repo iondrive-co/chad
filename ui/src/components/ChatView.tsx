@@ -33,6 +33,15 @@ function normalizeLineEndings(text: string): string {
   return text.replace(/\r\n?/g, "\n");
 }
 
+function getSessionActivationSinceSeq(events: Array<{ type?: string; seq?: number }>, fallbackSeq: number): number {
+  const sessionStarts = events.filter((event) => event.type === "session_started");
+  const latestStartSeq = sessionStarts[sessionStarts.length - 1]?.seq;
+  if (typeof latestStartSeq === "number") {
+    return Math.max(0, latestStartSeq - 1);
+  }
+  return fallbackSeq;
+}
+
 export function ChatView({
   api,
   sessionId,
@@ -281,7 +290,12 @@ export function ChatView({
       (async () => {
         try {
           const data = await api.getEvents(sessionId, 0, "session_started");
-          if (!cancelled) streamSinceSeqRef.current = data.latest_seq;
+          if (!cancelled) {
+            streamSinceSeqRef.current = getSessionActivationSinceSeq(
+              data.events as Array<{ type?: string; seq?: number }>,
+              data.latest_seq,
+            );
+          }
           // Extract task description from the most recent session_started event
           const sessionStartedEvents = (data.events as { type: string; task_description?: string }[])
             .filter((e) => e.type === "session_started" && e.task_description);

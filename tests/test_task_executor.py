@@ -792,6 +792,13 @@ class TestChatUILayoutSource:
         # Should have chat-verification-picker class for the new picker
         assert ".chat-verification-picker" in css
 
+    def test_external_followup_resume_anchors_to_latest_task_start(self):
+        """Externally-started follow-ups should replay the new task, not skip to the log head."""
+        chat_view = Path("ui/src/components/ChatView.tsx").read_text(encoding="utf-8")
+        assert "function getSessionActivationSinceSeq" in chat_view
+        assert "Math.max(0, latestStartSeq - 1)" in chat_view
+        assert "streamSinceSeqRef.current = getSessionActivationSinceSeq(" in chat_view
+
 
 def test_coding_status_events_are_logged_for_streaming(tmp_path, monkeypatch):
     """Event log should include coding status events."""
