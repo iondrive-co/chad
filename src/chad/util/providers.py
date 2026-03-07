@@ -1551,7 +1551,7 @@ class ClaudeCodeProvider(AIProvider):
         self.accumulated_text: list[str] = []
         self._usage_data_cache: dict | None = None
         self._usage_data_fetched_at: float = 0.0
-        self._usage_data_last_success: float = 0.0
+        self._usage_data_last_success: float | None = None
 
     def _get_usage_data(self) -> dict | None:
         """Return Anthropic usage data, refreshing after the cache TTL.
@@ -1570,8 +1570,10 @@ class ClaudeCodeProvider(AIProvider):
             if fresh is not None:
                 self._usage_data_cache = fresh
                 self._usage_data_last_success = now
-            elif (self._usage_data_last_success > 0
-                  and now - self._usage_data_last_success > self._USAGE_CACHE_STALE_TTL):
+            elif (
+                self._usage_data_last_success is not None
+                and now - self._usage_data_last_success > self._USAGE_CACHE_STALE_TTL
+            ):
                 self._usage_data_cache = None
             self._usage_data_fetched_at = now
         return self._usage_data_cache
