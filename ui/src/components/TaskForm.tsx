@@ -71,7 +71,7 @@ export function TaskForm({ api, sessionId, onStart, projectPath, overridePrompt 
       })
       .catch(() => {
         if (!cancelled) {
-          setVerificationSettings({ enabled: true, auto_run: true });
+          setVerificationSettings({ enabled: true });
         }
       });
 
