@@ -180,6 +180,13 @@ export interface TunnelStatus {
   error: string | null;
 }
 
+export interface PreviewTunnelStatus {
+  running: boolean;
+  url: string | null;
+  port: number | null;
+  error: string | null;
+}
+
 // ── Worktree types ──
 
 export interface WorktreeStatus {
@@ -331,6 +338,7 @@ export interface ProjectSettings {
   lint_command: string | null;
   test_command: string | null;
   instructions_paths: string[];
+  preview_port: number | null;
 }
 
 export interface ProjectSettingsUpdate {
@@ -338,6 +346,7 @@ export interface ProjectSettingsUpdate {
   lint_command?: string | null;
   test_command?: string | null;
   instructions_paths?: string[] | null;
+  preview_port?: number | null;
 }
 
 export interface PromptPreviews {

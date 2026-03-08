@@ -823,6 +823,37 @@ class APIClient:
         resp.raise_for_status()
         return resp.json()
 
+    # Preview Tunnel
+    def get_preview_tunnel_status(self) -> dict:
+        """Get preview tunnel status.
+
+        Returns:
+            Dict with running, url, port, error
+        """
+        resp = self._client.get(self._url("/preview-tunnel"))
+        resp.raise_for_status()
+        return resp.json()
+
+    def start_preview_tunnel(self, port: int) -> dict:
+        """Start a preview tunnel to a local port.
+
+        Returns:
+            Dict with running, url, port, error
+        """
+        resp = self._client.post(self._url("/preview-tunnel/start"), json={"port": port})
+        resp.raise_for_status()
+        return resp.json()
+
+    def stop_preview_tunnel(self) -> dict:
+        """Stop the preview tunnel.
+
+        Returns:
+            Dict with running, url, port, error
+        """
+        resp = self._client.post(self._url("/preview-tunnel/stop"))
+        resp.raise_for_status()
+        return resp.json()
+
     def test_slack_connection(self) -> dict:
         """Send a test message to verify Slack configuration.
 

@@ -85,6 +85,11 @@ export function ChatView({
   // Override coding prompt from ProjectSettings
   const [overrideCodingPrompt, setOverrideCodingPrompt] = useState<string | null>(null);
 
+  // Preview tunnel
+  const [previewPort, setPreviewPort] = useState<number | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
   // Verification agent selection for new tasks
   const [verificationAccount, setVerificationAccount] = useState<Account | null>(null);
   const [verificationSettings, setVerificationSettings] = useState<VerificationSettings | null>(null);
@@ -416,6 +421,29 @@ export function ChatView({
     }
   }, [api, sessionId]);
 
+  const handlePreview = useCallback(async () => {
+    if (!previewPort) return;
+
+    // If we already have a running preview, just open it
+    if (previewUrl) {
+      window.open(previewUrl, "_blank", "noopener");
+      return;
+    }
+
+    setPreviewLoading(true);
+    try {
+      const result = await api.startPreviewTunnel(previewPort);
+      if (result.url) {
+        setPreviewUrl(result.url);
+        window.open(result.url, "_blank", "noopener");
+      }
+    } catch {
+      // ignore
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, [api, previewPort, previewUrl]);
+
   // Screenshot upload handlers
   const handleFiles = useCallback(async (files: FileList | File[]) => {
     const imageFiles = Array.from(files).filter((f) =>
@@ -639,6 +667,7 @@ export function ChatView({
         projectPath={currentProjectPath || defaultProjectPath}
         onProjectPathChange={handleProjectPathChange}
         onPromptsChange={setOverrideCodingPrompt}
+        onPreviewPortChange={setPreviewPort}
       />
 
       <div className="chat-body">
@@ -783,6 +812,16 @@ export function ChatView({
               </span>
             )}
             {error && <span className="error-text">{error}</span>}
+            {previewPort && (
+              <button
+                className="preview-btn"
+                onClick={handlePreview}
+                disabled={previewLoading}
+                title={previewUrl ? `Open preview (${previewUrl})` : `Start preview tunnel to port ${previewPort}`}
+              >
+                {previewLoading ? "Starting..." : previewUrl ? "Preview" : "Preview"}
+              </button>
+            )}
           </div>
 
           <pre ref={outputRef} className="terminal-output">

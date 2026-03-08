@@ -809,6 +809,26 @@ label {
   font-size: 12px;
 }
 
+.preview-btn {
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 4px 10px;
+  font-size: 12px;
+  margin-left: auto;
+  cursor: pointer;
+}
+
+.preview-btn:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.preview-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .terminal-output {
   flex: 1;
   background: var(--terminal-bg);

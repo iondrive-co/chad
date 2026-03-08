@@ -56,6 +56,7 @@ class ProjectConfig:
     verification: VerificationConfig = field(default_factory=VerificationConfig)
     instructions: str | None = None
     docs: DocsConfig = field(default_factory=DocsConfig)
+    preview_port: int | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -75,6 +76,7 @@ class ProjectConfig:
             "docs": {
                 "instructions_paths": self.docs.instructions_paths,
             },
+            "preview_port": self.preview_port,
         }
 
     @classmethod
@@ -98,6 +100,7 @@ class ProjectConfig:
             verification=verification,
             instructions=data.get("instructions"),
             docs=docs,
+            preview_port=data.get("preview_port"),
         )
 
 
@@ -411,6 +414,7 @@ def save_project_settings(
     lint_command: str | None = None,
     test_command: str | None = None,
     instructions_paths: list[str] | None = None,
+    preview_port: int | None = ...,
 ) -> ProjectConfig:
     """Persist verification commands and documentation paths for a project.
 
@@ -419,6 +423,7 @@ def save_project_settings(
         lint_command: Lint command to save (None to clear)
         test_command: Test command to save (None to clear)
         instructions_paths: List of paths to agent instruction/doc files
+        preview_port: Local port for preview tunnel (None to clear, ... to leave unchanged)
 
     Returns:
         The saved ProjectConfig instance
@@ -455,6 +460,9 @@ def save_project_settings(
         docs.instructions_paths = detected_docs.instructions_paths
 
     config.docs = docs
+
+    if preview_port is not ...:
+        config.preview_port = preview_port
 
     save_project_config(project_path, config)
     return config

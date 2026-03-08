@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .state import init_start_time
-from .api.routes import health, sessions, providers, worktree, config, ws, slack, tunnel, uploads
+from .api.routes import health, sessions, providers, worktree, config, ws, slack, tunnel, uploads, preview_tunnel
 
 
 def _source_project_root() -> Path:
@@ -158,6 +158,7 @@ def create_app(
     app.include_router(slack.router, prefix="/api/v1", tags=["Slack"])
     app.include_router(tunnel.router, prefix="/api/v1", tags=["Tunnel"])
     app.include_router(uploads.router, prefix="/api/v1/uploads", tags=["Uploads"])
+    app.include_router(preview_tunnel.router, prefix="/api/v1", tags=["Preview Tunnel"])
 
     # Serve the single-file React UI if available (packaged or repo build).
     ui_index, ui_assets = _resolve_ui_paths()

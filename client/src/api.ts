@@ -10,6 +10,7 @@ import type {
   DiffSummary,
   MergeResult,
   ConversationResponse,
+  PreviewTunnelStatus,
   ProviderList,
   ServerStatus,
   Session,
@@ -421,6 +422,20 @@ export class ChadAPI {
     return this.post("/api/v1/tunnel/stop");
   }
 
+  // ── Preview Tunnel ──
+
+  getPreviewTunnelStatus(): Promise<PreviewTunnelStatus> {
+    return this.get("/api/v1/preview-tunnel");
+  }
+
+  startPreviewTunnel(port: number): Promise<PreviewTunnelStatus> {
+    return this.post("/api/v1/preview-tunnel/start", { port });
+  }
+
+  stopPreviewTunnel(): Promise<PreviewTunnelStatus> {
+    return this.post("/api/v1/preview-tunnel/stop");
+  }
+
   // ── Config: Slack ──
 
   getSlackSettings(): Promise<{
@@ -455,6 +470,7 @@ export class ChadAPI {
     lint_command: string | null;
     test_command: string | null;
     instructions_paths: string[];
+    preview_port: number | null;
   }> {
     return this.get(
       `/api/v1/config/project?project_path=${encodeURIComponent(projectPath)}`,
@@ -467,6 +483,7 @@ export class ChadAPI {
       lint_command?: string | null;
       test_command?: string | null;
       instructions_paths?: string[] | null;
+      preview_port?: number | null;
     },
   ): Promise<{
     project_path: string;
@@ -474,6 +491,7 @@ export class ChadAPI {
     lint_command: string | null;
     test_command: string | null;
     instructions_paths: string[];
+    preview_port: number | null;
   }> {
     return this.put("/api/v1/config/project", settings);
   }

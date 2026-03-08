@@ -397,6 +397,7 @@ class ProjectSettingsResponse(BaseModel):
     lint_command: str | None = Field(description="Lint command for the project")
     test_command: str | None = Field(description="Test command for the project")
     instructions_paths: list[str] = Field(default_factory=list, description="Paths to agent instruction/doc files")
+    preview_port: int | None = Field(default=None, description="Local port for preview tunnel")
 
 
 class ProjectSettingsUpdate(BaseModel):
@@ -406,6 +407,7 @@ class ProjectSettingsUpdate(BaseModel):
     lint_command: str | None = Field(default=None, description="Lint command")
     test_command: str | None = Field(default=None, description="Test command")
     instructions_paths: list[str] | None = Field(default=None, description="Paths to agent instruction/doc files")
+    preview_port: int | None = Field(default=None, description="Local port for preview tunnel")
 
 
 @router.get("/project", response_model=ProjectSettingsResponse)
@@ -432,6 +434,7 @@ async def get_project_settings(
             lint_command=config.verification.lint_command,
             test_command=config.verification.test_command,
             instructions_paths=config.docs.instructions_paths if config.docs else [],
+            preview_port=config.preview_port,
         )
 
     # Return defaults for new project
@@ -442,6 +445,7 @@ async def get_project_settings(
         lint_command=None,
         test_command=None,
         instructions_paths=[],
+        preview_port=None,
     )
 
 
@@ -459,6 +463,7 @@ async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSetting
         lint_command=request.lint_command,
         test_command=request.test_command,
         instructions_paths=request.instructions_paths,
+        preview_port=request.preview_port,
     )
 
     return ProjectSettingsResponse(
@@ -467,6 +472,7 @@ async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSetting
         lint_command=config.verification.lint_command,
         test_command=config.verification.test_command,
         instructions_paths=config.docs.instructions_paths if config.docs else [],
+        preview_port=config.preview_port,
     )
 
 

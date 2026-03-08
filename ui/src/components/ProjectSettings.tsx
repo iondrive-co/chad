@@ -6,6 +6,7 @@ interface Props {
   projectPath: string;
   onProjectPathChange?: (path: string) => void;
   onPromptsChange?: (codingPrompt: string | null) => void;
+  onPreviewPortChange?: (port: number | null) => void;
 }
 
 interface Settings {
@@ -14,15 +15,17 @@ interface Settings {
   lint_command: string | null;
   test_command: string | null;
   instructions_paths: string[];
+  preview_port: number | null;
 }
 
-export function ProjectSettings({ api, projectPath, onProjectPathChange, onPromptsChange }: Props) {
+export function ProjectSettings({ api, projectPath, onProjectPathChange, onPromptsChange, onPreviewPortChange }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [editPath, setEditPath] = useState(projectPath);
   const [lintCommand, setLintCommand] = useState("");
   const [testCommand, setTestCommand] = useState("");
   const [instructionsPaths, setInstructionsPaths] = useState<string[]>([]);
+  const [previewPort, setPreviewPort] = useState("");
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
@@ -49,6 +52,8 @@ export function ProjectSettings({ api, projectPath, onProjectPathChange, onPromp
       setLintCommand(s.lint_command || "");
       setTestCommand(s.test_command || "");
       setInstructionsPaths(s.instructions_paths || []);
+      setPreviewPort(s.preview_port != null ? String(s.preview_port) : "");
+      if (onPreviewPortChange) onPreviewPortChange(s.preview_port);
     }).catch(() => {
       // Ignore errors
     });
@@ -73,13 +78,16 @@ export function ProjectSettings({ api, projectPath, onProjectPathChange, onPromp
     if (!savePath) return;
     setSaving(true);
     try {
+      const parsedPort = previewPort.trim() ? parseInt(previewPort, 10) : null;
       const updated = await api.setProjectSettings({
         project_path: savePath,
         lint_command: lintCommand || null,
         test_command: testCommand || null,
         instructions_paths: instructionsPaths.filter(p => p.trim()),
+        preview_port: (parsedPort != null && !isNaN(parsedPort)) ? parsedPort : null,
       });
       setSettings(updated);
+      if (onPreviewPortChange) onPreviewPortChange(updated.preview_port);
       if (savePath !== projectPath && onProjectPathChange) {
         onProjectPathChange(savePath);
       }
@@ -89,7 +97,7 @@ export function ProjectSettings({ api, projectPath, onProjectPathChange, onPromp
     } finally {
       setSaving(false);
     }
-  }, [api, editPath, projectPath, lintCommand, testCommand, instructionsPaths, onProjectPathChange, flash]);
+  }, [api, editPath, projectPath, lintCommand, testCommand, instructionsPaths, previewPort, onProjectPathChange, onPreviewPortChange, flash]);
 
   const handleProjectPathBlur = useCallback(() => {
     const trimmed = editPath.trim();
@@ -165,6 +173,21 @@ export function ProjectSettings({ api, projectPath, onProjectPathChange, onPromp
                 onChange={(e) => setTestCommand(e.target.value)}
                 onBlur={handleSave}
                 placeholder="e.g., pytest tests/"
+              />
+            </label>
+          </div>
+
+          <div className="project-settings-row">
+            <label>
+              Preview Port
+              <input
+                type="number"
+                value={previewPort}
+                onChange={(e) => setPreviewPort(e.target.value)}
+                onBlur={handleSave}
+                placeholder="e.g., 3000"
+                min={1}
+                max={65535}
               />
             </label>
           </div>
