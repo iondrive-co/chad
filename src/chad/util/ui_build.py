@@ -16,6 +16,11 @@ from typing import Iterable
 from .config import resolve_project_root
 
 
+def _find_npm() -> str | None:
+    """Find the npm executable, returning None if not found."""
+    return shutil.which("npm")
+
+
 def _latest_mtime(paths: Iterable[Path]) -> float:
     latest = 0.0
     for p in paths:
@@ -61,18 +66,34 @@ def ensure_ui_built(
     ui_dist = project_root / "ui" / "dist" / "index.html"
     packaged_ui = project_root / "src" / "chad" / "ui_dist"
 
+    # Find npm executable (handles npm.cmd on Windows)
+    npm = _find_npm()
+    if npm is None:
+        _log("UI autobuild skipped: npm not found in PATH", verbose=verbose)
+        return
+
     try:
+        # Install dependencies if node_modules is missing
+        client_dir = client_src.parent
+        ui_dir = ui_src.parent
+        if not (client_dir / "node_modules").exists():
+            _log("[*] Installing client dependencies...", verbose=verbose)
+            _safe_run([npm, "install"], cwd=client_dir)
+        if not (ui_dir / "node_modules").exists():
+            _log("[*] Installing UI dependencies...", verbose=verbose)
+            _safe_run([npm, "install"], cwd=ui_dir)
+
         if force or _is_stale(client_src, client_dist):
-            _log("↻ Rebuilding chad-client…", verbose=verbose)
-            _safe_run(["npm", "run", "build"], cwd=client_src.parent)
+            _log("[*] Rebuilding chad-client...", verbose=verbose)
+            _safe_run([npm, "run", "build"], cwd=client_dir)
 
         if force or _is_stale(ui_src, ui_dist):
-            _log("↻ Rebuilding React UI…", verbose=verbose)
-            _safe_run(["npm", "run", "build"], cwd=ui_src.parent)
+            _log("[*] Rebuilding React UI...", verbose=verbose)
+            _safe_run([npm, "run", "build"], cwd=ui_dir)
 
-        # Always sync dist → packaged assets if dist exists
+        # Always sync dist -> packaged assets if dist exists
         if ui_dist.exists():
-            _log("↻ Syncing ui/dist → src/chad/ui_dist …", verbose=verbose)
+            _log("[*] Syncing ui/dist -> src/chad/ui_dist...", verbose=verbose)
             packaged_ui.mkdir(parents=True, exist_ok=True)
             (packaged_ui / "__init__.py").touch()
             # Clean packaged directory except for __init__.py / __pycache__
