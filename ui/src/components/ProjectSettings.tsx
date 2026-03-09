@@ -409,7 +409,7 @@ export function ProjectSettings({ api, projectPath, codingAgent, onProjectPathCh
                 className="autoconfigure-btn"
                 onClick={handleAutoconfigure}
                 disabled={autoconfiguring || !projectPath}
-                title="Use AI agent to discover project settings"
+                title="Use Coding Agent to discover project settings"
               >
                 Autoconfigure
               </button>

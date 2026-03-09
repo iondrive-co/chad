@@ -421,10 +421,19 @@ export function ChatView({
     }
   }, [api, sessionId]);
 
+  // Determine if we're connected to a remote server (need tunnel) or local (open directly)
+  const isRemote = Boolean(apiBaseUrl) && !/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(apiBaseUrl || "");
+
   const handlePreview = useCallback(async () => {
     if (!previewPort) return;
 
-    // If we already have a running preview, just open it
+    // Local connection: just open the port directly
+    if (!isRemote) {
+      window.open(`http://localhost:${previewPort}`, "_blank", "noopener");
+      return;
+    }
+
+    // Remote connection: use Cloudflare tunnel
     if (previewUrl) {
       window.open(previewUrl, "_blank", "noopener");
       return;
@@ -442,7 +451,7 @@ export function ChatView({
     } finally {
       setPreviewLoading(false);
     }
-  }, [api, previewPort, previewUrl]);
+  }, [api, previewPort, previewUrl, isRemote]);
 
   // Screenshot upload handlers
   const handleFiles = useCallback(async (files: FileList | File[]) => {
@@ -818,9 +827,9 @@ export function ChatView({
                 className="preview-btn"
                 onClick={handlePreview}
                 disabled={previewLoading}
-                title={previewUrl ? `Open preview (${previewUrl})` : `Start preview tunnel to port ${previewPort}`}
+                title={isRemote ? (previewUrl ? `Open preview (${previewUrl})` : `Start preview tunnel to port ${previewPort}`) : `Open localhost:${previewPort}`}
               >
-                {previewLoading ? "Starting..." : previewUrl ? "Preview" : "Preview"}
+                {previewLoading ? "Starting..." : "Preview"}
               </button>
             )}
           </div>
