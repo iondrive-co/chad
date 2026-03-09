@@ -8,6 +8,7 @@ interface Props {
   onProjectPathChange?: (path: string) => void;
   onPromptsChange?: (codingPrompt: string | null) => void;
   onPreviewPortChange?: (port: number | null) => void;
+  onPreviewCommandChange?: (command: string | null) => void;
 }
 
 interface Settings {
@@ -17,9 +18,10 @@ interface Settings {
   test_command: string | null;
   instructions_paths: string[];
   preview_port: number | null;
+  preview_command: string | null;
 }
 
-export function ProjectSettings({ api, projectPath, codingAgent, onProjectPathChange, onPromptsChange, onPreviewPortChange }: Props) {
+export function ProjectSettings({ api, projectPath, codingAgent, onProjectPathChange, onPromptsChange, onPreviewPortChange, onPreviewCommandChange }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [editPath, setEditPath] = useState(projectPath);
@@ -27,6 +29,7 @@ export function ProjectSettings({ api, projectPath, codingAgent, onProjectPathCh
   const [testCommand, setTestCommand] = useState("");
   const [instructionsPaths, setInstructionsPaths] = useState<string[]>([]);
   const [previewPort, setPreviewPort] = useState("");
+  const [previewCommand, setPreviewCommand] = useState("");
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
@@ -61,7 +64,9 @@ export function ProjectSettings({ api, projectPath, codingAgent, onProjectPathCh
       setTestCommand(s.test_command || "");
       setInstructionsPaths(s.instructions_paths || []);
       setPreviewPort(s.preview_port != null ? String(s.preview_port) : "");
+      setPreviewCommand(s.preview_command || "");
       if (onPreviewPortChange) onPreviewPortChange(s.preview_port);
+      if (onPreviewCommandChange) onPreviewCommandChange(s.preview_command);
     }).catch(() => {
       // Ignore errors
     });
@@ -99,8 +104,10 @@ export function ProjectSettings({ api, projectPath, codingAgent, onProjectPathCh
     setTestCommand(s.test_command || "");
     setInstructionsPaths(s.instructions_paths || []);
     setPreviewPort(s.preview_port != null ? String(s.preview_port) : "");
+    setPreviewCommand(s.preview_command || "");
     if (onPreviewPortChange) onPreviewPortChange(s.preview_port);
-  }, [onPreviewPortChange]);
+    if (onPreviewCommandChange) onPreviewCommandChange(s.preview_command);
+  }, [onPreviewPortChange, onPreviewCommandChange]);
 
   const handleSave = useCallback(async () => {
     const savePath = editPath.trim() || projectPath;
@@ -114,9 +121,11 @@ export function ProjectSettings({ api, projectPath, codingAgent, onProjectPathCh
         test_command: testCommand || null,
         instructions_paths: instructionsPaths.filter(p => p.trim()),
         preview_port: (parsedPort != null && !isNaN(parsedPort)) ? parsedPort : null,
+        preview_command: previewCommand || null,
       });
       setSettings(updated);
       if (onPreviewPortChange) onPreviewPortChange(updated.preview_port);
+      if (onPreviewCommandChange) onPreviewCommandChange(updated.preview_command);
       if (savePath !== projectPath && onProjectPathChange) {
         onProjectPathChange(savePath);
       }
@@ -126,7 +135,7 @@ export function ProjectSettings({ api, projectPath, codingAgent, onProjectPathCh
     } finally {
       setSaving(false);
     }
-  }, [api, editPath, projectPath, lintCommand, testCommand, instructionsPaths, previewPort, onProjectPathChange, onPreviewPortChange, flash]);
+  }, [api, editPath, projectPath, lintCommand, testCommand, instructionsPaths, previewPort, previewCommand, onProjectPathChange, onPreviewPortChange, onPreviewCommandChange, flash]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -162,6 +171,7 @@ export function ProjectSettings({ api, projectPath, codingAgent, onProjectPathCh
               test_command: result.settings.test_command,
               instructions_paths: result.settings.instructions_paths,
               preview_port: result.settings.preview_port,
+              preview_command: result.settings.preview_command,
             });
             applySettings(updated);
             flash("Autoconfigured");
@@ -312,6 +322,16 @@ export function ProjectSettings({ api, projectPath, codingAgent, onProjectPathCh
           </div>
 
           <div className="project-settings-row">
+            <label>
+              Preview Command
+              <input
+                type="text"
+                value={previewCommand}
+                onChange={(e) => setPreviewCommand(e.target.value)}
+                onBlur={handleSave}
+                placeholder="e.g., npm run dev"
+              />
+            </label>
             <label>
               Preview Port
               <input

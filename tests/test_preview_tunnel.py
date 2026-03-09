@@ -36,91 +36,132 @@ class TestPreviewTunnelService:
         svc.stop()
         assert svc.is_running is False
 
-    @patch("chad.server.services.preview_tunnel_service.AIToolInstaller")
-    def test_start_fails_when_cloudflared_not_installed(self, mock_installer_cls):
-        mock_installer = MagicMock()
-        mock_installer.ensure_tool.return_value = (False, "not found")
-        mock_installer_cls.return_value = mock_installer
-
-        svc = PreviewTunnelService()
-        result = svc.start(3000)
-
-        assert result is None
-        assert svc.status()["error"] == "not found"
-
     @patch("chad.server.services.preview_tunnel_service.get_global_registry")
-    @patch("chad.server.services.preview_tunnel_service.AIToolInstaller")
-    def test_start_success(self, mock_installer_cls, mock_registry_fn):
-        mock_installer = MagicMock()
-        mock_installer.ensure_tool.return_value = (True, "/usr/bin/cloudflared")
-        mock_installer_cls.return_value = mock_installer
+    def test_start_app_only_local(self, mock_registry_fn, tmp_path):
+        """Starting without tunnel should start the app and return localhost URL."""
+        mock_registry_fn.return_value = MagicMock()
 
-        mock_registry = MagicMock()
-        mock_registry_fn.return_value = mock_registry
-
-        # Simulate cloudflared outputting a URL on stderr
-        stderr_content = (
-            b"2024-01-01 INF Requesting new quick Tunnel\n"
-            b"2024-01-01 INF +----------------------------+\n"
-            b"2024-01-01 INF |  https://test-preview.trycloudflare.com  |\n"
-        )
-
-        mock_proc = MagicMock(spec=subprocess.Popen)
-        mock_proc.pid = 12345
+        mock_proc = MagicMock()
+        mock_proc.pid = 111
         mock_proc.poll.return_value = None
-        mock_proc.stderr = iter(stderr_content.split(b"\n"))
 
         with patch("chad.server.services.preview_tunnel_service.subprocess.Popen", return_value=mock_proc):
             svc = PreviewTunnelService()
-            result = svc.start(3000)
+            result = svc.start(3000, command="npm run dev", cwd=str(tmp_path))
 
-        assert result == "https://test-preview.trycloudflare.com"
+        assert result == "http://localhost:3000"
+        assert svc.is_running is True
+        assert svc.has_tunnel is False
         status = svc.status()
         assert status["running"] is True
-        assert status["url"] == "https://test-preview.trycloudflare.com"
+        assert status["url"] is None  # no tunnel
         assert status["port"] == 3000
 
     @patch("chad.server.services.preview_tunnel_service.get_global_registry")
     @patch("chad.server.services.preview_tunnel_service.AIToolInstaller")
-    def test_start_returns_existing_url_for_same_port(self, mock_installer_cls, mock_registry_fn):
-        """Starting again with the same port returns the existing URL."""
+    def test_start_with_tunnel(self, mock_installer_cls, mock_registry_fn, tmp_path):
+        """Starting with tunnel=True should start app + cloudflared."""
         mock_installer = MagicMock()
         mock_installer.ensure_tool.return_value = (True, "/usr/bin/cloudflared")
         mock_installer_cls.return_value = mock_installer
         mock_registry_fn.return_value = MagicMock()
 
-        stderr_content = b"https://existing-tunnel.trycloudflare.com\n"
-        mock_proc = MagicMock(spec=subprocess.Popen)
-        mock_proc.pid = 12345
+        stderr_content = b"https://test-preview.trycloudflare.com\n"
+
+        mock_app_proc = MagicMock(spec=subprocess.Popen)
+        mock_app_proc.pid = 111
+        mock_app_proc.poll.return_value = None
+
+        mock_tunnel_proc = MagicMock(spec=subprocess.Popen)
+        mock_tunnel_proc.pid = 222
+        mock_tunnel_proc.poll.return_value = None
+        mock_tunnel_proc.stderr = iter(stderr_content.split(b"\n"))
+
+        call_count = [0]
+
+        def make_proc(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return mock_app_proc
+            return mock_tunnel_proc
+
+        with patch("chad.server.services.preview_tunnel_service.subprocess.Popen", side_effect=make_proc):
+            svc = PreviewTunnelService()
+            result = svc.start(3000, command="npm run dev", cwd=str(tmp_path), tunnel=True)
+
+        assert result == "https://test-preview.trycloudflare.com"
+        assert svc.is_running is True
+        assert svc.has_tunnel is True
+
+    @patch("chad.server.services.preview_tunnel_service.AIToolInstaller")
+    def test_start_tunnel_fails_when_cloudflared_not_installed(self, mock_installer_cls, tmp_path):
+        """If cloudflared can't be installed, return localhost URL instead."""
+        mock_installer = MagicMock()
+        mock_installer.ensure_tool.return_value = (False, "not found")
+        mock_installer_cls.return_value = mock_installer
+
+        svc = PreviewTunnelService()
+        # No command, just tunnel request — should still handle gracefully
+        result = svc.start(3000, tunnel=True)
+
+        assert result == "http://localhost:3000"
+        assert svc.status()["error"] == "not found"
+
+    def test_start_no_command_no_tunnel(self):
+        """Starting without command or tunnel should just return localhost URL."""
+        svc = PreviewTunnelService()
+        result = svc.start(3000)
+
+        assert result == "http://localhost:3000"
+        assert svc.status()["error"] is None
+
+    @patch("chad.server.services.preview_tunnel_service.get_global_registry")
+    def test_start_returns_existing_for_same_config(self, mock_registry_fn, tmp_path):
+        """Starting again with same port/cwd returns existing URL."""
+        mock_registry_fn.return_value = MagicMock()
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 111
         mock_proc.poll.return_value = None
-        mock_proc.stderr = iter(stderr_content.split(b"\n"))
 
         with patch("chad.server.services.preview_tunnel_service.subprocess.Popen", return_value=mock_proc):
             svc = PreviewTunnelService()
-            url1 = svc.start(3000)
+            url1 = svc.start(3000, command="npm dev", cwd=str(tmp_path))
 
-        # Second call with same port should return existing
-        url2 = svc.start(3000)
+        url2 = svc.start(3000, cwd=str(tmp_path))
         assert url1 == url2
 
     @patch("chad.server.services.preview_tunnel_service.get_global_registry")
-    def test_stop_terminates_process(self, mock_registry_fn):
+    def test_stop_terminates_both_processes(self, mock_registry_fn):
         mock_registry = MagicMock()
         mock_registry_fn.return_value = mock_registry
 
         svc = PreviewTunnelService()
-        mock_proc = MagicMock()
-        mock_proc.pid = 99999
-        svc._proc = mock_proc
+        mock_app = MagicMock()
+        mock_app.pid = 111
+        mock_tunnel = MagicMock()
+        mock_tunnel.pid = 222
+        svc._app_proc = mock_app
+        svc._tunnel_proc = mock_tunnel
         svc._url = "https://test.trycloudflare.com"
         svc._port = 3000
 
         svc.stop()
 
-        mock_registry.terminate.assert_called_once_with(99999)
-        assert svc._proc is None
+        assert mock_registry.terminate.call_count == 2
+        mock_registry.terminate.assert_any_call(111)
+        mock_registry.terminate.assert_any_call(222)
+        assert svc._app_proc is None
+        assert svc._tunnel_proc is None
         assert svc._url is None
         assert svc._port is None
+
+    def test_start_invalid_cwd(self):
+        """Starting with a non-existent cwd should fail."""
+        svc = PreviewTunnelService()
+        result = svc.start(3000, command="npm dev", cwd="/nonexistent/path/xyz")
+        assert result is None
+        assert "does not exist" in svc.status()["error"]
 
     def test_singleton(self):
         reset_preview_tunnel_service()
@@ -164,6 +205,56 @@ class TestPreviewTunnelAPI:
     def test_start_requires_port(self, client):
         resp = client.post("/api/v1/preview-tunnel/start", json={})
         assert resp.status_code == 422  # validation error
+
+    def test_start_local_no_command(self, client):
+        """Starting with just a port (no command, no tunnel) should succeed."""
+        reset_preview_tunnel_service()
+        resp = client.post("/api/v1/preview-tunnel/start", json={"port": 3000})
+        assert resp.status_code == 200
+        # App not started (no command), but endpoint succeeds
+        data = resp.json()
+        assert data["port"] is None  # no app process running
+
+
+class TestPreviewCwdResolution:
+    """Tests for working directory resolution from session."""
+
+    def test_resolve_cwd_no_session(self):
+        from chad.server.api.routes.preview_tunnel import _resolve_cwd
+        assert _resolve_cwd(None) is None
+
+    def test_resolve_cwd_missing_session(self):
+        from chad.server.api.routes.preview_tunnel import _resolve_cwd
+        with patch("chad.server.api.routes.preview_tunnel.get_session_manager") as mock_mgr:
+            mock_mgr.return_value.get_session.return_value = None
+            assert _resolve_cwd("nonexistent") is None
+
+    def test_resolve_cwd_prefers_worktree(self, tmp_path):
+        from chad.server.api.routes.preview_tunnel import _resolve_cwd
+
+        wt_path = tmp_path / "worktree"
+        wt_path.mkdir()
+
+        mock_session = MagicMock()
+        mock_session.worktree_path = str(wt_path)
+        mock_session.project_path = "/some/project"
+
+        with patch("chad.server.api.routes.preview_tunnel.get_session_manager") as mock_mgr:
+            mock_mgr.return_value.get_session.return_value = mock_session
+            result = _resolve_cwd("sess1")
+            assert result == str(wt_path)
+
+    def test_resolve_cwd_falls_back_to_project_path(self):
+        from chad.server.api.routes.preview_tunnel import _resolve_cwd
+
+        mock_session = MagicMock()
+        mock_session.worktree_path = None
+        mock_session.project_path = "/some/project"
+
+        with patch("chad.server.api.routes.preview_tunnel.get_session_manager") as mock_mgr:
+            mock_mgr.return_value.get_session.return_value = mock_session
+            result = _resolve_cwd("sess1")
+            assert result == "/some/project"
 
 
 class TestAutoconfigureAPI:
@@ -282,10 +373,10 @@ class TestAutoconfigureService:
         assert get_job(job_id) is None
 
 
-class TestProjectConfigPreviewPort:
-    """Tests for preview_port in project config."""
+class TestProjectConfigPreviewFields:
+    """Tests for preview_port and preview_command in project config."""
 
-    def test_project_config_preview_port_roundtrip(self, tmp_path):
+    def test_project_config_preview_port_roundtrip(self):
         from chad.util.project_setup import ProjectConfig
 
         config = ProjectConfig(preview_port=3000)
@@ -295,22 +386,36 @@ class TestProjectConfigPreviewPort:
         restored = ProjectConfig.from_dict(data)
         assert restored.preview_port == 3000
 
-    def test_project_config_preview_port_none_by_default(self):
+    def test_project_config_preview_command_roundtrip(self):
+        from chad.util.project_setup import ProjectConfig
+
+        config = ProjectConfig(preview_command="npm run dev")
+        data = config.to_dict()
+        assert data["preview_command"] == "npm run dev"
+
+        restored = ProjectConfig.from_dict(data)
+        assert restored.preview_command == "npm run dev"
+
+    def test_project_config_defaults_none(self):
         from chad.util.project_setup import ProjectConfig
 
         config = ProjectConfig()
         assert config.preview_port is None
-        assert config.to_dict()["preview_port"] is None
+        assert config.preview_command is None
+        data = config.to_dict()
+        assert data["preview_port"] is None
+        assert data["preview_command"] is None
 
-    def test_project_config_from_dict_missing_preview_port(self):
+    def test_project_config_from_dict_missing_preview_fields(self):
         from chad.util.project_setup import ProjectConfig
 
         data = {"version": "1.0", "project_type": "python"}
         config = ProjectConfig.from_dict(data)
         assert config.preview_port is None
+        assert config.preview_command is None
 
-    def test_save_project_settings_with_preview_port(self, tmp_path):
-        """save_project_settings should persist preview_port."""
+    def test_save_project_settings_with_preview_fields(self, tmp_path):
+        """save_project_settings should persist preview_port and preview_command."""
         from unittest.mock import patch as mock_patch
         from chad.util.project_setup import save_project_settings
 
@@ -330,22 +435,25 @@ class TestProjectConfigPreviewPort:
         mock_cm.set_project_config.side_effect = mock_set
 
         with mock_patch("chad.util.config_manager.ConfigManager", return_value=mock_cm):
-            config = save_project_settings(project_dir, preview_port=8080)
+            config = save_project_settings(
+                project_dir, preview_port=8080, preview_command="python -m http.server 8080"
+            )
             assert config.preview_port == 8080
+            assert config.preview_command == "python -m http.server 8080"
 
-            # Verify the stored data includes preview_port
             saved_data = stored[str(project_dir.resolve())]
             assert saved_data["preview_port"] == 8080
+            assert saved_data["preview_command"] == "python -m http.server 8080"
 
-    def test_save_project_settings_preview_port_unchanged_when_omitted(self, tmp_path):
-        """preview_port should be unchanged when not passed (sentinel ...)."""
+    def test_save_project_settings_preview_unchanged_when_omitted(self, tmp_path):
+        """preview_port and preview_command should be unchanged when not passed (sentinel ...)."""
         from unittest.mock import patch as mock_patch
         from chad.util.project_setup import save_project_settings, ProjectConfig
 
         project_dir = tmp_path / "myproject"
         project_dir.mkdir()
 
-        existing = ProjectConfig(preview_port=5000)
+        existing = ProjectConfig(preview_port=5000, preview_command="npm start")
         stored = {str(project_dir.resolve()): existing.to_dict()}
 
         def mock_get(path):
@@ -362,6 +470,7 @@ class TestProjectConfigPreviewPort:
         mock_cm.set_project_config.side_effect = mock_set
 
         with mock_patch("chad.util.config_manager.ConfigManager", return_value=mock_cm):
-            # Call without preview_port (uses sentinel default)
+            # Call without preview fields (uses sentinel default)
             config = save_project_settings(project_dir)
             assert config.preview_port == 5000
+            assert config.preview_command == "npm start"

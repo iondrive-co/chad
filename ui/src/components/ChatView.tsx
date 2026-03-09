@@ -85,8 +85,9 @@ export function ChatView({
   // Override coding prompt from ProjectSettings
   const [overrideCodingPrompt, setOverrideCodingPrompt] = useState<string | null>(null);
 
-  // Preview tunnel
+  // Preview
   const [previewPort, setPreviewPort] = useState<number | null>(null);
+  const [previewCommand, setPreviewCommand] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
 
@@ -427,13 +428,7 @@ export function ChatView({
   const handlePreview = useCallback(async () => {
     if (!previewPort) return;
 
-    // Local connection: just open the port directly
-    if (!isRemote) {
-      window.open(`http://localhost:${previewPort}`, "_blank", "noopener");
-      return;
-    }
-
-    // Remote connection: use Cloudflare tunnel
+    // If already running, just open the URL
     if (previewUrl) {
       window.open(previewUrl, "_blank", "noopener");
       return;
@@ -441,17 +436,23 @@ export function ChatView({
 
     setPreviewLoading(true);
     try {
-      const result = await api.startPreviewTunnel(previewPort);
-      if (result.url) {
-        setPreviewUrl(result.url);
-        window.open(result.url, "_blank", "noopener");
-      }
+      const result = await api.startPreviewTunnel(previewPort, {
+        command: previewCommand || undefined,
+        session_id: sessionId,
+        tunnel: isRemote,
+      });
+
+      const url = isRemote && result.url
+        ? result.url
+        : `http://localhost:${previewPort}`;
+      setPreviewUrl(url);
+      window.open(url, "_blank", "noopener");
     } catch {
       // ignore
     } finally {
       setPreviewLoading(false);
     }
-  }, [api, previewPort, previewUrl, isRemote]);
+  }, [api, previewPort, previewCommand, previewUrl, isRemote, sessionId]);
 
   // Screenshot upload handlers
   const handleFiles = useCallback(async (files: FileList | File[]) => {
@@ -678,6 +679,7 @@ export function ChatView({
         onProjectPathChange={handleProjectPathChange}
         onPromptsChange={setOverrideCodingPrompt}
         onPreviewPortChange={setPreviewPort}
+        onPreviewCommandChange={setPreviewCommand}
       />
 
       <div className="chat-body">
@@ -822,14 +824,14 @@ export function ChatView({
               </span>
             )}
             {error && <span className="error-text">{error}</span>}
-            {previewPort && (
+            {(previewPort || previewCommand) && (
               <button
                 className="preview-btn"
                 onClick={handlePreview}
-                disabled={previewLoading}
-                title={isRemote ? (previewUrl ? `Open preview (${previewUrl})` : `Start preview tunnel to port ${previewPort}`) : `Open localhost:${previewPort}`}
+                disabled={previewLoading || !previewPort}
+                title={previewUrl ? `Open preview (${previewUrl})` : previewCommand ? `Start "${previewCommand}" on port ${previewPort}` : `Open localhost:${previewPort}`}
               >
-                {previewLoading ? "Starting..." : "Preview"}
+                {previewLoading ? "Starting..." : previewUrl ? "Preview" : "Start Preview"}
               </button>
             )}
           </div>

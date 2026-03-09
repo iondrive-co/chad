@@ -57,6 +57,7 @@ class ProjectConfig:
     instructions: str | None = None
     docs: DocsConfig = field(default_factory=DocsConfig)
     preview_port: int | None = None
+    preview_command: str | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -77,6 +78,7 @@ class ProjectConfig:
                 "instructions_paths": self.docs.instructions_paths,
             },
             "preview_port": self.preview_port,
+            "preview_command": self.preview_command,
         }
 
     @classmethod
@@ -101,6 +103,7 @@ class ProjectConfig:
             instructions=data.get("instructions"),
             docs=docs,
             preview_port=data.get("preview_port"),
+            preview_command=data.get("preview_command"),
         )
 
 
@@ -415,6 +418,7 @@ def save_project_settings(
     test_command: str | None = None,
     instructions_paths: list[str] | None = None,
     preview_port: int | None = ...,
+    preview_command: str | None = ...,
 ) -> ProjectConfig:
     """Persist verification commands and documentation paths for a project.
 
@@ -463,6 +467,9 @@ def save_project_settings(
 
     if preview_port is not ...:
         config.preview_port = preview_port
+
+    if preview_command is not ...:
+        config.preview_command = preview_command or None
 
     save_project_config(project_path, config)
     return config

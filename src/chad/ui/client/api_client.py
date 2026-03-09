@@ -834,13 +834,24 @@ class APIClient:
         resp.raise_for_status()
         return resp.json()
 
-    def start_preview_tunnel(self, port: int) -> dict:
-        """Start a preview tunnel to a local port.
+    def start_preview_tunnel(
+        self,
+        port: int,
+        command: str | None = None,
+        session_id: str | None = None,
+        tunnel: bool = False,
+    ) -> dict:
+        """Start a preview app and optionally tunnel it.
 
         Returns:
             Dict with running, url, port, error
         """
-        resp = self._client.post(self._url("/preview-tunnel/start"), json={"port": port})
+        payload: dict = {"port": port, "tunnel": tunnel}
+        if command:
+            payload["command"] = command
+        if session_id:
+            payload["session_id"] = session_id
+        resp = self._client.post(self._url("/preview-tunnel/start"), json=payload)
         resp.raise_for_status()
         return resp.json()
 

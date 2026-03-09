@@ -397,7 +397,8 @@ class ProjectSettingsResponse(BaseModel):
     lint_command: str | None = Field(description="Lint command for the project")
     test_command: str | None = Field(description="Test command for the project")
     instructions_paths: list[str] = Field(default_factory=list, description="Paths to agent instruction/doc files")
-    preview_port: int | None = Field(default=None, description="Local port for preview tunnel")
+    preview_port: int | None = Field(default=None, description="Local port for preview")
+    preview_command: str | None = Field(default=None, description="Command to start the app for preview")
 
 
 class ProjectSettingsUpdate(BaseModel):
@@ -407,7 +408,8 @@ class ProjectSettingsUpdate(BaseModel):
     lint_command: str | None = Field(default=None, description="Lint command")
     test_command: str | None = Field(default=None, description="Test command")
     instructions_paths: list[str] | None = Field(default=None, description="Paths to agent instruction/doc files")
-    preview_port: int | None = Field(default=None, description="Local port for preview tunnel")
+    preview_port: int | None = Field(default=None, description="Local port for preview")
+    preview_command: str | None = Field(default=None, description="Command to start the app for preview")
 
 
 @router.get("/project", response_model=ProjectSettingsResponse)
@@ -435,6 +437,7 @@ async def get_project_settings(
             test_command=config.verification.test_command,
             instructions_paths=config.docs.instructions_paths if config.docs else [],
             preview_port=config.preview_port,
+            preview_command=config.preview_command,
         )
 
     # Return defaults for new project
@@ -446,6 +449,7 @@ async def get_project_settings(
         test_command=None,
         instructions_paths=[],
         preview_port=None,
+        preview_command=None,
     )
 
 
@@ -464,6 +468,7 @@ async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSetting
         test_command=request.test_command,
         instructions_paths=request.instructions_paths,
         preview_port=request.preview_port,
+        preview_command=request.preview_command,
     )
 
     return ProjectSettingsResponse(
@@ -473,6 +478,7 @@ async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSetting
         test_command=config.verification.test_command,
         instructions_paths=config.docs.instructions_paths if config.docs else [],
         preview_port=config.preview_port,
+        preview_command=config.preview_command,
     )
 
 
@@ -684,6 +690,7 @@ async def get_autoconfigure_result(job_id: str) -> AutoconfigureResultResponse:
             test_command=discovered.get("test_command"),
             instructions_paths=discovered.get("instructions_paths", []),
             preview_port=discovered.get("preview_port"),
+            preview_command=discovered.get("preview_command"),
         ),
     )
 

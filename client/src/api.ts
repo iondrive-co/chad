@@ -430,8 +430,18 @@ export class ChadAPI {
     return this.get("/api/v1/preview-tunnel");
   }
 
-  startPreviewTunnel(port: number): Promise<PreviewTunnelStatus> {
-    return this.post("/api/v1/preview-tunnel/start", { port });
+  startPreviewTunnel(
+    port: number,
+    options?: {
+      command?: string;
+      session_id?: string;
+      tunnel?: boolean;
+    },
+  ): Promise<PreviewTunnelStatus> {
+    return this.post("/api/v1/preview-tunnel/start", {
+      port,
+      ...options,
+    });
   }
 
   stopPreviewTunnel(): Promise<PreviewTunnelStatus> {
@@ -473,6 +483,7 @@ export class ChadAPI {
     test_command: string | null;
     instructions_paths: string[];
     preview_port: number | null;
+    preview_command: string | null;
   }> {
     return this.get(
       `/api/v1/config/project?project_path=${encodeURIComponent(projectPath)}`,
@@ -486,6 +497,7 @@ export class ChadAPI {
       test_command?: string | null;
       instructions_paths?: string[] | null;
       preview_port?: number | null;
+      preview_command?: string | null;
     },
   ): Promise<{
     project_path: string;
@@ -494,6 +506,7 @@ export class ChadAPI {
     test_command: string | null;
     instructions_paths: string[];
     preview_port: number | null;
+    preview_command: string | null;
   }> {
     return this.put("/api/v1/config/project", settings);
   }

@@ -20,17 +20,21 @@ logger = logging.getLogger(__name__)
 _installer = AIToolInstaller()
 
 AUTOCONFIGURE_PROMPT = (
-    "Read pyproject.toml or package.json (whichever exists) and list the "
-    "top-level files. Also check subdirectories (ui/, client/, frontend/, web/) "
-    "for package.json or vite/webpack config with a dev server port. "
-    "Then output a JSON object with exactly these keys:\n"
+    "IMPORTANT: Be fast. Read only the minimum files needed, then output the JSON.\n"
+    "1. Read pyproject.toml or package.json (whichever exists at the root)\n"
+    "2. Run: ls to see top-level files\n"
+    "3. If there is a ui/ or frontend/ or web/ subdirectory, read its package.json "
+    "or vite.config.* for the dev server port and start command\n"
+    "4. Output a JSON object with exactly these keys:\n"
     "lint_command - shell command to lint (null if none)\n"
     "test_command - shell command to run tests (null if none)\n"
-    "preview_port - dev server port from vite.config/webpack.config/package.json "
-    "dev script (null if none)\n"
+    "preview_port - dev server port number (null if none)\n"
+    "preview_command - shell command to start the dev server from the project root, "
+    "e.g. 'npm run dev', 'cd ui && npm run dev', 'python manage.py runserver' "
+    "(null if none)\n"
     "instructions_paths - list of existing doc files like AGENTS.md, CLAUDE.md, "
     "CONTRIBUTING.md (empty list if none)\n"
-    "Output ONLY the JSON object, nothing else."
+    "Output ONLY the JSON object, nothing else. Do not read more files than necessary."
 )
 
 
@@ -100,6 +104,7 @@ def _build_command(
             "lint_command": None,
             "test_command": None,
             "preview_port": None,
+            "preview_command": None,
             "instructions_paths": [],
         })]
     else:
@@ -180,7 +185,7 @@ def start_autoconfigure(
     provider: str,
     account_name: str,
     project_path: Path,
-    timeout: int = 60,
+    timeout: int = 120,
 ) -> str:
     """Start an autoconfigure job in a background thread.
 
@@ -226,9 +231,17 @@ def start_autoconfigure(
                 if deadline.is_set():
                     proc.kill()
                     proc.wait()
-                    job.status = "failed"
-                    job.error = "Timed out"
                     timer.cancel()
+                    # Try to extract results from partial output before giving up
+                    output = "\n".join(collected)
+                    _write_debug_log(job_id, output, project_path)
+                    discovered = _extract_json(output)
+                    if discovered:
+                        job.result = discovered
+                        job.status = "completed"
+                    else:
+                        job.status = "failed"
+                        job.error = "Timed out"
                     return
 
                 line = raw_line.decode("utf-8", errors="replace").rstrip("\n")

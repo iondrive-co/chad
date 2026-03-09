@@ -1,9 +1,10 @@
-"""Preview tunnel service for tunneling a local dev server via Cloudflare."""
+"""Preview service for starting a project's dev server and optionally tunneling it."""
 
 import logging
 import re
 import subprocess
 import threading
+from pathlib import Path
 
 from chad.util.installer import AIToolInstaller
 from chad.util.process_registry import get_global_registry
@@ -14,41 +15,97 @@ _URL_RE = re.compile(r"https://([a-z0-9-]+\.trycloudflare\.com)")
 
 
 class PreviewTunnelService:
-    """Manages a second cloudflared quick-tunnel for previewing a local dev server."""
+    """Manages a project dev server process and an optional cloudflared tunnel."""
 
     _start_timeout: float = 15.0
 
     def __init__(self) -> None:
-        self._proc: subprocess.Popen | None = None
+        self._tunnel_proc: subprocess.Popen | None = None
+        self._app_proc: subprocess.Popen | None = None
         self._url: str | None = None
         self._port: int | None = None
+        self._command: str | None = None
+        self._cwd: str | None = None
         self._error: str | None = None
 
     @property
     def is_running(self) -> bool:
-        return self._proc is not None and self._proc.poll() is None
+        return self._app_proc is not None and self._app_proc.poll() is None
 
-    def start(self, port: int) -> str | None:
-        """Start a cloudflared quick-tunnel pointing to the given local port.
+    @property
+    def has_tunnel(self) -> bool:
+        return self._tunnel_proc is not None and self._tunnel_proc.poll() is None
 
-        Returns the tunnel URL on success, or None on failure.
-        If already tunneling this port, returns the existing URL.
+    def start(
+        self,
+        port: int,
+        command: str | None = None,
+        cwd: str | None = None,
+        tunnel: bool = False,
+    ) -> str | None:
+        """Start the preview app and optionally a cloudflared tunnel.
+
+        Args:
+            port: The port the app listens on.
+            command: Shell command to start the app (e.g. "npm run dev").
+            cwd: Working directory for the app command.
+            tunnel: Whether to also start a cloudflared tunnel (for remote access).
+
+        Returns:
+            The tunnel URL if tunnel=True and successful, otherwise
+            the localhost URL, or None on failure.
         """
-        if self.is_running and self._url and self._port == port:
-            return self._url
+        # If already running the same config, return existing URL
+        if self.is_running and self._port == port and self._cwd == cwd:
+            if tunnel and self._url:
+                return self._url
+            return f"http://localhost:{port}"
 
-        # Stop any existing tunnel (port may have changed)
+        # Stop any existing preview
         self.stop()
 
+        self._port = port
+        self._command = command
+        self._cwd = cwd
+
+        # Start the app process
+        if command:
+            resolved_cwd = cwd or "."
+            if not Path(resolved_cwd).is_dir():
+                self._error = f"Working directory does not exist: {resolved_cwd}"
+                logger.error(self._error)
+                return None
+
+            try:
+                self._app_proc = subprocess.Popen(
+                    command,
+                    shell=True,
+                    cwd=resolved_cwd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            except Exception as exc:
+                self._error = str(exc)
+                logger.error("Failed to start preview app: %s", exc)
+                return None
+
+            registry = get_global_registry()
+            registry.register(self._app_proc, description=f"preview app: {command}")
+
+        if not tunnel:
+            self._error = None
+            return f"http://localhost:{port}"
+
+        # Start cloudflared tunnel
         installer = AIToolInstaller()
         ok, path_or_error = installer.ensure_tool("cloudflared")
         if not ok:
             self._error = path_or_error
             logger.error("Failed to install cloudflared: %s", path_or_error)
-            return None
+            return f"http://localhost:{port}"
 
         try:
-            self._proc = subprocess.Popen(
+            self._tunnel_proc = subprocess.Popen(
                 [
                     path_or_error, "tunnel",
                     "--url", f"http://localhost:{port}",
@@ -60,18 +117,17 @@ class PreviewTunnelService:
         except Exception as exc:
             self._error = str(exc)
             logger.error("Failed to start preview tunnel: %s", exc)
-            return None
+            return f"http://localhost:{port}"
 
-        self._port = port
         registry = get_global_registry()
-        registry.register(self._proc, description="cloudflared preview tunnel")
+        registry.register(self._tunnel_proc, description="cloudflared preview tunnel")
 
         url_found = threading.Event()
 
         def _read_stderr():
-            assert self._proc is not None
-            assert self._proc.stderr is not None
-            for raw_line in self._proc.stderr:
+            assert self._tunnel_proc is not None
+            assert self._tunnel_proc.stderr is not None
+            for raw_line in self._tunnel_proc.stderr:
                 line = raw_line.decode("utf-8", errors="replace")
                 m = _URL_RE.search(line)
                 if m:
@@ -86,24 +142,27 @@ class PreviewTunnelService:
             return self._url
 
         self._error = "Timed out waiting for preview tunnel URL"
-        self.stop()
-        return None
+        return f"http://localhost:{port}"
 
     def stop(self) -> None:
-        """Stop the running preview tunnel."""
-        if self._proc is not None:
-            pid = self._proc.pid
-            registry = get_global_registry()
-            registry.terminate(pid)
-            self._proc = None
+        """Stop the app process and tunnel."""
+        registry = get_global_registry()
+        if self._tunnel_proc is not None:
+            registry.terminate(self._tunnel_proc.pid)
+            self._tunnel_proc = None
+        if self._app_proc is not None:
+            registry.terminate(self._app_proc.pid)
+            self._app_proc = None
         self._url = None
         self._port = None
+        self._command = None
+        self._cwd = None
 
     def status(self) -> dict:
-        """Return current preview tunnel status."""
+        """Return current preview status."""
         return {
             "running": self.is_running,
-            "url": self._url if self.is_running else None,
+            "url": self._url if self.has_tunnel else None,
             "port": self._port if self.is_running else None,
             "error": self._error,
         }
