@@ -166,6 +166,122 @@ class TestPreviewTunnelAPI:
         assert resp.status_code == 422  # validation error
 
 
+class TestAutoconfigureAPI:
+    """Tests for autoconfigure API endpoints."""
+
+    @pytest.fixture
+    def client(self):
+        from chad.server.main import create_app
+        from fastapi.testclient import TestClient
+
+        app = create_app(debug=True)
+        return TestClient(app)
+
+    def test_autoconfigure_requires_project_path(self, client):
+        resp = client.post("/api/v1/config/project/autoconfigure", json={
+            "coding_agent": "test",
+        })
+        assert resp.status_code == 422
+
+    def test_autoconfigure_requires_coding_agent(self, client):
+        resp = client.post("/api/v1/config/project/autoconfigure", json={
+            "project_path": "/tmp",
+        })
+        assert resp.status_code == 422
+
+    def test_autoconfigure_result_not_found(self, client):
+        resp = client.get("/api/v1/config/project/autoconfigure/nonexistent")
+        assert resp.status_code == 404
+
+    def test_cancel_not_found(self, client):
+        resp = client.post("/api/v1/config/project/autoconfigure/nonexistent/cancel")
+        assert resp.status_code == 404
+
+
+class TestAutoconfigureService:
+    """Tests for the autoconfigure service."""
+
+    def test_extract_json_from_code_block(self):
+        from chad.server.services.autoconfigure_service import _extract_json
+
+        text = 'Some text\n```json\n{"lint_command": "npm run lint"}\n```\nMore text'
+        result = _extract_json(text)
+        assert result == {"lint_command": "npm run lint"}
+
+    def test_extract_json_bare(self):
+        from chad.server.services.autoconfigure_service import _extract_json
+
+        text = '{"lint_command": "flake8 .", "test_command": "pytest", "preview_port": null, "instructions_paths": []}'
+        result = _extract_json(text)
+        assert result is not None
+        assert result["lint_command"] == "flake8 ."
+
+    def test_extract_json_none_when_no_json(self):
+        from chad.server.services.autoconfigure_service import _extract_json
+
+        result = _extract_json("no json here at all")
+        assert result is None
+
+    def test_build_command_anthropic(self):
+        from chad.server.services.autoconfigure_service import _build_command
+
+        cmd, env, stdin_input = _build_command(
+            "anthropic", "test-account", "/tmp", "test prompt"
+        )
+        assert "claude" in cmd[0] or cmd[0] == "claude"
+        assert "-p" in cmd
+        assert "--output-format" in cmd
+        assert "text" in cmd
+        assert "--max-turns" in cmd
+        assert stdin_input is None
+
+    def test_build_command_openai(self):
+        from chad.server.services.autoconfigure_service import _build_command
+
+        cmd, env, stdin_input = _build_command(
+            "openai", "test-account", "/tmp", "test prompt"
+        )
+        assert "codex" in cmd[0] or cmd[0] == "codex"
+        assert "exec" in cmd
+        assert stdin_input is not None
+
+    def test_build_command_mock(self):
+        import json
+        from chad.server.services.autoconfigure_service import _build_command
+
+        cmd, env, stdin_input = _build_command(
+            "mock", "test-account", "/tmp", "test prompt"
+        )
+        assert cmd[0] == "echo"
+        # Should be valid JSON
+        json.loads(cmd[1])
+
+    def test_job_lifecycle(self):
+        from chad.server.services.autoconfigure_service import (
+            start_autoconfigure, get_job, cleanup_job,
+        )
+        import time
+
+        # Mock provider returns instantly via echo
+        job_id = start_autoconfigure("mock", "test", "/tmp")
+        assert job_id.startswith("autoconf-")
+
+        # Wait for completion
+        for _ in range(20):
+            job = get_job(job_id)
+            if job and job.status != "running":
+                break
+            time.sleep(0.1)
+
+        job = get_job(job_id)
+        assert job is not None
+        assert job.status == "completed"
+        assert job.result is not None
+
+        cleanup_job(job_id)
+        assert get_job(job_id) is None
+
+
 class TestProjectConfigPreviewPort:
     """Tests for preview_port in project config."""
 

@@ -341,6 +341,17 @@ export interface ProjectSettings {
   preview_port: number | null;
 }
 
+export interface AutoconfigureStart {
+  job_id: string;
+}
+
+export interface AutoconfigureResult {
+  status: "running" | "completed" | "failed";
+  settings: ProjectSettings | null;
+  error: string | null;
+  output: string[];
+}
+
 export interface ProjectSettingsUpdate {
   project_path: string;
   lint_command?: string | null;

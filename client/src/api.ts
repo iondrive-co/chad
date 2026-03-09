@@ -4,6 +4,8 @@ import type {
   AccountList,
   AccountModels,
   AccountUsage,
+  AutoconfigureResult,
+  AutoconfigureStart,
   BranchesResponse,
   CleanupSettings,
   DiffFull,
@@ -494,6 +496,30 @@ export class ChadAPI {
     preview_port: number | null;
   }> {
     return this.put("/api/v1/config/project", settings);
+  }
+
+  // ── Config: Project Autoconfigure ──
+
+  startAutoconfigure(
+    projectPath: string,
+    codingAgent: string,
+  ): Promise<AutoconfigureStart> {
+    return this.post("/api/v1/config/project/autoconfigure", {
+      project_path: projectPath,
+      coding_agent: codingAgent,
+    });
+  }
+
+  getAutoconfigureResult(
+    jobId: string,
+  ): Promise<AutoconfigureResult> {
+    return this.get(`/api/v1/config/project/autoconfigure/${jobId}`);
+  }
+
+  cancelAutoconfigure(
+    jobId: string,
+  ): Promise<AutoconfigureResult> {
+    return this.post(`/api/v1/config/project/autoconfigure/${jobId}/cancel`);
   }
 
   getPromptPreviews(

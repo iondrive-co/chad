@@ -1,3 +1,5 @@
 Chad 1.0: Slip Slop Slap
 
-Bug fixes and stability
+- Preview remote projects
+- Autoconfigure project settings
+- Bug fixes and stability

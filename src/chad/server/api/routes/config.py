@@ -592,3 +592,111 @@ async def import_config(request: ConfigImportRequest) -> JSONResponse:
         })
 
     return JSONResponse(content={"ok": True, "message": "Config imported successfully"})
+
+
+# ── Project Autoconfigure ──
+
+
+class AutoconfigureRequest(BaseModel):
+    """Request to autoconfigure project settings."""
+
+    project_path: str = Field(description="Path to the project")
+    coding_agent: str = Field(description="Account name of the coding agent to use")
+
+
+class AutoconfigureStartResponse(BaseModel):
+    """Response when autoconfigure discovery starts."""
+
+    job_id: str = Field(description="Job ID for polling")
+
+
+class AutoconfigureResultResponse(BaseModel):
+    """Response when autoconfigure discovery completes."""
+
+    status: str = Field(description="Job status: running, completed, failed")
+    settings: ProjectSettingsResponse | None = Field(
+        default=None, description="Discovered settings (only when status=completed)"
+    )
+    error: str | None = Field(default=None, description="Error message if failed")
+    output: list[str] = Field(default_factory=list, description="Agent output lines so far")
+
+
+@router.post("/project/autoconfigure", response_model=AutoconfigureStartResponse)
+async def start_autoconfigure(request: AutoconfigureRequest) -> AutoconfigureStartResponse:
+    """Start project autoconfiguration using a coding agent.
+
+    Runs a lightweight one-shot agent query (no session, no worktree,
+    no continuation) to discover lint/test commands, dev server port,
+    and documentation files.
+    """
+    from chad.server.services.autoconfigure_service import start_autoconfigure as _start
+
+    path = Path(request.project_path).expanduser().resolve()
+    if not path.exists() or not path.is_dir():
+        raise HTTPException(status_code=400, detail=f"Invalid project path: {request.project_path}")
+
+    config_mgr = get_config_manager()
+    accounts = config_mgr.list_accounts()
+    if request.coding_agent not in accounts:
+        raise HTTPException(status_code=400, detail=f"Account '{request.coding_agent}' not found")
+
+    provider = accounts[request.coding_agent]
+
+    job_id = _start(
+        provider=provider,
+        account_name=request.coding_agent,
+        project_path=path,
+    )
+
+    return AutoconfigureStartResponse(job_id=job_id)
+
+
+@router.get("/project/autoconfigure/{job_id}", response_model=AutoconfigureResultResponse)
+async def get_autoconfigure_result(job_id: str) -> AutoconfigureResultResponse:
+    """Poll for autoconfigure result."""
+    from chad.server.services.autoconfigure_service import get_job, cleanup_job
+
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Autoconfigure job not found")
+
+    if job.status == "running":
+        return AutoconfigureResultResponse(status="running", output=job.output_lines)
+
+    if job.status == "failed":
+        error = job.error
+        output = list(job.output_lines)
+        cleanup_job(job_id)
+        return AutoconfigureResultResponse(status="failed", error=error, output=output)
+
+    # Completed — return discovered settings for the frontend to save.
+    discovered = job.result or {}
+    output = list(job.output_lines)
+    cleanup_job(job_id)
+
+    return AutoconfigureResultResponse(
+        status="completed",
+        output=output,
+        settings=ProjectSettingsResponse(
+            project_path="",  # filled by frontend
+            project_type=None,
+            lint_command=discovered.get("lint_command"),
+            test_command=discovered.get("test_command"),
+            instructions_paths=discovered.get("instructions_paths", []),
+            preview_port=discovered.get("preview_port"),
+        ),
+    )
+
+
+@router.post("/project/autoconfigure/{job_id}/cancel")
+async def cancel_autoconfigure(job_id: str) -> AutoconfigureResultResponse:
+    """Cancel a running autoconfigure job."""
+    from chad.server.services.autoconfigure_service import get_job, cleanup_job
+
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Autoconfigure job not found")
+
+    job.cancel()
+    cleanup_job(job_id)
+    return AutoconfigureResultResponse(status="failed", error="Cancelled")

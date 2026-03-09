@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { ChadAPI } from "chad-client";
 
 interface Props {
   api: ChadAPI;
   projectPath: string;
+  codingAgent?: string | null;
   onProjectPathChange?: (path: string) => void;
   onPromptsChange?: (codingPrompt: string | null) => void;
   onPreviewPortChange?: (port: number | null) => void;
@@ -18,7 +19,7 @@ interface Settings {
   preview_port: number | null;
 }
 
-export function ProjectSettings({ api, projectPath, onProjectPathChange, onPromptsChange, onPreviewPortChange }: Props) {
+export function ProjectSettings({ api, projectPath, codingAgent, onProjectPathChange, onPromptsChange, onPreviewPortChange }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [editPath, setEditPath] = useState(projectPath);
@@ -29,6 +30,13 @@ export function ProjectSettings({ api, projectPath, onProjectPathChange, onPromp
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
+  // Autoconfigure state
+  const [autoconfiguring, setAutoconfiguring] = useState(false);
+  const [autoconfigJobId, setAutoconfigJobId] = useState<string | null>(null);
+  const [autoconfigOutput, setAutoconfigOutput] = useState<string[]>([]);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const outputEndRef = useRef<HTMLDivElement | null>(null);
+
   // Prompts sub-panel
   const [promptsExpanded, setPromptsExpanded] = useState(false);
   const [codingPrompt, setCodingPrompt] = useState("");
@@ -37,7 +45,7 @@ export function ProjectSettings({ api, projectPath, onProjectPathChange, onPromp
 
   const flash = useCallback((msg: string) => {
     setStatus(msg);
-    setTimeout(() => setStatus(null), 2000);
+    setTimeout(() => setStatus(null), 3000);
   }, []);
 
   // Sync editPath when projectPath prop changes
@@ -73,6 +81,27 @@ export function ProjectSettings({ api, projectPath, onProjectPathChange, onPromp
     });
   }, [api, projectPath, promptsExpanded]);
 
+  // Clean up poll on unmount
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
+
+  // Auto-scroll output log
+  useEffect(() => {
+    outputEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [autoconfigOutput]);
+
+  const applySettings = useCallback((s: Settings) => {
+    setSettings(s);
+    setLintCommand(s.lint_command || "");
+    setTestCommand(s.test_command || "");
+    setInstructionsPaths(s.instructions_paths || []);
+    setPreviewPort(s.preview_port != null ? String(s.preview_port) : "");
+    if (onPreviewPortChange) onPreviewPortChange(s.preview_port);
+  }, [onPreviewPortChange]);
+
   const handleSave = useCallback(async () => {
     const savePath = editPath.trim() || projectPath;
     if (!savePath) return;
@@ -99,6 +128,73 @@ export function ProjectSettings({ api, projectPath, onProjectPathChange, onPromp
     }
   }, [api, editPath, projectPath, lintCommand, testCommand, instructionsPaths, previewPort, onProjectPathChange, onPreviewPortChange, flash]);
 
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  const handleAutoconfigure = useCallback(async () => {
+    if (!codingAgent || !projectPath) return;
+    setAutoconfiguring(true);
+    setAutoconfigOutput([]);
+
+    try {
+      const { job_id } = await api.startAutoconfigure(projectPath, codingAgent);
+      setAutoconfigJobId(job_id);
+
+      pollRef.current = setInterval(async () => {
+        try {
+          const result = await api.getAutoconfigureResult(job_id);
+          if (result.output) setAutoconfigOutput(result.output);
+          if (result.status === "running") return;
+
+          stopPolling();
+          setAutoconfiguring(false);
+          setAutoconfigJobId(null);
+
+          if (result.status === "completed" && result.settings) {
+            const savePath = editPath.trim() || projectPath;
+            const updated = await api.setProjectSettings({
+              project_path: savePath,
+              lint_command: result.settings.lint_command,
+              test_command: result.settings.test_command,
+              instructions_paths: result.settings.instructions_paths,
+              preview_port: result.settings.preview_port,
+            });
+            applySettings(updated);
+            flash("Autoconfigured");
+          } else {
+            flash(result.error || "Autoconfigure failed");
+          }
+        } catch {
+          stopPolling();
+          setAutoconfiguring(false);
+          setAutoconfigJobId(null);
+          flash("Autoconfigure error");
+        }
+      }, 1500);
+    } catch {
+      setAutoconfiguring(false);
+      flash("Failed to start autoconfigure");
+    }
+  }, [api, projectPath, codingAgent, editPath, applySettings, stopPolling, flash]);
+
+  const handleCancelAutoconfigure = useCallback(async () => {
+    stopPolling();
+    if (autoconfigJobId) {
+      try {
+        await api.cancelAutoconfigure(autoconfigJobId);
+      } catch {
+        // ignore
+      }
+    }
+    setAutoconfiguring(false);
+    setAutoconfigJobId(null);
+    flash("Cancelled");
+  }, [api, autoconfigJobId, stopPolling, flash]);
+
   const handleProjectPathBlur = useCallback(() => {
     const trimmed = editPath.trim();
     if (trimmed && trimmed !== projectPath && onProjectPathChange) {
@@ -118,13 +214,15 @@ export function ProjectSettings({ api, projectPath, onProjectPathChange, onPromp
     setInstructionsPaths(prev => prev.map((p, i) => i === index ? value : p));
   }, []);
 
-  // Notify parent when coding prompt changes
   const handleCodingPromptChange = useCallback((value: string) => {
     setCodingPrompt(value);
     if (onPromptsChange) {
       onPromptsChange(value);
     }
   }, [onPromptsChange]);
+
+  const isUnconfigured = settings && !settings.lint_command && !settings.test_command
+    && settings.instructions_paths.length === 0;
 
   return (
     <div className="project-settings">
@@ -141,6 +239,29 @@ export function ProjectSettings({ api, projectPath, onProjectPathChange, onPromp
 
       {expanded && (
         <div className="project-settings-content">
+          {/* Autoconfigure overlay — blocks interaction while running */}
+          {autoconfiguring && (
+            <div className="autoconfigure-overlay">
+              <div className="autoconfigure-overlay-content">
+                <div className="autoconfigure-header">
+                  <div className="autoconfigure-spinner" />
+                  <div>Discovering project settings...</div>
+                </div>
+                {autoconfigOutput.length > 0 && (
+                  <div className="autoconfigure-log">
+                    {autoconfigOutput.map((line, i) => (
+                      <div key={i}>{line || "\u00A0"}</div>
+                    ))}
+                    <div ref={outputEndRef} />
+                  </div>
+                )}
+                <button className="cancel-btn" onClick={handleCancelAutoconfigure}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="project-settings-row">
             <label>
               Project Path
@@ -153,6 +274,19 @@ export function ProjectSettings({ api, projectPath, onProjectPathChange, onPromp
               />
             </label>
           </div>
+
+          {/* Autoconfigure banner for unconfigured projects */}
+          {isUnconfigured && codingAgent && !autoconfiguring && (
+            <div className="autoconfigure-banner">
+              Project not yet configured.
+              <button
+                className="autoconfigure-btn"
+                onClick={handleAutoconfigure}
+              >
+                Autoconfigure
+              </button>
+            </div>
+          )}
 
           <div className="project-settings-row">
             <label>
@@ -270,6 +404,16 @@ export function ProjectSettings({ api, projectPath, onProjectPathChange, onPromp
             <button onClick={handleSave} disabled={saving}>
               {saving ? "Saving..." : "Save"}
             </button>
+            {codingAgent && (
+              <button
+                className="autoconfigure-btn"
+                onClick={handleAutoconfigure}
+                disabled={autoconfiguring || !projectPath}
+                title="Use AI agent to discover project settings"
+              >
+                Autoconfigure
+              </button>
+            )}
           </div>
         </div>
       )}

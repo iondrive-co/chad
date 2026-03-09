@@ -665,6 +665,7 @@ export function ChatView({
       <ProjectSettings
         api={api}
         projectPath={currentProjectPath || defaultProjectPath}
+        codingAgent={codingAccount?.name}
         onProjectPathChange={handleProjectPathChange}
         onPromptsChange={setOverrideCodingPrompt}
         onPreviewPortChange={setPreviewPort}

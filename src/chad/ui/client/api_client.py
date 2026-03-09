@@ -854,6 +854,36 @@ class APIClient:
         resp.raise_for_status()
         return resp.json()
 
+    # Project Autoconfigure
+    def start_autoconfigure(self, project_path: str, coding_agent: str) -> dict:
+        """Start project autoconfiguration.
+
+        Returns:
+            Dict with job_id
+        """
+        resp = self._client.post(
+            self._url("/config/project/autoconfigure"),
+            json={"project_path": project_path, "coding_agent": coding_agent},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_autoconfigure_result(self, job_id: str) -> dict:
+        """Poll for autoconfigure result.
+
+        Returns:
+            Dict with status, settings (when complete), error
+        """
+        resp = self._client.get(self._url(f"/config/project/autoconfigure/{job_id}"))
+        resp.raise_for_status()
+        return resp.json()
+
+    def cancel_autoconfigure(self, job_id: str) -> dict:
+        """Cancel a running autoconfigure job."""
+        resp = self._client.post(self._url(f"/config/project/autoconfigure/{job_id}/cancel"))
+        resp.raise_for_status()
+        return resp.json()
+
     def test_slack_connection(self) -> dict:
         """Send a test message to verify Slack configuration.
 
