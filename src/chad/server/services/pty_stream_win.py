@@ -1,4 +1,8 @@
-"""Pipe-based streaming service for Windows (no PTY support)."""
+"""ConPTY-based streaming service for Windows.
+
+Uses pywinpty (Windows ConPTY) to give child processes a real pseudo-terminal,
+which ensures they flush output in real time instead of buffering it in pipes.
+"""
 
 from __future__ import annotations
 
@@ -7,29 +11,29 @@ import base64
 import os
 import queue
 import subprocess
-import sys
 import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Callable
 
+from winpty import PTY
+
 
 @dataclass
 class PTYSession:
-    """Represents an active streaming session (pipe-based on Windows)."""
+    """Represents an active ConPTY session on Windows."""
 
     stream_id: str
     session_id: str
     pid: int
-    master_fd: int  # -1 on Windows (no PTY fd)
+    master_fd: int  # -1 on Windows (no fd, ConPTY uses its own handle)
     cmd: list[str]
     cwd: Path
     env: dict[str, str]
 
-    # Subprocess object
-    _proc: subprocess.Popen | None = None
-    _stdin_pipe: bool = False
+    # ConPTY object
+    _pty: PTY | None = None
 
     # State
     active: bool = True
@@ -56,7 +60,7 @@ class PTYEvent:
 
 
 class PTYStreamService:
-    """Pipe-based stream service for Windows."""
+    """ConPTY-based stream service for Windows."""
 
     def __init__(self):
         self._sessions: dict[str, PTYSession] = {}
@@ -73,17 +77,17 @@ class PTYStreamService:
         log_callback: Callable[["PTYEvent"], None] | None = None,
         stdin_pipe: bool = False,
     ) -> str:
-        """Start a pipe-based process (Windows equivalent of PTY).
+        """Start a ConPTY-based process.
 
         Args:
             session_id: The session this belongs to
             cmd: Command and arguments to run
             cwd: Working directory
             env: Additional environment variables
-            rows: Terminal rows (used for env vars only, no real terminal)
-            cols: Terminal columns (used for env vars only, no real terminal)
+            rows: Terminal rows
+            cols: Terminal columns
             log_callback: Optional callback for logging events
-            stdin_pipe: Ignored on Windows (always uses pipes)
+            stdin_pipe: Ignored on Windows (ConPTY handles I/O)
 
         Returns:
             stream_id for this session
@@ -91,40 +95,37 @@ class PTYStreamService:
         stream_id = f"pty_{uuid.uuid4().hex[:8]}"
 
         full_env = os.environ.copy()
+        # Strip nesting-detection variables so provider CLIs don't refuse to
+        # start when Chad itself is launched from inside a Claude Code session.
+        for var in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
+            full_env.pop(var, None)
         if env:
             full_env.update(env)
 
         full_env["LINES"] = str(rows)
         full_env["COLUMNS"] = str(cols)
 
-        creation_flags = 0
-        startupinfo = None
-        if sys.platform == "win32":
-            creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESTDHANDLES
+        # Create ConPTY
+        pty = PTY(cols, rows)
 
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            cwd=str(cwd),
-            env=full_env,
-            creationflags=creation_flags,
-            startupinfo=startupinfo,
-        )
+        # Build command line for CreateProcess (appname + cmdline)
+        appname = cmd[0]
+        cmdline = subprocess.list2cmdline(cmd[1:]) if len(cmd) > 1 else None
+
+        # Build env string: null-separated KEY=VALUE pairs
+        env_str = "\0".join(f"{k}={v}" for k, v in full_env.items()) + "\0"
+
+        pty.spawn(appname, cmdline=cmdline, cwd=str(cwd), env=env_str)
 
         session = PTYSession(
             stream_id=stream_id,
             session_id=session_id,
-            pid=proc.pid,
+            pid=pty.pid,
             master_fd=-1,
             cmd=cmd,
             cwd=cwd,
             env=full_env,
-            _proc=proc,
-            _stdin_pipe=True,
+            _pty=pty,
             _log_callback=log_callback,
         )
 
@@ -141,37 +142,73 @@ class PTYStreamService:
         return stream_id
 
     def _read_output_loop(self, session: PTYSession) -> None:
-        """Read output from process stdout pipe and dispatch to subscribers."""
-        proc = session._proc
-        if not proc or not proc.stdout:
+        """Read output from ConPTY and dispatch to subscribers."""
+        import time
+
+        pty = session._pty
+        if not pty:
             return
 
         while session.active:
             try:
-                data = proc.stdout.read(4096)
+                data = pty.read()
                 if data:
-                    data = self._handle_cpr_request(session, data)
-                    if not data:
+                    data_bytes = data.encode("utf-8", errors="replace")
+                    data_bytes = self._handle_cpr_request(session, data_bytes)
+                    if not data_bytes:
                         continue
-                    has_ansi = b"\x1b[" in data or b"\x1b]" in data
+                    has_ansi = b"\x1b[" in data_bytes or b"\x1b]" in data_bytes
                     event = PTYEvent(
                         type="output",
                         stream_id=session.stream_id,
-                        data=base64.b64encode(data).decode("ascii"),
+                        data=base64.b64encode(data_bytes).decode("ascii"),
                         has_ansi=has_ansi,
                     )
                     self._dispatch_event(session, event)
                 else:
+                    # No data available — avoid busy-looping
+                    time.sleep(0.01)
+            except Exception:
+                break
+
+            # Check if process has exited
+            try:
+                if not pty.isalive():
+                    # Drain remaining output — ConPTY may still have buffered
+                    # data after process exit, so retry a few times.
+                    for _ in range(10):
+                        try:
+                            remaining = pty.read()
+                            if remaining:
+                                data_bytes = remaining.encode(
+                                    "utf-8", errors="replace"
+                                )
+                                has_ansi = (
+                                    b"\x1b[" in data_bytes
+                                    or b"\x1b]" in data_bytes
+                                )
+                                event = PTYEvent(
+                                    type="output",
+                                    stream_id=session.stream_id,
+                                    data=base64.b64encode(
+                                        data_bytes
+                                    ).decode("ascii"),
+                                    has_ansi=has_ansi,
+                                )
+                                self._dispatch_event(session, event)
+                            else:
+                                time.sleep(0.05)
+                        except Exception:
+                            break
                     break
-            except (OSError, ValueError):
+            except Exception:
                 break
 
         # Get exit code
-        if proc is not None:
+        if pty is not None:
             try:
-                proc.wait(timeout=1.0)
-                session.exit_code = proc.returncode
-            except subprocess.TimeoutExpired:
+                session.exit_code = pty.get_exitstatus()
+            except Exception:
                 session.exit_code = -1
 
         event = PTYEvent(
@@ -202,7 +239,11 @@ class PTYStreamService:
                     pass
 
     def send_input(self, stream_id: str, data: bytes, close_stdin: bool = False) -> bool:
-        """Send input to process stdin pipe."""
+        """Send input to process via ConPTY.
+
+        Note: close_stdin is ignored since ConPTY doesn't support closing
+        stdin independently of the terminal session.
+        """
         with self._lock:
             session = self._sessions.get(stream_id)
 
@@ -210,18 +251,27 @@ class PTYStreamService:
             return False
 
         try:
-            if session._proc and session._proc.stdin:
-                session._proc.stdin.write(data)
-                session._proc.stdin.flush()
-                if close_stdin:
-                    session._proc.stdin.close()
+            if session._pty:
+                # ConPTY is a terminal — translate \n to \r (Enter key)
+                text = data.decode("utf-8", errors="replace").replace("\n", "\r")
+                session._pty.write(text)
             return True
-        except OSError:
+        except Exception:
             return False
 
     def resize(self, stream_id: str, rows: int, cols: int) -> bool:
-        """Resize terminal — no-op on Windows (pipes have no terminal size)."""
-        return False
+        """Resize the ConPTY terminal."""
+        with self._lock:
+            session = self._sessions.get(stream_id)
+
+        if not session or not session._pty:
+            return False
+
+        try:
+            session._pty.set_size(cols, rows)
+            return True
+        except Exception:
+            return False
 
     async def subscribe(self, stream_id: str) -> AsyncIterator[PTYEvent]:
         """Subscribe to output events."""
@@ -279,33 +329,16 @@ class PTYStreamService:
 
         session.active = False
 
-        if session._proc is not None:
-            pid = session._proc.pid
-            if sys.platform == "win32":
-                try:
-                    subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(pid)],
-                        capture_output=True,
-                        timeout=5,
-                    )
-                except (subprocess.SubprocessError, OSError):
-                    try:
-                        session._proc.kill()
-                    except OSError:
-                        pass
-            else:
-                try:
-                    session._proc.terminate()
-                except OSError:
-                    pass
-
-                def force_kill():
-                    try:
-                        session._proc.kill()
-                    except OSError:
-                        pass
-
-                threading.Timer(2.0, force_kill).start()
+        # Kill the process tree via taskkill for reliable cleanup
+        pid = session.pid
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                timeout=5,
+            )
+        except (subprocess.SubprocessError, OSError):
+            pass
 
         return True
 
@@ -315,12 +348,11 @@ class PTYStreamService:
         if cpr_seq not in data:
             return data
 
-        # Respond via stdin pipe
+        # Respond via ConPTY input
         try:
-            if session._proc and session._proc.stdin:
-                session._proc.stdin.write(b"\x1b[1;1R\r")
-                session._proc.stdin.flush()
-        except OSError:
+            if session._pty:
+                session._pty.write("\x1b[1;1R\r")
+        except Exception:
             pass
 
         return data.replace(cpr_seq, b"")

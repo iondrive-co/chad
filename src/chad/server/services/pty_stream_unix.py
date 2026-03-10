@@ -120,6 +120,10 @@ class PTYStreamService:
 
         # Merge environment
         full_env = os.environ.copy()
+        # Strip nesting-detection variables so provider CLIs don't refuse to
+        # start when Chad itself is launched from inside a Claude Code session.
+        for var in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
+            full_env.pop(var, None)
         if env:
             full_env.update(env)
 
