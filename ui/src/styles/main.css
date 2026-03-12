@@ -801,6 +801,12 @@ label {
   font-weight: 600;
 }
 
+.failed-indicator {
+  color: var(--error, #d9534f);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .cancel-btn {
   background: transparent;
   border: 1px solid var(--error);

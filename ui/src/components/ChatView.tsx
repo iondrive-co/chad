@@ -60,7 +60,8 @@ export function ChatView({
   const conversationSeqRef = useRef(0);
   const [inputText, setInputText] = useState("");
   const [hasRunTask, setHasRunTask] = useState(false);
-  const [wasCancelled, setWasCancelled] = useState(false);
+  // Track how the session ended: null (still running or no task), "completed", "cancelled", "timeout", "failed", etc.
+  const [endReason, setEndReason] = useState<string | null>(null);
   const [expandedMilestones, setExpandedMilestones] = useState<Set<number>>(new Set());
   const outputRef = useRef<HTMLPreElement>(null);
   const convoRef = useRef<HTMLDivElement>(null);
@@ -186,12 +187,12 @@ export function ChatView({
             setHasRunTask(false);
           }
 
-          // Check if the last session_ended was a cancellation
+          // Track the session end reason for status display
           const ends = (data.events as { type: string; reason?: string }[])
             .filter((e) => e.type === "session_ended");
           if (ends.length > 0) {
             const lastEnd = ends[ends.length - 1];
-            setWasCancelled(lastEnd.reason === "cancelled");
+            setEndReason(lastEnd.reason || "completed");
           }
 
           const status = await api.getWorktreeStatus(sessionId);
@@ -371,19 +372,31 @@ export function ChatView({
     }
   }, [conversation]);
 
-  // Mark task inactive when stream completes, check for worktree changes
+  // Mark task inactive when stream completes, check for worktree changes and end reason
   useEffect(() => {
     if (completed) {
       setTaskActive(false);
       onSessionChange();
-      // Check if there are worktree changes to merge
-      api.getWorktreeStatus(sessionId).then((status) => {
-        if (status.exists && status.has_changes) {
-          setShowMerge(true);
-        }
-      }).catch(() => {
-        // Ignore errors checking worktree status
-      });
+      // Fetch the session end reason and check for worktree changes
+      Promise.all([
+        api.getEvents(sessionId, 0, "session_ended").then((data) => {
+          const ends = (data.events as { type: string; reason?: string; success?: boolean }[])
+            .filter((e) => e.type === "session_ended");
+          if (ends.length > 0) {
+            const lastEnd = ends[ends.length - 1];
+            setEndReason(lastEnd.reason || "completed");
+          } else {
+            setEndReason("completed");
+          }
+        }).catch(() => {
+          setEndReason("completed");
+        }),
+        api.getWorktreeStatus(sessionId).then((status) => {
+          if (status.exists && status.has_changes) {
+            setShowMerge(true);
+          }
+        }).catch(() => {}),
+      ]);
     }
   }, [api, completed, sessionId, onSessionChange]);
 
@@ -401,7 +414,7 @@ export function ChatView({
     setHistoricalOutput("");
     setTaskActive(true);
     setShowMerge(false);
-    setWasCancelled(false);
+    setEndReason(null);
     setTaskDescription(taskDesc);
     setConversation([]);
     conversationSeqRef.current = 0;
@@ -416,7 +429,7 @@ export function ChatView({
   const handleCancel = useCallback(async () => {
     try {
       await api.cancelSession(sessionId);
-      setWasCancelled(true);
+      setEndReason("cancelled");
     } catch {
       // ignore
     }
@@ -819,8 +832,8 @@ export function ChatView({
               </>
             )}
             {(completed || (historicalOutput && !taskActive)) && (
-              <span className={wasCancelled ? "cancelled-indicator" : "done-indicator"}>
-                {wasCancelled ? "Cancelled" : "Completed"}
+              <span className={endReason === "completed" || !endReason ? "done-indicator" : endReason === "cancelled" ? "cancelled-indicator" : "failed-indicator"}>
+                {endReason === "cancelled" ? "Cancelled" : endReason === "timeout" ? "Timed out" : endReason && endReason !== "completed" ? `Failed (${endReason})` : "Completed"}
               </span>
             )}
             {error && <span className="error-text">{error}</span>}

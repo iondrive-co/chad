@@ -34,15 +34,20 @@ export function SessionLog({ api, sessionId }: Props) {
   const loadEvents = useCallback(async () => {
     setLoading(true);
     try {
-      const [eventsData, logData] = await Promise.all([
+      // Fetch events and log path independently so one failure doesn't block the other
+      const [eventsResult, logResult] = await Promise.allSettled([
         api.getEvents(sessionId, 0),
         api.getSessionLog(sessionId),
       ]);
-      setEvents(eventsData.events as SessionEvent[]);
-      setLogPath(logData.log_path);
-      return eventsData.events as SessionEvent[];
+      const loadedEvents = eventsResult.status === "fulfilled"
+        ? (eventsResult.value.events as SessionEvent[])
+        : [];
+      setEvents(loadedEvents);
+      if (logResult.status === "fulfilled") {
+        setLogPath(logResult.value.log_path);
+      }
+      return loadedEvents;
     } catch {
-      // Ignore errors
       return [];
     } finally {
       setLoading(false);
@@ -60,11 +65,11 @@ export function SessionLog({ api, sessionId }: Props) {
 
       // If no visible events found and we haven't retried too many times, retry after a delay
       const hasVisibleEvents = loadedEvents.some((e) => VISIBLE_TYPES.has(e.type));
-      if (!hasVisibleEvents && retryCountRef.current < 3) {
+      if (!hasVisibleEvents && retryCountRef.current < 5) {
         retryCountRef.current++;
         setTimeout(() => {
           if (!cancelled) loadWithRetry();
-        }, 500);
+        }, 1000);
       }
     };
 
@@ -72,9 +77,10 @@ export function SessionLog({ api, sessionId }: Props) {
     return () => { cancelled = true; };
   }, [loadEvents]);
 
-  // Auto-refresh while expanded
+  // Refresh immediately when expanded, then auto-refresh every 5s
   useEffect(() => {
     if (!expanded) return;
+    loadEvents();
     const timer = setInterval(loadEvents, 5000);
     return () => clearInterval(timer);
   }, [expanded, loadEvents]);
