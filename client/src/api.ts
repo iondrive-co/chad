@@ -13,6 +13,7 @@ import type {
   MergeResult,
   ConversationResponse,
   PreviewTunnelStatus,
+  ProjectSettings,
   ProviderList,
   ServerStatus,
   Session,
@@ -115,8 +116,11 @@ export class ChadAPI {
     return this.post("/api/v1/sessions", params ?? {});
   }
 
-  listSessions(): Promise<SessionList> {
-    return this.get("/api/v1/sessions");
+  listSessions(projectPath?: string): Promise<SessionList> {
+    const params = projectPath
+      ? `?project_path=${encodeURIComponent(projectPath)}`
+      : "";
+    return this.get(`/api/v1/sessions${params}`);
   }
 
   getSession(sessionId: string): Promise<Session> {
@@ -475,6 +479,16 @@ export class ChadAPI {
     has_token: boolean;
   }> {
     return this.put("/api/v1/config/slack", settings);
+  }
+
+  // ── Config: Projects ──
+
+  listProjects(): Promise<ProjectSettings[]> {
+    return this.get("/api/v1/config/projects");
+  }
+
+  deleteProject(projectPath: string): Promise<{ deleted: boolean; project_path: string }> {
+    return this.del(`/api/v1/config/project?project_path=${encodeURIComponent(projectPath)}`);
   }
 
   // ── Config: Project Settings ──

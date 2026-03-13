@@ -157,10 +157,16 @@ async def create_session(request: SessionCreate) -> SessionResponse:
 
 
 @router.get("", response_model=SessionListResponse)
-async def list_sessions() -> SessionListResponse:
-    """List all active sessions."""
+async def list_sessions(
+    project_path: str | None = Query(default=None, description="Filter sessions by project path"),
+) -> SessionListResponse:
+    """List all sessions, optionally filtered by project path."""
     manager = get_session_manager()
     sessions = manager.list_sessions()
+    if project_path:
+        from pathlib import Path
+        norm = str(Path(project_path).expanduser().resolve())
+        sessions = [s for s in sessions if s.project_path and str(Path(s.project_path).expanduser().resolve()) == norm]
     return SessionListResponse(
         sessions=[_session_to_response(s) for s in sessions],
         total=len(sessions),

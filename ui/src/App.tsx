@@ -1,11 +1,13 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { ChadAPI } from "chad-client";
+import type { ProjectSettings } from "chad-client";
 import { ChatView } from "./components/ChatView.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { ProvidersPanel } from "./components/ProvidersPanel.tsx";
+import { ProjectsPanel } from "./components/ProjectsPanel.tsx";
 import { useSessions } from "./hooks/useSessions.ts";
 
-type Tab = "chat" | "providers" | "settings";
+type Tab = "chat" | "projects" | "providers" | "settings";
 
 /**
  * Parse a connection input string into an API base URL and optional auth token.
@@ -51,11 +53,25 @@ export function App() {
   const api = useMemo(() => new ChadAPI(apiBaseUrl, token), [apiBaseUrl, token]);
   const [connected, setConnected] = useState(false);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("settings");
+  const [tab, setTab] = useState<Tab>("projects");
   const [sessionVersion, setSessionVersion] = useState(0);
-  const [defaultProjectPath, setDefaultProjectPath] = useState("");
+  // Track the project selected for the current session (set when opening from ProjectsPanel)
+  const [sessionProjectPath, setSessionProjectPath] = useState("");
+  // All configured projects, loaded on connect
+  const [projects, setProjects] = useState<ProjectSettings[]>([]);
   // Track whether the user has ever set a URL (vs initial empty state)
   const hasUrl = useRef(false);
+
+  // Load projects when connected
+  const loadProjects = useCallback(async () => {
+    if (!connected) return;
+    try {
+      const result = await api.listProjects();
+      setProjects(result);
+    } catch {
+      // ignore
+    }
+  }, [api, connected]);
 
   // Auto-connect when apiBaseUrl changes, retry only if we have a URL
   useEffect(() => {
@@ -72,18 +88,8 @@ export function App() {
     const tryConnect = async () => {
       try {
         await api.getStatus();
-        const prefs = await api.getPreferences().catch(() => null);
         if (!cancelled) {
           setConnected(true);
-
-          if (prefs?.last_project_path) {
-            setDefaultProjectPath(prefs.last_project_path);
-          }
-          const sessionsData = await api.listSessions();
-          if (sessionsData.sessions.length > 0) {
-            // Select the most recent session
-            setSelectedSession(sessionsData.sessions[0].id);
-          }
         }
       } catch {
         if (!cancelled) {
@@ -94,6 +100,11 @@ export function App() {
     tryConnect();
     return () => { cancelled = true; clearTimeout(timer); };
   }, [api]);
+
+  // Load projects once connected
+  useEffect(() => {
+    if (connected) loadProjects();
+  }, [connected, loadProjects]);
 
   const { sessions, loading: sessionsLoading, createSession, deleteSession } = useSessions(
     connected ? api : null,
@@ -125,10 +136,11 @@ export function App() {
     }
   }, []);
 
-  const handleNewSession = useCallback(async () => {
-    const session = await createSession();
+  const handleNewSession = useCallback(async (projectPath?: string) => {
+    const session = await createSession(projectPath);
     if (session) {
       setSelectedSession(session.id);
+      if (projectPath) setSessionProjectPath(projectPath);
       setTab("chat");
       refreshSessions();
     }
@@ -148,11 +160,20 @@ export function App() {
     setTab("chat");
   }, []);
 
+  const handleOpenSessionFromProject = useCallback((sessionId: string, projectPath: string) => {
+    setSelectedSession(sessionId);
+    setSessionProjectPath(projectPath);
+    setTab("chat");
+  }, []);
+
   return (
     <div className="app">
       <header className="app-header">
         <h1 className={connected ? "connected" : ""}>Chad</h1>
         <nav className="tabs">
+          <button className={tab === "projects" ? "active" : ""} onClick={() => setTab("projects")}>
+            Projects
+          </button>
           <button className={tab === "providers" ? "active" : ""} onClick={() => setTab("providers")}>
             Providers
           </button>
@@ -192,7 +213,7 @@ export function App() {
           {connected && (
             <button
               className="new-session-btn"
-              onClick={handleNewSession}
+              onClick={() => handleNewSession()}
               disabled={sessionsLoading}
               title="New session"
             >
@@ -217,18 +238,30 @@ export function App() {
                 api={api}
                 sessionId={selectedSession}
                 onSessionChange={refreshSessions}
-                defaultProjectPath={defaultProjectPath}
+                defaultProjectPath={sessionProjectPath}
                 apiBaseUrl={apiBaseUrl}
                 token={token}
                 sessionActive={selectedSessionActive}
+                projects={projects}
               />
             ) : (
               <div className="placeholder">
-                Select or create a session to get started.
+                {projects.length === 0
+                  ? "Go to the Projects tab to set up a project first."
+                  : "Select or create a session to get started."}
               </div>
             )}
           </main>
         </div>
+        {tab === "projects" && (
+          <main className="main full-width">
+            <ProjectsPanel
+              api={api}
+              connected={connected}
+              onOpenSession={handleOpenSessionFromProject}
+            />
+          </main>
+        )}
         {tab === "providers" && (
           <main className="main full-width">
             <ProvidersPanel api={api} connected={connected} />

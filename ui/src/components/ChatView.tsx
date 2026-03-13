@@ -1,10 +1,9 @@
 import { useState, useCallback, useRef, useEffect, DragEvent } from "react";
-import type { ChadAPI, ConversationItem, Account, VerificationSettings } from "chad-client";
+import type { ChadAPI, ConversationItem, Account, VerificationSettings, ProjectSettings } from "chad-client";
 import { useStream } from "../hooks/useStream.ts";
 import { MergePanel } from "./MergePanel.tsx";
 import { WorktreeInfo } from "./WorktreeInfo.tsx";
 import { SessionLog } from "./SessionLog.tsx";
-import { ProjectSettings } from "./ProjectSettings.tsx";
 import { AccountPicker } from "./AccountPicker.tsx";
 
 interface UploadedScreenshot {
@@ -22,6 +21,8 @@ interface Props {
   token?: string;
   /** Whether the session is active (from polled session list data). */
   sessionActive?: boolean;
+  /** Available projects for the project dropdown. */
+  projects?: ProjectSettings[];
 }
 
 /** Strip ANSI escape codes for plain-text display. */
@@ -50,6 +51,7 @@ export function ChatView({
   apiBaseUrl,
   token,
   sessionActive = false,
+  projects = [],
 }: Props) {
   const [taskActive, setTaskActive] = useState(false);
   const [sending, setSending] = useState(false);
@@ -82,9 +84,6 @@ export function ChatView({
   // Track current project path for settings
   const [currentProjectPath, setCurrentProjectPath] = useState(defaultProjectPath);
   const [worktreeRefresh, setWorktreeRefresh] = useState(0);
-
-  // Override coding prompt from ProjectSettings
-  const [overrideCodingPrompt, setOverrideCodingPrompt] = useState<string | null>(null);
 
   // Preview
   const [previewPort, setPreviewPort] = useState<number | null>(null);
@@ -595,7 +594,6 @@ export function ChatView({
         task_description: message,
         coding_agent: codingAccount.name,
         verification_agent: verificationAllowed ? verificationAccount.name : undefined,
-        override_prompt: overrideCodingPrompt || undefined,
         is_followup: hasRunTask,
         screenshots: screenshots.length > 0 ? screenshots.map((s) => s.path) : undefined,
       });
@@ -625,7 +623,6 @@ export function ChatView({
     verificationSettings,
     currentProjectPath,
     defaultProjectPath,
-    overrideCodingPrompt,
     hasRunTask,
     handleTaskStart,
     conversationSeqRef,
@@ -657,9 +654,18 @@ export function ChatView({
     }
   }, [completed]);
 
-  const handleProjectPathChange = useCallback((path: string) => {
-    setCurrentProjectPath(path);
-  }, []);
+  // Load preview settings when project path changes
+  useEffect(() => {
+    if (!currentProjectPath) {
+      setPreviewPort(null);
+      setPreviewCommand(null);
+      return;
+    }
+    api.getProjectSettings(currentProjectPath).then((s) => {
+      setPreviewPort(s.preview_port);
+      setPreviewCommand(s.preview_command);
+    }).catch(() => {});
+  }, [api, currentProjectPath]);
 
   return (
     <div className="chat-view">
@@ -684,16 +690,30 @@ export function ChatView({
         </div>
       )}
 
-      {/* Project settings (collapsible) - always shown */}
-      <ProjectSettings
-        api={api}
-        projectPath={currentProjectPath || defaultProjectPath}
-        codingAgent={codingAccount?.name}
-        onProjectPathChange={handleProjectPathChange}
-        onPromptsChange={setOverrideCodingPrompt}
-        onPreviewPortChange={setPreviewPort}
-        onPreviewCommandChange={setPreviewCommand}
-      />
+      {/* Project selector - shown when no task has been run yet */}
+      {!hasRunTask && projects.length > 0 && (
+        <div className="project-selector-bar">
+          <label>
+            Project
+            <select
+              value={currentProjectPath}
+              onChange={(e) => setCurrentProjectPath(e.target.value)}
+            >
+              <option value="">-- Select a project --</option>
+              {projects.map((p) => (
+                <option key={p.project_path} value={p.project_path}>
+                  {p.project_path}{p.project_type && p.project_type !== "unknown" ? ` (${p.project_type})` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
+      {!hasRunTask && projects.length === 0 && (
+        <div className="project-selector-bar">
+          <span className="no-projects-hint">No projects configured. Go to the Projects tab to add one.</span>
+        </div>
+      )}
 
       <div className="chat-body">
         {/* Conversation (takes more space) */}

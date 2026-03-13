@@ -412,6 +412,53 @@ class ProjectSettingsUpdate(BaseModel):
     preview_command: str | None = Field(default=None, description="Command to start the app for preview")
 
 
+@router.get("/projects")
+async def list_projects() -> list[ProjectSettingsResponse]:
+    """List all configured projects."""
+    from chad.util.project_setup import ProjectConfig
+
+    config_mgr = get_config_manager()
+    project_configs = config_mgr.list_project_configs()
+    results = []
+    for path_str, data in project_configs.items():
+        try:
+            config = ProjectConfig.from_dict(data)
+        except (KeyError, TypeError):
+            config = None
+
+        if config:
+            docs = config.docs
+            results.append(ProjectSettingsResponse(
+                project_path=path_str,
+                project_type=config.project_type,
+                lint_command=config.verification.lint_command,
+                test_command=config.verification.test_command,
+                instructions_paths=docs.instructions_paths if docs else [],
+                preview_port=config.preview_port,
+                preview_command=config.preview_command,
+            ))
+        else:
+            results.append(ProjectSettingsResponse(
+                project_path=path_str,
+                project_type=data.get("project_type"),
+                lint_command=None,
+                test_command=None,
+                instructions_paths=[],
+                preview_port=None,
+                preview_command=None,
+            ))
+    return results
+
+
+@router.delete("/project")
+async def delete_project(project_path: str) -> dict:
+    """Delete a project configuration."""
+    config_mgr = get_config_manager()
+    path = Path(project_path).expanduser().resolve()
+    config_mgr.delete_project_config(str(path))
+    return {"deleted": True, "project_path": str(path)}
+
+
 @router.get("/project", response_model=ProjectSettingsResponse)
 async def get_project_settings(
     project_path: str | None = None,

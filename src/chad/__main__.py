@@ -182,7 +182,6 @@ def run_server(
     host: str = "0.0.0.0",
     port: int = 0,
     tunnel: bool = False,
-    resume_sessions: bool = False,
 ) -> None:
     """Run the Chad API server.
 
@@ -190,7 +189,6 @@ def run_server(
         host: Host to bind to
         port: Port to run on (0 for ephemeral)
         tunnel: Start a Cloudflare tunnel for remote access
-        resume_sessions: Restore historical sessions from disk on startup
     """
     import uvicorn
     from chad.server.main import create_app
@@ -206,7 +204,7 @@ def run_server(
         from chad.server.auth import generate_token
         auth_token = generate_token()
 
-    app = create_app(auth_token=auth_token, resume_sessions=resume_sessions)
+    app = create_app(auth_token=auth_token)
 
     if tunnel:
         # Start uvicorn in a thread so the server is listening before the
@@ -242,7 +240,6 @@ def run_unified(
     ui_mode: str = "react",
     server_url: str | None = None,
     tunnel: bool = False,
-    resume_sessions: bool = False,
 ) -> None:
     """Run UI, optionally with a local API server.
 
@@ -257,7 +254,6 @@ def run_unified(
         ui_mode: UI mode - "react" (default) or "cli"
         server_url: External server URL to connect to (skips local server)
         tunnel: Start a Cloudflare tunnel for remote access
-        resume_sessions: Restore historical sessions from disk on startup
     """
     import webbrowser
 
@@ -281,7 +277,7 @@ def run_unified(
             from chad.server.auth import generate_token
             auth_token = generate_token()
 
-        app = create_app(auth_token=auth_token, resume_sessions=resume_sessions)
+        app = create_app(auth_token=auth_token)
         server_config = uvicorn.Config(app, host="127.0.0.1", port=api_port, log_level="warning")
         server = uvicorn.Server(server_config)
 
@@ -358,11 +354,6 @@ def main() -> int:
         "--tunnel", action="store_true", help="Start a Cloudflare tunnel for remote access"
     )
     parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Restore previous sessions from disk on startup",
-    )
-    parser.add_argument(
         "--ui",
         type=str,
         choices=["react", "cli"],
@@ -422,7 +413,6 @@ def main() -> int:
                 host=args.api_host,
                 port=args.api_port,
                 tunnel=True,
-                resume_sessions=args.resume,
             )
             return 0
 
@@ -433,7 +423,6 @@ def main() -> int:
                 host=args.api_host,
                 port=args.api_port,
                 tunnel=args.tunnel,
-                resume_sessions=args.resume,
             )
             return 0
 
@@ -472,7 +461,6 @@ def main() -> int:
             ui_mode=ui_mode,
             server_url=server_url,
             tunnel=args.tunnel,
-            resume_sessions=args.resume,
         )
 
         return 0
