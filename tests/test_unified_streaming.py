@@ -5,10 +5,16 @@ import anyio
 import base64
 import httpx
 import json
+import sys
 import time
 from pathlib import Path
 
 import pytest
+
+_skip_windows = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Uses bash/Unix PTY commands not available on Windows",
+)
 from fastapi.testclient import TestClient
 
 from chad.server.main import create_app
@@ -330,6 +336,7 @@ class TestPTYStreamService:
         # Cleanup
         service.cleanup_session(stream_id)
 
+    @_skip_windows
     def test_pty_output_captured(self, tmp_path):
         """PTY output is captured and available."""
         from chad.server.services.pty_stream import PTYStreamService
@@ -429,6 +436,7 @@ class TestMockProviderThroughAPI:
         assert "Mock Agent" in cmd[2]
         assert "ANSI" in cmd[2] or "033" in cmd[2]  # Contains ANSI codes
 
+    @_skip_windows
     def test_mock_agent_outputs_ansi(self, tmp_path):
         """Mock agent outputs ANSI escape codes."""
         from chad.server.services.task_executor import _build_mock_agent_command
@@ -451,6 +459,7 @@ class TestMockProviderThroughAPI:
 class TestCliStreamAlignment:
     """Ensure CLI-style streaming keeps output aligned."""
 
+    @_skip_windows
     @pytest.mark.parametrize("terminal_cols", [80, 120])
     def test_mock_agent_output_is_left_aligned(self, client, git_repo, terminal_cols):
         """Mock agent lines should start at column 0 for CLI terminals."""
@@ -828,6 +837,7 @@ class TestCancelSession:
         assert second_start.status_code == 409
         assert "already running" in second_start.json().get("detail", "").lower()
 
+    @_skip_windows
     def test_followup_immediately_after_cancel(self, client, git_repo, monkeypatch):
         """Starting a follow-up task right after cancel should succeed, not 409."""
         import chad.server.services.task_executor as task_executor_module
@@ -928,6 +938,7 @@ class TestCancelSession:
             time.sleep(0.1)
         assert final_status == "completed"
 
+    @_skip_windows
     def test_milestones_include_cancelled_task_after_restart(self, client, git_repo, monkeypatch):
         """Milestone polling should keep milestones from cancelled tasks after restart."""
         import chad.server.services.task_executor as task_executor_module
@@ -1042,6 +1053,7 @@ class TestCancelSession:
         assert any("first milestone" in summary for summary in all_summaries)
         assert any("second milestone" in summary for summary in all_summaries)
 
+    @_skip_windows
     def test_events_latest_seq_uses_latest_task_after_restart(self, client, git_repo, monkeypatch):
         """Events endpoint should report latest_seq from the most recent task."""
         import chad.server.services.task_executor as task_executor_module
@@ -1224,6 +1236,7 @@ class TestMockProviderFullIntegration:
         events_resp = client.get(f"/api/v1/sessions/{session_id}/events")
         assert events_resp.status_code == 200
 
+    @_skip_windows
     def test_mock_provider_produces_parseable_output(self, tmp_path):
         """Mock provider output can be parsed properly."""
         from chad.server.services.task_executor import _build_mock_agent_command
@@ -1245,6 +1258,7 @@ class TestMockProviderFullIntegration:
 class TestEndToEndSSEStreaming:
     """True end-to-end tests that verify actual SSE streaming works."""
 
+    @_skip_windows
     def test_sse_stream_receives_terminal_events(self, client, git_repo, tmp_path, monkeypatch):
         """Verify SSE endpoint actually streams terminal events from mock agent."""
         # Create session
@@ -1290,6 +1304,7 @@ class TestEndToEndSSEStreaming:
         session_events = [e for e in events if e["type"] == "session_started"]
         assert len(session_events) == 1, "Should have exactly one session_started event"
 
+    @_skip_windows
     def test_pty_stream_service_delivers_events(self, tmp_path):
         """Verify PTY stream service delivers events to subscribers."""
         from chad.server.services.pty_stream import PTYStreamService
@@ -1368,6 +1383,7 @@ class TestEventLogAPI:
         assert data["events"] == []
         assert data["latest_seq"] == 0
 
+    @_skip_windows
     def test_get_events_after_task(self, client, git_repo):
         """Get events after task completion includes session_started and terminal_output."""
         # Create session and run task
@@ -2004,6 +2020,7 @@ class TestEventMultiplexer:
         assert len(events3) == 1
         assert events3[0].seq == 2
 
+    @_skip_windows
     @pytest.mark.asyncio
     async def test_mux_replays_terminal_from_log_with_since(self, tmp_path):
         """stream_with_since replays terminal_output as terminal events."""
@@ -2040,6 +2057,7 @@ class TestEventMultiplexer:
         assert events[0].type == "terminal"
         assert events[0].seq == 2
 
+    @_skip_windows
     @pytest.mark.asyncio
     async def test_mux_attaches_when_pty_starts_late(self, tmp_path):
         """Multiplexer should switch from fallback polling to the PTY once it appears."""
@@ -2086,6 +2104,7 @@ class TestEventMultiplexer:
 
         reset_pty_stream_service()
 
+    @_skip_windows
     @pytest.mark.asyncio
     async def test_mux_prefers_latest_active_session(self, tmp_path):
         """Multiplexer should attach to the newest active PTY for a session ID."""
@@ -2125,6 +2144,7 @@ class TestEventMultiplexer:
         pty_service.cleanup_session(second_stream)
         reset_pty_stream_service()
 
+    @_skip_windows
     @pytest.mark.asyncio
     async def test_mux_complete_event_on_iterator_end(self, tmp_path):
         """Multiplexer emits complete event even when PTY iterator ends prematurely.
@@ -2161,6 +2181,7 @@ class TestEventMultiplexer:
         pty_service.cleanup_session(stream_id)
         reset_pty_stream_service()
 
+    @_skip_windows
     @pytest.mark.asyncio
     async def test_mux_delivers_status_events_while_pty_is_idle(self, tmp_path):
         """Status events should stream immediately even when PTY has no output."""
@@ -2243,6 +2264,7 @@ class TestEventMultiplexer:
         # After ping, should not need another immediately
         assert not mux._should_ping()
 
+    @_skip_windows
     @pytest.mark.asyncio
     async def test_mux_multi_phase_delivers_complete(self, tmp_path):
         """Multiplexer delivers complete after exploration→implementation phase transition.
@@ -2353,6 +2375,7 @@ class TestEventMultiplexer:
 
         reset_pty_stream_service()
 
+    @_skip_windows
     @pytest.mark.asyncio
     async def test_mux_multi_phase_no_premature_complete(self, tmp_path):
         """Multiplexer must NOT emit complete when first PTY phase exits.
@@ -2429,6 +2452,7 @@ class TestEventMultiplexer:
 
         reset_pty_stream_service()
 
+    @_skip_windows
     @pytest.mark.asyncio
     async def test_mux_stream_with_since_multi_phase(self, tmp_path):
         """Full SSE-like flow using stream_with_since for multi-phase tasks.
@@ -2512,6 +2536,7 @@ class TestEventMultiplexer:
 
         reset_pty_stream_service()
 
+    @_skip_windows
     @pytest.mark.asyncio
     async def test_mux_cleanup_before_subscribe_race(self, tmp_path):
         """Test race where PTY is cleaned up between detection and subscription.
@@ -2594,6 +2619,7 @@ class TestEventMuxCompletionBugs:
     - Safety timeout on polling loops
     """
 
+    @_skip_windows
     @pytest.mark.asyncio
     async def test_stream_events_initial_wait_yields_complete_on_session_ended(self, tmp_path):
         """stream_events initial wait loop must yield 'complete' after session_ended.
@@ -2635,6 +2661,7 @@ class TestEventMuxCompletionBugs:
         # Must find complete event AFTER session_ended
         assert event_types[-1] == "complete", f"Last event should be 'complete', got: {event_types}"
 
+    @_skip_windows
     @pytest.mark.asyncio
     async def test_stream_with_since_catchup_yields_complete_on_session_ended(self, tmp_path):
         """stream_with_since must yield 'complete' when session_ended is in catchup.
@@ -2688,6 +2715,7 @@ class TestEventMuxCompletionBugs:
         )
         assert session_ended_found, f"session_ended must be in catchup events: {event_types}"
 
+    @_skip_windows
     @pytest.mark.asyncio
     async def test_stream_with_since_mid_sequence_catchup(self, tmp_path):
         """stream_with_since catchup with since_seq > 0 still detects session_ended.
@@ -2732,6 +2760,7 @@ class TestEventMuxCompletionBugs:
         event_types = [e.type for e in collected]
         assert "complete" in event_types, f"Must get complete on reconnect, got: {event_types}"
 
+    @_skip_windows
     @pytest.mark.asyncio
     async def test_polling_loop_safety_timeout(self, tmp_path):
         """Polling loop must not hang forever if session_ended is never written.
@@ -2803,6 +2832,7 @@ class TestEventMuxCompletionBugs:
 class TestPTYCursorResponse:
     """Ensure PTY stream responds to cursor position requests."""
 
+    @_skip_windows
     def test_handles_cpr_request(self, tmp_path):
         """PTYStreamService should fake a cursor position reply."""
         from chad.server.services.pty_stream import PTYStreamService
@@ -2922,6 +2952,7 @@ class TestTerminalDimensionsThroughAPI:
         # Should fail validation
         assert task_resp.status_code == 422
 
+    @_skip_windows
     def test_pty_session_receives_dimensions(self, tmp_path):
         """PTY session receives configured dimensions via winsize and env."""
         from chad.server.services.pty_stream import PTYStreamService
@@ -2959,6 +2990,7 @@ class TestTerminalDimensionsThroughAPI:
         # stty size outputs "rows cols" - verify our dimensions were used
         assert "30 100" in output, f"Expected '30 100' in output, got: {output!r}"
 
+    @_skip_windows
     def test_pty_session_env_contains_dimensions(self, tmp_path):
         """PTY session environment contains LINES and COLUMNS."""
         from chad.server.services.pty_stream import PTYStreamService
