@@ -108,6 +108,7 @@ class TestAuthMiddleware:
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "healthy"
+        assert "cwd" not in data
 
     def test_post_api_without_token_returns_401(self, client_with_auth):
         """POST to API without token should be rejected."""
@@ -149,6 +150,34 @@ class TestAuthMiddleware:
             )
             assert resp.status_code != 401, f"{route} should allow valid token"
 
+    def test_non_api_docs_routes_are_protected(self, client_with_auth, auth_token):
+        """Docs and schema routes should not bypass auth when tunnel auth is enabled."""
+        protected_routes = [
+            "/docs",
+            "/redoc",
+            "/openapi.json",
+        ]
+        for route in protected_routes:
+            resp = client_with_auth.get(route)
+            assert resp.status_code == 401, f"{route} should require auth"
+
+            resp = client_with_auth.get(
+                route,
+                headers={"Authorization": f"Bearer {auth_token}"},
+            )
+            assert resp.status_code == 200, f"{route} should allow valid token"
+
+    def test_root_serves_security_headers(self, client_with_auth):
+        """The public UI should send hardening headers."""
+        resp = client_with_auth.get("/")
+        assert resp.status_code == 200
+        assert resp.headers["x-frame-options"] == "DENY"
+        assert resp.headers["x-content-type-options"] == "nosniff"
+        assert resp.headers["referrer-policy"] == "same-origin"
+        csp = resp.headers["content-security-policy"]
+        assert "default-src 'self'" in csp
+        assert "frame-ancestors 'none'" in csp
+
 
 class TestNoAuthMode:
     """Test that local mode (no auth) works as before."""
@@ -167,10 +196,10 @@ class TestNoAuthMode:
 class TestWebSocketAuth:
     """Test WebSocket authentication via query parameter."""
 
-    def test_ws_with_correct_token_connects(
+    def test_ws_with_valid_ticket_connects(
         self, client_with_auth, auth_token
     ):
-        """WebSocket with valid ?token= should connect successfully."""
+        """WebSocket with a minted ticket should connect successfully."""
         # First create a session (with auth)
         resp = client_with_auth.post(
             "/api/v1/sessions",
@@ -179,17 +208,23 @@ class TestWebSocketAuth:
         )
         session_id = resp.json()["id"]
 
-        # Connect WebSocket with correct token
+        ticket_resp = client_with_auth.post(
+            f"/api/v1/ws-ticket/{session_id}",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert ticket_resp.status_code == 200
+        ticket = ticket_resp.json()["ticket"]
+
         with client_with_auth.websocket_connect(
-            f"/api/v1/ws/{session_id}?token={auth_token}"
+            f"/api/v1/ws/{session_id}?ticket={ticket}"
         ) as ws:
             # Send ping and expect pong
             ws.send_json({"type": "ping"})
             msg = ws.receive_json()
             assert msg["type"] == "pong"
 
-    def test_ws_without_token_rejected(self, client_with_auth, auth_token):
-        """WebSocket without token should be rejected with code 4001."""
+    def test_ws_without_ticket_rejected(self, client_with_auth, auth_token):
+        """WebSocket without a ticket should be rejected with code 4001."""
         # Create a session first
         resp = client_with_auth.post(
             "/api/v1/sessions",
@@ -205,10 +240,10 @@ class TestWebSocketAuth:
             ) as ws:
                 ws.receive_json()
 
-    def test_ws_with_wrong_token_rejected(
+    def test_ws_with_invalid_ticket_rejected(
         self, client_with_auth, auth_token
     ):
-        """WebSocket with wrong token should be rejected."""
+        """WebSocket with a forged ticket should be rejected."""
         # Create a session first
         resp = client_with_auth.post(
             "/api/v1/sessions",
@@ -219,9 +254,21 @@ class TestWebSocketAuth:
 
         with pytest.raises(Exception):
             with client_with_auth.websocket_connect(
-                f"/api/v1/ws/{session_id}?token=wrong-token"
+                f"/api/v1/ws/{session_id}?ticket=wrong-ticket"
             ) as ws:
                 ws.receive_json()
+
+    def test_ws_ticket_requires_api_auth(self, client_with_auth, auth_token):
+        """Minting a WebSocket ticket should require the bearer token."""
+        resp = client_with_auth.post(
+            "/api/v1/sessions",
+            json={"name": "ws-test"},
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        session_id = resp.json()["id"]
+
+        unauth = client_with_auth.post(f"/api/v1/ws-ticket/{session_id}")
+        assert unauth.status_code == 401
 
 
 class TestTokenGeneration:

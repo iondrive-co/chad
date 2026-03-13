@@ -327,7 +327,11 @@ export interface ServerStatus {
   status: string;
   version: string;
   uptime_seconds: number;
-  cwd: string;
+}
+
+export interface WebSocketTicket {
+  ticket: string;
+  expires_in: number;
 }
 
 // ── Project settings ──

@@ -71,15 +71,13 @@ export function App() {
     setConnected(false);
     const tryConnect = async () => {
       try {
-        const status = await api.getStatus();
+        await api.getStatus();
         const prefs = await api.getPreferences().catch(() => null);
         if (!cancelled) {
           setConnected(true);
 
           if (prefs?.last_project_path) {
             setDefaultProjectPath(prefs.last_project_path);
-          } else if (status.cwd) {
-            setDefaultProjectPath(status.cwd);
           }
           const sessionsData = await api.listSessions();
           if (sessionsData.sessions.length > 0) {

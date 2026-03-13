@@ -9,10 +9,36 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import __version__
 from .state import init_start_time
 from .api.routes import health, sessions, providers, worktree, config, ws, slack, tunnel, uploads, preview_tunnel
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Apply baseline browser hardening headers to Chad UI responses."""
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "; ".join([
+                "default-src 'self'",
+                "script-src 'self'",
+                "style-src 'self' 'unsafe-inline'",
+                "img-src 'self' data: blob:",
+                "connect-src 'self' ws: wss: https:",
+                "font-src 'self' data:",
+                "object-src 'none'",
+                "base-uri 'self'",
+                "frame-ancestors 'none'",
+            ]),
+        )
+        return response
 
 
 def _source_project_root() -> Path:
@@ -140,6 +166,7 @@ def create_app(
         from .auth import BearerAuthMiddleware
         app.add_middleware(BearerAuthMiddleware, token=auth_token)
 
+    app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,

@@ -1,6 +1,10 @@
-"""Bearer token authentication middleware for tunnel access."""
+"""Bearer token authentication middleware and browser tickets."""
 
+import base64
+import hashlib
+import hmac
 import secrets
+import time
 
 from fastapi import Request, WebSocket
 from fastapi.responses import JSONResponse
@@ -16,9 +20,9 @@ def generate_token() -> str:
 class BearerAuthMiddleware(BaseHTTPMiddleware):
     """Middleware that requires Bearer token on /api/ routes.
 
-    Skips auth for:
+    Skips auth only for explicitly public routes:
     - GET /status (health check)
-    - Static routes (/, /assets/)
+    - Static UI routes (/, /assets/)
     """
 
     def __init__(self, app, token: str) -> None:
@@ -36,11 +40,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # Skip auth for health check and static routes
-        if path == "/status" or path == "/" or path.startswith("/assets"):
-            return await call_next(request)
-
-        # Only require auth on /api/ routes
-        if not path.startswith("/api/"):
+        if path == "/status" or path == "/" or path == "/assets" or path.startswith("/assets/"):
             return await call_next(request)
 
         # Check Authorization header
@@ -54,11 +54,72 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         )
 
 
-def check_websocket_token(websocket: WebSocket, token: str) -> bool:
-    """Check if a WebSocket connection has a valid token query parameter.
+def _urlsafe_b64decode(data: str) -> bytes:
+    padding = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(data + padding)
 
-    WebSocket connections can't set custom headers from browser JS,
-    so the token is passed as a ?token= query parameter.
-    """
-    ws_token = websocket.query_params.get("token", "")
-    return ws_token == token
+
+def _urlsafe_b64encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def mint_browser_ticket(
+    secret: str,
+    purpose: str,
+    resource: str,
+    ttl_seconds: int,
+) -> str:
+    """Mint a signed browser ticket scoped to a purpose and resource."""
+    expires_at = int(time.time()) + ttl_seconds
+    nonce = secrets.token_urlsafe(12)
+    payload = f"{purpose}:{resource}:{expires_at}:{nonce}"
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    return f"{_urlsafe_b64encode(payload.encode('utf-8'))}.{_urlsafe_b64encode(signature)}"
+
+
+def validate_browser_ticket(
+    secret: str,
+    ticket: str,
+    purpose: str,
+    resource: str,
+) -> bool:
+    """Validate a signed browser ticket."""
+    try:
+        encoded_payload, encoded_sig = ticket.split(".", 1)
+        payload = _urlsafe_b64decode(encoded_payload).decode("utf-8")
+        supplied_sig = _urlsafe_b64decode(encoded_sig)
+        ticket_purpose, ticket_resource, expires_at, nonce = payload.split(":", 3)
+        del nonce
+    except Exception:
+        return False
+
+    if ticket_purpose != purpose or ticket_resource != resource:
+        return False
+
+    try:
+        if int(expires_at) < int(time.time()):
+            return False
+    except ValueError:
+        return False
+
+    expected_sig = hmac.new(
+        secret.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    return hmac.compare_digest(expected_sig, supplied_sig)
+
+
+def check_websocket_ticket(websocket: WebSocket, token: str, session_id: str) -> bool:
+    """Check if a WebSocket connection has a valid one-time browser ticket."""
+    ticket = websocket.query_params.get("ticket", "")
+    return validate_browser_ticket(
+        secret=token,
+        ticket=ticket,
+        purpose="ws",
+        resource=session_id,
+    )

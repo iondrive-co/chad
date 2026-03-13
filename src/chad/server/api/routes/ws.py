@@ -5,13 +5,21 @@ import base64
 import json
 from typing import Any
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
 
 from chad.server.services import get_session_manager, get_task_executor
 from chad.server.services.pty_stream import get_pty_stream_service
 from chad.server.services.event_mux import EventMultiplexer
 
 router = APIRouter()
+
+
+class WebSocketTicketResponse(BaseModel):
+    """Short-lived WebSocket browser ticket."""
+
+    ticket: str = Field(description="Signed ticket for the session WebSocket")
+    expires_in: int = Field(description="Lifetime of the ticket in seconds")
 
 
 class ConnectionManager:
@@ -55,12 +63,36 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+@router.post("/ws-ticket/{session_id}", response_model=WebSocketTicketResponse)
+async def create_websocket_ticket(session_id: str, request: Request) -> WebSocketTicketResponse:
+    """Mint a short-lived ticket for browser WebSocket auth."""
+    session_mgr = get_session_manager()
+    session = session_mgr.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+    auth_token = getattr(request.app.state, "auth_token", None)
+    if not auth_token:
+        raise HTTPException(status_code=400, detail="WebSocket tickets are only used when auth is enabled")
+
+    from chad.server.auth import mint_browser_ticket
+
+    expires_in = 60
+    ticket = mint_browser_ticket(
+        secret=auth_token,
+        purpose="ws",
+        resource=session_id,
+        ttl_seconds=expires_in,
+    )
+    return WebSocketTicketResponse(ticket=ticket, expires_in=expires_in)
+
+
 @router.websocket("/ws/{session_id}")
 async def websocket_endpoint(
     websocket: WebSocket,
     session_id: str,
     since_seq: int = 0,
-    token: str | None = None,
+    ticket: str | None = None,
 ):
     """WebSocket endpoint for streaming task updates.
 
@@ -68,7 +100,7 @@ async def websocket_endpoint(
 
     Query params:
     - since_seq: Resume from this sequence number (for reconnection)
-    - token: Bearer token for authenticated connections
+    - ticket: Short-lived browser ticket for authenticated connections
 
     Server -> Client message types:
     - terminal: Raw PTY output (base64 encoded)
@@ -86,8 +118,8 @@ async def websocket_endpoint(
     # Check auth token if configured
     auth_token = getattr(websocket.app.state, "auth_token", None)
     if auth_token:
-        from chad.server.auth import check_websocket_token
-        if not check_websocket_token(websocket, auth_token):
+        from chad.server.auth import check_websocket_ticket
+        if not ticket or not check_websocket_ticket(websocket, auth_token, session_id):
             await websocket.close(code=4001, reason="Authentication required")
             return
 

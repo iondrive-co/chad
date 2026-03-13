@@ -17,7 +17,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Callable
 
-from winpty import PTY
+try:
+    from winpty import PTY
+except ImportError:  # pragma: no cover - exercised in Windows compat tests
+    PTY = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -34,6 +37,7 @@ class PTYSession:
 
     # ConPTY object
     _pty: PTY | None = None
+    _proc: subprocess.Popen[bytes] | None = None
 
     # State
     active: bool = True
@@ -106,28 +110,49 @@ class PTYStreamService:
         full_env["COLUMNS"] = str(cols)
 
         # Create ConPTY
-        pty = PTY(cols, rows)
+        if PTY is not None:
+            pty = PTY(cols, rows)
 
-        # Build command line for CreateProcess (appname + cmdline)
-        appname = cmd[0]
-        cmdline = subprocess.list2cmdline(cmd[1:]) if len(cmd) > 1 else None
+            # Build command line for CreateProcess (appname + cmdline)
+            appname = cmd[0]
+            cmdline = subprocess.list2cmdline(cmd[1:]) if len(cmd) > 1 else None
 
-        # Build env string: null-separated KEY=VALUE pairs
-        env_str = "\0".join(f"{k}={v}" for k, v in full_env.items()) + "\0"
+            # Build env string: null-separated KEY=VALUE pairs
+            env_str = "\0".join(f"{k}={v}" for k, v in full_env.items()) + "\0"
 
-        pty.spawn(appname, cmdline=cmdline, cwd=str(cwd), env=env_str)
+            pty.spawn(appname, cmdline=cmdline, cwd=str(cwd), env=env_str)
 
-        session = PTYSession(
-            stream_id=stream_id,
-            session_id=session_id,
-            pid=pty.pid,
-            master_fd=-1,
-            cmd=cmd,
-            cwd=cwd,
-            env=full_env,
-            _pty=pty,
-            _log_callback=log_callback,
-        )
+            session = PTYSession(
+                stream_id=stream_id,
+                session_id=session_id,
+                pid=pty.pid,
+                master_fd=-1,
+                cmd=cmd,
+                cwd=cwd,
+                env=full_env,
+                _pty=pty,
+                _log_callback=log_callback,
+            )
+        else:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(cwd),
+                env=full_env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            session = PTYSession(
+                stream_id=stream_id,
+                session_id=session_id,
+                pid=proc.pid,
+                master_fd=-1,
+                cmd=cmd,
+                cwd=cwd,
+                env=full_env,
+                _proc=proc,
+                _log_callback=log_callback,
+            )
 
         with self._lock:
             self._sessions[stream_id] = session
@@ -146,7 +171,36 @@ class PTYStreamService:
         import time
 
         pty = session._pty
-        if not pty:
+        proc = session._proc
+        if not pty and not proc:
+            return
+
+        if proc is not None:
+            try:
+                assert proc.stdout is not None
+                while session.active:
+                    chunk = proc.stdout.readline()
+                    if chunk:
+                        event = PTYEvent(
+                            type="output",
+                            stream_id=session.stream_id,
+                            data=base64.b64encode(chunk).decode("ascii"),
+                            has_ansi=b"\x1b[" in chunk or b"\x1b]" in chunk,
+                        )
+                        self._dispatch_event(session, event)
+                    elif proc.poll() is not None:
+                        break
+                    else:
+                        time.sleep(0.01)
+            finally:
+                session.exit_code = proc.poll()
+                event = PTYEvent(
+                    type="exit",
+                    stream_id=session.stream_id,
+                    exit_code=session.exit_code,
+                )
+                self._dispatch_event(session, event)
+                session.active = False
             return
 
         while session.active:
@@ -255,6 +309,9 @@ class PTYStreamService:
                 # ConPTY is a terminal — translate \n to \r (Enter key)
                 text = data.decode("utf-8", errors="replace").replace("\n", "\r")
                 session._pty.write(text)
+            elif session._proc and session._proc.stdin:
+                session._proc.stdin.write(data)
+                session._proc.stdin.flush()
             return True
         except Exception:
             return False
@@ -265,7 +322,7 @@ class PTYStreamService:
             session = self._sessions.get(stream_id)
 
         if not session or not session._pty:
-            return False
+            return session is not None and session._proc is not None
 
         try:
             session._pty.set_size(cols, rows)
@@ -332,11 +389,14 @@ class PTYStreamService:
         # Kill the process tree via taskkill for reliable cleanup
         pid = session.pid
         try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(pid)],
-                capture_output=True,
-                timeout=5,
-            )
+            if session._proc is not None:
+                session._proc.terminate()
+            else:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True,
+                    timeout=5,
+                )
         except (subprocess.SubprocessError, OSError):
             pass
 

@@ -2,10 +2,11 @@
 
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 from chad.server.services import preview_tunnel_service, get_session_manager
+from chad.server.services.preview_tunnel_service import create_preview_access_url
 
 router = APIRouter()
 
@@ -61,17 +62,22 @@ async def get_preview_tunnel_status() -> PreviewTunnelStatus:
 
 
 @router.post("/preview-tunnel/start", response_model=PreviewTunnelStatus)
-async def start_preview_tunnel(request: PreviewStartRequest) -> PreviewTunnelStatus:
+async def start_preview_tunnel(request: PreviewStartRequest, http_request: Request) -> PreviewTunnelStatus:
     """Start a preview app and optionally tunnel it."""
     svc = preview_tunnel_service.get_preview_tunnel_service()
     cwd = _resolve_cwd(request.session_id)
-    svc.start(
+    auth_token = getattr(http_request.app.state, "auth_token", None)
+    url = svc.start(
         port=request.port,
         command=request.command,
         cwd=cwd,
         tunnel=request.tunnel,
+        auth_token=auth_token,
     )
-    return PreviewTunnelStatus(**svc.status())
+    status = svc.status()
+    if request.tunnel and auth_token and url and url.startswith("https://"):
+        status["url"] = create_preview_access_url(url, auth_token)
+    return PreviewTunnelStatus(**status)
 
 
 @router.post("/preview-tunnel/stop", response_model=PreviewTunnelStatus)

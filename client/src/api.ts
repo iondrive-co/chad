@@ -24,6 +24,7 @@ import type {
   TaskStatus,
   UserPreferences,
   VerificationSettings,
+  WebSocketTicket,
   WorktreeStatus,
 } from "./types.js";
 
@@ -170,6 +171,10 @@ export class ChadAPI {
     cols: number,
   ): Promise<{ success: boolean; rows: number; cols: number }> {
     return this.post(`/api/v1/sessions/${sessionId}/resize`, { rows, cols });
+  }
+
+  getWebSocketTicket(sessionId: string): Promise<WebSocketTicket> {
+    return this.post(`/api/v1/ws-ticket/${sessionId}`);
   }
 
   // ── Events & Milestones ──

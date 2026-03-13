@@ -4,9 +4,12 @@ import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi.testclient import TestClient
 
 from chad.server.services.preview_tunnel_service import (
     PreviewTunnelService,
+    create_preview_access_url,
+    create_preview_proxy_app,
     get_preview_tunnel_service,
     reset_preview_tunnel_service,
 )
@@ -85,9 +88,16 @@ class TestPreviewTunnelService:
                 return mock_app_proc
             return mock_tunnel_proc
 
-        with patch("chad.server.services.preview_tunnel_service.subprocess.Popen", side_effect=make_proc):
+        with patch("chad.server.services.preview_tunnel_service.subprocess.Popen", side_effect=make_proc), \
+             patch.object(PreviewTunnelService, "_start_proxy", return_value=43123):
             svc = PreviewTunnelService()
-            result = svc.start(3000, command="npm run dev", cwd=str(tmp_path), tunnel=True)
+            result = svc.start(
+                3000,
+                command="npm run dev",
+                cwd=str(tmp_path),
+                tunnel=True,
+                auth_token="main-auth-token",
+            )
 
         assert result == "https://test-preview.trycloudflare.com"
         assert svc.is_running is True
@@ -102,10 +112,18 @@ class TestPreviewTunnelService:
 
         svc = PreviewTunnelService()
         # No command, just tunnel request — should still handle gracefully
-        result = svc.start(3000, tunnel=True)
+        with patch.object(PreviewTunnelService, "_start_proxy", return_value=43123):
+            result = svc.start(3000, tunnel=True, auth_token="main-auth-token")
 
         assert result == "http://localhost:3000"
         assert svc.status()["error"] == "not found"
+
+    def test_start_tunnel_requires_main_auth(self):
+        """Preview tunnels should not start without the main tunnel auth secret."""
+        svc = PreviewTunnelService()
+        result = svc.start(3000, tunnel=True)
+        assert result == "http://localhost:3000"
+        assert "requires authenticated main tunnel" in svc.status()["error"]
 
     def test_start_no_command_no_tunnel(self):
         """Starting without command or tunnel should just return localhost URL."""
@@ -182,7 +200,6 @@ class TestPreviewTunnelAPI:
     @pytest.fixture
     def client(self):
         from chad.server.main import create_app
-        from fastapi.testclient import TestClient
 
         app = create_app(debug=True)
         return TestClient(app)
@@ -214,6 +231,31 @@ class TestPreviewTunnelAPI:
         # App not started (no command), but endpoint succeeds
         data = resp.json()
         assert data["port"] is None  # no app process running
+
+    def test_start_remote_preview_returns_bootstrap_url(self):
+        from chad.server.main import create_app
+
+        app = create_app(auth_token="main-auth-token")
+        client = TestClient(app)
+        with patch("chad.server.api.routes.preview_tunnel.preview_tunnel_service.get_preview_tunnel_service") as mock_get:
+            mock_service = MagicMock()
+            mock_service.start.return_value = "https://preview.trycloudflare.com"
+            mock_service.status.return_value = {
+                "running": True,
+                "url": "https://preview.trycloudflare.com",
+                "port": 3000,
+                "error": None,
+            }
+            mock_get.return_value = mock_service
+
+            resp = client.post(
+                "/api/v1/preview-tunnel/start",
+                json={"port": 3000, "tunnel": True},
+                headers={"Authorization": "Bearer main-auth-token"},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["url"].startswith("https://preview.trycloudflare.com?preview_token=")
 
 
 class TestPreviewCwdResolution:
@@ -255,6 +297,20 @@ class TestPreviewCwdResolution:
             mock_mgr.return_value.get_session.return_value = mock_session
             result = _resolve_cwd("sess1")
             assert result == "/some/project"
+
+
+class TestPreviewProxyAuth:
+    """Tests for the authenticated preview proxy."""
+
+    def test_access_url_carries_scoped_ticket(self):
+        url = create_preview_access_url("https://preview.trycloudflare.com", "main-auth-token")
+        assert url.startswith("https://preview.trycloudflare.com?preview_token=")
+
+    def test_proxy_rejects_request_without_ticket(self):
+        app = create_preview_proxy_app(target_port=3000, auth_token="main-auth-token")
+        client = TestClient(app)
+        resp = client.get("/")
+        assert resp.status_code == 401
 
 
 class TestAutoconfigureAPI:
