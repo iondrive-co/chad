@@ -106,6 +106,74 @@ class TestTerminalStylingMatchesMilestone:
         ), f"Light mode terminal text should be dark, got: {terminal_text}"
 
 
+class TestFontSizeReadability:
+    """Ensure font sizes are large enough to be readable."""
+
+    MINIMUM_FONT_SIZE_PX = 13  # Minimum acceptable font size in pixels
+
+    def test_no_tiny_font_sizes(self):
+        """Font sizes should not be smaller than the minimum threshold."""
+        content = CSS_FILE.read_text()
+        # Find all explicit pixel font sizes
+        font_size_matches = re.findall(r"font-size:\s*(\d+)px", content)
+        small_sizes = [int(s) for s in font_size_matches if int(s) < self.MINIMUM_FONT_SIZE_PX]
+        assert not small_sizes, (
+            f"Found font sizes below {self.MINIMUM_FONT_SIZE_PX}px threshold: {sorted(set(small_sizes))}px. "
+            "Small fonts make the UI difficult to read."
+        )
+
+    def test_html_has_base_font_size(self):
+        """HTML element should have a base font-size for rem calculations."""
+        content = CSS_FILE.read_text()
+        # Look for html rule with font-size
+        html_match = re.search(r"html\s*\{([^}]+)\}", content)
+        assert html_match, "Should have html {} rule for base font-size"
+        rule_content = html_match.group(1)
+        assert "font-size:" in rule_content, (
+            "html element should set font-size as base for rem units"
+        )
+
+
+class TestJetBrainsMonoFont:
+    """Ensure JetBrains Mono is used as the primary font throughout the UI."""
+
+    def test_body_uses_font_mono_variable(self):
+        """Body should use the --font-mono variable (JetBrains Mono)."""
+        content = CSS_FILE.read_text()
+        # Find body rule
+        body_match = re.search(r"body\s*\{([^}]+)\}", content)
+        assert body_match, "Should have body {} rule"
+        rule_content = body_match.group(1)
+        assert "font-family: var(--font-mono)" in rule_content, (
+            "body should use font-family: var(--font-mono) for JetBrains Mono font"
+        )
+
+    def test_font_mono_variable_includes_jetbrains_mono(self):
+        """The --font-mono CSS variable should include JetBrains Mono."""
+        content = CSS_FILE.read_text()
+        # Find :root with --font-mono
+        root_match = re.search(r":root\s*\{([^}]+)\}", content)
+        assert root_match, "Should have :root {} rule"
+        root_content = root_match.group(1)
+        font_mono_match = re.search(r"--font-mono:\s*([^;]+);", root_content)
+        assert font_mono_match, "Should have --font-mono variable defined"
+        font_mono_value = font_mono_match.group(1)
+        assert "JetBrains Mono" in font_mono_value, (
+            f"--font-mono should include JetBrains Mono, got: {font_mono_value}"
+        )
+
+    def test_index_html_loads_jetbrains_mono(self):
+        """index.html should load JetBrains Mono from Google Fonts."""
+        index_file = CSS_FILE.parent.parent.parent / "index.html"
+        content = index_file.read_text()
+        assert "fonts.googleapis.com" in content, (
+            "index.html should load fonts from Google Fonts"
+        )
+        assert "JetBrains+Mono" in content, (
+            "index.html should load JetBrains Mono font"
+        )
+
+
 class TestChatViewLayoutClasses:
     """Verify CSS classes for chat view agent picker layout."""
 
