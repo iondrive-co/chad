@@ -12,7 +12,6 @@ from typing import Iterable
 from urllib.parse import urlencode
 
 import httpx
-import psutil
 import uvicorn
 import websockets
 from fastapi import FastAPI, Request, Response, WebSocket
@@ -24,6 +23,11 @@ from chad.util.process_registry import get_global_registry
 
 logger = logging.getLogger(__name__)
 
+try:
+    import psutil
+except ModuleNotFoundError:
+    psutil = None
+
 # Regex to match common dev server URL announcements in stdout/stderr
 _DEV_SERVER_URL_RE = re.compile(
     r'https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::\]):(\d+)',
@@ -33,6 +37,8 @@ _DEV_SERVER_URL_RE = re.compile(
 def _get_listening_ports(pid: int) -> set[int]:
     """Get all TCP ports that a process tree is listening on."""
     ports: set[int] = set()
+    if psutil is None:
+        return ports
     try:
         proc = psutil.Process(pid)
         for child in [proc] + proc.children(recursive=True):

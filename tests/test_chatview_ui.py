@@ -220,6 +220,38 @@ class TestExpandableMilestones:
         )
 
 
+class TestInterruptFollowups:
+    """Verify interrupt follow-ups are queued as real follow-up tasks."""
+
+    def test_interrupt_with_message_queues_pending_followup(self):
+        """Active-task interrupts should queue a follow-up instead of writing raw message bytes."""
+        content = CHATVIEW_FILE.read_text()
+
+        assert "pendingFollowup" in content, (
+            "ChatView should track a queued follow-up message after interrupt"
+        )
+        assert "setPendingFollowup(message)" in content, (
+            "Interrupting with text should queue the text as a pending follow-up"
+        )
+        assert 'ctrlC + "\\n" + message + "\\n"' not in content, (
+            "Interrupt follow-up text should not be appended to raw Ctrl+C PTY input"
+        )
+
+    def test_pending_followup_auto_starts_real_followup_task(self):
+        """Queued interrupt follow-ups should auto-start a real is_followup task."""
+        content = CHATVIEW_FILE.read_text()
+
+        assert "await api.cancelSession(sessionId)" in content, (
+            "Interrupting with text should cancel the active task before starting a follow-up"
+        )
+        assert "await startTaskRequest(message, true, [])" in content, (
+            "Queued interrupt follow-up should start a real follow-up task"
+        )
+        assert "is_followup: isFollowup" in content, (
+            "Follow-up task start request should explicitly set is_followup"
+        )
+
+
 class TestVerificationAgentPicker:
     """Verify that verification agent picker is editable when None."""
 

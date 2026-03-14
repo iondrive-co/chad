@@ -62,6 +62,7 @@ export function ChatView({
   const conversationSeqRef = useRef(0);
   const [inputText, setInputText] = useState("");
   const [hasRunTask, setHasRunTask] = useState(false);
+  const [pendingFollowup, setPendingFollowup] = useState<string | null>(null);
   // Track how the session ended: null (still running or no task), "completed", "cancelled", "timeout", "failed", etc.
   const [endReason, setEndReason] = useState<string | null>(null);
   const [expandedMilestones, setExpandedMilestones] = useState<Set<number>>(new Set());
@@ -557,6 +558,50 @@ export function ChatView({
     });
   }, []);
 
+  const startTaskRequest = useCallback(async (
+    message: string,
+    isFollowup: boolean,
+    attachedScreenshots: UploadedScreenshot[],
+  ) => {
+    if (!codingAccount) {
+      throw new Error("Select a coding agent first");
+    }
+
+    const session = await api.getSession(sessionId);
+    const projectPath = session.project_path || currentProjectPath || defaultProjectPath;
+    if (!projectPath) {
+      throw new Error("Set a project path first");
+    }
+
+    try {
+      const data = await api.getEvents(sessionId, 0, "session_started");
+      streamSinceSeqRef.current = data.latest_seq;
+    } catch {
+      streamSinceSeqRef.current = undefined;
+    }
+
+    const verificationAllowed = verificationSettings?.enabled && verificationAccount;
+    await api.startTask(sessionId, {
+      project_path: projectPath,
+      task_description: message,
+      coding_agent: codingAccount.name,
+      verification_agent: verificationAllowed ? verificationAccount.name : undefined,
+      is_followup: isFollowup,
+      screenshots: attachedScreenshots.length > 0 ? attachedScreenshots.map((s) => s.path) : undefined,
+    });
+
+    handleTaskStart(message, isFollowup);
+  }, [
+    api,
+    sessionId,
+    codingAccount,
+    verificationAccount,
+    verificationSettings,
+    currentProjectPath,
+    defaultProjectPath,
+    handleTaskStart,
+  ]);
+
   const handleSendMessage = useCallback(async () => {
     if (sending) return;
 
@@ -566,25 +611,25 @@ export function ChatView({
       setSending(true);
       try {
         const message = inputText.trim();
-        // Send Ctrl+C first to interrupt the agent, then the message if any
-        const ctrlC = "\x03";
-        const payload = message ? ctrlC + "\n" + message + "\n" : ctrlC + "\n";
-        const encodedData = btoa(payload);
-        await api.sendInput(sessionId, encodedData);
+        if (message) {
+          await api.cancelSession(sessionId);
+          setPendingFollowup(message);
+          setInputText("");
+        } else {
+          const encodedData = btoa("\x03\n");
+          await api.sendInput(sessionId, encodedData);
 
-        // Add the interrupt to the conversation as a special user message
-        setConversation((prev) => [
-          ...prev,
-          {
-            seq: conversationSeqRef.current + 1,
-            ts: new Date().toISOString(),
-            type: "user",
-            content: `[Interrupt] ${message || "(interrupted)"}`,
-          },
-        ]);
-        conversationSeqRef.current += 1;
-
-        if (message) setInputText("");
+          setConversation((prev) => [
+            ...prev,
+            {
+              seq: conversationSeqRef.current + 1,
+              ts: new Date().toISOString(),
+              type: "user",
+              content: "[Interrupt] (interrupted)",
+            },
+          ]);
+          conversationSeqRef.current += 1;
+        }
       } catch (e) {
         if (e instanceof Error) {
           setConversationError(e.message);
@@ -598,44 +643,14 @@ export function ChatView({
     }
 
     // Handle normal message (start new task)
-    if (!inputText.trim()) return;
-    if (!codingAccount) {
-      setConversationError("Select a coding agent first");
-      return;
-    }
+    const message = inputText.trim();
+    if (!message) return;
+
     setConversationError(null);
     setSending(true);
     try {
-      const session = await api.getSession(sessionId);
-      const projectPath = session.project_path || currentProjectPath || defaultProjectPath;
-      if (!projectPath) {
-        setConversationError("Set a project path first");
-        setSending(false);
-        return;
-      }
-
-      // Capture event log position before the task starts
-      try {
-        const data = await api.getEvents(sessionId, 0, "session_started");
-        streamSinceSeqRef.current = data.latest_seq;
-      } catch {
-        streamSinceSeqRef.current = undefined;
-      }
-
-      const message = inputText.trim();
-      const verificationAllowed = verificationSettings?.enabled && verificationAccount;
-      await api.startTask(sessionId, {
-        project_path: projectPath,
-        task_description: message,
-        coding_agent: codingAccount.name,
-        verification_agent: verificationAllowed ? verificationAccount.name : undefined,
-        is_followup: hasRunTask,
-        screenshots: screenshots.length > 0 ? screenshots.map((s) => s.path) : undefined,
-      });
-
-      handleTaskStart(message, hasRunTask);
+      await startTaskRequest(message, hasRunTask, screenshots);
       setInputText("");
-      // Clear screenshots after starting task
       screenshots.forEach((s) => URL.revokeObjectURL(s.previewUrl));
       setScreenshots([]);
     } catch (e) {
@@ -653,16 +668,42 @@ export function ChatView({
     inputText,
     sending,
     taskActive,
-    codingAccount,
-    verificationAccount,
-    verificationSettings,
-    currentProjectPath,
-    defaultProjectPath,
     hasRunTask,
-    handleTaskStart,
-    conversationSeqRef,
     screenshots,
+    startTaskRequest,
   ]);
+
+  useEffect(() => {
+    if (!pendingFollowup || taskActive || sending) return;
+
+    let cancelled = false;
+    const message = pendingFollowup;
+    setPendingFollowup(null);
+    setConversationError(null);
+    setSending(true);
+
+    (async () => {
+      try {
+        await startTaskRequest(message, true, []);
+      } catch (e) {
+        if (cancelled) return;
+        setPendingFollowup(message);
+        if (e instanceof Error) {
+          setConversationError(e.message);
+        } else {
+          setConversationError("Failed to start follow-up task");
+        }
+      } finally {
+        if (!cancelled) {
+          setSending(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingFollowup, taskActive, sending, startTaskRequest]);
 
   const handleInputKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {

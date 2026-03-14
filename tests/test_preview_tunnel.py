@@ -621,6 +621,23 @@ class TestPortAutodetection:
         port = detect_listening_port(proc, timeout=5.0)
         assert port == 4567
 
+    def test_detect_port_from_stdout_without_psutil(self):
+        """Should still import and detect from stdout when psutil is unavailable."""
+        from chad.server.services import preview_tunnel_service
+
+        original_psutil = preview_tunnel_service.psutil
+        preview_tunnel_service.psutil = None
+        try:
+            proc = subprocess.Popen(
+                ["echo", "Server running at http://localhost:4568/"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            port = preview_tunnel_service.detect_listening_port(proc, timeout=5.0)
+            assert port == 4568
+        finally:
+            preview_tunnel_service.psutil = original_psutil
+
     def test_detect_port_from_listening_socket(self):
         """Should detect port from a process that opens a listening socket."""
         import sys
