@@ -641,7 +641,10 @@ class TestPortAutodetection:
     def test_detect_port_from_listening_socket(self):
         """Should detect port from a process that opens a listening socket."""
         import sys
-        from chad.server.services.preview_tunnel_service import detect_listening_port
+        from chad.server.services import preview_tunnel_service
+
+        if preview_tunnel_service.psutil is None:
+            pytest.skip("listening-socket autodetection requires psutil")
 
         # Start a Python subprocess that listens on a random port
         proc = subprocess.Popen(
@@ -656,7 +659,7 @@ class TestPortAutodetection:
             stderr=subprocess.PIPE,
         )
         try:
-            port = detect_listening_port(proc, timeout=10.0)
+            port = preview_tunnel_service.detect_listening_port(proc, timeout=10.0)
             assert port is not None
             assert 1 <= port <= 65535
         finally:
