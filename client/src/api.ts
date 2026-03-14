@@ -441,17 +441,15 @@ export class ChadAPI {
   }
 
   startPreviewTunnel(
-    port: number,
-    options?: {
+    options: {
+      port?: number;
       command?: string;
       session_id?: string;
       tunnel?: boolean;
+      autodetect_port?: boolean;
     },
   ): Promise<PreviewTunnelStatus> {
-    return this.post("/api/v1/preview-tunnel/start", {
-      port,
-      ...options,
-    });
+    return this.post("/api/v1/preview-tunnel/start", options);
   }
 
   stopPreviewTunnel(): Promise<PreviewTunnelStatus> {

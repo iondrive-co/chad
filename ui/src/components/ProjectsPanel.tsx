@@ -20,6 +20,7 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
   const [lintCommand, setLintCommand] = useState("");
   const [testCommand, setTestCommand] = useState("");
   const [instructionsPaths, setInstructionsPaths] = useState<string[]>([]);
+  const [previewPortMode, setPreviewPortMode] = useState<"disabled" | "auto" | "manual">("disabled");
   const [previewPort, setPreviewPort] = useState("");
   const [previewCommand, setPreviewCommand] = useState("");
   const [preferredCodingAgent, setPreferredCodingAgent] = useState<Account | null>(null);
@@ -77,6 +78,7 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
       setLintCommand(s.lint_command || "");
       setTestCommand(s.test_command || "");
       setInstructionsPaths(s.instructions_paths || []);
+      setPreviewPortMode(s.preview_port_mode || "disabled");
       setPreviewPort(s.preview_port != null ? String(s.preview_port) : "");
       setPreviewCommand(s.preview_command || "");
       // Load preferred coding agent
@@ -116,6 +118,7 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
       lint_command: lintCommand || null,
       test_command: testCommand || null,
       instructions_paths: instructionsPaths.filter(p => p.trim()),
+      preview_port_mode: previewPortMode,
       preview_port: (parsedPort != null && !isNaN(parsedPort)) ? parsedPort : null,
       preview_command: previewCommand || null,
       preferred_coding_agent: preferredCodingAgent?.name || null,
@@ -172,6 +175,7 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
         lint_command: lintCommand || null,
         test_command: testCommand || null,
         instructions_paths: instructionsPaths.filter(p => p.trim()),
+        preview_port_mode: previewPortMode,
         preview_port: (parsedPort != null && !isNaN(parsedPort)) ? parsedPort : null,
         preview_command: previewCommand || null,
         preferred_coding_agent: preferredCodingAgent?.name || null,
@@ -182,7 +186,7 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
     } finally {
       setSaving(false);
     }
-  }, [api, selectedProject, lintCommand, testCommand, instructionsPaths, previewPort, previewCommand, preferredCodingAgent, flash]);
+  }, [api, selectedProject, lintCommand, testCommand, instructionsPaths, previewPortMode, previewPort, previewCommand, preferredCodingAgent, flash]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -216,12 +220,14 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
               lint_command: result.settings.lint_command,
               test_command: result.settings.test_command,
               instructions_paths: result.settings.instructions_paths,
+              preview_port_mode: result.settings.preview_port_mode,
               preview_port: result.settings.preview_port,
               preview_command: result.settings.preview_command,
             });
             setLintCommand(updated.lint_command || "");
             setTestCommand(updated.test_command || "");
             setInstructionsPaths(updated.instructions_paths || []);
+            setPreviewPortMode(updated.preview_port_mode || "disabled");
             setPreviewPort(updated.preview_port != null ? String(updated.preview_port) : "");
             setPreviewCommand(updated.preview_command || "");
             flash("Autoconfigured");
@@ -410,28 +416,48 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
 
                 <div className="project-settings-row">
                   <label>
-                    Preview Command
-                    <input
-                      type="text"
-                      value={previewCommand}
-                      onChange={(e) => setPreviewCommand(e.target.value)}
-                      onBlur={handleSave}
-                      placeholder="e.g., npm run dev"
-                    />
-                  </label>
-                  <label>
-                    Preview Port
-                    <input
-                      type="number"
-                      value={previewPort}
-                      onChange={(e) => setPreviewPort(e.target.value)}
-                      onBlur={handleSave}
-                      placeholder="e.g., 3000"
-                      min={1}
-                      max={65535}
-                    />
+                    Preview
+                    <select
+                      value={previewPortMode}
+                      onChange={(e) => {
+                        setPreviewPortMode(e.target.value as "disabled" | "auto" | "manual");
+                        setTimeout(handleSave, 0);
+                      }}
+                    >
+                      <option value="disabled">Disabled</option>
+                      <option value="auto">Auto-detect port</option>
+                      <option value="manual">Manual port</option>
+                    </select>
                   </label>
                 </div>
+                {previewPortMode !== "disabled" && (
+                  <div className="project-settings-row">
+                    <label>
+                      Preview Command
+                      <input
+                        type="text"
+                        value={previewCommand}
+                        onChange={(e) => setPreviewCommand(e.target.value)}
+                        onBlur={handleSave}
+                        placeholder="e.g., npm run dev"
+                      />
+                    </label>
+                    {previewPortMode === "manual" && (
+                      <label>
+                        Preview Port
+                        <input
+                          type="number"
+                          value={previewPort}
+                          onChange={(e) => setPreviewPort(e.target.value)}
+                          onBlur={handleSave}
+                          placeholder="e.g., 3000"
+                          min={1}
+                          max={65535}
+                        />
+                      </label>
+                    )}
+                  </div>
+                )}
 
                 <div className="project-settings-row">
                   <label>

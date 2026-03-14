@@ -219,9 +219,14 @@ class TestPreviewTunnelAPI:
         assert resp.status_code == 200
         assert resp.json()["running"] is False
 
-    def test_start_requires_port(self, client):
+    def test_start_without_port_or_command_returns_error(self, client):
+        """Starting without port or command should return an error status."""
+        reset_preview_tunnel_service()
         resp = client.post("/api/v1/preview-tunnel/start", json={})
-        assert resp.status_code == 422  # validation error
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["running"] is False
+        assert data["error"] is not None
 
     def test_start_local_no_command(self, client):
         """Starting with just a port (no command, no tunnel) should succeed."""
@@ -530,3 +535,176 @@ class TestProjectConfigPreviewFields:
             config = save_project_settings(project_dir)
             assert config.preview_port == 5000
             assert config.preview_command == "npm start"
+
+
+class TestPreviewPortMode:
+    """Tests for preview_port_mode in project config."""
+
+    def test_default_mode_is_disabled(self):
+        from chad.util.project_setup import ProjectConfig
+
+        config = ProjectConfig()
+        assert config.preview_port_mode == "disabled"
+        data = config.to_dict()
+        assert data["preview_port_mode"] == "disabled"
+
+    def test_mode_roundtrip(self):
+        from chad.util.project_setup import ProjectConfig
+
+        for mode in ("disabled", "auto", "manual"):
+            config = ProjectConfig(preview_port_mode=mode)
+            data = config.to_dict()
+            assert data["preview_port_mode"] == mode
+            restored = ProjectConfig.from_dict(data)
+            assert restored.preview_port_mode == mode
+
+    def test_legacy_migration_port_set_becomes_manual(self):
+        """Old configs without preview_port_mode but with preview_port should migrate to manual."""
+        from chad.util.project_setup import ProjectConfig
+
+        data = {"version": "1.0", "project_type": "python", "preview_port": 3000}
+        config = ProjectConfig.from_dict(data)
+        assert config.preview_port_mode == "manual"
+        assert config.preview_port == 3000
+
+    def test_legacy_migration_no_port_becomes_disabled(self):
+        """Old configs without preview_port_mode and no preview_port stay disabled."""
+        from chad.util.project_setup import ProjectConfig
+
+        data = {"version": "1.0", "project_type": "python"}
+        config = ProjectConfig.from_dict(data)
+        assert config.preview_port_mode == "disabled"
+
+    def test_save_project_settings_with_mode(self, tmp_path):
+        from unittest.mock import patch as mock_patch, MagicMock
+        from chad.util.project_setup import save_project_settings
+
+        project_dir = tmp_path / "myproject"
+        project_dir.mkdir()
+        stored = {}
+
+        def mock_get(path):
+            return stored.get(str(path))
+
+        def mock_set(path, data):
+            stored[str(path)] = data
+
+        mock_cm = MagicMock()
+        mock_cm.get_project_config.side_effect = mock_get
+        mock_cm.set_project_config.side_effect = mock_set
+
+        with mock_patch("chad.util.config_manager.ConfigManager", return_value=mock_cm):
+            config = save_project_settings(
+                project_dir,
+                preview_port_mode="auto",
+                preview_command="npm run dev",
+            )
+            assert config.preview_port_mode == "auto"
+            assert config.preview_command == "npm run dev"
+
+            saved_data = stored[str(project_dir.resolve())]
+            assert saved_data["preview_port_mode"] == "auto"
+
+
+class TestPortAutodetection:
+    """Tests for the port autodetection functionality."""
+
+    def test_detect_port_from_stdout(self):
+        """Should detect port from a process that prints a URL to stdout."""
+        from chad.server.services.preview_tunnel_service import detect_listening_port
+
+        proc = subprocess.Popen(
+            ["echo", "Server running at http://localhost:4567/"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        port = detect_listening_port(proc, timeout=5.0)
+        assert port == 4567
+
+    def test_detect_port_from_listening_socket(self):
+        """Should detect port from a process that opens a listening socket."""
+        import socket
+        import sys
+        from chad.server.services.preview_tunnel_service import detect_listening_port
+
+        # Start a Python subprocess that listens on a random port
+        proc = subprocess.Popen(
+            [
+                sys.executable, "-c",
+                "import socket, time; "
+                "s = socket.socket(); s.bind(('127.0.0.1', 0)); "
+                "s.listen(1); print(f'port={s.getsockname()[1]}'); "
+                "time.sleep(10)",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            port = detect_listening_port(proc, timeout=10.0)
+            assert port is not None
+            assert 1 <= port <= 65535
+        finally:
+            proc.terminate()
+            proc.wait()
+
+    def test_detect_port_returns_none_on_exit(self):
+        """Should return None when process exits without opening a port."""
+        from chad.server.services.preview_tunnel_service import detect_listening_port
+
+        proc = subprocess.Popen(
+            ["echo", "no port here"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        port = detect_listening_port(proc, timeout=2.0)
+        assert port is None
+
+    @patch("chad.server.services.preview_tunnel_service.get_global_registry")
+    def test_service_autodetect_mode(self, mock_registry_fn, tmp_path):
+        """PreviewTunnelService should autodetect port when autodetect_port=True."""
+        import sys
+        from chad.server.services.preview_tunnel_service import PreviewTunnelService
+
+        mock_registry_fn.return_value = MagicMock()
+
+        # Write a tiny server script that prints a URL and listens
+        script = tmp_path / "serve.py"
+        script.write_text(
+            "import http.server, sys\n"
+            "s = http.server.HTTPServer(('127.0.0.1', 0), http.server.SimpleHTTPRequestHandler)\n"
+            "print(f'http://localhost:{s.server_address[1]}/')\n"
+            "sys.stdout.flush()\n"
+            "s.serve_forever()\n"
+        )
+
+        svc = PreviewTunnelService()
+        try:
+            result = svc.start(
+                command=f"{sys.executable} {script}",
+                cwd=str(tmp_path),
+                autodetect_port=True,
+            )
+            assert result is not None
+            assert "localhost" in result
+            assert svc._port is not None
+            assert svc._port > 0
+        finally:
+            if svc._app_proc and svc._app_proc.poll() is None:
+                svc._app_proc.terminate()
+                svc._app_proc.wait(timeout=5)
+
+    def test_url_patterns(self):
+        """Test the URL regex matches common dev server output patterns."""
+        from chad.server.services.preview_tunnel_service import _DEV_SERVER_URL_RE
+
+        cases = [
+            ("  Local: http://localhost:5173/", 5173),
+            ("Starting development server at http://127.0.0.1:8000/", 8000),
+            (" * Running on http://127.0.0.1:5000", 5000),
+            ("http://localhost:8080", 8080),
+            ("Server running at http://0.0.0.0:3000/", 3000),
+        ]
+        for text, expected_port in cases:
+            m = _DEV_SERVER_URL_RE.search(text)
+            assert m is not None, f"No match for: {text}"
+            assert int(m.group(1)) == expected_port

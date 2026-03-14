@@ -91,6 +91,7 @@ export function ChatView({
   }, [defaultProjectPath]);
 
   // Preview
+  const [previewPortMode, setPreviewPortMode] = useState<"disabled" | "auto" | "manual">("disabled");
   const [previewPort, setPreviewPort] = useState<number | null>(null);
   const [previewCommand, setPreviewCommand] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -457,7 +458,8 @@ export function ChatView({
   const isRemote = Boolean(apiBaseUrl) && !/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(apiBaseUrl || "");
 
   const handlePreview = useCallback(async () => {
-    if (!previewPort) return;
+    if (previewPortMode === "disabled") return;
+    if (previewPortMode === "manual" && !previewPort) return;
 
     // If already running, just open the URL
     if (previewUrl) {
@@ -467,23 +469,27 @@ export function ChatView({
 
     setPreviewLoading(true);
     try {
-      const result = await api.startPreviewTunnel(previewPort, {
+      const result = await api.startPreviewTunnel({
+        port: previewPort || undefined,
         command: previewCommand || undefined,
         session_id: sessionId,
         tunnel: isRemote,
+        autodetect_port: previewPortMode === "auto",
       });
 
       const url = isRemote && result.url
         ? result.url
-        : `http://localhost:${previewPort}`;
-      setPreviewUrl(url);
-      window.open(url, "_blank", "noopener");
+        : result.port ? `http://localhost:${result.port}` : undefined;
+      if (url) {
+        setPreviewUrl(url);
+        window.open(url, "_blank", "noopener");
+      }
     } catch {
       // ignore
     } finally {
       setPreviewLoading(false);
     }
-  }, [api, previewPort, previewCommand, previewUrl, isRemote, sessionId]);
+  }, [api, previewPortMode, previewPort, previewCommand, previewUrl, isRemote, sessionId]);
 
   // Screenshot upload handlers
   const handleFiles = useCallback(async (files: FileList | File[]) => {
@@ -681,6 +687,7 @@ export function ChatView({
       return;
     }
     api.getProjectSettings(currentProjectPath).then((s) => {
+      setPreviewPortMode(s.preview_port_mode || "disabled");
       setPreviewPort(s.preview_port);
       setPreviewCommand(s.preview_command);
     }).catch(() => {});
@@ -876,12 +883,12 @@ export function ChatView({
               </span>
             )}
             {error && <span className="error-text">{error}</span>}
-            {(previewPort || previewCommand) && (
+            {previewPortMode !== "disabled" && (
               <button
                 className="preview-btn"
                 onClick={handlePreview}
-                disabled={previewLoading || !previewPort}
-                title={previewUrl ? `Open preview (${previewUrl})` : previewCommand ? `Start "${previewCommand}" on port ${previewPort}` : `Open localhost:${previewPort}`}
+                disabled={previewLoading || (previewPortMode === "manual" && !previewPort)}
+                title={previewUrl ? `Open preview (${previewUrl})` : previewCommand ? `Start "${previewCommand}"${previewPortMode === "auto" ? " (auto-detect port)" : ` on port ${previewPort}`}` : previewPort ? `Open localhost:${previewPort}` : "Start preview"}
               >
                 {previewLoading ? "Starting..." : previewUrl ? "Preview" : "Start Preview"}
               </button>

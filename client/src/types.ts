@@ -342,6 +342,7 @@ export interface ProjectSettings {
   lint_command: string | null;
   test_command: string | null;
   instructions_paths: string[];
+  preview_port_mode: "disabled" | "auto" | "manual";
   preview_port: number | null;
   preview_command: string | null;
   preferred_coding_agent: string | null;
@@ -363,6 +364,7 @@ export interface ProjectSettingsUpdate {
   lint_command?: string | null;
   test_command?: string | null;
   instructions_paths?: string[] | null;
+  preview_port_mode?: "disabled" | "auto" | "manual";
   preview_port?: number | null;
   preview_command?: string | null;
   preferred_coding_agent?: string | null;

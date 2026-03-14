@@ -836,17 +836,20 @@ class APIClient:
 
     def start_preview_tunnel(
         self,
-        port: int,
+        port: int | None = None,
         command: str | None = None,
         session_id: str | None = None,
         tunnel: bool = False,
+        autodetect_port: bool = False,
     ) -> dict:
         """Start a preview app and optionally tunnel it.
 
         Returns:
             Dict with running, url, port, error
         """
-        payload: dict = {"port": port, "tunnel": tunnel}
+        payload: dict = {"tunnel": tunnel, "autodetect_port": autodetect_port}
+        if port is not None:
+            payload["port"] = port
         if command:
             payload["command"] = command
         if session_id:

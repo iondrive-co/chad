@@ -23,10 +23,11 @@ class PreviewTunnelStatus(BaseModel):
 class PreviewStartRequest(BaseModel):
     """Request to start a preview."""
 
-    port: int = Field(description="Local port the app listens on")
+    port: int | None = Field(default=None, description="Local port the app listens on (required for manual mode)")
     command: str | None = Field(default=None, description="Shell command to start the app")
     session_id: str | None = Field(default=None, description="Session ID to resolve worktree cwd")
     tunnel: bool = Field(default=False, description="Whether to create a Cloudflare tunnel")
+    autodetect_port: bool = Field(default=False, description="Detect port from the launched command")
 
 
 def _resolve_cwd(session_id: str | None) -> str | None:
@@ -73,6 +74,7 @@ async def start_preview_tunnel(request: PreviewStartRequest, http_request: Reque
         cwd=cwd,
         tunnel=request.tunnel,
         auth_token=auth_token,
+        autodetect_port=request.autodetect_port,
     )
     status = svc.status()
     if request.tunnel and auth_token and url and url.startswith("https://"):

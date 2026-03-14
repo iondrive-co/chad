@@ -6,11 +6,13 @@ import re
 import socket
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlencode
 
 import httpx
+import psutil
 import uvicorn
 import websockets
 from fastapi import FastAPI, Request, Response, WebSocket
@@ -21,6 +23,90 @@ from chad.util.installer import AIToolInstaller
 from chad.util.process_registry import get_global_registry
 
 logger = logging.getLogger(__name__)
+
+# Regex to match common dev server URL announcements in stdout/stderr
+_DEV_SERVER_URL_RE = re.compile(
+    r'https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::\]):(\d+)',
+)
+
+
+def _get_listening_ports(pid: int) -> set[int]:
+    """Get all TCP ports that a process tree is listening on."""
+    ports: set[int] = set()
+    try:
+        proc = psutil.Process(pid)
+        for child in [proc] + proc.children(recursive=True):
+            try:
+                for conn in child.net_connections(kind="tcp"):
+                    if conn.status == "LISTEN":
+                        ports.add(conn.laddr.port)
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                continue
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    return ports
+
+
+def detect_listening_port(
+    proc: subprocess.Popen,
+    timeout: float = 30.0,
+    poll_interval: float = 0.3,
+) -> int | None:
+    """Detect the port a subprocess starts listening on.
+
+    Uses two strategies in parallel:
+    1. Parse stdout/stderr for common URL patterns (fast path)
+    2. Poll the process tree for new TCP LISTEN ports (generic fallback)
+
+    Returns the detected port or None if detection times out.
+    """
+    deadline = time.monotonic() + timeout
+    stdout_port: list[int] = []
+    found_event = threading.Event()
+
+    def _scan_output(stream) -> None:
+        """Read process output looking for URL patterns."""
+        if stream is None:
+            return
+        try:
+            for raw_line in stream:
+                line = raw_line.decode("utf-8", errors="replace")
+                m = _DEV_SERVER_URL_RE.search(line)
+                if m:
+                    port = int(m.group(1))
+                    if port > 0:
+                        stdout_port.append(port)
+                        found_event.set()
+                        return
+        except (OSError, ValueError):
+            pass
+
+    # Start stdout/stderr scanners in background threads
+    readers = []
+    for stream in (proc.stdout, proc.stderr):
+        if stream:
+            t = threading.Thread(target=_scan_output, args=(stream,), daemon=True)
+            t.start()
+            readers.append(t)
+
+    # Poll for new listening ports
+    while time.monotonic() < deadline:
+        if found_event.wait(timeout=poll_interval):
+            break
+
+        if proc.poll() is not None:
+            # Process exited before we found a port
+            break
+
+        ports = _get_listening_ports(proc.pid)
+        if ports:
+            return min(ports)  # prefer lowest port (usually the main server)
+
+    if stdout_port:
+        return stdout_port[0]
+
+    return None
+
 
 _URL_RE = re.compile(r"https://([a-z0-9-]+\.trycloudflare\.com)")
 _PREVIEW_COOKIE = "chad_preview_ticket"
@@ -260,21 +346,25 @@ class PreviewTunnelService:
 
     def start(
         self,
-        port: int,
+        port: int | None = None,
         command: str | None = None,
         cwd: str | None = None,
         tunnel: bool = False,
         auth_token: str | None = None,
+        autodetect_port: bool = False,
     ) -> str | None:
-        """Start the preview app and optionally an authenticated cloudflared tunnel."""
-        if self.is_running and self._port == port and self._cwd == cwd:
+        """Start the preview app and optionally an authenticated cloudflared tunnel.
+
+        When autodetect_port is True and port is None, the port is discovered
+        by launching the command and detecting what it listens on.
+        """
+        if self.is_running and self._port == port and self._cwd == cwd and port is not None:
             if tunnel and self._url:
                 return self._url
             return f"http://localhost:{port}"
 
         self.stop()
 
-        self._port = port
         self._command = command
         self._cwd = cwd
 
@@ -300,6 +390,22 @@ class PreviewTunnelService:
 
             registry = get_global_registry()
             registry.register(self._app_proc, description=f"preview app: {command}")
+
+            if autodetect_port and port is None:
+                detected = detect_listening_port(self._app_proc)
+                if detected is None:
+                    self._error = "Could not detect preview port from command output"
+                    logger.error(self._error)
+                    self.stop()
+                    return None
+                port = detected
+                logger.info("Auto-detected preview port: %d", port)
+
+        if port is None:
+            self._error = "No port specified and no command to autodetect from"
+            return None
+
+        self._port = port
 
         if not tunnel:
             self._error = None

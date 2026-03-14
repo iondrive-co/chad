@@ -397,7 +397,8 @@ class ProjectSettingsResponse(BaseModel):
     lint_command: str | None = Field(description="Lint command for the project")
     test_command: str | None = Field(description="Test command for the project")
     instructions_paths: list[str] = Field(default_factory=list, description="Paths to agent instruction/doc files")
-    preview_port: int | None = Field(default=None, description="Local port for preview")
+    preview_port_mode: str = Field(default="disabled", description="Preview mode: disabled, auto, manual")
+    preview_port: int | None = Field(default=None, description="Local port for preview (manual mode)")
     preview_command: str | None = Field(default=None, description="Command to start the app for preview")
     preferred_coding_agent: str | None = Field(default=None, description="Default coding agent for this project")
 
@@ -409,7 +410,8 @@ class ProjectSettingsUpdate(BaseModel):
     lint_command: str | None = Field(default=None, description="Lint command")
     test_command: str | None = Field(default=None, description="Test command")
     instructions_paths: list[str] | None = Field(default=None, description="Paths to agent instruction/doc files")
-    preview_port: int | None = Field(default=None, description="Local port for preview")
+    preview_port_mode: str | None = Field(default=None, description="Preview mode: disabled, auto, manual")
+    preview_port: int | None = Field(default=None, description="Local port for preview (manual mode)")
     preview_command: str | None = Field(default=None, description="Command to start the app for preview")
     preferred_coding_agent: str | None = Field(default=None, description="Default coding agent for this project")
 
@@ -436,6 +438,7 @@ async def list_projects() -> list[ProjectSettingsResponse]:
                 lint_command=config.verification.lint_command,
                 test_command=config.verification.test_command,
                 instructions_paths=docs.instructions_paths if docs else [],
+                preview_port_mode=config.preview_port_mode,
                 preview_port=config.preview_port,
                 preview_command=config.preview_command,
                 preferred_coding_agent=config.preferred_coding_agent,
@@ -487,6 +490,7 @@ async def get_project_settings(
             lint_command=config.verification.lint_command,
             test_command=config.verification.test_command,
             instructions_paths=config.docs.instructions_paths if config.docs else [],
+            preview_port_mode=config.preview_port_mode,
             preview_port=config.preview_port,
             preview_command=config.preview_command,
             preferred_coding_agent=config.preferred_coding_agent,
@@ -520,6 +524,7 @@ async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSetting
         lint_command=request.lint_command,
         test_command=request.test_command,
         instructions_paths=request.instructions_paths,
+        preview_port_mode=request.preview_port_mode,
         preview_port=request.preview_port,
         preview_command=request.preview_command,
         preferred_coding_agent=request.preferred_coding_agent,
@@ -531,6 +536,7 @@ async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSetting
         lint_command=config.verification.lint_command,
         test_command=config.verification.test_command,
         instructions_paths=config.docs.instructions_paths if config.docs else [],
+        preview_port_mode=config.preview_port_mode,
         preview_port=config.preview_port,
         preview_command=config.preview_command,
         preferred_coding_agent=config.preferred_coding_agent,
@@ -744,6 +750,7 @@ async def get_autoconfigure_result(job_id: str) -> AutoconfigureResultResponse:
             lint_command=discovered.get("lint_command"),
             test_command=discovered.get("test_command"),
             instructions_paths=discovered.get("instructions_paths", []),
+            preview_port_mode="manual" if discovered.get("preview_port") else "disabled",
             preview_port=discovered.get("preview_port"),
             preview_command=discovered.get("preview_command"),
         ),

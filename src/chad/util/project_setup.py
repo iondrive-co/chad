@@ -56,6 +56,7 @@ class ProjectConfig:
     verification: VerificationConfig = field(default_factory=VerificationConfig)
     instructions: str | None = None
     docs: DocsConfig = field(default_factory=DocsConfig)
+    preview_port_mode: str = "disabled"  # "disabled", "auto", "manual"
     preview_port: int | None = None
     preview_command: str | None = None
     preferred_coding_agent: str | None = None
@@ -78,6 +79,7 @@ class ProjectConfig:
             "docs": {
                 "instructions_paths": self.docs.instructions_paths,
             },
+            "preview_port_mode": self.preview_port_mode,
             "preview_port": self.preview_port,
             "preview_command": self.preview_command,
             "preferred_coding_agent": self.preferred_coding_agent,
@@ -97,6 +99,12 @@ class ProjectConfig:
         )
         docs_data = data.get("docs", {})
         docs = DocsConfig.from_dict(docs_data)
+        # Migrate legacy: if preview_port is set but no mode, infer "manual"
+        raw_mode = data.get("preview_port_mode")
+        if raw_mode is None and data.get("preview_port") is not None:
+            raw_mode = "manual"
+        preview_port_mode = raw_mode if raw_mode in ("disabled", "auto", "manual") else "disabled"
+
         return cls(
             version=data.get("version", "1.0"),
             detected_at=data.get("detected_at", ""),
@@ -104,6 +112,7 @@ class ProjectConfig:
             verification=verification,
             instructions=data.get("instructions"),
             docs=docs,
+            preview_port_mode=preview_port_mode,
             preview_port=data.get("preview_port"),
             preview_command=data.get("preview_command"),
             preferred_coding_agent=data.get("preferred_coding_agent"),
@@ -429,6 +438,7 @@ def save_project_settings(
     lint_command: str | None = None,
     test_command: str | None = None,
     instructions_paths: list[str] | None = None,
+    preview_port_mode: str | None = ...,
     preview_port: int | None = ...,
     preview_command: str | None = ...,
     preferred_coding_agent: str | None = ...,
@@ -478,6 +488,12 @@ def save_project_settings(
         docs.instructions_paths = detected_docs.instructions_paths
 
     config.docs = docs
+
+    if preview_port_mode is not ...:
+        if preview_port_mode in ("disabled", "auto", "manual"):
+            config.preview_port_mode = preview_port_mode
+        elif preview_port_mode is None:
+            config.preview_port_mode = "disabled"
 
     if preview_port is not ...:
         config.preview_port = preview_port
