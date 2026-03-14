@@ -224,38 +224,24 @@ class TestVerificationAgentPicker:
     """Verify that verification agent picker is editable when None."""
 
     def test_verification_picker_not_disabled_when_enabled(self):
-        """Verification picker should be editable when verification is enabled."""
+        """Verification picker should always be enabled."""
         content = CHATVIEW_FILE.read_text()
 
         # Find the AccountPicker for verification
-        # It should only be disabled when verificationSettings?.enabled === false
-        # NOT when verificationAccount is null
-
-        # Look for the AccountPicker with disabled prop
-        picker_pattern = r'<AccountPicker[^>]*selected=\{[^}]*verificationAccount[^}]*\}[^>]*disabled='
+        # It should not have a disabled prop
+        picker_pattern = r'<AccountPicker[^>]*selected=\{[^}]*verificationAccount[^}]*\}[^>]*onSelect='
         match = re.search(picker_pattern, content, re.DOTALL)
-        assert match, "Should have AccountPicker for verification with disabled prop"
+        assert match, "Should have AccountPicker for verification"
 
         # Get the full AccountPicker element
         start = match.start()
-        # Find closing />
         tag_end = content.find("/>", start)
         picker_element = content[start:tag_end + 2]
 
-        # The disabled prop should NOT check verificationAccount === null
-        # It should only check verificationSettings?.enabled === false
-        assert "verificationSettings?.enabled === false" in picker_element, (
-            "Verification picker should only be disabled when verification is disabled globally"
+        # The picker should NOT have a disabled prop
+        assert "disabled=" not in picker_element, (
+            "Verification picker should not have disabled prop"
         )
-
-        # Should NOT have verificationAccount in disabled condition
-        # Split out just the disabled prop value
-        disabled_match = re.search(r'disabled=\{([^}]+)\}', picker_element)
-        if disabled_match:
-            disabled_value = disabled_match.group(1)
-            assert "verificationAccount" not in disabled_value, (
-                "Verification picker disabled state should not depend on verificationAccount being null"
-            )
 
     def test_verification_picker_allows_none_option(self):
         """Verification picker should allow selecting None option."""
@@ -264,4 +250,29 @@ class TestVerificationAgentPicker:
         # The AccountPicker should have allowNone prop
         assert "allowNone" in content, (
             "Verification picker should have allowNone prop for optional selection"
+        )
+
+    def test_verification_picker_not_disabled_when_no_agent_selected(self):
+        """Verification picker should be enabled even when no agent is selected.
+
+        The picker should always be enabled to allow selecting a verification agent
+        from the ChatView, regardless of verificationSettings.enabled state.
+        """
+        content = CHATVIEW_FILE.read_text()
+
+        # Find the AccountPicker for verification
+        picker_pattern = r'<AccountPicker[^>]*selected=\{[^}]*verificationAccount[^}]*\}[^>]*onSelect='
+        match = re.search(picker_pattern, content, re.DOTALL)
+        assert match, "Should have AccountPicker for verification"
+
+        # Get the full AccountPicker element
+        start = match.start()
+        tag_end = content.find("/>", start)
+        picker_element = content[start:tag_end + 2]
+
+        # The picker should NOT have a disabled prop that checks verificationSettings
+        # It should always be enabled
+        disabled_match = re.search(r'\s+disabled=\{', picker_element)
+        assert disabled_match is None, (
+            "Verification picker should not have disabled prop - it should always be enabled"
         )

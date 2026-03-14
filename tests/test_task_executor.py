@@ -783,8 +783,11 @@ class TestChatUILayoutSource:
         assert "Verification Agent" in chat_view
         # Should have verificationAccount state
         assert "verificationAccount" in chat_view
-        # Should use AccountPicker for verification agent, showing null when disabled
-        assert "verificationSettings?.enabled === false ? null : verificationAccount" in chat_view
+        # Should use AccountPicker for verification agent, always enabled (no disabled prop)
+        # The picker should not have conditional logic based on verificationSettings.enabled
+        assert "verificationSettings?.enabled === false" not in chat_view, (
+            "Verification picker should not be disabled based on verificationSettings"
+        )
 
     def test_verification_agent_picker_css_exists(self):
         """CSS should define chat-verification-picker styling."""

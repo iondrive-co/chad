@@ -777,9 +777,8 @@ export function ChatView({
                   <span className="field-label">Verification Agent</span>
                   <AccountPicker
                     api={api}
-                    selected={verificationSettings?.enabled === false ? null : verificationAccount}
+                    selected={verificationAccount}
                     onSelect={setVerificationAccount}
-                    disabled={verificationSettings?.enabled === false}
                     placeholder="None"
                     allowNone
                   />
