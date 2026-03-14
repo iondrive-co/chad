@@ -470,11 +470,12 @@ class SessionEventLoop:
             elif action in ("switch_provider", "await_reset"):
                 with self._pending_action_lock:
                     self._pending_action = {**setting, "current_pct": current, "label": label}
-                self._emit_milestone(
-                    "usage_threshold",
-                    f"{label.title()} usage reached {current:.0f}% - {action.replace('_', ' ')}",
-                    {"metric": label, "percentage": current, "action": action},
-                )
+                if action == "switch_provider":
+                    self._emit_milestone(
+                        "usage_threshold",
+                        f"{label.title()} usage reached {current:.0f}% - {action.replace('_', ' ')}",
+                        {"metric": label, "percentage": current, "action": action},
+                    )
                 if self._terminate_pty_fn:
                     self._terminate_pty_fn()
 

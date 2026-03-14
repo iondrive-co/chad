@@ -754,6 +754,28 @@ class TestUsageThresholdMonitoring:
         assert call_count[0] == 2
         assert len(self._usage_milestones(emitted)) == 0
 
+    def test_await_reset_threshold_crossing_sets_pending_action_without_warning(self):
+        """await_reset crossings should not emit a separate usage-reached milestone."""
+        pct = [80.0]
+        terminated = []
+        loop, event_log, emitted = self._make_loop(
+            weekly_fn=lambda: pct[0],
+            action_settings=[
+                {"event": "weekly_usage", "threshold": 100, "action": "await_reset"},
+            ],
+            terminate_pty_fn=lambda: terminated.append(True),
+        )
+
+        loop._check_usage_thresholds()
+        pct[0] = 100.0
+        loop._check_usage_thresholds()
+
+        assert loop._pending_action is not None
+        assert loop._pending_action["action"] == "await_reset"
+        assert loop._pending_action["label"] == "weekly"
+        assert terminated == [True]
+        assert self._usage_milestones(emitted) == []
+
     def test_milestone_logged_to_event_log(self):
         """Usage threshold milestone should appear in the EventLog."""
         pct = [80.0]
@@ -1652,6 +1674,59 @@ class TestAwaitResetPollingLoop:
             e[1]["summary"] for e in emitted if e[0] == "milestone"
         ]
         assert any("ETA: 2h 15m" in s for s in milestone_summaries)
+
+    def test_await_reset_emits_only_pause_and_resume_milestones(self, monkeypatch):
+        """await_reset flow should emit only the operational pause/resume milestones."""
+        event_log = FakeEventLog()
+        emitted = []
+        call_count = [0]
+
+        def usage_fn():
+            call_count[0] += 1
+            if call_count[0] <= 1:
+                return 100.0
+            return 50.0
+
+        monkeypatch.setattr("chad.server.services.session_event_loop.time.sleep", lambda s: None)
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=type("Task", (), {"cancel_requested": False, "stream_id": None})(),
+            run_phase_fn=lambda **kw: (0, "done"),
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            get_weekly_usage_fn=usage_fn,
+            action_settings=[
+                {"event": "weekly_usage", "threshold": 100, "action": "await_reset"},
+            ],
+            terminate_pty_fn=lambda: None,
+        )
+        loop._running = True
+
+        try:
+            loop._run_coding_phase(
+                session=None,
+                task_description="trigger weekly await reset",
+                coding_account="primary",
+                coding_provider="anthropic",
+                screenshots=None,
+                rows=24,
+                cols=80,
+                git_mgr=None,
+            )
+        finally:
+            loop._running = False
+
+        milestone_summaries = [
+            e[1]["summary"]
+            for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "usage_threshold"
+        ]
+        assert milestone_summaries == [
+            "Paused, waiting for weekly reset",
+            "Weekly reset detected, resuming",
+        ]
 
 
 class TestAwaitResetWithMockResetTime:
