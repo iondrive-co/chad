@@ -1359,6 +1359,87 @@ class TestQuotaCheckerAfterSwitch:
 
         assert loop._is_quota_exhausted_fn is not original_checker
 
+    def test_switch_provider_resume_runs_normal_completion_flow(self, monkeypatch):
+        """A switched provider that exits early should fall back to continuation logic."""
+        event_log = FakeEventLog()
+        emitted = []
+        phases_run = []
+
+        def fake_run_phase(**kwargs):
+            phase = kwargs.get("phase")
+            provider = kwargs.get("coding_provider")
+            phases_run.append((phase, provider))
+            if phase == "combined":
+                return -15, "primary provider terminated at threshold"
+            if phase == "continuation" and provider == "openai":
+                if len(phases_run) == 2:
+                    return 0, "EXPLORATION_RESULT: resumed work"
+                return 0, '{"change_summary": "finished after handover"}'
+            return 0, "unexpected"
+
+        def fake_get_account_info(name):
+            return {"provider": "openai", "model": "gpt-5.1-codex"}
+
+        monkeypatch.setattr(
+            "chad.util.handoff.log_handoff_checkpoint",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            "chad.util.handoff.build_resume_prompt",
+            lambda *args, **kwargs: "resume",
+        )
+        monkeypatch.setattr(
+            "chad.util.providers.create_provider",
+            lambda config: type("P", (), {"is_quota_exhausted": lambda self, output: None})(),
+        )
+
+        task = type("Task", (), {
+            "cancel_requested": False,
+            "stream_id": None,
+            "_last_terminal_snapshot": "",
+            "_mock_duration_applied": False,
+        })()
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=task,
+            run_phase_fn=fake_run_phase,
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            get_account_info_fn=fake_get_account_info,
+        )
+        loop._running = True
+        loop._pending_action = {
+            "event": "session_usage",
+            "threshold": 90,
+            "action": "switch_provider",
+            "target_account": "codex-home",
+            "label": "session",
+        }
+
+        exit_code, output = loop._run_coding_phase(
+            session=None,
+            task_description="test task",
+            coding_account="claude-2",
+            coding_provider="anthropic",
+            screenshots=None,
+            rows=24, cols=80,
+            git_mgr=None,
+            coding_model=None,
+            coding_reasoning=None,
+        )
+
+        assert exit_code == 0
+        assert phases_run == [
+            ("combined", "anthropic"),
+            ("continuation", "openai"),
+            ("continuation", "openai"),
+        ]
+        assert '{"change_summary": "finished after handover"}' in output
+        statuses = [e[1].get("status", "") for e in emitted if e[0] == "status"]
+        assert "Agent continuing (attempt 1)..." in statuses
+
     def test_code_output_not_detected_as_quota_error(self):
         """Indented code containing quota patterns should not trigger session limit."""
         event_log = FakeEventLog()
