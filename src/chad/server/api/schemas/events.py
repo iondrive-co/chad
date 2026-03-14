@@ -47,6 +47,7 @@ class SessionStartedEventSchema(EventBaseSchema):
     coding_provider: str = Field(description="Provider type")
     coding_account: str = Field(description="Account name")
     coding_model: str | None = Field(default=None, description="Model name")
+    screenshots: list[str] = Field(default_factory=list, description="Attached screenshot paths")
 
 
 class ModelSelectedEventSchema(EventBaseSchema):
@@ -199,6 +200,7 @@ class ConversationItemSchema(BaseModel):
     milestone_type: str | None = Field(default=None, description="Milestone category")
     title: str | None = Field(default=None, description="Milestone display title")
     summary: str | None = Field(default=None, description="Milestone summary text")
+    screenshots: list[str] | None = Field(default=None, description="Attached screenshot paths")
 
 
 class ConversationTaskSchema(BaseModel):
@@ -211,6 +213,7 @@ class ConversationTaskSchema(BaseModel):
     coding_account: str = Field(description="Account used for coding")
     coding_model: str | None = Field(default=None, description="Model used for coding")
     verification_account: str | None = Field(default=None, description="Account used for verification")
+    screenshots: list[str] = Field(default_factory=list, description="Attached screenshot paths")
 
 
 class ConversationResponseSchema(BaseModel):

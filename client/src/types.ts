@@ -285,6 +285,7 @@ export interface ConversationItem {
   milestone_type?: string | null;
   title?: string | null;
   summary?: string | null;
+  screenshots?: string[] | null;
 }
 
 export interface ConversationTask {
@@ -295,6 +296,7 @@ export interface ConversationTask {
   coding_account: string;
   coding_model: string | null;
   verification_account: string | null;
+  screenshots?: string[];
 }
 
 export interface ConversationResponse {

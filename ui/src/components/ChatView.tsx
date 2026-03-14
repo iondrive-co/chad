@@ -77,9 +77,10 @@ export function ChatView({
   // Historical output/events loaded from persisted log for finished sessions
   const [historicalOutput, setHistoricalOutput] = useState("");
 
-  // Current task description and verification agent (extracted from session_started events)
+  // Current task description, verification agent, and screenshots (extracted from session_started events)
   const [taskDescription, setTaskDescription] = useState<string | null>(null);
   const [verificationAgent, setVerificationAgent] = useState<string | null>(null);
+  const [taskScreenshots, setTaskScreenshots] = useState<string[]>([]);
 
   // Track current project path for settings
   const [currentProjectPath, setCurrentProjectPath] = useState(defaultProjectPath);
@@ -226,6 +227,7 @@ export function ChatView({
         setConversation(convo.items);
         setTaskDescription(convo.task.task_description || null);
         setVerificationAgent((convo.task as { verification_account?: string }).verification_account || null);
+        setTaskScreenshots((convo.task as { screenshots?: string[] }).screenshots || []);
         setHasRunTask(true);
         conversationSeqRef.current = convo.latest_seq;
       } catch {
@@ -352,9 +354,14 @@ export function ChatView({
         const evtType = data.type || data.event_type;
 
         if (evtType === "session_started") {
-          updated = [];
+          // Preserve conversation on follow-up (when prev has items)
+          // Only clear on first task start
+          if (prev.length === 0) {
+            updated = [];
+          }
           setTaskDescription(data.task_description ?? null);
           setVerificationAgent(data.verification_account ?? null);
+          setTaskScreenshots(data.screenshots ?? []);
           setHasRunTask(true);
           if (seq) conversationSeqRef.current = seq;
           continue;
@@ -419,7 +426,7 @@ export function ChatView({
     }
   }, [api, completed, sessionId, onSessionChange]);
 
-  const handleTaskStart = useCallback(async (taskDesc: string) => {
+  const handleTaskStart = useCallback(async (taskDesc: string, isFollowup: boolean = false) => {
     // Capture the current event log position before the task starts, so the
     // stream only shows events from this task (not old milestones/output).
     try {
@@ -435,8 +442,11 @@ export function ChatView({
     setShowMerge(false);
     setEndReason(null);
     setTaskDescription(taskDesc);
-    setConversation([]);
-    conversationSeqRef.current = 0;
+    // Preserve conversation history on follow-up tasks
+    if (!isFollowup) {
+      setConversation([]);
+      conversationSeqRef.current = 0;
+    }
     setHasRunTask(true);
   }, [api, sessionId, reset]);
 
@@ -623,7 +633,7 @@ export function ChatView({
         screenshots: screenshots.length > 0 ? screenshots.map((s) => s.path) : undefined,
       });
 
-      handleTaskStart(message);
+      handleTaskStart(message, hasRunTask);
       setInputText("");
       // Clear screenshots after starting task
       screenshots.forEach((s) => URL.revokeObjectURL(s.previewUrl));
@@ -713,6 +723,18 @@ export function ChatView({
           {verificationAgent && (
             <span className="verification-agent-badge">Verification: {verificationAgent}</span>
           )}
+          {taskScreenshots.length > 0 && (
+            <div className="task-screenshots">
+              {taskScreenshots.map((path, i) => (
+                <img
+                  key={i}
+                  src={`/api/v1/file?path=${encodeURIComponent(path)}`}
+                  alt={`Screenshot ${i + 1}`}
+                  className="task-screenshot-thumbnail"
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -791,6 +813,9 @@ export function ChatView({
                     >
                       <div className="chat-bubble-label">{label}</div>
                       <div className={`chat-bubble-text${isMilestone && !isExpanded ? " clamped" : ""}`}>{content}</div>
+                      {isMilestone && (
+                        <div className="chat-bubble-expand-hint">{isExpanded ? "Click to collapse" : "Click to expand"}</div>
+                      )}
                     </div>
                   </div>
                 );

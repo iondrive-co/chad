@@ -1434,6 +1434,7 @@ class TaskExecutor:
                     coding_account=coding_account,
                     coding_model=coding_model,
                     verification_account=verification_account,
+                    screenshots=screenshots or [],
                 ))
                 task.event_log.start_turn()
                 task.event_log.log(UserMessageEvent(content=task_description))
