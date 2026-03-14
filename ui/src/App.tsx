@@ -137,14 +137,16 @@ export function App() {
   }, []);
 
   const handleNewSession = useCallback(async (projectPath?: string) => {
-    const session = await createSession(projectPath);
+    // Default to first configured project when none specified
+    const effectivePath = projectPath || (projects.length > 0 ? projects[0].project_path : undefined);
+    const session = await createSession(effectivePath);
     if (session) {
       setSelectedSession(session.id);
-      if (projectPath) setSessionProjectPath(projectPath);
+      if (effectivePath) setSessionProjectPath(effectivePath);
       setTab("chat");
       refreshSessions();
     }
-  }, [createSession, refreshSessions]);
+  }, [createSession, refreshSessions, projects]);
 
   const handleDeleteSession = useCallback(async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();

@@ -309,9 +309,25 @@ class TestDocsConfig:
         assert "AGENTS.md" in docs.instructions_paths
         assert "docs/ARCHITECTURE.md" in docs.instructions_paths
 
-    def test_ensure_docs_config_persists_to_config_file(self, tmp_path, isolated_config):
-        """ensure_docs_config should save discovered paths into main config file."""
+    def test_ensure_docs_config_does_not_create_project_entry(self, tmp_path, isolated_config):
+        """ensure_docs_config must NOT create a project config entry for unknown projects.
+
+        This prevents temp directories (e.g. /tmp/pytest-*) from polluting
+        the project list when the task executor calls build_doc_reference_text.
+        """
         (tmp_path / "AGENTS.md").write_text("instructions", encoding="utf-8")
+        docs = ensure_docs_config(tmp_path)
+        # Docs are still returned for prompt building
+        assert "AGENTS.md" in docs.instructions_paths
+        # But no config entry was persisted
+        assert load_project_config(tmp_path) is None
+
+    def test_ensure_docs_config_updates_existing_project(self, tmp_path, isolated_config):
+        """ensure_docs_config should update docs when a project config already exists."""
+        (tmp_path / "AGENTS.md").write_text("instructions", encoding="utf-8")
+        # Pre-create the project config (simulates user adding via Projects tab)
+        save_project_config(tmp_path, ProjectConfig(project_type="python"))
+
         docs = ensure_docs_config(tmp_path)
         assert "AGENTS.md" in docs.instructions_paths
 

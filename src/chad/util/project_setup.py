@@ -309,11 +309,18 @@ def _get_config_project_root(project_path: Path) -> Path:
 
 
 def ensure_docs_config(project_path: Path) -> DocsConfig:
-    """Ensure docs paths are recorded in project config and return them."""
+    """Ensure docs paths are recorded in project config and return them.
+
+    Only persists to the config file when a project config already exists
+    (i.e. the user explicitly added the project).  For unknown projects the
+    detected docs are still returned but not saved, which prevents temp
+    directories (e.g. /tmp/pytest-*) from polluting the project list.
+    """
     project_path = Path(project_path).resolve()
     config_root = _get_config_project_root(project_path)
     config = load_project_config(config_root)
 
+    already_configured = config is not None
     if config is None:
         config = ProjectConfig()
 
@@ -324,7 +331,9 @@ def ensure_docs_config(project_path: Path) -> DocsConfig:
         docs.instructions_paths = detected.instructions_paths
 
     config.docs = docs
-    save_project_config(config_root, config)
+
+    if already_configured:
+        save_project_config(config_root, config)
 
     return docs
 
