@@ -109,7 +109,8 @@ class TestTerminalStylingMatchesMilestone:
 class TestFontSizeReadability:
     """Ensure font sizes are large enough to be readable."""
 
-    MINIMUM_FONT_SIZE_PX = 13  # Minimum acceptable font size in pixels
+    MINIMUM_FONT_SIZE_PX = 14  # Minimum acceptable font size in pixels
+    MINIMUM_FONT_SIZE_REM = 0.8
 
     def test_no_tiny_font_sizes(self):
         """Font sizes should not be smaller than the minimum threshold."""
@@ -122,6 +123,16 @@ class TestFontSizeReadability:
             "Small fonts make the UI difficult to read."
         )
 
+    def test_no_tiny_rem_font_sizes(self):
+        """Rem-based font sizes should also stay above the minimum threshold."""
+        content = CSS_FILE.read_text()
+        rem_matches = re.findall(r"font-size:\s*([0-9.]+)rem", content)
+        small_sizes = [float(s) for s in rem_matches if float(s) < self.MINIMUM_FONT_SIZE_REM]
+        assert not small_sizes, (
+            f"Found rem font sizes below {self.MINIMUM_FONT_SIZE_REM}rem: {sorted(set(small_sizes))}. "
+            "Small fonts make the UI difficult to read."
+        )
+
     def test_html_has_base_font_size(self):
         """HTML element should have a base font-size for rem calculations."""
         content = CSS_FILE.read_text()
@@ -129,13 +140,23 @@ class TestFontSizeReadability:
         html_match = re.search(r"html\s*\{([^}]+)\}", content)
         assert html_match, "Should have html {} rule for base font-size"
         rule_content = html_match.group(1)
-        assert "font-size:" in rule_content, (
-            "html element should set font-size as base for rem units"
+        font_size_match = re.search(r"font-size:\s*(\d+)px", rule_content)
+        assert font_size_match, "html element should set font-size as base for rem units"
+        assert int(font_size_match.group(1)) >= 18, (
+            "html base font size should be at least 18px so the UI is visibly larger"
         )
 
 
 class TestJetBrainsMonoFont:
     """Ensure JetBrains Mono is preferred without relying on remote hosts."""
+
+    def test_main_entry_imports_bundled_jetbrains_mono(self):
+        """The React entrypoint should bundle JetBrains Mono instead of relying on local install."""
+        main_file = CSS_FILE.parent.parent / "main.tsx"
+        content = main_file.read_text()
+        assert "@fontsource/jetbrains-mono" in content, (
+            "main.tsx should import bundled JetBrains Mono font assets"
+        )
 
     def test_body_uses_font_mono_variable(self):
         """Body should use the --font-mono variable (JetBrains Mono)."""

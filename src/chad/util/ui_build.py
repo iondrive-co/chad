@@ -64,6 +64,7 @@ def ensure_ui_built(
     client_dist = project_root / "client" / "dist" / "index.js"
     ui_src = project_root / "ui" / "src"
     ui_dist = project_root / "ui" / "dist" / "index.html"
+    portable_dist = project_root / "ui" / "dist-portable" / "index.html"
     packaged_ui = project_root / "src" / "chad" / "ui_dist"
 
     # Find npm executable (handles npm.cmd on Windows)
@@ -90,6 +91,23 @@ def ensure_ui_built(
         if force or _is_stale(ui_src, ui_dist):
             _log("[*] Rebuilding React UI...", verbose=verbose)
             _safe_run([npm, "run", "build"], cwd=ui_dir)
+
+        if force or _is_stale(ui_src, portable_dist):
+            _log("[*] Rebuilding portable React UI...", verbose=verbose)
+            _safe_run(
+                [
+                    npm,
+                    "exec",
+                    "--",
+                    "vite",
+                    "build",
+                    "--config",
+                    "vite.portable.config.ts",
+                    "--outDir",
+                    "dist-portable",
+                ],
+                cwd=ui_dir,
+            )
 
         # Always sync dist -> packaged assets if dist exists
         if ui_dist.exists():

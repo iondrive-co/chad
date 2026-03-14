@@ -269,7 +269,7 @@ export function App() {
           </main>
         </div>
         {tab === "projects" && (
-          <main className="main full-width">
+          <main className="main">
             <ProjectsPanel
               api={api}
               connected={connected}
