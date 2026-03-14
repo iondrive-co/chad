@@ -754,6 +754,28 @@ class TestUsageThresholdMonitoring:
         assert call_count[0] == 2
         assert len(self._usage_milestones(emitted)) == 0
 
+    def test_await_reset_threshold_crossing_sets_pending_action_without_warning(self):
+        """await_reset crossings should not emit a separate usage-reached milestone."""
+        pct = [80.0]
+        terminated = []
+        loop, event_log, emitted = self._make_loop(
+            weekly_fn=lambda: pct[0],
+            action_settings=[
+                {"event": "weekly_usage", "threshold": 100, "action": "await_reset"},
+            ],
+            terminate_pty_fn=lambda: terminated.append(True),
+        )
+
+        loop._check_usage_thresholds()
+        pct[0] = 100.0
+        loop._check_usage_thresholds()
+
+        assert loop._pending_action is not None
+        assert loop._pending_action["action"] == "await_reset"
+        assert loop._pending_action["label"] == "weekly"
+        assert terminated == [True]
+        assert self._usage_milestones(emitted) == []
+
     def test_milestone_logged_to_event_log(self):
         """Usage threshold milestone should appear in the EventLog."""
         pct = [80.0]
@@ -1337,6 +1359,87 @@ class TestQuotaCheckerAfterSwitch:
 
         assert loop._is_quota_exhausted_fn is not original_checker
 
+    def test_switch_provider_resume_runs_normal_completion_flow(self, monkeypatch):
+        """A switched provider that exits early should fall back to continuation logic."""
+        event_log = FakeEventLog()
+        emitted = []
+        phases_run = []
+
+        def fake_run_phase(**kwargs):
+            phase = kwargs.get("phase")
+            provider = kwargs.get("coding_provider")
+            phases_run.append((phase, provider))
+            if phase == "combined":
+                return -15, "primary provider terminated at threshold"
+            if phase == "continuation" and provider == "openai":
+                if len(phases_run) == 2:
+                    return 0, "EXPLORATION_RESULT: resumed work"
+                return 0, '{"change_summary": "finished after handover"}'
+            return 0, "unexpected"
+
+        def fake_get_account_info(name):
+            return {"provider": "openai", "model": "gpt-5.1-codex"}
+
+        monkeypatch.setattr(
+            "chad.util.handoff.log_handoff_checkpoint",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            "chad.util.handoff.build_resume_prompt",
+            lambda *args, **kwargs: "resume",
+        )
+        monkeypatch.setattr(
+            "chad.util.providers.create_provider",
+            lambda config: type("P", (), {"is_quota_exhausted": lambda self, output: None})(),
+        )
+
+        task = type("Task", (), {
+            "cancel_requested": False,
+            "stream_id": None,
+            "_last_terminal_snapshot": "",
+            "_mock_duration_applied": False,
+        })()
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=task,
+            run_phase_fn=fake_run_phase,
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            get_account_info_fn=fake_get_account_info,
+        )
+        loop._running = True
+        loop._pending_action = {
+            "event": "session_usage",
+            "threshold": 90,
+            "action": "switch_provider",
+            "target_account": "codex-home",
+            "label": "session",
+        }
+
+        exit_code, output = loop._run_coding_phase(
+            session=None,
+            task_description="test task",
+            coding_account="claude-2",
+            coding_provider="anthropic",
+            screenshots=None,
+            rows=24, cols=80,
+            git_mgr=None,
+            coding_model=None,
+            coding_reasoning=None,
+        )
+
+        assert exit_code == 0
+        assert phases_run == [
+            ("combined", "anthropic"),
+            ("continuation", "openai"),
+            ("continuation", "openai"),
+        ]
+        assert '{"change_summary": "finished after handover"}' in output
+        statuses = [e[1].get("status", "") for e in emitted if e[0] == "status"]
+        assert "Agent continuing (attempt 1)..." in statuses
+
     def test_code_output_not_detected_as_quota_error(self):
         """Indented code containing quota patterns should not trigger session limit."""
         event_log = FakeEventLog()
@@ -1652,6 +1755,59 @@ class TestAwaitResetPollingLoop:
             e[1]["summary"] for e in emitted if e[0] == "milestone"
         ]
         assert any("ETA: 2h 15m" in s for s in milestone_summaries)
+
+    def test_await_reset_emits_only_pause_and_resume_milestones(self, monkeypatch):
+        """await_reset flow should emit only the operational pause/resume milestones."""
+        event_log = FakeEventLog()
+        emitted = []
+        call_count = [0]
+
+        def usage_fn():
+            call_count[0] += 1
+            if call_count[0] <= 1:
+                return 100.0
+            return 50.0
+
+        monkeypatch.setattr("chad.server.services.session_event_loop.time.sleep", lambda s: None)
+
+        loop = SessionEventLoop(
+            session_id="test",
+            event_log=event_log,
+            task=type("Task", (), {"cancel_requested": False, "stream_id": None})(),
+            run_phase_fn=lambda **kw: (0, "done"),
+            emit_fn=lambda event_type, **kw: emitted.append((event_type, kw)),
+            worktree_path="/tmp/test",
+            get_weekly_usage_fn=usage_fn,
+            action_settings=[
+                {"event": "weekly_usage", "threshold": 100, "action": "await_reset"},
+            ],
+            terminate_pty_fn=lambda: None,
+        )
+        loop._running = True
+
+        try:
+            loop._run_coding_phase(
+                session=None,
+                task_description="trigger weekly await reset",
+                coding_account="primary",
+                coding_provider="anthropic",
+                screenshots=None,
+                rows=24,
+                cols=80,
+                git_mgr=None,
+            )
+        finally:
+            loop._running = False
+
+        milestone_summaries = [
+            e[1]["summary"]
+            for e in emitted
+            if e[0] == "milestone" and e[1].get("milestone_type") == "usage_threshold"
+        ]
+        assert milestone_summaries == [
+            "Paused, waiting for weekly reset",
+            "Weekly reset detected, resuming",
+        ]
 
 
 class TestAwaitResetWithMockResetTime:

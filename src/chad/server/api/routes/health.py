@@ -1,7 +1,5 @@
 """Status endpoint."""
 
-import os
-
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
@@ -10,8 +8,6 @@ from chad.server.state import get_uptime
 
 router = APIRouter()
 
-_server_cwd: str = os.getcwd()
-
 
 class StatusResponse(BaseModel):
     """Response model for status endpoint."""
@@ -19,7 +15,6 @@ class StatusResponse(BaseModel):
     status: str = Field(default="healthy", description="Server status")
     version: str = Field(description="Server version")
     uptime_seconds: float = Field(description="Server uptime in seconds")
-    cwd: str = Field(description="Server working directory")
 
 
 @router.get("/status", response_model=StatusResponse)
@@ -29,5 +24,4 @@ async def get_status() -> StatusResponse:
         status="healthy",
         version=__version__,
         uptime_seconds=get_uptime(),
-        cwd=os.environ.get("CHAD_PROJECT_PATH", _server_cwd),
     )

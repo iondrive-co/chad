@@ -214,12 +214,65 @@ class SessionManager:
         with self._lock:
             return len(self._sessions)
 
+    @staticmethod
+    def _read_first_last_lines(path: str) -> tuple[str | None, str | None]:
+        """Read the first and last non-empty lines from a JSONL file efficiently.
+
+        Uses seek from end-of-file to find the last line without reading the
+        entire file, which matters for large log files.
+        """
+        try:
+            with open(path, "rb") as f:
+                # Read first line
+                first_line = None
+                for raw in f:
+                    stripped = raw.strip()
+                    if stripped:
+                        first_line = stripped.decode("utf-8", errors="replace")
+                        break
+
+                if first_line is None:
+                    return None, None
+
+                # Seek from end to find last non-empty line
+                f.seek(0, 2)
+                size = f.tell()
+                if size == 0:
+                    return first_line, first_line
+
+                # Read backwards in chunks to find last line
+                chunk_size = 8192
+                pos = size
+                remainder = b""
+                last_line = None
+                while pos > 0 and last_line is None:
+                    read_size = min(chunk_size, pos)
+                    pos -= read_size
+                    f.seek(pos)
+                    chunk = f.read(read_size) + remainder
+                    lines = chunk.split(b"\n")
+                    # Check lines from end
+                    for line in reversed(lines):
+                        stripped = line.strip()
+                        if stripped:
+                            last_line = stripped.decode("utf-8", errors="replace")
+                            break
+                    remainder = lines[0]  # May be partial line
+
+                return first_line, last_line or first_line
+        except Exception:
+            return None, None
+
     def load_from_logs(self, max_age_days: int = 3) -> int:
         """Restore sessions from persisted event logs on disk.
 
         Scans ~/.chad/logs/*.jsonl for previous sessions, reads the first
         event (session_started) for metadata and the last event to determine
         whether the session completed or was interrupted.
+
+        Uses os.scandir() for efficient directory traversal — avoids
+        separate stat() calls per file which is critical when the log
+        directory contains thousands of files.
 
         Args:
             max_age_days: Skip log files older than this many days
@@ -234,35 +287,35 @@ class SessionManager:
         if not log_dir.exists():
             return 0
 
+        import os
         import time
         cutoff = time.time() - (max_age_days * 86400)
         restored = 0
 
-        for log_file in log_dir.glob("*.jsonl"):
+        # Use os.scandir for efficient directory listing — DirEntry.stat()
+        # avoids extra syscalls compared to Path.glob() + Path.stat().
+        try:
+            entries = os.scandir(log_dir)
+        except OSError:
+            return 0
+
+        for entry in entries:
             try:
-                # Skip old files
-                if log_file.stat().st_mtime < cutoff:
+                if not entry.name.endswith(".jsonl"):
                     continue
 
-                session_id = log_file.stem
+                # DirEntry.stat() uses cached info when available
+                if entry.stat().st_mtime < cutoff:
+                    continue
+
+                session_id = entry.name[:-6]  # strip .jsonl
 
                 # Skip if already loaded (e.g. active session)
                 with self._lock:
                     if session_id in self._sessions:
                         continue
 
-                # Read first and last lines
-                first_line = None
-                last_line = None
-                with open(log_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        if first_line is None:
-                            first_line = line
-                        last_line = line
-
+                first_line, last_line = self._read_first_last_lines(entry.path)
                 if not first_line:
                     continue
 
@@ -330,7 +383,11 @@ class SessionManager:
                         if wt_path.exists():
                             session.worktree_path = wt_path
                             session.worktree_branch = branch
-                            session.has_worktree_changes = git_mgr.has_changes(session_id)
+                            session.worktree_base_commit = git_mgr.get_worktree_base_commit(session_id)
+                            session.has_worktree_changes = git_mgr.has_changes(
+                                session_id,
+                                session.worktree_base_commit,
+                            )
                     except Exception:
                         pass
 

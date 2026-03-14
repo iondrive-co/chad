@@ -9,10 +9,36 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import __version__
 from .state import init_start_time
-from .api.routes import health, sessions, providers, worktree, config, ws, slack, tunnel, uploads
+from .api.routes import health, sessions, providers, worktree, config, ws, slack, tunnel, uploads, preview_tunnel
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Apply baseline browser hardening headers to Chad UI responses."""
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "; ".join([
+                "default-src 'self'",
+                "script-src 'self'",
+                "style-src 'self' 'unsafe-inline'",
+                "img-src 'self' data: blob:",
+                "connect-src 'self' ws: wss: https:",
+                "font-src 'self' data:",
+                "object-src 'none'",
+                "base-uri 'self'",
+                "frame-ancestors 'none'",
+            ]),
+        )
+        return response
 
 
 def _source_project_root() -> Path:
@@ -82,16 +108,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan context manager."""
     init_start_time()
 
-    if getattr(app.state, "resume_sessions", False):
-        # Restore previous sessions from event logs on disk only when
-        # explicitly requested on the command line.
-        from .services import get_session_manager
-        from chad.util.config_manager import ConfigManager
-        manager = get_session_manager()
-        cleanup_days = ConfigManager().get_cleanup_days()
-        restored = manager.load_from_logs(max_age_days=cleanup_days)
-        if restored:
-            print(f"Restored {restored} previous session(s)")
+    # Always restore previous sessions from event logs on disk.
+    from .services import get_session_manager
+    from chad.util.config_manager import ConfigManager
+    manager = get_session_manager()
+    cleanup_days = ConfigManager().get_cleanup_days()
+    restored = manager.load_from_logs(max_age_days=cleanup_days)
+    if restored:
+        print(f"Restored {restored} previous session(s)")
 
     yield
 
@@ -104,7 +128,6 @@ def create_app(
     debug: bool = False,
     cors_origins: list[str] | None = None,
     auth_token: str | None = None,
-    resume_sessions: bool = False,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -113,7 +136,6 @@ def create_app(
         debug: Enable debug mode
         cors_origins: List of allowed CORS origins (None = allow all)
         auth_token: Bearer token for API authentication (None = no auth)
-        resume_sessions: Restore historical sessions from disk on startup
 
     Returns:
         Configured FastAPI application
@@ -128,7 +150,6 @@ def create_app(
 
     # Store auth token on app state for WebSocket auth
     app.state.auth_token = auth_token
-    app.state.resume_sessions = resume_sessions
 
     # Configure CORS
     if cors_origins is None:
@@ -140,6 +161,7 @@ def create_app(
         from .auth import BearerAuthMiddleware
         app.add_middleware(BearerAuthMiddleware, token=auth_token)
 
+    app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
@@ -158,13 +180,17 @@ def create_app(
     app.include_router(slack.router, prefix="/api/v1", tags=["Slack"])
     app.include_router(tunnel.router, prefix="/api/v1", tags=["Tunnel"])
     app.include_router(uploads.router, prefix="/api/v1/uploads", tags=["Uploads"])
+    app.include_router(preview_tunnel.router, prefix="/api/v1", tags=["Preview Tunnel"])
 
     # Serve the single-file React UI if available (packaged or repo build).
     ui_index, ui_assets = _resolve_ui_paths()
     if ui_index:
         @app.get("/", include_in_schema=False)
         async def serve_index():
-            return FileResponse(ui_index)
+            return FileResponse(
+                ui_index,
+                headers={"Cache-Control": "no-cache, must-revalidate"},
+            )
 
         if ui_assets:
             app.mount("/assets", StaticFiles(directory=ui_assets), name="assets")

@@ -397,6 +397,11 @@ class ProjectSettingsResponse(BaseModel):
     lint_command: str | None = Field(description="Lint command for the project")
     test_command: str | None = Field(description="Test command for the project")
     instructions_paths: list[str] = Field(default_factory=list, description="Paths to agent instruction/doc files")
+    preview_port_mode: str = Field(default="disabled", description="Preview mode: disabled, auto, manual")
+    preview_port: int | None = Field(default=None, description="Local port for preview (manual mode)")
+    preview_command: str | None = Field(default=None, description="Command to start the app for preview")
+    preferred_coding_agent: str | None = Field(default=None, description="Default coding agent for this project")
+    autoconfigure_agent: str | None = Field(default=None, description="Agent used for autoconfigure")
 
 
 class ProjectSettingsUpdate(BaseModel):
@@ -406,6 +411,63 @@ class ProjectSettingsUpdate(BaseModel):
     lint_command: str | None = Field(default=None, description="Lint command")
     test_command: str | None = Field(default=None, description="Test command")
     instructions_paths: list[str] | None = Field(default=None, description="Paths to agent instruction/doc files")
+    preview_port_mode: str | None = Field(default=None, description="Preview mode: disabled, auto, manual")
+    preview_port: int | None = Field(default=None, description="Local port for preview (manual mode)")
+    preview_command: str | None = Field(default=None, description="Command to start the app for preview")
+    preferred_coding_agent: str | None = Field(default=None, description="Default coding agent for this project")
+    autoconfigure_agent: str | None = Field(default=None, description="Agent used for autoconfigure")
+
+
+@router.get("/projects")
+async def list_projects() -> list[ProjectSettingsResponse]:
+    """List all configured projects."""
+    from chad.util.project_setup import ProjectConfig
+
+    config_mgr = get_config_manager()
+    project_configs = config_mgr.list_project_configs()
+    results = []
+    for path_str, data in project_configs.items():
+        try:
+            config = ProjectConfig.from_dict(data)
+        except (KeyError, TypeError):
+            config = None
+
+        if config:
+            docs = config.docs
+            results.append(ProjectSettingsResponse(
+                project_path=path_str,
+                project_type=config.project_type,
+                lint_command=config.verification.lint_command,
+                test_command=config.verification.test_command,
+                instructions_paths=docs.instructions_paths if docs else [],
+                preview_port_mode=config.preview_port_mode,
+                preview_port=config.preview_port,
+                preview_command=config.preview_command,
+                preferred_coding_agent=config.preferred_coding_agent,
+                autoconfigure_agent=config.autoconfigure_agent,
+            ))
+        else:
+            results.append(ProjectSettingsResponse(
+                project_path=path_str,
+                project_type=data.get("project_type"),
+                lint_command=None,
+                test_command=None,
+                instructions_paths=[],
+                preview_port=None,
+                preview_command=None,
+                preferred_coding_agent=data.get("preferred_coding_agent"),
+                autoconfigure_agent=data.get("autoconfigure_agent"),
+            ))
+    return results
+
+
+@router.delete("/project")
+async def delete_project(project_path: str) -> dict:
+    """Delete a project configuration."""
+    config_mgr = get_config_manager()
+    path = Path(project_path).expanduser().resolve()
+    config_mgr.delete_project_config(str(path))
+    return {"deleted": True, "project_path": str(path)}
 
 
 @router.get("/project", response_model=ProjectSettingsResponse)
@@ -432,6 +494,11 @@ async def get_project_settings(
             lint_command=config.verification.lint_command,
             test_command=config.verification.test_command,
             instructions_paths=config.docs.instructions_paths if config.docs else [],
+            preview_port_mode=config.preview_port_mode,
+            preview_port=config.preview_port,
+            preview_command=config.preview_command,
+            preferred_coding_agent=config.preferred_coding_agent,
+            autoconfigure_agent=config.autoconfigure_agent,
         )
 
     # Return defaults for new project
@@ -442,6 +509,9 @@ async def get_project_settings(
         lint_command=None,
         test_command=None,
         instructions_paths=[],
+        preview_port=None,
+        preview_command=None,
+        preferred_coding_agent=None,
     )
 
 
@@ -450,15 +520,26 @@ async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSetting
     """Update project settings.
 
     Saves lint/test commands and documentation paths for a project.
+    Fields not included in the request body are left unchanged (using ellipsis sentinel).
     """
     from chad.util.project_setup import save_project_settings
 
     path = Path(request.project_path).expanduser().resolve()
+
+    # Use model_fields_set to determine which fields were actually sent in the request.
+    # Fields not sent should use ellipsis (...) to signal "leave unchanged".
+    fields_set = request.model_fields_set
+
     config = save_project_settings(
         path,
-        lint_command=request.lint_command,
-        test_command=request.test_command,
-        instructions_paths=request.instructions_paths,
+        lint_command=request.lint_command if "lint_command" in fields_set else ...,
+        test_command=request.test_command if "test_command" in fields_set else ...,
+        instructions_paths=request.instructions_paths if "instructions_paths" in fields_set else ...,
+        preview_port_mode=request.preview_port_mode if "preview_port_mode" in fields_set else ...,
+        preview_port=request.preview_port if "preview_port" in fields_set else ...,
+        preview_command=request.preview_command if "preview_command" in fields_set else ...,
+        preferred_coding_agent=request.preferred_coding_agent if "preferred_coding_agent" in fields_set else ...,
+        autoconfigure_agent=request.autoconfigure_agent if "autoconfigure_agent" in fields_set else ...,
     )
 
     return ProjectSettingsResponse(
@@ -467,6 +548,11 @@ async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSetting
         lint_command=config.verification.lint_command,
         test_command=config.verification.test_command,
         instructions_paths=config.docs.instructions_paths if config.docs else [],
+        preview_port_mode=config.preview_port_mode,
+        preview_port=config.preview_port,
+        preview_command=config.preview_command,
+        preferred_coding_agent=config.preferred_coding_agent,
+        autoconfigure_agent=config.autoconfigure_agent,
     )
 
 
@@ -586,3 +672,113 @@ async def import_config(request: ConfigImportRequest) -> JSONResponse:
         })
 
     return JSONResponse(content={"ok": True, "message": "Config imported successfully"})
+
+
+# ── Project Autoconfigure ──
+
+
+class AutoconfigureRequest(BaseModel):
+    """Request to autoconfigure project settings."""
+
+    project_path: str = Field(description="Path to the project")
+    coding_agent: str = Field(description="Account name of the coding agent to use")
+
+
+class AutoconfigureStartResponse(BaseModel):
+    """Response when autoconfigure discovery starts."""
+
+    job_id: str = Field(description="Job ID for polling")
+
+
+class AutoconfigureResultResponse(BaseModel):
+    """Response when autoconfigure discovery completes."""
+
+    status: str = Field(description="Job status: running, completed, failed")
+    settings: ProjectSettingsResponse | None = Field(
+        default=None, description="Discovered settings (only when status=completed)"
+    )
+    error: str | None = Field(default=None, description="Error message if failed")
+    output: list[str] = Field(default_factory=list, description="Agent output lines so far")
+
+
+@router.post("/project/autoconfigure", response_model=AutoconfigureStartResponse)
+async def start_autoconfigure(request: AutoconfigureRequest) -> AutoconfigureStartResponse:
+    """Start project autoconfiguration using a coding agent.
+
+    Runs a lightweight one-shot agent query (no session, no worktree,
+    no continuation) to discover lint/test commands, dev server port,
+    and documentation files.
+    """
+    from chad.server.services.autoconfigure_service import start_autoconfigure as _start
+
+    path = Path(request.project_path).expanduser().resolve()
+    if not path.exists() or not path.is_dir():
+        raise HTTPException(status_code=400, detail=f"Invalid project path: {request.project_path}")
+
+    config_mgr = get_config_manager()
+    accounts = config_mgr.list_accounts()
+    if request.coding_agent not in accounts:
+        raise HTTPException(status_code=400, detail=f"Account '{request.coding_agent}' not found")
+
+    provider = accounts[request.coding_agent]
+
+    job_id = _start(
+        provider=provider,
+        account_name=request.coding_agent,
+        project_path=path,
+    )
+
+    return AutoconfigureStartResponse(job_id=job_id)
+
+
+@router.get("/project/autoconfigure/{job_id}", response_model=AutoconfigureResultResponse)
+async def get_autoconfigure_result(job_id: str) -> AutoconfigureResultResponse:
+    """Poll for autoconfigure result."""
+    from chad.server.services.autoconfigure_service import get_job, cleanup_job
+
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Autoconfigure job not found")
+
+    if job.status == "running":
+        return AutoconfigureResultResponse(status="running", output=job.output_lines)
+
+    if job.status == "failed":
+        error = job.error
+        output = list(job.output_lines)
+        cleanup_job(job_id)
+        return AutoconfigureResultResponse(status="failed", error=error, output=output)
+
+    # Completed — return discovered settings for the frontend to save.
+    discovered = job.result or {}
+    output = list(job.output_lines)
+    cleanup_job(job_id)
+
+    return AutoconfigureResultResponse(
+        status="completed",
+        output=output,
+        settings=ProjectSettingsResponse(
+            project_path="",  # filled by frontend
+            project_type=None,
+            lint_command=discovered.get("lint_command"),
+            test_command=discovered.get("test_command"),
+            instructions_paths=discovered.get("instructions_paths", []),
+            preview_port_mode="manual" if discovered.get("preview_port") else "disabled",
+            preview_port=discovered.get("preview_port"),
+            preview_command=discovered.get("preview_command"),
+        ),
+    )
+
+
+@router.post("/project/autoconfigure/{job_id}/cancel")
+async def cancel_autoconfigure(job_id: str) -> AutoconfigureResultResponse:
+    """Cancel a running autoconfigure job."""
+    from chad.server.services.autoconfigure_service import get_job, cleanup_job
+
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Autoconfigure job not found")
+
+    job.cancel()
+    cleanup_job(job_id)
+    return AutoconfigureResultResponse(status="failed", error="Cancelled")

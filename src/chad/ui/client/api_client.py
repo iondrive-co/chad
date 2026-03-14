@@ -823,6 +823,81 @@ class APIClient:
         resp.raise_for_status()
         return resp.json()
 
+    # Preview Tunnel
+    def get_preview_tunnel_status(self) -> dict:
+        """Get preview tunnel status.
+
+        Returns:
+            Dict with running, url, port, error
+        """
+        resp = self._client.get(self._url("/preview-tunnel"))
+        resp.raise_for_status()
+        return resp.json()
+
+    def start_preview_tunnel(
+        self,
+        port: int | None = None,
+        command: str | None = None,
+        session_id: str | None = None,
+        tunnel: bool = False,
+        autodetect_port: bool = False,
+    ) -> dict:
+        """Start a preview app and optionally tunnel it.
+
+        Returns:
+            Dict with running, url, port, error
+        """
+        payload: dict = {"tunnel": tunnel, "autodetect_port": autodetect_port}
+        if port is not None:
+            payload["port"] = port
+        if command:
+            payload["command"] = command
+        if session_id:
+            payload["session_id"] = session_id
+        resp = self._client.post(self._url("/preview-tunnel/start"), json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def stop_preview_tunnel(self) -> dict:
+        """Stop the preview tunnel.
+
+        Returns:
+            Dict with running, url, port, error
+        """
+        resp = self._client.post(self._url("/preview-tunnel/stop"))
+        resp.raise_for_status()
+        return resp.json()
+
+    # Project Autoconfigure
+    def start_autoconfigure(self, project_path: str, coding_agent: str) -> dict:
+        """Start project autoconfiguration.
+
+        Returns:
+            Dict with job_id
+        """
+        resp = self._client.post(
+            self._url("/config/project/autoconfigure"),
+            json={"project_path": project_path, "coding_agent": coding_agent},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_autoconfigure_result(self, job_id: str) -> dict:
+        """Poll for autoconfigure result.
+
+        Returns:
+            Dict with status, settings (when complete), error
+        """
+        resp = self._client.get(self._url(f"/config/project/autoconfigure/{job_id}"))
+        resp.raise_for_status()
+        return resp.json()
+
+    def cancel_autoconfigure(self, job_id: str) -> dict:
+        """Cancel a running autoconfigure job."""
+        resp = self._client.post(self._url(f"/config/project/autoconfigure/{job_id}/cancel"))
+        resp.raise_for_status()
+        return resp.json()
+
     def test_slack_connection(self) -> dict:
         """Send a test message to verify Slack configuration.
 

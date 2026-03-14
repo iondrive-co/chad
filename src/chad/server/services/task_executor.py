@@ -971,6 +971,15 @@ class TaskExecutor:
         Returns:
             Tuple of (exit_code, captured_output)
         """
+        if phase == "continuation" and override_prompt is None and task.event_log:
+            from chad.util.handoff import build_resume_prompt
+
+            override_prompt = build_resume_prompt(
+                task.event_log,
+                new_message=task_description,
+                target_provider=coding_provider,
+            )
+
         last_output_time = time.time()
         last_warning_time = 0.0
         last_log_flush = time.time()
@@ -1425,6 +1434,7 @@ class TaskExecutor:
                     coding_account=coding_account,
                     coding_model=coding_model,
                     verification_account=verification_account,
+                    screenshots=screenshots or [],
                 ))
                 task.event_log.start_turn()
                 task.event_log.log(UserMessageEvent(content=task_description))
@@ -1525,7 +1535,10 @@ class TaskExecutor:
                 task.completed_at = datetime.now(timezone.utc)
                 session.active = False
                 session.status = "interrupted"
-                session.has_worktree_changes = git_mgr.has_changes(task.session_id)
+                session.has_worktree_changes = git_mgr.has_changes(
+                    task.session_id,
+                    session.worktree_base_commit,
+                )
                 if task.event_log:
                     task.event_log.log(SessionEndedEvent(success=False, reason="timeout"))
                 return
@@ -1536,7 +1549,10 @@ class TaskExecutor:
             if final_exit_code == 0:
                 task.state = TaskState.COMPLETED
                 task.result = "Task completed successfully"
-                session.has_worktree_changes = git_mgr.has_changes(task.session_id)
+                session.has_worktree_changes = git_mgr.has_changes(
+                    task.session_id,
+                    session.worktree_base_commit,
+                )
                 session.status = "completed"
                 emit(
                     "complete",

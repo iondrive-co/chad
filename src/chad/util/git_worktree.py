@@ -310,8 +310,27 @@ class GitWorktreeManager:
         self._run_git("clean", "-fd", cwd=worktree_path, check=False)
         return True
 
-    def has_changes(self, task_id: str) -> bool:
-        """Check if worktree has uncommitted changes or commits ahead of main."""
+    def get_worktree_base_commit(self, task_id: str) -> str | None:
+        """Infer the commit the worktree branch was originally created from."""
+        branch_name = self._branch_name(task_id)
+        result = self._run_git("reflog", "show", "--format=%gs", branch_name, check=False)
+        if result.returncode != 0:
+            return None
+
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        for line in reversed(lines):
+            prefix = "branch: Created from "
+            if not line.startswith(prefix):
+                continue
+            ref = line[len(prefix):].strip()
+            resolved = self._run_git("rev-parse", ref, check=False)
+            commit = resolved.stdout.strip()
+            if resolved.returncode == 0 and commit:
+                return commit
+        return None
+
+    def has_changes(self, task_id: str, base_commit: str | None = None) -> bool:
+        """Check if worktree has uncommitted changes or commits ahead of its session base."""
         worktree_path = self._worktree_path(task_id)
         if not worktree_path.exists():
             return False
@@ -321,30 +340,56 @@ class GitWorktreeManager:
         if result.stdout.strip():
             return True
 
-        # Check for commits ahead of main (even if working tree clean)
-        main_branch = self.get_main_branch()
+        # Check for commits ahead of the session base (even if working tree clean)
         branch_name = self._branch_name(task_id)
-        result = self._run_git("rev-list", "--count", f"{main_branch}..{branch_name}", check=False)
+        target = base_commit or self.get_worktree_base_commit(task_id) or self.get_main_branch()
+        result = self._run_git("rev-list", "--count", f"{target}..{branch_name}", check=False)
         ahead_count = int(result.stdout.strip()) if result.stdout.strip() else 0
         return ahead_count > 0
 
-    def _diff_target(self, task_id: str, base_commit: str | None) -> str:
+    def _diff_target(
+        self,
+        task_id: str,
+        base_commit: str | None,
+        compare_branch: str | None = None,
+    ) -> str:
         """Return the git ref to diff against.
 
-        Uses base_commit if provided, otherwise diffs against the main branch.
-        This captures both committed and uncommitted changes on the worktree branch.
+        When compare_branch is provided, diff against the merge-base between that
+        branch and the task worktree branch so the diff only shows worktree-side
+        changes relative to the selected branch tip.
         """
+        if compare_branch:
+            worktree_path = self._worktree_path(task_id)
+            branch_name = self._branch_name(task_id)
+            result = self._run_git(
+                "merge-base",
+                compare_branch,
+                branch_name,
+                cwd=worktree_path,
+                check=False,
+            )
+            merge_base = result.stdout.strip()
+            if result.returncode != 0 or not merge_base:
+                detail = result.stderr.strip() or result.stdout.strip() or compare_branch
+                raise ValueError(f"Unable to compare against branch '{compare_branch}': {detail}")
+            return merge_base
         if base_commit:
             return base_commit
         return self.get_main_branch()
 
-    def get_diff_summary(self, task_id: str, base_commit: str | None = None) -> str:
+    def get_diff_summary(
+        self,
+        task_id: str,
+        base_commit: str | None = None,
+        compare_branch: str | None = None,
+    ) -> str:
         """Get a summary of all changes in the worktree vs the base."""
         worktree_path = self._worktree_path(task_id)
         if not worktree_path.exists():
             return ""
 
-        target = self._diff_target(task_id, base_commit)
+        target = self._diff_target(task_id, base_commit, compare_branch)
 
         # Diff working tree (committed + uncommitted) against the base
         stat_result = self._run_git("diff", "--stat", target, cwd=worktree_path, check=False)
@@ -367,23 +412,33 @@ class GitWorktreeManager:
 
         return "\n".join(summary_lines)
 
-    def get_full_diff(self, task_id: str, base_commit: str | None = None) -> str:
+    def get_full_diff(
+        self,
+        task_id: str,
+        base_commit: str | None = None,
+        compare_branch: str | None = None,
+    ) -> str:
         """Get the full diff content for all worktree changes vs the base."""
         worktree_path = self._worktree_path(task_id)
         if not worktree_path.exists():
             return ""
 
-        target = self._diff_target(task_id, base_commit)
+        target = self._diff_target(task_id, base_commit, compare_branch)
         result = self._run_git("diff", target, cwd=worktree_path, check=False)
         return result.stdout.strip() or "No changes"
 
-    def get_parsed_diff(self, task_id: str, base_commit: str | None = None) -> list[FileDiff]:
+    def get_parsed_diff(
+        self,
+        task_id: str,
+        base_commit: str | None = None,
+        compare_branch: str | None = None,
+    ) -> list[FileDiff]:
         """Get structured diff data for all worktree changes vs the base."""
         worktree_path = self._worktree_path(task_id)
         if not worktree_path.exists():
             return []
 
-        target = self._diff_target(task_id, base_commit)
+        target = self._diff_target(task_id, base_commit, compare_branch)
         diff_texts = []
 
         # All changes (committed + uncommitted) vs base
@@ -599,7 +654,7 @@ class GitWorktreeManager:
                 )
 
             # If there is nothing to merge, surface a clear error early
-            if not self.has_changes(task_id):
+            if not self.has_changes(task_id, self.get_worktree_base_commit(task_id)):
                 return False, None, "No changes to merge"
 
             # First commit any uncommitted changes in the worktree

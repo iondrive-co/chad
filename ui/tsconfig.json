@@ -15,7 +15,10 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noUnusedLocals": true,
-    "noUnusedParameters": true
+    "noUnusedParameters": true,
+    "paths": {
+      "chad-client": ["../client/src/index.ts"]
+    }
   },
   "include": ["src"],
   "exclude": ["node_modules", "dist"]

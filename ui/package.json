@@ -8,6 +8,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource/jetbrains-mono": "^5.2.6",
     "chad-client": "file:../client",
     "jsqr": "^1.4.0",
     "react": "^19.0.0",

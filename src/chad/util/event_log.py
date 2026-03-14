@@ -98,6 +98,7 @@ class SessionStartedEvent(EventBase):
     coding_account: str = ""
     coding_model: str | None = None
     verification_account: str | None = None
+    screenshots: list[str] = field(default_factory=list)
 
 
 @dataclass

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { ChadWebSocket } from "chad-client";
+import { ChadAPI, ChadWebSocket } from "chad-client";
 import type { StreamEvent, WSMessage } from "chad-client";
 
 export interface TerminalChunk {
@@ -64,8 +64,8 @@ export function useStream(
 
     reset();
     const baseUrl = apiBaseUrl || "";
+    let cancelled = false;
     const ws = new ChadWebSocket(baseUrl, token);
-    wsRef.current = ws;
 
     const handleMessage = (msg: WSMessage) => {
       const seq = typeof msg.data?.seq === "number" ? msg.data.seq : null;
@@ -89,9 +89,26 @@ export function useStream(
     };
 
     ws.onMessage("any", handleMessage);
-    ws.connect(sessionId, { sinceSeq: sinceSeqRef.current });
+
+    const connect = async () => {
+      let ticket: string | undefined;
+      if (token) {
+        const api = new ChadAPI(baseUrl, token);
+        const result = await api.getWebSocketTicket(sessionId);
+        ticket = result.ticket;
+      }
+
+      if (cancelled) return;
+      wsRef.current = ws;
+      ws.connect(sessionId, { sinceSeq: sinceSeqRef.current, ticket });
+    };
+
+    connect().catch(() => {
+      if (!cancelled) setError("Stream error");
+    });
 
     return () => {
+      cancelled = true;
       ws.disconnect();
       wsRef.current = null;
     };

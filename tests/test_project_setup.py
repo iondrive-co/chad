@@ -309,9 +309,25 @@ class TestDocsConfig:
         assert "AGENTS.md" in docs.instructions_paths
         assert "docs/ARCHITECTURE.md" in docs.instructions_paths
 
-    def test_ensure_docs_config_persists_to_config_file(self, tmp_path, isolated_config):
-        """ensure_docs_config should save discovered paths into main config file."""
+    def test_ensure_docs_config_does_not_create_project_entry(self, tmp_path, isolated_config):
+        """ensure_docs_config must NOT create a project config entry for unknown projects.
+
+        This prevents temp directories (e.g. /tmp/pytest-*) from polluting
+        the project list when the task executor calls build_doc_reference_text.
+        """
         (tmp_path / "AGENTS.md").write_text("instructions", encoding="utf-8")
+        docs = ensure_docs_config(tmp_path)
+        # Docs are still returned for prompt building
+        assert "AGENTS.md" in docs.instructions_paths
+        # But no config entry was persisted
+        assert load_project_config(tmp_path) is None
+
+    def test_ensure_docs_config_updates_existing_project(self, tmp_path, isolated_config):
+        """ensure_docs_config should update docs when a project config already exists."""
+        (tmp_path / "AGENTS.md").write_text("instructions", encoding="utf-8")
+        # Pre-create the project config (simulates user adding via Projects tab)
+        save_project_config(tmp_path, ProjectConfig(project_type="python"))
+
         docs = ensure_docs_config(tmp_path)
         assert "AGENTS.md" in docs.instructions_paths
 
@@ -403,3 +419,96 @@ class TestDocsConfig:
                 capture_output=True,
                 text=True,
             )
+
+
+class TestPreferredCodingAgent:
+    """Tests for per-project preferred coding agent configuration."""
+
+    def test_preferred_coding_agent_in_config_to_dict(self):
+        """Test ProjectConfig includes preferred_coding_agent in serialization."""
+        config = ProjectConfig(
+            project_type="python",
+            preferred_coding_agent="my-claude-account",
+        )
+        data = config.to_dict()
+        assert data["preferred_coding_agent"] == "my-claude-account"
+
+    def test_preferred_coding_agent_from_dict(self):
+        """Test ProjectConfig deserialization includes preferred_coding_agent."""
+        data = {
+            "version": "1.0",
+            "project_type": "python",
+            "preferred_coding_agent": "my-codex-account",
+        }
+        config = ProjectConfig.from_dict(data)
+        assert config.preferred_coding_agent == "my-codex-account"
+
+    def test_preferred_coding_agent_defaults_to_none(self):
+        """Test preferred_coding_agent defaults to None when not specified."""
+        data = {
+            "version": "1.0",
+            "project_type": "python",
+        }
+        config = ProjectConfig.from_dict(data)
+        assert config.preferred_coding_agent is None
+
+    def test_save_project_settings_with_preferred_coding_agent(self, tmp_path, isolated_config):
+        """Test saving and loading preferred_coding_agent via save_project_settings."""
+        saved = save_project_settings(
+            tmp_path,
+            lint_command="flake8 .",
+            test_command="pytest -q",
+            preferred_coding_agent="work-claude",
+        )
+        assert saved.preferred_coding_agent == "work-claude"
+
+        # Verify it persisted and can be loaded
+        loaded = load_project_config(tmp_path)
+        assert loaded is not None
+        assert loaded.preferred_coding_agent == "work-claude"
+
+    def test_save_project_settings_clear_preferred_coding_agent(self, tmp_path, isolated_config):
+        """Test clearing preferred_coding_agent by passing None."""
+        # First set it
+        save_project_settings(
+            tmp_path,
+            preferred_coding_agent="initial-agent",
+        )
+        loaded = load_project_config(tmp_path)
+        assert loaded.preferred_coding_agent == "initial-agent"
+
+        # Then clear it
+        save_project_settings(
+            tmp_path,
+            preferred_coding_agent=None,
+        )
+        loaded = load_project_config(tmp_path)
+        assert loaded.preferred_coding_agent is None
+
+    def test_preferred_coding_agent_persists_other_fields(self, tmp_path, isolated_config):
+        """Test that updating preferred_coding_agent doesn't clear other settings.
+
+        This is a regression test: updating one field via save_project_settings
+        should NOT overwrite unrelated fields.
+        """
+        # Set initial config with lint/test
+        save_project_settings(
+            tmp_path,
+            lint_command="flake8 .",
+            test_command="pytest -q",
+            instructions_paths=["AGENTS.md"],
+        )
+
+        # Update only preferred_coding_agent - using ellipsis defaults for others
+        # to signal "leave unchanged"
+        save_project_settings(
+            tmp_path,
+            preferred_coding_agent="my-account",
+        )
+
+        loaded = load_project_config(tmp_path)
+        assert loaded.preferred_coding_agent == "my-account"
+        # lint/test/instructions should be preserved
+        assert loaded.verification.lint_command == "flake8 ."
+        assert loaded.verification.test_command == "pytest -q"
+        assert "AGENTS.md" in loaded.docs.instructions_paths

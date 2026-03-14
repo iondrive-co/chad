@@ -141,30 +141,10 @@ class TestMain:
             host="0.0.0.0",
             port=3184,
             tunnel=False,
-            resume_sessions=False,
         )
         # Should NOT prompt for password in server mode
         mock_config.verify_main_password.assert_not_called()
         mock_config.setup_main_password.assert_not_called()
-
-    @patch("chad.__main__.run_server")
-    @patch("chad.__main__.ConfigManager")
-    def test_main_server_only_mode_with_resume(self, mock_config_class, mock_run_server):
-        """Server mode forwards --resume to startup."""
-        mock_config = Mock()
-        mock_config.get_cleanup_days.return_value = 3
-        mock_config_class.return_value = mock_config
-
-        with patch.object(sys, "argv", ["chad", "--mode", "server", "--resume"]):
-            result = main()
-
-        assert result == 0
-        mock_run_server.assert_called_once_with(
-            host="0.0.0.0",
-            port=3184,
-            tunnel=False,
-            resume_sessions=True,
-        )
 
     @patch("chad.__main__.run_unified")
     @patch("chad.__main__.run_server")
@@ -187,7 +167,6 @@ class TestMain:
             host="0.0.0.0",
             port=3184,
             tunnel=True,
-            resume_sessions=False,
         )
         mock_run_unified.assert_not_called()
         mock_config.setup_main_password.assert_called_once()
@@ -265,27 +244,6 @@ class TestMain:
         mock_run_unified.assert_called_once()
         call_kwargs = mock_run_unified.call_args.kwargs
         assert call_kwargs.get("ui_mode") == "cli"
-
-    @patch("chad.__main__.run_unified")
-    @patch("chad.__main__.ConfigManager")
-    def test_main_resume_flag_passed_to_unified(self, mock_config_class, mock_run_unified):
-        """Unified mode forwards --resume to the local server startup path."""
-        mock_config = Mock()
-        mock_config.is_first_run.return_value = False
-        mock_config.verify_main_password.return_value = "password"
-        mock_config.get_cleanup_days.return_value = 3
-        mock_config.get_ui_mode.return_value = "cli"
-        mock_config_class.return_value = mock_config
-
-        with patch.object(sys, "argv", ["chad", "--resume"]):
-            with patch.dict(os.environ, {}, clear=True):
-                os.environ.pop("CHAD_PASSWORD", None)
-                result = main()
-
-        assert result == 0
-        mock_run_unified.assert_called_once()
-        call_kwargs = mock_run_unified.call_args.kwargs
-        assert call_kwargs.get("resume_sessions") is True
 
     @patch("chad.__main__.run_unified")
     @patch("chad.__main__.ConfigManager")

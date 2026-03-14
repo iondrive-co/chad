@@ -1,11 +1,13 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { ChadAPI } from "chad-client";
+import type { ProjectSettings } from "chad-client";
 import { ChatView } from "./components/ChatView.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { ProvidersPanel } from "./components/ProvidersPanel.tsx";
+import { ProjectsPanel } from "./components/ProjectsPanel.tsx";
 import { useSessions } from "./hooks/useSessions.ts";
 
-type Tab = "chat" | "providers" | "settings";
+type Tab = "chat" | "projects" | "providers" | "settings";
 
 /**
  * Parse a connection input string into an API base URL and optional auth token.
@@ -51,11 +53,27 @@ export function App() {
   const api = useMemo(() => new ChadAPI(apiBaseUrl, token), [apiBaseUrl, token]);
   const [connected, setConnected] = useState(false);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("settings");
+  const [tab, setTab] = useState<Tab>("projects");
   const [sessionVersion, setSessionVersion] = useState(0);
-  const [defaultProjectPath, setDefaultProjectPath] = useState("");
+  // Track the project selected for the current session (set when opening from ProjectsPanel)
+  const [sessionProjectPath, setSessionProjectPath] = useState("");
+  // All configured projects, loaded on connect
+  const [projects, setProjects] = useState<ProjectSettings[]>([]);
+  // Track which sessions have been opened in this UI instance (only these show as tabs)
+  const [openedSessionIds, setOpenedSessionIds] = useState<Set<string>>(new Set());
   // Track whether the user has ever set a URL (vs initial empty state)
   const hasUrl = useRef(false);
+
+  // Load projects when connected
+  const loadProjects = useCallback(async () => {
+    if (!connected) return;
+    try {
+      const result = await api.listProjects();
+      setProjects(result);
+    } catch {
+      // ignore
+    }
+  }, [api, connected]);
 
   // Auto-connect when apiBaseUrl changes, retry only if we have a URL
   useEffect(() => {
@@ -71,21 +89,9 @@ export function App() {
     setConnected(false);
     const tryConnect = async () => {
       try {
-        const status = await api.getStatus();
-        const prefs = await api.getPreferences().catch(() => null);
+        await api.getStatus();
         if (!cancelled) {
           setConnected(true);
-
-          if (prefs?.last_project_path) {
-            setDefaultProjectPath(prefs.last_project_path);
-          } else if (status.cwd) {
-            setDefaultProjectPath(status.cwd);
-          }
-          const sessionsData = await api.listSessions();
-          if (sessionsData.sessions.length > 0) {
-            // Select the most recent session
-            setSelectedSession(sessionsData.sessions[0].id);
-          }
         }
       } catch {
         if (!cancelled) {
@@ -96,6 +102,11 @@ export function App() {
     tryConnect();
     return () => { cancelled = true; clearTimeout(timer); };
   }, [api]);
+
+  // Load projects once connected
+  useEffect(() => {
+    if (connected) loadProjects();
+  }, [connected, loadProjects]);
 
   const { sessions, loading: sessionsLoading, createSession, deleteSession } = useSessions(
     connected ? api : null,
@@ -127,26 +138,46 @@ export function App() {
     }
   }, []);
 
-  const handleNewSession = useCallback(async () => {
-    const session = await createSession();
+  const handleNewSession = useCallback(async (projectPath?: string) => {
+    // Default to first configured project when none specified
+    const effectivePath = projectPath || (projects.length > 0 ? projects[0].project_path : undefined);
+    const session = await createSession(effectivePath);
     if (session) {
       setSelectedSession(session.id);
+      setOpenedSessionIds(prev => new Set(prev).add(session.id));
+      if (effectivePath) setSessionProjectPath(effectivePath);
       setTab("chat");
       refreshSessions();
     }
-  }, [createSession, refreshSessions]);
+  }, [createSession, refreshSessions, projects]);
 
   const handleDeleteSession = useCallback(async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     await deleteSession(id);
+    setOpenedSessionIds(prev => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
     if (selectedSession === id) {
-      setSelectedSession(sessions.find(s => s.id !== id)?.id ?? null);
+      // Select another opened session, or deselect
+      const remaining = sessions.filter(s => s.id !== id && openedSessionIds.has(s.id));
+      setSelectedSession(remaining[0]?.id ?? null);
     }
     refreshSessions();
-  }, [deleteSession, selectedSession, sessions, refreshSessions]);
+  }, [deleteSession, selectedSession, sessions, openedSessionIds, refreshSessions]);
 
   const handleSelectSession = useCallback((id: string) => {
     setSelectedSession(id);
+    const session = sessions.find(s => s.id === id);
+    if (session?.project_path) setSessionProjectPath(session.project_path);
+    setTab("chat");
+  }, [sessions]);
+
+  const handleOpenSessionFromProject = useCallback((sessionId: string, projectPath: string) => {
+    setSelectedSession(sessionId);
+    setOpenedSessionIds(prev => new Set(prev).add(sessionId));
+    setSessionProjectPath(projectPath);
     setTab("chat");
   }, []);
 
@@ -155,16 +186,19 @@ export function App() {
       <header className="app-header">
         <h1 className={connected ? "connected" : ""}>Chad</h1>
         <nav className="tabs">
+          <button className={tab === "projects" ? "active" : ""} onClick={() => setTab("projects")}>
+            Projects
+          </button>
           <button className={tab === "providers" ? "active" : ""} onClick={() => setTab("providers")}>
             Providers
           </button>
           <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>
             Settings
           </button>
-          {connected && sessions.length > 0 && (
+          {connected && sessions.some(s => openedSessionIds.has(s.id)) && (
             <>
               <span className="tab-separator" />
-              {[...sessions].reverse().map((s) => (
+              {[...sessions].filter(s => openedSessionIds.has(s.id)).reverse().map((s) => (
                 <button
                   key={s.id}
                   className={`session-tab ${s.id === selectedSession && tab === "chat" ? "active" : ""}`}
@@ -194,7 +228,7 @@ export function App() {
           {connected && (
             <button
               className="new-session-btn"
-              onClick={handleNewSession}
+              onClick={() => handleNewSession()}
               disabled={sessionsLoading}
               title="New session"
             >
@@ -219,18 +253,31 @@ export function App() {
                 api={api}
                 sessionId={selectedSession}
                 onSessionChange={refreshSessions}
-                defaultProjectPath={defaultProjectPath}
+                defaultProjectPath={sessionProjectPath}
                 apiBaseUrl={apiBaseUrl}
                 token={token}
                 sessionActive={selectedSessionActive}
+                projects={projects}
               />
             ) : (
               <div className="placeholder">
-                Select or create a session to get started.
+                {projects.length === 0
+                  ? "Go to the Projects tab to set up a project first."
+                  : "Select or create a session to get started."}
               </div>
             )}
           </main>
         </div>
+        {tab === "projects" && (
+          <main className="main">
+            <ProjectsPanel
+              api={api}
+              connected={connected}
+              onOpenSession={handleOpenSessionFromProject}
+              onProjectsChange={loadProjects}
+            />
+          </main>
+        )}
         {tab === "providers" && (
           <main className="main full-width">
             <ProvidersPanel api={api} connected={connected} />

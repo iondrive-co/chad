@@ -12,22 +12,22 @@ export class ChadWebSocket {
   private ws: WebSocket | null = null;
   private callbacks: Partial<Record<WSServerMessageType | "any", WSCallback[]>> = {};
   private pingInterval: ReturnType<typeof setInterval> | null = null;
-  private token: string | null;
 
-  constructor(private baseUrl: string, token?: string) {
+  constructor(private baseUrl: string, _token?: string) {
     // Convert http(s) to ws(s)
     this.baseUrl = baseUrl
       .replace(/\/+$/, "")
       .replace(/^http/, "ws");
-    this.token = token ?? null;
   }
 
   /** Connect to a session's WebSocket endpoint. */
-  connect(sessionId: string, options?: { sinceSeq?: number }): void {
+  connect(sessionId: string, options?: { sinceSeq?: number; ticket?: string }): void {
     this.disconnect();
 
     const params = new URLSearchParams();
-    if (this.token) params.set("token", this.token);
+    if (options?.ticket) {
+      params.set("ticket", options.ticket);
+    }
     if (options?.sinceSeq) params.set("since_seq", String(options.sinceSeq));
     const qs = params.toString();
     const ws = new WebSocket(

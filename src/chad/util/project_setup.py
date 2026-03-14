@@ -56,6 +56,11 @@ class ProjectConfig:
     verification: VerificationConfig = field(default_factory=VerificationConfig)
     instructions: str | None = None
     docs: DocsConfig = field(default_factory=DocsConfig)
+    preview_port_mode: str = "disabled"  # "disabled", "auto", "manual"
+    preview_port: int | None = None
+    preview_command: str | None = None
+    preferred_coding_agent: str | None = None
+    autoconfigure_agent: str | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -75,6 +80,11 @@ class ProjectConfig:
             "docs": {
                 "instructions_paths": self.docs.instructions_paths,
             },
+            "preview_port_mode": self.preview_port_mode,
+            "preview_port": self.preview_port,
+            "preview_command": self.preview_command,
+            "preferred_coding_agent": self.preferred_coding_agent,
+            "autoconfigure_agent": self.autoconfigure_agent,
         }
 
     @classmethod
@@ -91,6 +101,12 @@ class ProjectConfig:
         )
         docs_data = data.get("docs", {})
         docs = DocsConfig.from_dict(docs_data)
+        # Migrate legacy: if preview_port is set but no mode, infer "manual"
+        raw_mode = data.get("preview_port_mode")
+        if raw_mode is None and data.get("preview_port") is not None:
+            raw_mode = "manual"
+        preview_port_mode = raw_mode if raw_mode in ("disabled", "auto", "manual") else "disabled"
+
         return cls(
             version=data.get("version", "1.0"),
             detected_at=data.get("detected_at", ""),
@@ -98,6 +114,11 @@ class ProjectConfig:
             verification=verification,
             instructions=data.get("instructions"),
             docs=docs,
+            preview_port_mode=preview_port_mode,
+            preview_port=data.get("preview_port"),
+            preview_command=data.get("preview_command"),
+            preferred_coding_agent=data.get("preferred_coding_agent"),
+            autoconfigure_agent=data.get("autoconfigure_agent"),
         )
 
 
@@ -303,11 +324,18 @@ def _get_config_project_root(project_path: Path) -> Path:
 
 
 def ensure_docs_config(project_path: Path) -> DocsConfig:
-    """Ensure docs paths are recorded in project config and return them."""
+    """Ensure docs paths are recorded in project config and return them.
+
+    Only persists to the config file when a project config already exists
+    (i.e. the user explicitly added the project).  For unknown projects the
+    detected docs are still returned but not saved, which prevents temp
+    directories (e.g. /tmp/pytest-*) from polluting the project list.
+    """
     project_path = Path(project_path).resolve()
     config_root = _get_config_project_root(project_path)
     config = load_project_config(config_root)
 
+    already_configured = config is not None
     if config is None:
         config = ProjectConfig()
 
@@ -318,7 +346,9 @@ def ensure_docs_config(project_path: Path) -> DocsConfig:
         docs.instructions_paths = detected.instructions_paths
 
     config.docs = docs
-    save_project_config(config_root, config)
+
+    if already_configured:
+        save_project_config(config_root, config)
 
     return docs
 
@@ -408,17 +438,29 @@ def save_project_config(project_path: Path, config: ProjectConfig) -> None:
 
 def save_project_settings(
     project_path: Path,
-    lint_command: str | None = None,
-    test_command: str | None = None,
-    instructions_paths: list[str] | None = None,
+    lint_command: str | None = ...,
+    test_command: str | None = ...,
+    instructions_paths: list[str] | None = ...,
+    preview_port_mode: str | None = ...,
+    preview_port: int | None = ...,
+    preview_command: str | None = ...,
+    preferred_coding_agent: str | None = ...,
+    autoconfigure_agent: str | None = ...,
 ) -> ProjectConfig:
     """Persist verification commands and documentation paths for a project.
 
+    All optional parameters use ellipsis (...) as a sentinel to mean "leave unchanged".
+    Pass None explicitly to clear a value, or a non-None value to set it.
+
     Args:
         project_path: Path to the project root
-        lint_command: Lint command to save (None to clear)
-        test_command: Test command to save (None to clear)
-        instructions_paths: List of paths to agent instruction/doc files
+        lint_command: Lint command (None to clear, ... to leave unchanged)
+        test_command: Test command (None to clear, ... to leave unchanged)
+        instructions_paths: List of paths (None/empty to auto-detect, ... to leave unchanged)
+        preview_port_mode: Preview mode ("disabled", "auto", "manual", ... to leave unchanged)
+        preview_port: Local port for preview tunnel (None to clear, ... to leave unchanged)
+        preview_command: Command to start preview (None to clear, ... to leave unchanged)
+        preferred_coding_agent: Account name to use as default coding agent (None to clear, ... to leave unchanged)
 
     Returns:
         The saved ProjectConfig instance
@@ -440,21 +482,45 @@ def save_project_settings(
     # Always refresh project type so the label stays accurate
     config.project_type = detect_project_type(project_path)
 
-    # Update verification commands and mark them validated (user provided)
-    config.verification.lint_command = lint_command or None
-    config.verification.test_command = test_command or None
-    config.verification.validated = True
+    # Update verification commands only if explicitly provided
+    if lint_command is not ...:
+        config.verification.lint_command = lint_command or None
+        config.verification.validated = True
+    if test_command is not ...:
+        config.verification.test_command = test_command or None
+        config.verification.validated = True
 
     docs = config.docs or DocsConfig()
 
-    if instructions_paths is not None:
-        docs.instructions_paths = [p.strip() for p in instructions_paths if p.strip()]
-
-    if not docs.instructions_paths:
-        detected_docs = detect_doc_paths(project_path)
-        docs.instructions_paths = detected_docs.instructions_paths
+    if instructions_paths is not ...:
+        if instructions_paths is not None:
+            docs.instructions_paths = [p.strip() for p in instructions_paths if p.strip()]
+        else:
+            docs.instructions_paths = []
+        # Auto-detect docs only if explicitly cleared
+        if not docs.instructions_paths:
+            detected_docs = detect_doc_paths(project_path)
+            docs.instructions_paths = detected_docs.instructions_paths
 
     config.docs = docs
+
+    if preview_port_mode is not ...:
+        if preview_port_mode in ("disabled", "auto", "manual"):
+            config.preview_port_mode = preview_port_mode
+        elif preview_port_mode is None:
+            config.preview_port_mode = "disabled"
+
+    if preview_port is not ...:
+        config.preview_port = preview_port
+
+    if preview_command is not ...:
+        config.preview_command = preview_command or None
+
+    if preferred_coding_agent is not ...:
+        config.preferred_coding_agent = preferred_coding_agent or None
+
+    if autoconfigure_agent is not ...:
+        config.autoconfigure_agent = autoconfigure_agent or None
 
     save_project_config(project_path, config)
     return config

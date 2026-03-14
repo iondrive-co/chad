@@ -44,30 +44,31 @@ def test_ui_connection_default_is_localhost_3184():
     assert "localhost:3814" not in text
 
 
-def test_ui_project_path_prefers_preferences_over_cwd():
+def test_ui_project_path_uses_projects_not_cwd():
     text = Path("ui/src/App.tsx").read_text()
-    assert "getPreferences" in text
-    # Preferences should be checked first, with server cwd as fallback
-    prefs_idx = text.index("last_project_path")
-    cwd_idx = text.index("status.cwd")
-    assert prefs_idx < cwd_idx, "Preferences should be checked before server cwd"
+    assert "listProjects" in text
+    assert "status.cwd" not in text
 
 
-def test_ui_tabs_start_with_settings_and_new_button():
+def test_ui_tabs_start_with_projects_and_new_button():
     """
-    Verify that the UI tabs start with Settings (for connection instructions in
-    static UI) and the new session button shows "New" instead of "+".
+    Verify that the UI tabs start with Projects and the new session button
+    shows "New" instead of "+".
     """
     text = Path("ui/src/App.tsx").read_text()
 
-    # Default tab should be "settings" so the static UI shows connection instructions
-    assert 'useState<Tab>("settings")' in text
+    # Default tab should be "projects" so users start by selecting a project
+    assert 'useState<Tab>("projects")' in text
     assert 'useState<Tab>("chat")' not in text
 
     # There should be no "Chat" tab button
     assert 'onClick={() => setTab("chat")}' not in text
 
-    # First tab button should be "Providers" (check for providers tab condition)
+    # Projects tab should be present as the first tab
+    assert 'tab === "projects"' in text
+    assert "Projects" in text
+
+    # Providers tab should be present
     assert 'tab === "providers"' in text
     assert "Providers" in text
 
@@ -76,8 +77,6 @@ def test_ui_tabs_start_with_settings_and_new_button():
     assert "Settings" in text
 
     # New session button should show "New" not "+"
-    # Check for "New" text in the button (with flexible whitespace)
     assert "New" in text
     assert 'title="New session"' in text
-    # Make sure "+" button is gone (only in title attribute now)
     assert ">+</button>" not in text

@@ -180,6 +180,13 @@ export interface TunnelStatus {
   error: string | null;
 }
 
+export interface PreviewTunnelStatus {
+  running: boolean;
+  url: string | null;
+  port: number | null;
+  error: string | null;
+}
+
 // ── Worktree types ──
 
 export interface WorktreeStatus {
@@ -278,6 +285,7 @@ export interface ConversationItem {
   milestone_type?: string | null;
   title?: string | null;
   summary?: string | null;
+  screenshots?: string[] | null;
 }
 
 export interface ConversationTask {
@@ -288,6 +296,7 @@ export interface ConversationTask {
   coding_account: string;
   coding_model: string | null;
   verification_account: string | null;
+  screenshots?: string[];
 }
 
 export interface ConversationResponse {
@@ -320,7 +329,11 @@ export interface ServerStatus {
   status: string;
   version: string;
   uptime_seconds: number;
-  cwd: string;
+}
+
+export interface WebSocketTicket {
+  ticket: string;
+  expires_in: number;
 }
 
 // ── Project settings ──
@@ -331,6 +344,22 @@ export interface ProjectSettings {
   lint_command: string | null;
   test_command: string | null;
   instructions_paths: string[];
+  preview_port_mode: "disabled" | "auto" | "manual";
+  preview_port: number | null;
+  preview_command: string | null;
+  preferred_coding_agent: string | null;
+  autoconfigure_agent: string | null;
+}
+
+export interface AutoconfigureStart {
+  job_id: string;
+}
+
+export interface AutoconfigureResult {
+  status: "running" | "completed" | "failed";
+  settings: ProjectSettings | null;
+  error: string | null;
+  output: string[];
 }
 
 export interface ProjectSettingsUpdate {
@@ -338,6 +367,11 @@ export interface ProjectSettingsUpdate {
   lint_command?: string | null;
   test_command?: string | null;
   instructions_paths?: string[] | null;
+  preview_port_mode?: "disabled" | "auto" | "manual";
+  preview_port?: number | null;
+  preview_command?: string | null;
+  preferred_coding_agent?: string | null;
+  autoconfigure_agent?: string | null;
 }
 
 export interface PromptPreviews {

@@ -4,6 +4,10 @@
   padding: 0;
 }
 
+html {
+  font-size: 18px;
+}
+
 /* Light theme (default for light mode preference) */
 :root {
   --bg: #ffffff;
@@ -22,7 +26,7 @@
   --diff-add-bg: #bbf7d0;
   --conflict-ours-bg: #fecaca;
   --conflict-theirs-bg: #bbf7d0;
-  --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+  --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "DejaVu Sans Mono", monospace;
 }
 
 /* Dark theme for dark mode preference */
@@ -52,7 +56,7 @@
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-mono);
   background: var(--bg);
   color: var(--text);
   min-height: 100vh;
@@ -76,7 +80,7 @@ body {
 }
 
 .app-header h1 {
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 700;
   color: var(--error);
   flex-shrink: 0;
@@ -110,7 +114,7 @@ body {
   height: 100%;
   padding: 24px;
   color: var(--text);
-  font-size: 14px;
+  font-size: 16px;
 }
 
 .placeholder-card {
@@ -127,7 +131,7 @@ body {
 
 .placeholder-card h3 {
   margin: 0;
-  font-size: 17px;
+  font-size: 19px;
   color: var(--text);
 }
 
@@ -146,7 +150,7 @@ body {
   background: var(--bg-tertiary);
   padding: 2px 6px;
   border-radius: 6px;
-  font-size: 12px;
+  font-size: 16px;
 }
 
 .placeholder-steps {
@@ -157,7 +161,7 @@ body {
 .scan-qr-btn {
   align-self: center;
   padding: 10px 24px;
-  font-size: 15px;
+  font-size: 17px;
   border-radius: 8px;
   margin-top: 4px;
 }
@@ -181,7 +185,7 @@ body {
 
 .qr-scanner-error {
   color: var(--error);
-  font-size: 14px;
+  font-size: 16px;
   text-align: center;
   padding: 24px 0;
 }
@@ -215,7 +219,7 @@ body {
   }
 
   .placeholder-card h3 {
-    font-size: 16px;
+    font-size: 18px;
   }
 
   .qr-scanner video {
@@ -245,7 +249,7 @@ body {
   padding: 4px 12px;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .tabs button.active {
@@ -264,7 +268,7 @@ select {
   color: var(--text);
   padding: 6px 10px;
   border-radius: 4px;
-  font-size: 13px;
+  font-size: 15px;
   font-family: inherit;
   width: 100%;
 }
@@ -289,7 +293,7 @@ button {
   padding: 6px 14px;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 15px;
   white-space: nowrap;
 }
 
@@ -306,7 +310,7 @@ label {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text-muted);
 }
 
@@ -330,7 +334,7 @@ label {
   padding: 4px 8px;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 16px;
   max-width: 160px;
   white-space: nowrap;
   flex-shrink: 0;
@@ -350,7 +354,7 @@ label {
 
 .session-tab-close {
   opacity: 0;
-  font-size: 10px;
+  font-size: 15px;
   cursor: pointer;
   color: var(--text-muted);
   padding: 0 2px;
@@ -372,7 +376,7 @@ label {
   padding: 4px 10px;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
   flex-shrink: 0;
 }
@@ -383,7 +387,7 @@ label {
 }
 
 .badge {
-  font-size: 10px;
+  font-size: 15px;
   padding: 2px 6px;
   border-radius: 8px;
   background: var(--running);
@@ -395,7 +399,7 @@ label {
   background: transparent;
   color: var(--text-muted);
   padding: 2px 6px;
-  font-size: 11px;
+  font-size: 15px;
   opacity: 0;
 }
 
@@ -417,7 +421,7 @@ label {
 }
 
 .task-form h3 {
-  font-size: 16px;
+  font-size: 18px;
   font-weight: 600;
 }
 
@@ -435,7 +439,7 @@ label {
 }
 
 .screenshot-label {
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text-muted);
 }
 
@@ -445,7 +449,7 @@ label {
   padding: 20px;
   text-align: center;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 15px;
   cursor: pointer;
   transition: border-color 0.2s, background-color 0.2s;
 }
@@ -487,7 +491,7 @@ label {
 }
 
 .screenshot-preview .screenshot-name {
-  font-size: 10px;
+  font-size: 15px;
   color: var(--text-muted);
   max-width: 80px;
   overflow: hidden;
@@ -506,7 +510,7 @@ label {
   background: var(--error);
   color: white;
   border: none;
-  font-size: 12px;
+  font-size: 16px;
   line-height: 1;
   cursor: pointer;
   padding: 0;
@@ -587,7 +591,7 @@ label {
 }
 
 .chat-status {
-  font-size: 12px;
+  font-size: 16px;
   color: var(--text-muted);
   padding-top: 6px;
 }
@@ -607,7 +611,7 @@ label {
 
 .chat-placeholder {
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 15px;
   text-align: center;
 }
 
@@ -634,7 +638,7 @@ label {
 }
 
 .chat-label {
-  font-size: 11px;
+  font-size: 15px;
   color: var(--text-muted);
   font-weight: 600;
 }
@@ -642,7 +646,7 @@ label {
 .chat-bubble {
   border-radius: 18px;
   padding: 14px 18px;
-  font-size: 16px;
+  font-size: 18px;
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
@@ -650,7 +654,7 @@ label {
 }
 
 .chat-bubble-label {
-  font-size: 12px;
+  font-size: 16px;
   font-weight: 600;
   margin-bottom: 4px;
   color: inherit;
@@ -658,7 +662,7 @@ label {
 }
 
 .chat-bubble-text {
-  font-size: 17px;
+  font-size: 19px;
   line-height: 1.5;
 }
 
@@ -695,6 +699,14 @@ label {
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.chat-bubble-expand-hint {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 6px;
+  text-align: right;
+  font-style: italic;
 }
 
 .chat-composer {
@@ -749,7 +761,7 @@ label {
   border: 1px solid var(--border);
   color: var(--text-muted);
   padding: 6px 12px;
-  font-size: 13px;
+  font-size: 15px;
   cursor: pointer;
   border-radius: 6px;
   transition: border-color 0.2s, color 0.2s;
@@ -785,19 +797,25 @@ label {
 
 .running-indicator {
   color: var(--running);
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
 }
 
 .done-indicator {
   color: var(--success);
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
 }
 
 .cancelled-indicator {
   color: var(--warning, #f0ad4e);
-  font-size: 13px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.failed-indicator {
+  color: var(--error, #d9534f);
+  font-size: 15px;
   font-weight: 600;
 }
 
@@ -806,7 +824,27 @@ label {
   border: 1px solid var(--error);
   color: var(--error);
   padding: 4px 10px;
-  font-size: 12px;
+  font-size: 16px;
+}
+
+.preview-btn {
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 4px 10px;
+  font-size: 16px;
+  margin-left: auto;
+  cursor: pointer;
+}
+
+.preview-btn:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.preview-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .terminal-output {
@@ -817,7 +855,7 @@ label {
   padding: 12px;
   overflow: auto;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-all;
@@ -855,7 +893,7 @@ label {
   background: var(--bg-tertiary);
   padding: 6px 10px;
   border-radius: 4px;
-  font-size: 12px;
+  font-size: 16px;
   border-left: 3px solid var(--accent);
 }
 
@@ -887,11 +925,11 @@ label {
 }
 
 .settings-panel h2 {
-  font-size: 18px;
+  font-size: 20px;
 }
 
 .settings-panel h3 {
-  font-size: 14px;
+  font-size: 16px;
   color: var(--text-muted);
   margin-bottom: 8px;
 }
@@ -908,7 +946,7 @@ label {
   gap: 8px;
   cursor: pointer;
   color: var(--text);
-  font-size: 14px;
+  font-size: 16px;
 }
 
 .toggle-label input[type="checkbox"] {
@@ -930,7 +968,7 @@ label {
 }
 
 .save-status {
-  font-size: 12px;
+  font-size: 16px;
   color: var(--success);
 }
 
@@ -960,7 +998,7 @@ label {
 }
 
 .threshold-value {
-  font-size: 12px;
+  font-size: 16px;
   color: var(--text-muted);
   min-width: 32px;
 }
@@ -969,7 +1007,7 @@ label {
   background: transparent;
   color: var(--text-muted);
   padding: 2px 8px;
-  font-size: 12px;
+  font-size: 16px;
   border: 1px solid var(--border);
 }
 
@@ -984,7 +1022,7 @@ label {
   border: 1px dashed var(--border);
   color: var(--text-muted);
   padding: 4px 12px;
-  font-size: 12px;
+  font-size: 16px;
 }
 
 .add-rule-btn:hover {
@@ -1001,11 +1039,11 @@ label {
 }
 
 .providers-panel h2 {
-  font-size: 18px;
+  font-size: 20px;
 }
 
 .providers-panel h3 {
-  font-size: 14px;
+  font-size: 16px;
   color: var(--text-muted);
   margin-bottom: 8px;
 }
@@ -1036,11 +1074,11 @@ label {
 
 .account-name {
   font-weight: 600;
-  font-size: 14px;
+  font-size: 16px;
 }
 
 .account-provider {
-  font-size: 12px;
+  font-size: 16px;
   color: var(--text-muted);
   background: var(--bg-tertiary);
   padding: 2px 8px;
@@ -1048,7 +1086,7 @@ label {
 }
 
 .account-status {
-  font-size: 11px;
+  font-size: 15px;
   margin-left: auto;
   color: var(--error);
 }
@@ -1067,7 +1105,7 @@ label {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .field-label {
@@ -1090,7 +1128,7 @@ label {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: 16px;
 }
 
 .usage-bar {
@@ -1103,7 +1141,7 @@ label {
   background: transparent;
   color: var(--accent);
   padding: 0;
-  font-size: 13px;
+  font-size: 15px;
   text-decoration: underline;
   border: none;
 }
@@ -1129,12 +1167,12 @@ label {
 
 .error-text {
   color: var(--error);
-  font-size: 12px;
+  font-size: 16px;
 }
 
 .loading {
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 15px;
   padding: 12px;
   text-align: center;
 }
@@ -1157,7 +1195,7 @@ label {
   background: transparent;
   color: var(--accent);
   padding: 2px 8px;
-  font-size: 11px;
+  font-size: 15px;
   border: 1px solid var(--accent);
   border-radius: 4px;
 }
@@ -1189,7 +1227,7 @@ label {
 }
 
 .merge-header {
-  font-size: 16px;
+  font-size: 18px;
   font-weight: 600;
   margin-bottom: 12px;
 }
@@ -1205,7 +1243,7 @@ label {
 .merge-summary {
   display: flex;
   gap: 12px;
-  font-size: 13px;
+  font-size: 15px;
   margin-bottom: 12px;
 }
 
@@ -1258,7 +1296,7 @@ label {
   border: 1px solid var(--border);
   color: var(--text-muted);
   padding: 4px 12px;
-  font-size: 12px;
+  font-size: 16px;
 }
 
 .expand-btn:hover:not(:disabled) {
@@ -1270,7 +1308,7 @@ label {
 
 .conflict-phase .conflict-info {
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 15px;
   margin-bottom: 16px;
 }
 
@@ -1303,7 +1341,7 @@ label {
 
 .diff-viewer {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 16px;
   border: 1px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
@@ -1313,7 +1351,7 @@ label {
 .no-changes,
 .no-conflicts {
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 15px;
   padding: 12px;
 }
 
@@ -1328,7 +1366,7 @@ label {
 .diff-file-header {
   background: var(--bg-tertiary);
   padding: 8px 12px;
-  font-size: 13px;
+  font-size: 15px;
   color: var(--accent);
   display: flex;
   align-items: center;
@@ -1336,7 +1374,7 @@ label {
 }
 
 .diff-file-header .badge {
-  font-size: 10px;
+  font-size: 15px;
   padding: 2px 6px;
 }
 
@@ -1383,7 +1421,7 @@ label {
 .diff-side-header {
   background: var(--bg-tertiary);
   padding: 4px 8px;
-  font-size: 11px;
+  font-size: 15px;
   color: var(--text-muted);
   font-weight: 600;
 }
@@ -1431,7 +1469,7 @@ label {
 
 .conflict-viewer {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 16px;
   border: 1px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
@@ -1449,7 +1487,7 @@ label {
 .conflict-file-header {
   background: var(--bg-tertiary);
   padding: 8px 12px;
-  font-size: 13px;
+  font-size: 15px;
   color: var(--accent);
 }
 
@@ -1512,7 +1550,7 @@ label {
   padding: 8px 12px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
-  font-size: 0.85rem;
+  font-size: 1rem;
 }
 
 /* ── Task Description Bar ── */
@@ -1524,7 +1562,7 @@ label {
   padding: 10px 12px;
   background: var(--bg-tertiary);
   border-bottom: 1px solid var(--border);
-  font-size: 0.9rem;
+  font-size: 1.05rem;
 }
 
 .task-description-label {
@@ -1538,6 +1576,26 @@ label {
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.4;
+}
+
+.task-screenshots {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.task-screenshot-thumbnail {
+  max-height: 60px;
+  max-width: 100px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  object-fit: cover;
+}
+
+.task-screenshot-thumbnail:hover {
+  border-color: var(--accent);
 }
 
 /* ── Worktree Info ── */
@@ -1556,7 +1614,7 @@ label {
 
 .worktree-path {
   font-family: var(--font-mono);
-  font-size: 0.8rem;
+  font-size: 0.925rem;
   max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1584,7 +1642,7 @@ label {
   border: none;
   color: var(--text);
   cursor: pointer;
-  font-size: 0.85rem;
+  font-size: 1rem;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1597,7 +1655,7 @@ label {
 
 .log-file-name {
   font-family: var(--font-mono);
-  font-size: 0.75rem;
+  font-size: 0.875rem;
   color: var(--text-muted);
 }
 
@@ -1626,12 +1684,12 @@ label {
 
 .session-log-header button {
   padding: 4px 12px;
-  font-size: 0.8rem;
+  font-size: 0.925rem;
 }
 
 .log-path {
   font-family: var(--font-mono);
-  font-size: 0.75rem;
+  font-size: 0.875rem;
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1654,7 +1712,7 @@ label {
   gap: 8px;
   padding: 4px 8px;
   border-radius: 4px;
-  font-size: 0.8rem;
+  font-size: 0.925rem;
 }
 
 .session-event:hover {
@@ -1671,7 +1729,7 @@ label {
   font-family: var(--font-mono);
   padding: 2px 6px;
   border-radius: 3px;
-  font-size: 0.7rem;
+  font-size: 0.8rem;
   min-width: 100px;
   text-align: center;
 }
@@ -1686,7 +1744,7 @@ label {
 
 .event-time {
   color: var(--text-muted);
-  font-size: 0.75rem;
+  font-size: 0.875rem;
   min-width: 70px;
 }
 
@@ -1708,7 +1766,7 @@ label {
   border: none;
   color: var(--text);
   cursor: pointer;
-  font-size: 0.85rem;
+  font-size: 1rem;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1722,26 +1780,29 @@ label {
 
 .project-type {
   color: var(--text-muted);
-  font-size: 0.8rem;
+  font-size: 0.925rem;
 }
 
 .project-settings-content {
   padding: 12px;
   background: var(--bg-secondary);
+  position: relative;
 }
 
 .project-settings-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 16px;
   margin-bottom: 12px;
 }
 
 .project-settings-row label {
   flex: 1;
+  min-width: 240px;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font-size: 0.85rem;
+  font-size: 1rem;
   color: var(--text-muted);
 }
 
@@ -1752,7 +1813,7 @@ label {
   border-radius: 4px;
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 0.85rem;
+  font-size: 1rem;
 }
 
 .project-settings-row input:focus {
@@ -1763,11 +1824,102 @@ label {
 .project-settings-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
 }
 
 .project-settings-actions button {
   padding: 6px 16px;
-  font-size: 0.85rem;
+  font-size: 1rem;
+}
+
+.autoconfigure-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 1rem;
+  color: var(--text-secondary);
+}
+
+.autoconfigure-btn {
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 4px 12px;
+  font-size: 0.925rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.autoconfigure-btn:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.autoconfigure-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.autoconfigure-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  border-radius: 6px;
+}
+
+.autoconfigure-overlay-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: #e0e0e0;
+  font-size: 1.05rem;
+  width: 90%;
+  max-height: 80%;
+}
+
+.autoconfigure-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 500;
+}
+
+.autoconfigure-log {
+  width: 100%;
+  max-height: 200px;
+  overflow-y: auto;
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  padding: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  line-height: 1.4;
+  color: #b0b0b0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.autoconfigure-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .project-settings-section {
@@ -1778,7 +1930,7 @@ label {
   display: flex;
   align-items: center;
   gap: 12px;
-  font-size: 0.85rem;
+  font-size: 1rem;
   color: var(--text-muted);
   margin-bottom: 8px;
 }
@@ -1788,7 +1940,7 @@ label {
   border: 1px dashed var(--border);
   color: var(--text-muted);
   padding: 2px 8px;
-  font-size: 0.8rem;
+  font-size: 0.925rem;
   border-radius: 4px;
 }
 
@@ -1812,14 +1964,14 @@ label {
   border-radius: 4px;
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 0.85rem;
+  font-size: 1rem;
 }
 
 .remove-path-btn {
   background: transparent;
   color: var(--text-muted);
   padding: 2px 6px;
-  font-size: 11px;
+  font-size: 15px;
   border: 1px solid var(--border);
   border-radius: 4px;
   flex-shrink: 0;
@@ -1831,7 +1983,7 @@ label {
 }
 
 .instructions-hint {
-  font-size: 0.8rem;
+  font-size: 0.925rem;
   color: var(--text-muted);
   font-style: italic;
 }
@@ -1841,7 +1993,7 @@ label {
 .prompts-toggle {
   margin-top: 8px;
   padding: 6px 12px;
-  font-size: 0.85rem;
+  font-size: 1rem;
 }
 
 .prompts-panel {
@@ -1852,7 +2004,7 @@ label {
 }
 
 .prompt-note {
-  font-size: 0.8rem;
+  font-size: 0.925rem;
   color: var(--text-muted);
 }
 
@@ -1860,12 +2012,12 @@ label {
   background: var(--bg-tertiary);
   padding: 1px 4px;
   border-radius: 3px;
-  font-size: 0.8rem;
+  font-size: 0.925rem;
 }
 
 .prompt-textarea {
   font-family: var(--font-mono);
-  font-size: 0.8rem;
+  font-size: 0.925rem;
   line-height: 1.4;
   resize: vertical;
   min-height: 100px;
@@ -1880,11 +2032,11 @@ label {
   }
 
   .settings-panel h2 {
-    font-size: 20px;
+    font-size: 22px;
   }
 
   .settings-panel h3 {
-    font-size: 16px;
+    font-size: 18px;
     margin-bottom: 12px;
   }
 
@@ -1896,24 +2048,24 @@ label {
   .settings-panel input,
   .settings-panel textarea,
   .settings-panel select {
-    font-size: 16px;
+    font-size: 18px;
     padding: 12px 14px;
     border-radius: 8px;
   }
 
   .settings-panel label {
-    font-size: 15px;
+    font-size: 17px;
     gap: 8px;
   }
 
   .settings-panel button {
-    font-size: 16px;
+    font-size: 18px;
     padding: 12px 20px;
     border-radius: 8px;
   }
 
   .toggle-label {
-    font-size: 16px;
+    font-size: 18px;
     gap: 12px;
     padding: 8px 0;
   }
@@ -1948,33 +2100,33 @@ label {
   .delete-rule-btn {
     align-self: flex-start;
     padding: 8px 16px;
-    font-size: 14px;
+    font-size: 16px;
   }
 
   .add-rule-btn {
-    font-size: 14px;
+    font-size: 16px;
     padding: 10px 16px;
   }
 
   /* Connection section */
   .connection-section input {
-    font-size: 16px;
+    font-size: 18px;
     padding: 12px 14px;
   }
 
   .scan-qr-btn {
     width: 100%;
     padding: 14px 24px;
-    font-size: 16px;
+    font-size: 18px;
   }
 
   /* Providers panel mobile adjustments */
   .providers-panel h2 {
-    font-size: 20px;
+    font-size: 22px;
   }
 
   .providers-panel h3 {
-    font-size: 16px;
+    font-size: 18px;
     margin-bottom: 12px;
   }
 
@@ -1983,11 +2135,11 @@ label {
   }
 
   .account-name {
-    font-size: 16px;
+    font-size: 18px;
   }
 
   .account-provider {
-    font-size: 14px;
+    font-size: 16px;
     padding: 4px 10px;
   }
 
@@ -1997,11 +2149,11 @@ label {
   }
 
   .account-field {
-    font-size: 15px;
+    font-size: 17px;
   }
 
   .account-field select {
-    font-size: 16px;
+    font-size: 18px;
     padding: 10px 12px;
     min-width: auto;
     width: 100%;
@@ -2016,7 +2168,308 @@ label {
   .add-provider-row select {
     width: 100%;
     min-width: auto;
-    font-size: 16px;
+    font-size: 18px;
     padding: 12px 14px;
+  }
+}
+
+/* ── Projects Panel ── */
+
+.projects-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.projects-panel h2 {
+  font-size: 20px;
+}
+
+.projects-panel h3 {
+  font-size: 16px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.projects-layout {
+  display: flex;
+  gap: 24px;
+  min-height: 400px;
+  align-items: flex-start;
+}
+
+.projects-sidebar {
+  width: 420px;
+  max-width: min(42vw, 520px);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.projects-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  max-height: 400px;
+}
+
+.project-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 1rem;
+  transition: background 0.1s;
+}
+
+.project-item:hover {
+  background: var(--bg-secondary);
+}
+
+.project-item.selected {
+  background: var(--bg-tertiary);
+  border-color: var(--accent);
+}
+
+.project-item-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.925rem;
+}
+
+.project-type-badge {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.project-remove-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 15px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.project-remove-btn:hover {
+  color: var(--error);
+  background: var(--bg-secondary);
+}
+
+.projects-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.projects-add input {
+  flex: 1 1 280px;
+  padding: 6px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 1rem;
+}
+
+.projects-add input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.projects-add button {
+  flex: 0 0 auto;
+  padding: 6px 16px;
+  font-size: 1rem;
+}
+
+.projects-detail {
+  flex: 1;
+  min-width: 0;
+  max-width: 960px;
+}
+
+.projects-detail h3 {
+  font-family: var(--font-mono);
+  font-size: 1.05rem;
+  color: var(--text);
+  margin-bottom: 16px;
+  word-break: break-all;
+}
+
+.projects-detail-empty {
+  color: var(--text-muted);
+  font-size: 1.05rem;
+  padding: 40px 20px;
+  text-align: center;
+}
+
+.projects-empty {
+  color: var(--text-muted);
+  font-size: 1rem;
+  font-style: italic;
+  padding: 12px;
+}
+
+.project-detail-section {
+  margin-bottom: 24px;
+  position: relative;
+}
+
+.project-detail-section h4 {
+  font-size: 1.05rem;
+  color: var(--text);
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+
+.autoconfigure-inline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* ── Task History ── */
+
+.task-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.task-history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.task-history-item:hover {
+  background: var(--bg-secondary);
+}
+
+.task-history-item.completed {
+  border-left: 3px solid var(--success);
+}
+
+.task-history-item.interrupted {
+  border-left: 3px solid var(--error);
+}
+
+.task-history-item.active {
+  border-left: 3px solid var(--running);
+}
+
+.task-history-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.task-status-badge {
+  flex-shrink: 0;
+  font-size: 0.925rem;
+}
+
+.task-status-badge.completed {
+  color: var(--success);
+}
+
+.task-status-badge.interrupted {
+  color: var(--error);
+}
+
+.task-status-badge.active {
+  color: var(--running);
+}
+
+.task-history-description {
+  font-size: 1rem;
+  line-height: 1.3;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.task-history-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+/* ── Project Selector in ChatView ── */
+
+.project-selector-bar {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.project-selector-bar label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 1rem;
+  color: var(--text-muted);
+  flex: 1;
+}
+
+.project-selector-bar select {
+  flex: 1;
+  padding: 6px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 1rem;
+}
+
+.project-selector-bar select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.no-projects-hint {
+  font-size: 1rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+@media (max-width: 640px) {
+  .projects-layout {
+    flex-direction: column;
+  }
+
+  .projects-sidebar {
+    width: 100%;
+    max-width: none;
   }
 }

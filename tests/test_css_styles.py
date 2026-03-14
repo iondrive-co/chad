@@ -106,6 +106,108 @@ class TestTerminalStylingMatchesMilestone:
         ), f"Light mode terminal text should be dark, got: {terminal_text}"
 
 
+class TestFontSizeReadability:
+    """Ensure font sizes are large enough to be readable."""
+
+    MINIMUM_FONT_SIZE_PX = 14  # Minimum acceptable font size in pixels
+    MINIMUM_FONT_SIZE_REM = 0.8
+
+    def test_no_tiny_font_sizes(self):
+        """Font sizes should not be smaller than the minimum threshold."""
+        content = CSS_FILE.read_text()
+        # Find all explicit pixel font sizes
+        font_size_matches = re.findall(r"font-size:\s*(\d+)px", content)
+        small_sizes = [int(s) for s in font_size_matches if int(s) < self.MINIMUM_FONT_SIZE_PX]
+        assert not small_sizes, (
+            f"Found font sizes below {self.MINIMUM_FONT_SIZE_PX}px threshold: {sorted(set(small_sizes))}px. "
+            "Small fonts make the UI difficult to read."
+        )
+
+    def test_no_tiny_rem_font_sizes(self):
+        """Rem-based font sizes should also stay above the minimum threshold."""
+        content = CSS_FILE.read_text()
+        rem_matches = re.findall(r"font-size:\s*([0-9.]+)rem", content)
+        small_sizes = [float(s) for s in rem_matches if float(s) < self.MINIMUM_FONT_SIZE_REM]
+        assert not small_sizes, (
+            f"Found rem font sizes below {self.MINIMUM_FONT_SIZE_REM}rem: {sorted(set(small_sizes))}. "
+            "Small fonts make the UI difficult to read."
+        )
+
+    def test_html_has_base_font_size(self):
+        """HTML element should have a base font-size for rem calculations."""
+        content = CSS_FILE.read_text()
+        # Look for html rule with font-size
+        html_match = re.search(r"html\s*\{([^}]+)\}", content)
+        assert html_match, "Should have html {} rule for base font-size"
+        rule_content = html_match.group(1)
+        font_size_match = re.search(r"font-size:\s*(\d+)px", rule_content)
+        assert font_size_match, "html element should set font-size as base for rem units"
+        assert int(font_size_match.group(1)) >= 18, (
+            "html base font size should be at least 18px so the UI is visibly larger"
+        )
+
+
+class TestJetBrainsMonoFont:
+    """Ensure JetBrains Mono is preferred without relying on remote hosts."""
+
+    def test_main_entry_imports_bundled_jetbrains_mono(self):
+        """The React entrypoint should bundle JetBrains Mono instead of relying on local install."""
+        main_file = CSS_FILE.parent.parent / "main.tsx"
+        content = main_file.read_text()
+        assert "@fontsource/jetbrains-mono" in content, (
+            "main.tsx should import bundled JetBrains Mono font assets"
+        )
+
+    def test_body_uses_font_mono_variable(self):
+        """Body should use the --font-mono variable (JetBrains Mono)."""
+        content = CSS_FILE.read_text()
+        # Find body rule
+        body_match = re.search(r"body\s*\{([^}]+)\}", content)
+        assert body_match, "Should have body {} rule"
+        rule_content = body_match.group(1)
+        assert "font-family: var(--font-mono)" in rule_content, (
+            "body should use font-family: var(--font-mono) for JetBrains Mono font"
+        )
+
+    def test_font_mono_variable_includes_local_fallbacks(self):
+        """The --font-mono CSS variable should prefer JetBrains with local fallbacks."""
+        content = CSS_FILE.read_text()
+        # Find :root with --font-mono
+        root_match = re.search(r":root\s*\{([^}]+)\}", content)
+        assert root_match, "Should have :root {} rule"
+        root_content = root_match.group(1)
+        font_mono_match = re.search(r"--font-mono:\s*([^;]+);", root_content)
+        assert font_mono_match, "Should have --font-mono variable defined"
+        font_mono_value = font_mono_match.group(1)
+        # Parse stack and ensure we keep JetBrains Mono but also a system fallback
+        font_stack = [item.strip().strip('"\'') for item in font_mono_value.split(",")]
+        assert "JetBrains Mono" in font_stack, (
+            f"--font-mono should still prefer JetBrains Mono, got: {font_mono_value}"
+        )
+        assert "ui-monospace" in font_stack, (
+            "--font-mono should include ui-monospace to avoid needing remote fonts"
+        )
+
+    def test_index_html_avoids_remote_font_providers(self):
+        """index.html should not pull fonts from Google Fonts or other CDNs."""
+        index_file = CSS_FILE.parent.parent.parent / "index.html"
+        content = index_file.read_text()
+        assert "fonts.googleapis.com" not in content
+        assert "fonts.gstatic.com" not in content
+        assert "JetBrains+Mono" not in content
+
+    def test_csp_disallows_external_font_hosts(self):
+        """CSP headers should avoid allowing external font providers."""
+        main_py = Path(__file__).parent.parent / "src" / "chad" / "server" / "main.py"
+        content = main_py.read_text()
+        assert "fonts.googleapis.com" not in content, (
+            "CSP should not include Google Fonts domains"
+        )
+        assert "fonts.gstatic.com" not in content, (
+            "CSP should not include Google Fonts domains"
+        )
+
+
 class TestChatViewLayoutClasses:
     """Verify CSS classes for chat view agent picker layout."""
 

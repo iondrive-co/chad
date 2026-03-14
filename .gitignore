@@ -97,3 +97,4 @@ dist/install-chad.sh
 !/src/chad/ui_dist/__init__.py
 /ui/dist-portable/
 /release/
+/.claude/settings.local.json

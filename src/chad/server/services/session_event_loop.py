@@ -470,11 +470,12 @@ class SessionEventLoop:
             elif action in ("switch_provider", "await_reset"):
                 with self._pending_action_lock:
                     self._pending_action = {**setting, "current_pct": current, "label": label}
-                self._emit_milestone(
-                    "usage_threshold",
-                    f"{label.title()} usage reached {current:.0f}% - {action.replace('_', ' ')}",
-                    {"metric": label, "percentage": current, "action": action},
-                )
+                if action == "switch_provider":
+                    self._emit_milestone(
+                        "usage_threshold",
+                        f"{label.title()} usage reached {current:.0f}% - {action.replace('_', ' ')}",
+                        {"metric": label, "percentage": current, "action": action},
+                    )
                 if self._terminate_pty_fn:
                     self._terminate_pty_fn()
 
@@ -658,12 +659,19 @@ class SessionEventLoop:
         if pending:
             action = pending.get("action")
             if action == "switch_provider":
-                action_output = self._handle_switch_provider(
+                (
+                    exit_code,
+                    action_output,
+                    coding_account,
+                    coding_provider,
+                    coding_model,
+                    coding_reasoning,
+                ) = self._handle_switch_provider(
                     pending, session, task_description, output,
                     screenshots, rows, cols, git_mgr,
                     coding_account, coding_provider, coding_model, coding_reasoning,
                 )
-                return 0, output + "\n" + action_output
+                output += "\n" + action_output
             elif action == "await_reset":
                 action_output = self._handle_await_reset(
                     pending, session, task_description, output,
@@ -731,7 +739,7 @@ class SessionEventLoop:
         old_provider: str,
         old_model: str | None,
         old_reasoning: str | None,
-    ) -> str:
+    ) -> tuple[int, str, str, str, str | None, str | None]:
         """Handle switch_provider action: log checkpoint, switch, resume."""
         from chad.util.handoff import log_handoff_checkpoint, build_resume_prompt
 
@@ -744,7 +752,7 @@ class SessionEventLoop:
                 "usage_threshold",
                 f"Cannot switch to {target_account}: account not found",
             )
-            return ""
+            return 0, "", old_account, old_provider, old_model, old_reasoning
 
         new_provider = account_info["provider"]
         new_model = account_info.get("model")
@@ -807,7 +815,7 @@ class SessionEventLoop:
             override_prompt=resume_prompt,
         )
         self._analyze_output(finalize=True)
-        return cont_output
+        return exit_code, cont_output, target_account, new_provider, new_model, new_reasoning
 
     def _handle_await_reset(
         self,

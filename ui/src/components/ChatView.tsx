@@ -1,10 +1,9 @@
 import { useState, useCallback, useRef, useEffect, DragEvent } from "react";
-import type { ChadAPI, ConversationItem, Account, VerificationSettings } from "chad-client";
+import type { ChadAPI, ConversationItem, Account, VerificationSettings, ProjectSettings } from "chad-client";
 import { useStream } from "../hooks/useStream.ts";
 import { MergePanel } from "./MergePanel.tsx";
 import { WorktreeInfo } from "./WorktreeInfo.tsx";
 import { SessionLog } from "./SessionLog.tsx";
-import { ProjectSettings } from "./ProjectSettings.tsx";
 import { AccountPicker } from "./AccountPicker.tsx";
 
 interface UploadedScreenshot {
@@ -22,6 +21,8 @@ interface Props {
   token?: string;
   /** Whether the session is active (from polled session list data). */
   sessionActive?: boolean;
+  /** Available projects for the project dropdown. */
+  projects?: ProjectSettings[];
 }
 
 /** Strip ANSI escape codes for plain-text display. */
@@ -50,6 +51,7 @@ export function ChatView({
   apiBaseUrl,
   token,
   sessionActive = false,
+  projects = [],
 }: Props) {
   const [taskActive, setTaskActive] = useState(false);
   const [sending, setSending] = useState(false);
@@ -60,7 +62,9 @@ export function ChatView({
   const conversationSeqRef = useRef(0);
   const [inputText, setInputText] = useState("");
   const [hasRunTask, setHasRunTask] = useState(false);
-  const [wasCancelled, setWasCancelled] = useState(false);
+  const [pendingFollowup, setPendingFollowup] = useState<string | null>(null);
+  // Track how the session ended: null (still running or no task), "completed", "cancelled", "timeout", "failed", etc.
+  const [endReason, setEndReason] = useState<string | null>(null);
   const [expandedMilestones, setExpandedMilestones] = useState<Set<number>>(new Set());
   const outputRef = useRef<HTMLPreElement>(null);
   const convoRef = useRef<HTMLDivElement>(null);
@@ -74,16 +78,26 @@ export function ChatView({
   // Historical output/events loaded from persisted log for finished sessions
   const [historicalOutput, setHistoricalOutput] = useState("");
 
-  // Current task description and verification agent (extracted from session_started events)
+  // Current task description, verification agent, and screenshots (extracted from session_started events)
   const [taskDescription, setTaskDescription] = useState<string | null>(null);
   const [verificationAgent, setVerificationAgent] = useState<string | null>(null);
+  const [taskScreenshots, setTaskScreenshots] = useState<string[]>([]);
 
   // Track current project path for settings
   const [currentProjectPath, setCurrentProjectPath] = useState(defaultProjectPath);
   const [worktreeRefresh, setWorktreeRefresh] = useState(0);
 
-  // Override coding prompt from ProjectSettings
-  const [overrideCodingPrompt, setOverrideCodingPrompt] = useState<string | null>(null);
+  // Sync when parent changes defaultProjectPath (e.g. selecting a session tab)
+  useEffect(() => {
+    if (defaultProjectPath) setCurrentProjectPath(defaultProjectPath);
+  }, [defaultProjectPath]);
+
+  // Preview
+  const [previewPortMode, setPreviewPortMode] = useState<"disabled" | "auto" | "manual">("disabled");
+  const [previewPort, setPreviewPort] = useState<number | null>(null);
+  const [previewCommand, setPreviewCommand] = useState<string | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   // Verification agent selection for new tasks
   const [verificationAccount, setVerificationAccount] = useState<Account | null>(null);
@@ -180,12 +194,12 @@ export function ChatView({
             setHasRunTask(false);
           }
 
-          // Check if the last session_ended was a cancellation
+          // Track the session end reason for status display
           const ends = (data.events as { type: string; reason?: string }[])
             .filter((e) => e.type === "session_ended");
           if (ends.length > 0) {
             const lastEnd = ends[ends.length - 1];
-            setWasCancelled(lastEnd.reason === "cancelled");
+            setEndReason(lastEnd.reason || "completed");
           }
 
           const status = await api.getWorktreeStatus(sessionId);
@@ -214,6 +228,7 @@ export function ChatView({
         setConversation(convo.items);
         setTaskDescription(convo.task.task_description || null);
         setVerificationAgent((convo.task as { verification_account?: string }).verification_account || null);
+        setTaskScreenshots((convo.task as { screenshots?: string[] }).screenshots || []);
         setHasRunTask(true);
         conversationSeqRef.current = convo.latest_seq;
       } catch {
@@ -229,18 +244,32 @@ export function ChatView({
     return () => { cancelled = true; };
   }, [api, sessionId]);
 
-  // Load default coding account
+  // Load default coding account, using project's preferred agent if available
   useEffect(() => {
     let cancelled = false;
     api.listAccounts().then((res) => {
       if (cancelled) return;
+      // Find the project's preferred coding agent if a project is selected
+      const currentProject = projects?.find((p) => p.project_path === currentProjectPath);
+      const preferredAgentName = currentProject?.preferred_coding_agent;
+
+      // Try to use the project's preferred agent first
+      if (preferredAgentName) {
+        const preferredAccount = res.accounts.find((a) => a.name === preferredAgentName);
+        if (preferredAccount) {
+          setCodingAccount(preferredAccount);
+          return;
+        }
+      }
+
+      // Fall back to the global CODING role or first account
       const coding = res.accounts.find((a) => a.role === "CODING") || res.accounts[0] || null;
       setCodingAccount(coding || null);
     }).catch(() => {
       if (!cancelled) setCodingAccount(null);
     });
     return () => { cancelled = true; };
-  }, [api]);
+  }, [api, currentProjectPath, projects]);
 
   // Load verification settings and default verification agent
   useEffect(() => {
@@ -326,9 +355,14 @@ export function ChatView({
         const evtType = data.type || data.event_type;
 
         if (evtType === "session_started") {
-          updated = [];
+          // Preserve conversation on follow-up (when prev has items)
+          // Only clear on first task start
+          if (prev.length === 0) {
+            updated = [];
+          }
           setTaskDescription(data.task_description ?? null);
           setVerificationAgent(data.verification_account ?? null);
+          setTaskScreenshots(data.screenshots ?? []);
           setHasRunTask(true);
           if (seq) conversationSeqRef.current = seq;
           continue;
@@ -365,23 +399,35 @@ export function ChatView({
     }
   }, [conversation]);
 
-  // Mark task inactive when stream completes, check for worktree changes
+  // Mark task inactive when stream completes, check for worktree changes and end reason
   useEffect(() => {
     if (completed) {
       setTaskActive(false);
       onSessionChange();
-      // Check if there are worktree changes to merge
-      api.getWorktreeStatus(sessionId).then((status) => {
-        if (status.exists && status.has_changes) {
-          setShowMerge(true);
-        }
-      }).catch(() => {
-        // Ignore errors checking worktree status
-      });
+      // Fetch the session end reason and check for worktree changes
+      Promise.all([
+        api.getEvents(sessionId, 0, "session_ended").then((data) => {
+          const ends = (data.events as { type: string; reason?: string; success?: boolean }[])
+            .filter((e) => e.type === "session_ended");
+          if (ends.length > 0) {
+            const lastEnd = ends[ends.length - 1];
+            setEndReason(lastEnd.reason || "completed");
+          } else {
+            setEndReason("completed");
+          }
+        }).catch(() => {
+          setEndReason("completed");
+        }),
+        api.getWorktreeStatus(sessionId).then((status) => {
+          if (status.exists && status.has_changes) {
+            setShowMerge(true);
+          }
+        }).catch(() => {}),
+      ]);
     }
   }, [api, completed, sessionId, onSessionChange]);
 
-  const handleTaskStart = useCallback(async (taskDesc: string) => {
+  const handleTaskStart = useCallback(async (taskDesc: string, isFollowup: boolean = false) => {
     // Capture the current event log position before the task starts, so the
     // stream only shows events from this task (not old milestones/output).
     try {
@@ -395,10 +441,13 @@ export function ChatView({
     setHistoricalOutput("");
     setTaskActive(true);
     setShowMerge(false);
-    setWasCancelled(false);
+    setEndReason(null);
     setTaskDescription(taskDesc);
-    setConversation([]);
-    conversationSeqRef.current = 0;
+    // Preserve conversation history on follow-up tasks
+    if (!isFollowup) {
+      setConversation([]);
+      conversationSeqRef.current = 0;
+    }
     setHasRunTask(true);
   }, [api, sessionId, reset]);
 
@@ -410,11 +459,48 @@ export function ChatView({
   const handleCancel = useCallback(async () => {
     try {
       await api.cancelSession(sessionId);
-      setWasCancelled(true);
+      setEndReason("cancelled");
     } catch {
       // ignore
     }
   }, [api, sessionId]);
+
+  // Determine if we're connected to a remote server (need tunnel) or local (open directly)
+  const isRemote = Boolean(apiBaseUrl) && !/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(apiBaseUrl || "");
+
+  const handlePreview = useCallback(async () => {
+    if (previewPortMode === "disabled") return;
+    if (previewPortMode === "manual" && !previewPort) return;
+
+    // If already running, just open the URL
+    if (previewUrl) {
+      window.open(previewUrl, "_blank", "noopener");
+      return;
+    }
+
+    setPreviewLoading(true);
+    try {
+      const result = await api.startPreviewTunnel({
+        port: previewPort || undefined,
+        command: previewCommand || undefined,
+        session_id: sessionId,
+        tunnel: isRemote,
+        autodetect_port: previewPortMode === "auto",
+      });
+
+      const url = isRemote && result.url
+        ? result.url
+        : result.port ? `http://localhost:${result.port}` : undefined;
+      if (url) {
+        setPreviewUrl(url);
+        window.open(url, "_blank", "noopener");
+      }
+    } catch {
+      // ignore
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, [api, previewPortMode, previewPort, previewCommand, previewUrl, isRemote, sessionId]);
 
   // Screenshot upload handlers
   const handleFiles = useCallback(async (files: FileList | File[]) => {
@@ -472,6 +558,50 @@ export function ChatView({
     });
   }, []);
 
+  const startTaskRequest = useCallback(async (
+    message: string,
+    isFollowup: boolean,
+    attachedScreenshots: UploadedScreenshot[],
+  ) => {
+    if (!codingAccount) {
+      throw new Error("Select a coding agent first");
+    }
+
+    const session = await api.getSession(sessionId);
+    const projectPath = session.project_path || currentProjectPath || defaultProjectPath;
+    if (!projectPath) {
+      throw new Error("Set a project path first");
+    }
+
+    try {
+      const data = await api.getEvents(sessionId, 0, "session_started");
+      streamSinceSeqRef.current = data.latest_seq;
+    } catch {
+      streamSinceSeqRef.current = undefined;
+    }
+
+    const verificationAllowed = verificationSettings?.enabled && verificationAccount;
+    await api.startTask(sessionId, {
+      project_path: projectPath,
+      task_description: message,
+      coding_agent: codingAccount.name,
+      verification_agent: verificationAllowed ? verificationAccount.name : undefined,
+      is_followup: isFollowup,
+      screenshots: attachedScreenshots.length > 0 ? attachedScreenshots.map((s) => s.path) : undefined,
+    });
+
+    handleTaskStart(message, isFollowup);
+  }, [
+    api,
+    sessionId,
+    codingAccount,
+    verificationAccount,
+    verificationSettings,
+    currentProjectPath,
+    defaultProjectPath,
+    handleTaskStart,
+  ]);
+
   const handleSendMessage = useCallback(async () => {
     if (sending) return;
 
@@ -481,25 +611,25 @@ export function ChatView({
       setSending(true);
       try {
         const message = inputText.trim();
-        // Send Ctrl+C first to interrupt the agent, then the message if any
-        const ctrlC = "\x03";
-        const payload = message ? ctrlC + "\n" + message + "\n" : ctrlC + "\n";
-        const encodedData = btoa(payload);
-        await api.sendInput(sessionId, encodedData);
+        if (message) {
+          await api.cancelSession(sessionId);
+          setPendingFollowup(message);
+          setInputText("");
+        } else {
+          const encodedData = btoa("\x03\n");
+          await api.sendInput(sessionId, encodedData);
 
-        // Add the interrupt to the conversation as a special user message
-        setConversation((prev) => [
-          ...prev,
-          {
-            seq: conversationSeqRef.current + 1,
-            ts: new Date().toISOString(),
-            type: "user",
-            content: `[Interrupt] ${message || "(interrupted)"}`,
-          },
-        ]);
-        conversationSeqRef.current += 1;
-
-        if (message) setInputText("");
+          setConversation((prev) => [
+            ...prev,
+            {
+              seq: conversationSeqRef.current + 1,
+              ts: new Date().toISOString(),
+              type: "user",
+              content: "[Interrupt] (interrupted)",
+            },
+          ]);
+          conversationSeqRef.current += 1;
+        }
       } catch (e) {
         if (e instanceof Error) {
           setConversationError(e.message);
@@ -513,45 +643,14 @@ export function ChatView({
     }
 
     // Handle normal message (start new task)
-    if (!inputText.trim()) return;
-    if (!codingAccount) {
-      setConversationError("Select a coding agent first");
-      return;
-    }
+    const message = inputText.trim();
+    if (!message) return;
+
     setConversationError(null);
     setSending(true);
     try {
-      const session = await api.getSession(sessionId);
-      const projectPath = session.project_path || currentProjectPath || defaultProjectPath;
-      if (!projectPath) {
-        setConversationError("Set a project path first");
-        setSending(false);
-        return;
-      }
-
-      // Capture event log position before the task starts
-      try {
-        const data = await api.getEvents(sessionId, 0, "session_started");
-        streamSinceSeqRef.current = data.latest_seq;
-      } catch {
-        streamSinceSeqRef.current = undefined;
-      }
-
-      const message = inputText.trim();
-      const verificationAllowed = verificationSettings?.enabled && verificationAccount;
-      await api.startTask(sessionId, {
-        project_path: projectPath,
-        task_description: message,
-        coding_agent: codingAccount.name,
-        verification_agent: verificationAllowed ? verificationAccount.name : undefined,
-        override_prompt: overrideCodingPrompt || undefined,
-        is_followup: hasRunTask,
-        screenshots: screenshots.length > 0 ? screenshots.map((s) => s.path) : undefined,
-      });
-
-      handleTaskStart(message);
+      await startTaskRequest(message, hasRunTask, screenshots);
       setInputText("");
-      // Clear screenshots after starting task
       screenshots.forEach((s) => URL.revokeObjectURL(s.previewUrl));
       setScreenshots([]);
     } catch (e) {
@@ -569,17 +668,42 @@ export function ChatView({
     inputText,
     sending,
     taskActive,
-    codingAccount,
-    verificationAccount,
-    verificationSettings,
-    currentProjectPath,
-    defaultProjectPath,
-    overrideCodingPrompt,
     hasRunTask,
-    handleTaskStart,
-    conversationSeqRef,
     screenshots,
+    startTaskRequest,
   ]);
+
+  useEffect(() => {
+    if (!pendingFollowup || taskActive || sending) return;
+
+    let cancelled = false;
+    const message = pendingFollowup;
+    setPendingFollowup(null);
+    setConversationError(null);
+    setSending(true);
+
+    (async () => {
+      try {
+        await startTaskRequest(message, true, []);
+      } catch (e) {
+        if (cancelled) return;
+        setPendingFollowup(message);
+        if (e instanceof Error) {
+          setConversationError(e.message);
+        } else {
+          setConversationError("Failed to start follow-up task");
+        }
+      } finally {
+        if (!cancelled) {
+          setSending(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingFollowup, taskActive, sending, startTaskRequest]);
 
   const handleInputKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -606,9 +730,19 @@ export function ChatView({
     }
   }, [completed]);
 
-  const handleProjectPathChange = useCallback((path: string) => {
-    setCurrentProjectPath(path);
-  }, []);
+  // Load preview settings when project path changes
+  useEffect(() => {
+    if (!currentProjectPath) {
+      setPreviewPort(null);
+      setPreviewCommand(null);
+      return;
+    }
+    api.getProjectSettings(currentProjectPath).then((s) => {
+      setPreviewPortMode(s.preview_port_mode || "disabled");
+      setPreviewPort(s.preview_port);
+      setPreviewCommand(s.preview_command);
+    }).catch(() => {});
+  }, [api, currentProjectPath]);
 
   return (
     <div className="chat-view">
@@ -630,16 +764,45 @@ export function ChatView({
           {verificationAgent && (
             <span className="verification-agent-badge">Verification: {verificationAgent}</span>
           )}
+          {taskScreenshots.length > 0 && (
+            <div className="task-screenshots">
+              {taskScreenshots.map((path, i) => (
+                <img
+                  key={i}
+                  src={`/api/v1/file?path=${encodeURIComponent(path)}`}
+                  alt={`Screenshot ${i + 1}`}
+                  className="task-screenshot-thumbnail"
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
 
-      {/* Project settings (collapsible) - always shown */}
-      <ProjectSettings
-        api={api}
-        projectPath={currentProjectPath || defaultProjectPath}
-        onProjectPathChange={handleProjectPathChange}
-        onPromptsChange={setOverrideCodingPrompt}
-      />
+      {/* Project selector - shown when no task has been run yet */}
+      {!hasRunTask && projects.length > 0 && (
+        <div className="project-selector-bar">
+          <label>
+            Project
+            <select
+              value={currentProjectPath}
+              onChange={(e) => setCurrentProjectPath(e.target.value)}
+            >
+              <option value="">-- Select a project --</option>
+              {projects.map((p) => (
+                <option key={p.project_path} value={p.project_path}>
+                  {p.project_path}{p.project_type && p.project_type !== "unknown" ? ` (${p.project_type})` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
+      {!hasRunTask && projects.length === 0 && (
+        <div className="project-selector-bar">
+          <span className="no-projects-hint">No projects configured. Go to the Projects tab to add one.</span>
+        </div>
+      )}
 
       <div className="chat-body">
         {/* Conversation (takes more space) */}
@@ -655,9 +818,8 @@ export function ChatView({
                   <span className="field-label">Verification Agent</span>
                   <AccountPicker
                     api={api}
-                    selected={verificationSettings?.enabled === false ? null : verificationAccount}
+                    selected={verificationAccount}
                     onSelect={setVerificationAccount}
-                    disabled={verificationSettings?.enabled === false}
                     placeholder="None"
                     allowNone
                   />
@@ -691,6 +853,9 @@ export function ChatView({
                     >
                       <div className="chat-bubble-label">{label}</div>
                       <div className={`chat-bubble-text${isMilestone && !isExpanded ? " clamped" : ""}`}>{content}</div>
+                      {isMilestone && (
+                        <div className="chat-bubble-expand-hint">{isExpanded ? "Click to collapse" : "Click to expand"}</div>
+                      )}
                     </div>
                   </div>
                 );
@@ -778,11 +943,21 @@ export function ChatView({
               </>
             )}
             {(completed || (historicalOutput && !taskActive)) && (
-              <span className={wasCancelled ? "cancelled-indicator" : "done-indicator"}>
-                {wasCancelled ? "Cancelled" : "Completed"}
+              <span className={endReason === "completed" || !endReason ? "done-indicator" : endReason === "cancelled" ? "cancelled-indicator" : "failed-indicator"}>
+                {endReason === "cancelled" ? "Cancelled" : endReason === "timeout" ? "Timed out" : endReason && endReason !== "completed" ? `Failed (${endReason})` : "Completed"}
               </span>
             )}
             {error && <span className="error-text">{error}</span>}
+            {previewPortMode !== "disabled" && (
+              <button
+                className="preview-btn"
+                onClick={handlePreview}
+                disabled={previewLoading || (previewPortMode === "manual" && !previewPort)}
+                title={previewUrl ? `Open preview (${previewUrl})` : previewCommand ? `Start "${previewCommand}"${previewPortMode === "auto" ? " (auto-detect port)" : ` on port ${previewPort}`}` : previewPort ? `Open localhost:${previewPort}` : "Start preview"}
+              >
+                {previewLoading ? "Starting..." : previewUrl ? "Preview" : "Start Preview"}
+              </button>
+            )}
           </div>
 
           <pre ref={outputRef} className="terminal-output">

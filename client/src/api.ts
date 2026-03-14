@@ -4,12 +4,17 @@ import type {
   AccountList,
   AccountModels,
   AccountUsage,
+  AutoconfigureResult,
+  AutoconfigureStart,
   BranchesResponse,
   CleanupSettings,
   DiffFull,
   DiffSummary,
   MergeResult,
   ConversationResponse,
+  PreviewTunnelStatus,
+  ProjectSettings,
+  ProjectSettingsUpdate,
   ProviderList,
   ServerStatus,
   Session,
@@ -21,6 +26,7 @@ import type {
   TaskStatus,
   UserPreferences,
   VerificationSettings,
+  WebSocketTicket,
   WorktreeStatus,
 } from "./types.js";
 
@@ -111,8 +117,11 @@ export class ChadAPI {
     return this.post("/api/v1/sessions", params ?? {});
   }
 
-  listSessions(): Promise<SessionList> {
-    return this.get("/api/v1/sessions");
+  listSessions(projectPath?: string): Promise<SessionList> {
+    const params = projectPath
+      ? `?project_path=${encodeURIComponent(projectPath)}`
+      : "";
+    return this.get(`/api/v1/sessions${params}`);
   }
 
   getSession(sessionId: string): Promise<Session> {
@@ -167,6 +176,10 @@ export class ChadAPI {
     cols: number,
   ): Promise<{ success: boolean; rows: number; cols: number }> {
     return this.post(`/api/v1/sessions/${sessionId}/resize`, { rows, cols });
+  }
+
+  getWebSocketTicket(sessionId: string): Promise<WebSocketTicket> {
+    return this.post(`/api/v1/ws-ticket/${sessionId}`);
   }
 
   // ── Events & Milestones ──
@@ -264,12 +277,22 @@ export class ChadAPI {
     return this.get(`/api/v1/sessions/${sessionId}/worktree`);
   }
 
-  getDiffSummary(sessionId: string): Promise<DiffSummary> {
-    return this.get(`/api/v1/sessions/${sessionId}/worktree/diff`);
+  getDiffSummary(sessionId: string, compareBranch?: string | null): Promise<DiffSummary> {
+    const params = new URLSearchParams();
+    if (compareBranch) {
+      params.set("compare_branch", compareBranch);
+    }
+    const suffix = params.size > 0 ? `?${params.toString()}` : "";
+    return this.get(`/api/v1/sessions/${sessionId}/worktree/diff${suffix}`);
   }
 
-  getFullDiff(sessionId: string): Promise<DiffFull> {
-    return this.get(`/api/v1/sessions/${sessionId}/worktree/diff/full`);
+  getFullDiff(sessionId: string, compareBranch?: string | null): Promise<DiffFull> {
+    const params = new URLSearchParams();
+    if (compareBranch) {
+      params.set("compare_branch", compareBranch);
+    }
+    const suffix = params.size > 0 ? `?${params.toString()}` : "";
+    return this.get(`/api/v1/sessions/${sessionId}/worktree/diff/full${suffix}`);
   }
 
   mergeWorktree(
@@ -421,6 +444,28 @@ export class ChadAPI {
     return this.post("/api/v1/tunnel/stop");
   }
 
+  // ── Preview Tunnel ──
+
+  getPreviewTunnelStatus(): Promise<PreviewTunnelStatus> {
+    return this.get("/api/v1/preview-tunnel");
+  }
+
+  startPreviewTunnel(
+    options: {
+      port?: number;
+      command?: string;
+      session_id?: string;
+      tunnel?: boolean;
+      autodetect_port?: boolean;
+    },
+  ): Promise<PreviewTunnelStatus> {
+    return this.post("/api/v1/preview-tunnel/start", options);
+  }
+
+  stopPreviewTunnel(): Promise<PreviewTunnelStatus> {
+    return this.post("/api/v1/preview-tunnel/stop");
+  }
+
   // ── Config: Slack ──
 
   getSlackSettings(): Promise<{
@@ -445,37 +490,54 @@ export class ChadAPI {
     return this.put("/api/v1/config/slack", settings);
   }
 
+  // ── Config: Projects ──
+
+  listProjects(): Promise<ProjectSettings[]> {
+    return this.get("/api/v1/config/projects");
+  }
+
+  deleteProject(projectPath: string): Promise<{ deleted: boolean; project_path: string }> {
+    return this.del(`/api/v1/config/project?project_path=${encodeURIComponent(projectPath)}`);
+  }
+
   // ── Config: Project Settings ──
 
   getProjectSettings(
     projectPath: string,
-  ): Promise<{
-    project_path: string;
-    project_type: string | null;
-    lint_command: string | null;
-    test_command: string | null;
-    instructions_paths: string[];
-  }> {
+  ): Promise<ProjectSettings> {
     return this.get(
       `/api/v1/config/project?project_path=${encodeURIComponent(projectPath)}`,
     );
   }
 
   setProjectSettings(
-    settings: {
-      project_path: string;
-      lint_command?: string | null;
-      test_command?: string | null;
-      instructions_paths?: string[] | null;
-    },
-  ): Promise<{
-    project_path: string;
-    project_type: string | null;
-    lint_command: string | null;
-    test_command: string | null;
-    instructions_paths: string[];
-  }> {
+    settings: ProjectSettingsUpdate,
+  ): Promise<ProjectSettings> {
     return this.put("/api/v1/config/project", settings);
+  }
+
+  // ── Config: Project Autoconfigure ──
+
+  startAutoconfigure(
+    projectPath: string,
+    codingAgent: string,
+  ): Promise<AutoconfigureStart> {
+    return this.post("/api/v1/config/project/autoconfigure", {
+      project_path: projectPath,
+      coding_agent: codingAgent,
+    });
+  }
+
+  getAutoconfigureResult(
+    jobId: string,
+  ): Promise<AutoconfigureResult> {
+    return this.get(`/api/v1/config/project/autoconfigure/${jobId}`);
+  }
+
+  cancelAutoconfigure(
+    jobId: string,
+  ): Promise<AutoconfigureResult> {
+    return this.post(`/api/v1/config/project/autoconfigure/${jobId}/cancel`);
   }
 
   getPromptPreviews(
