@@ -399,6 +399,7 @@ class ProjectSettingsResponse(BaseModel):
     instructions_paths: list[str] = Field(default_factory=list, description="Paths to agent instruction/doc files")
     preview_port: int | None = Field(default=None, description="Local port for preview")
     preview_command: str | None = Field(default=None, description="Command to start the app for preview")
+    preferred_coding_agent: str | None = Field(default=None, description="Default coding agent for this project")
 
 
 class ProjectSettingsUpdate(BaseModel):
@@ -410,6 +411,7 @@ class ProjectSettingsUpdate(BaseModel):
     instructions_paths: list[str] | None = Field(default=None, description="Paths to agent instruction/doc files")
     preview_port: int | None = Field(default=None, description="Local port for preview")
     preview_command: str | None = Field(default=None, description="Command to start the app for preview")
+    preferred_coding_agent: str | None = Field(default=None, description="Default coding agent for this project")
 
 
 @router.get("/projects")
@@ -436,6 +438,7 @@ async def list_projects() -> list[ProjectSettingsResponse]:
                 instructions_paths=docs.instructions_paths if docs else [],
                 preview_port=config.preview_port,
                 preview_command=config.preview_command,
+                preferred_coding_agent=config.preferred_coding_agent,
             ))
         else:
             results.append(ProjectSettingsResponse(
@@ -446,6 +449,7 @@ async def list_projects() -> list[ProjectSettingsResponse]:
                 instructions_paths=[],
                 preview_port=None,
                 preview_command=None,
+                preferred_coding_agent=data.get("preferred_coding_agent"),
             ))
     return results
 
@@ -485,6 +489,7 @@ async def get_project_settings(
             instructions_paths=config.docs.instructions_paths if config.docs else [],
             preview_port=config.preview_port,
             preview_command=config.preview_command,
+            preferred_coding_agent=config.preferred_coding_agent,
         )
 
     # Return defaults for new project
@@ -497,6 +502,7 @@ async def get_project_settings(
         instructions_paths=[],
         preview_port=None,
         preview_command=None,
+        preferred_coding_agent=None,
     )
 
 
@@ -516,6 +522,7 @@ async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSetting
         instructions_paths=request.instructions_paths,
         preview_port=request.preview_port,
         preview_command=request.preview_command,
+        preferred_coding_agent=request.preferred_coding_agent,
     )
 
     return ProjectSettingsResponse(
@@ -526,6 +533,7 @@ async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSetting
         instructions_paths=config.docs.instructions_paths if config.docs else [],
         preview_port=config.preview_port,
         preview_command=config.preview_command,
+        preferred_coding_agent=config.preferred_coding_agent,
     )
 
 

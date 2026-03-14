@@ -240,18 +240,32 @@ export function ChatView({
     return () => { cancelled = true; };
   }, [api, sessionId]);
 
-  // Load default coding account
+  // Load default coding account, using project's preferred agent if available
   useEffect(() => {
     let cancelled = false;
     api.listAccounts().then((res) => {
       if (cancelled) return;
+      // Find the project's preferred coding agent if a project is selected
+      const currentProject = projects?.find((p) => p.project_path === currentProjectPath);
+      const preferredAgentName = currentProject?.preferred_coding_agent;
+
+      // Try to use the project's preferred agent first
+      if (preferredAgentName) {
+        const preferredAccount = res.accounts.find((a) => a.name === preferredAgentName);
+        if (preferredAccount) {
+          setCodingAccount(preferredAccount);
+          return;
+        }
+      }
+
+      // Fall back to the global CODING role or first account
       const coding = res.accounts.find((a) => a.role === "CODING") || res.accounts[0] || null;
       setCodingAccount(coding || null);
     }).catch(() => {
       if (!cancelled) setCodingAccount(null);
     });
     return () => { cancelled = true; };
-  }, [api]);
+  }, [api, currentProjectPath, projects]);
 
   // Load verification settings and default verification agent
   useEffect(() => {

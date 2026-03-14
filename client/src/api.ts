@@ -14,6 +14,7 @@ import type {
   ConversationResponse,
   PreviewTunnelStatus,
   ProjectSettings,
+  ProjectSettingsUpdate,
   ProviderList,
   ServerStatus,
   Session,
@@ -495,38 +496,15 @@ export class ChadAPI {
 
   getProjectSettings(
     projectPath: string,
-  ): Promise<{
-    project_path: string;
-    project_type: string | null;
-    lint_command: string | null;
-    test_command: string | null;
-    instructions_paths: string[];
-    preview_port: number | null;
-    preview_command: string | null;
-  }> {
+  ): Promise<ProjectSettings> {
     return this.get(
       `/api/v1/config/project?project_path=${encodeURIComponent(projectPath)}`,
     );
   }
 
   setProjectSettings(
-    settings: {
-      project_path: string;
-      lint_command?: string | null;
-      test_command?: string | null;
-      instructions_paths?: string[] | null;
-      preview_port?: number | null;
-      preview_command?: string | null;
-    },
-  ): Promise<{
-    project_path: string;
-    project_type: string | null;
-    lint_command: string | null;
-    test_command: string | null;
-    instructions_paths: string[];
-    preview_port: number | null;
-    preview_command: string | null;
-  }> {
+    settings: ProjectSettingsUpdate,
+  ): Promise<ProjectSettings> {
     return this.put("/api/v1/config/project", settings);
   }
 

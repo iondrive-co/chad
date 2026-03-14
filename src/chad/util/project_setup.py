@@ -58,6 +58,7 @@ class ProjectConfig:
     docs: DocsConfig = field(default_factory=DocsConfig)
     preview_port: int | None = None
     preview_command: str | None = None
+    preferred_coding_agent: str | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -79,6 +80,7 @@ class ProjectConfig:
             },
             "preview_port": self.preview_port,
             "preview_command": self.preview_command,
+            "preferred_coding_agent": self.preferred_coding_agent,
         }
 
     @classmethod
@@ -104,6 +106,7 @@ class ProjectConfig:
             docs=docs,
             preview_port=data.get("preview_port"),
             preview_command=data.get("preview_command"),
+            preferred_coding_agent=data.get("preferred_coding_agent"),
         )
 
 
@@ -428,6 +431,7 @@ def save_project_settings(
     instructions_paths: list[str] | None = None,
     preview_port: int | None = ...,
     preview_command: str | None = ...,
+    preferred_coding_agent: str | None = ...,
 ) -> ProjectConfig:
     """Persist verification commands and documentation paths for a project.
 
@@ -437,6 +441,7 @@ def save_project_settings(
         test_command: Test command to save (None to clear)
         instructions_paths: List of paths to agent instruction/doc files
         preview_port: Local port for preview tunnel (None to clear, ... to leave unchanged)
+        preferred_coding_agent: Account name to use as default coding agent for this project
 
     Returns:
         The saved ProjectConfig instance
@@ -479,6 +484,9 @@ def save_project_settings(
 
     if preview_command is not ...:
         config.preview_command = preview_command or None
+
+    if preferred_coding_agent is not ...:
+        config.preferred_coding_agent = preferred_coding_agent or None
 
     save_project_config(project_path, config)
     return config

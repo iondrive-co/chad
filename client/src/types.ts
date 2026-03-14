@@ -344,6 +344,7 @@ export interface ProjectSettings {
   instructions_paths: string[];
   preview_port: number | null;
   preview_command: string | null;
+  preferred_coding_agent: string | null;
 }
 
 export interface AutoconfigureStart {
@@ -364,6 +365,7 @@ export interface ProjectSettingsUpdate {
   instructions_paths?: string[] | null;
   preview_port?: number | null;
   preview_command?: string | null;
+  preferred_coding_agent?: string | null;
 }
 
 export interface PromptPreviews {

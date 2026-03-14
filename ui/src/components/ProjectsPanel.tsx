@@ -22,6 +22,7 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
   const [instructionsPaths, setInstructionsPaths] = useState<string[]>([]);
   const [previewPort, setPreviewPort] = useState("");
   const [previewCommand, setPreviewCommand] = useState("");
+  const [preferredCodingAgent, setPreferredCodingAgent] = useState<Account | null>(null);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
@@ -32,6 +33,7 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
   const [codingAgent, setCodingAgent] = useState<Account | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const outputEndRef = useRef<HTMLDivElement | null>(null);
+  const preferredAgentInitialized = useRef(false);
 
   // Task history
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -67,12 +69,25 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
   // Load settings when project is selected
   useEffect(() => {
     if (!selectedProject || !connected) return;
-    api.getProjectSettings(selectedProject).then((s) => {
+    preferredAgentInitialized.current = false;
+    Promise.all([
+      api.getProjectSettings(selectedProject),
+      api.listAccounts(),
+    ]).then(([s, accountsResult]) => {
       setLintCommand(s.lint_command || "");
       setTestCommand(s.test_command || "");
       setInstructionsPaths(s.instructions_paths || []);
       setPreviewPort(s.preview_port != null ? String(s.preview_port) : "");
       setPreviewCommand(s.preview_command || "");
+      // Load preferred coding agent
+      if (s.preferred_coding_agent) {
+        const account = accountsResult.accounts.find((a) => a.name === s.preferred_coding_agent);
+        setPreferredCodingAgent(account || null);
+      } else {
+        setPreferredCodingAgent(null);
+      }
+      // Mark as initialized after loading
+      preferredAgentInitialized.current = true;
     }).catch(() => {});
   }, [api, selectedProject, connected]);
 
@@ -91,6 +106,21 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
       setSessionsLoading(false);
     });
   }, [api, selectedProject, connected]);
+
+  // Auto-save when preferred coding agent changes (after initial load)
+  useEffect(() => {
+    if (!selectedProject || !connected || !preferredAgentInitialized.current) return;
+    const parsedPort = previewPort.trim() ? parseInt(previewPort, 10) : null;
+    api.setProjectSettings({
+      project_path: selectedProject,
+      lint_command: lintCommand || null,
+      test_command: testCommand || null,
+      instructions_paths: instructionsPaths.filter(p => p.trim()),
+      preview_port: (parsedPort != null && !isNaN(parsedPort)) ? parsedPort : null,
+      preview_command: previewCommand || null,
+      preferred_coding_agent: preferredCodingAgent?.name || null,
+    }).then(() => flash("Saved")).catch(() => flash("Error saving"));
+  }, [preferredCodingAgent]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-scroll autoconfigure output
   useEffect(() => {
@@ -144,6 +174,7 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
         instructions_paths: instructionsPaths.filter(p => p.trim()),
         preview_port: (parsedPort != null && !isNaN(parsedPort)) ? parsedPort : null,
         preview_command: previewCommand || null,
+        preferred_coding_agent: preferredCodingAgent?.name || null,
       });
       flash("Saved");
     } catch {
@@ -151,7 +182,7 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
     } finally {
       setSaving(false);
     }
-  }, [api, selectedProject, lintCommand, testCommand, instructionsPaths, previewPort, previewCommand, flash]);
+  }, [api, selectedProject, lintCommand, testCommand, instructionsPaths, previewPort, previewCommand, preferredCodingAgent, flash]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -398,6 +429,19 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
                       placeholder="e.g., 3000"
                       min={1}
                       max={65535}
+                    />
+                  </label>
+                </div>
+
+                <div className="project-settings-row">
+                  <label>
+                    Default Coding Agent
+                    <AccountPicker
+                      api={api}
+                      selected={preferredCodingAgent}
+                      onSelect={setPreferredCodingAgent}
+                      placeholder="Use global default"
+                      allowNone
                     />
                   </label>
                 </div>
