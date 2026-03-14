@@ -59,6 +59,8 @@ export function App() {
   const [sessionProjectPath, setSessionProjectPath] = useState("");
   // All configured projects, loaded on connect
   const [projects, setProjects] = useState<ProjectSettings[]>([]);
+  // Track which sessions have been opened in this UI instance (only these show as tabs)
+  const [openedSessionIds, setOpenedSessionIds] = useState<Set<string>>(new Set());
   // Track whether the user has ever set a URL (vs initial empty state)
   const hasUrl = useRef(false);
 
@@ -142,6 +144,7 @@ export function App() {
     const session = await createSession(effectivePath);
     if (session) {
       setSelectedSession(session.id);
+      setOpenedSessionIds(prev => new Set(prev).add(session.id));
       if (effectivePath) setSessionProjectPath(effectivePath);
       setTab("chat");
       refreshSessions();
@@ -151,19 +154,29 @@ export function App() {
   const handleDeleteSession = useCallback(async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     await deleteSession(id);
+    setOpenedSessionIds(prev => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
     if (selectedSession === id) {
-      setSelectedSession(sessions.find(s => s.id !== id)?.id ?? null);
+      // Select another opened session, or deselect
+      const remaining = sessions.filter(s => s.id !== id && openedSessionIds.has(s.id));
+      setSelectedSession(remaining[0]?.id ?? null);
     }
     refreshSessions();
-  }, [deleteSession, selectedSession, sessions, refreshSessions]);
+  }, [deleteSession, selectedSession, sessions, openedSessionIds, refreshSessions]);
 
   const handleSelectSession = useCallback((id: string) => {
     setSelectedSession(id);
+    const session = sessions.find(s => s.id === id);
+    if (session?.project_path) setSessionProjectPath(session.project_path);
     setTab("chat");
-  }, []);
+  }, [sessions]);
 
   const handleOpenSessionFromProject = useCallback((sessionId: string, projectPath: string) => {
     setSelectedSession(sessionId);
+    setOpenedSessionIds(prev => new Set(prev).add(sessionId));
     setSessionProjectPath(projectPath);
     setTab("chat");
   }, []);
@@ -182,10 +195,10 @@ export function App() {
           <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>
             Settings
           </button>
-          {connected && sessions.length > 0 && (
+          {connected && sessions.some(s => openedSessionIds.has(s.id)) && (
             <>
               <span className="tab-separator" />
-              {[...sessions].reverse().map((s) => (
+              {[...sessions].filter(s => openedSessionIds.has(s.id)).reverse().map((s) => (
                 <button
                   key={s.id}
                   className={`session-tab ${s.id === selectedSession && tab === "chat" ? "active" : ""}`}

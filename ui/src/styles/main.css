@@ -2227,7 +2227,7 @@ label {
   border: none;
   color: var(--text-muted);
   cursor: pointer;
-  font-size: 12px;
+  font-size: 13px;
   padding: 2px 6px;
   border-radius: 3px;
   flex-shrink: 0;

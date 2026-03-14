@@ -85,6 +85,11 @@ export function ChatView({
   const [currentProjectPath, setCurrentProjectPath] = useState(defaultProjectPath);
   const [worktreeRefresh, setWorktreeRefresh] = useState(0);
 
+  // Sync when parent changes defaultProjectPath (e.g. selecting a session tab)
+  useEffect(() => {
+    if (defaultProjectPath) setCurrentProjectPath(defaultProjectPath);
+  }, [defaultProjectPath]);
+
   // Preview
   const [previewPort, setPreviewPort] = useState<number | null>(null);
   const [previewCommand, setPreviewCommand] = useState<string | null>(null);
