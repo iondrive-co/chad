@@ -623,7 +623,6 @@ class TestPortAutodetection:
 
     def test_detect_port_from_listening_socket(self):
         """Should detect port from a process that opens a listening socket."""
-        import socket
         import sys
         from chad.server.services.preview_tunnel_service import detect_listening_port
 

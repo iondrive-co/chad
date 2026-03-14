@@ -10,11 +10,6 @@ import time
 from pathlib import Path
 
 import pytest
-
-_skip_windows = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="Uses bash/Unix PTY commands not available on Windows",
-)
 from fastapi.testclient import TestClient
 
 from chad.server.main import create_app
@@ -24,6 +19,11 @@ from chad.server.state import reset_state
 from chad.ui.client.stream_client import StreamClient, decode_terminal_data
 from chad.ui.terminal_emulator import TerminalEmulator
 from chad.util.event_log import EventLog, SessionEndedEvent, SessionStartedEvent, StatusEvent, TerminalOutputEvent
+
+_skip_windows = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Uses bash/Unix PTY commands not available on Windows",
+)
 
 
 @pytest.fixture

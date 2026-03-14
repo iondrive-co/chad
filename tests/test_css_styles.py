@@ -135,7 +135,7 @@ class TestFontSizeReadability:
 
 
 class TestJetBrainsMonoFont:
-    """Ensure JetBrains Mono is used as the primary font throughout the UI."""
+    """Ensure JetBrains Mono is preferred without relying on remote hosts."""
 
     def test_body_uses_font_mono_variable(self):
         """Body should use the --font-mono variable (JetBrains Mono)."""
@@ -148,8 +148,8 @@ class TestJetBrainsMonoFont:
             "body should use font-family: var(--font-mono) for JetBrains Mono font"
         )
 
-    def test_font_mono_variable_includes_jetbrains_mono(self):
-        """The --font-mono CSS variable should include JetBrains Mono."""
+    def test_font_mono_variable_includes_local_fallbacks(self):
+        """The --font-mono CSS variable should prefer JetBrains with local fallbacks."""
         content = CSS_FILE.read_text()
         # Find :root with --font-mono
         root_match = re.search(r":root\s*\{([^}]+)\}", content)
@@ -158,19 +158,32 @@ class TestJetBrainsMonoFont:
         font_mono_match = re.search(r"--font-mono:\s*([^;]+);", root_content)
         assert font_mono_match, "Should have --font-mono variable defined"
         font_mono_value = font_mono_match.group(1)
-        assert "JetBrains Mono" in font_mono_value, (
-            f"--font-mono should include JetBrains Mono, got: {font_mono_value}"
+        # Parse stack and ensure we keep JetBrains Mono but also a system fallback
+        font_stack = [item.strip().strip('"\'') for item in font_mono_value.split(",")]
+        assert "JetBrains Mono" in font_stack, (
+            f"--font-mono should still prefer JetBrains Mono, got: {font_mono_value}"
+        )
+        assert "ui-monospace" in font_stack, (
+            "--font-mono should include ui-monospace to avoid needing remote fonts"
         )
 
-    def test_index_html_loads_jetbrains_mono(self):
-        """index.html should load JetBrains Mono from Google Fonts."""
+    def test_index_html_avoids_remote_font_providers(self):
+        """index.html should not pull fonts from Google Fonts or other CDNs."""
         index_file = CSS_FILE.parent.parent.parent / "index.html"
         content = index_file.read_text()
-        assert "fonts.googleapis.com" in content, (
-            "index.html should load fonts from Google Fonts"
+        assert "fonts.googleapis.com" not in content
+        assert "fonts.gstatic.com" not in content
+        assert "JetBrains+Mono" not in content
+
+    def test_csp_disallows_external_font_hosts(self):
+        """CSP headers should avoid allowing external font providers."""
+        main_py = Path(__file__).parent.parent / "src" / "chad" / "server" / "main.py"
+        content = main_py.read_text()
+        assert "fonts.googleapis.com" not in content, (
+            "CSP should not include Google Fonts domains"
         )
-        assert "JetBrains+Mono" in content, (
-            "index.html should load JetBrains Mono font"
+        assert "fonts.gstatic.com" not in content, (
+            "CSP should not include Google Fonts domains"
         )
 
 
