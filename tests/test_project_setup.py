@@ -486,7 +486,11 @@ class TestPreferredCodingAgent:
         assert loaded.preferred_coding_agent is None
 
     def test_preferred_coding_agent_persists_other_fields(self, tmp_path, isolated_config):
-        """Test that updating preferred_coding_agent doesn't clear other settings."""
+        """Test that updating preferred_coding_agent doesn't clear other settings.
+
+        This is a regression test: updating one field via save_project_settings
+        should NOT overwrite unrelated fields.
+        """
         # Set initial config with lint/test
         save_project_settings(
             tmp_path,
@@ -495,13 +499,16 @@ class TestPreferredCodingAgent:
             instructions_paths=["AGENTS.md"],
         )
 
-        # Update only preferred_coding_agent
+        # Update only preferred_coding_agent - using ellipsis defaults for others
+        # to signal "leave unchanged"
         save_project_settings(
             tmp_path,
             preferred_coding_agent="my-account",
         )
 
         loaded = load_project_config(tmp_path)
-        # Other fields should be preserved (though lint/test will be reset to None
-        # due to how save_project_settings works with explicit None values)
         assert loaded.preferred_coding_agent == "my-account"
+        # lint/test/instructions should be preserved
+        assert loaded.verification.lint_command == "flake8 ."
+        assert loaded.verification.test_command == "pytest -q"
+        assert "AGENTS.md" in loaded.docs.instructions_paths

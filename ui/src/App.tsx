@@ -274,6 +274,7 @@ export function App() {
               api={api}
               connected={connected}
               onOpenSession={handleOpenSessionFromProject}
+              onProjectsChange={loadProjects}
             />
           </main>
         )}

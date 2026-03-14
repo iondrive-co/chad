@@ -7,9 +7,10 @@ interface Props {
   api: ChadAPI;
   connected: boolean;
   onOpenSession: (sessionId: string, projectPath: string) => void;
+  onProjectsChange?: () => void;
 }
 
-export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
+export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange }: Props) {
   const [projects, setProjects] = useState<ProjectSettings[]>([]);
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [newPath, setNewPath] = useState("");
@@ -122,7 +123,10 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
       preview_port: (parsedPort != null && !isNaN(parsedPort)) ? parsedPort : null,
       preview_command: previewCommand || null,
       preferred_coding_agent: preferredCodingAgent?.name || null,
-    }).then(() => flash("Saved")).catch(() => flash("Error saving"));
+    }).then(() => {
+      flash("Saved");
+      onProjectsChange?.();
+    }).catch(() => flash("Error saving"));
   }, [preferredCodingAgent]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-scroll autoconfigure output
@@ -146,12 +150,13 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
       await loadProjects();
       setSelectedProject(path);
       setNewPath("");
+      onProjectsChange?.();
     } catch {
       flash("Failed to add project");
     } finally {
       setAddingProject(false);
     }
-  }, [api, newPath, loadProjects, flash]);
+  }, [api, newPath, loadProjects, flash, onProjectsChange]);
 
   const handleDeleteProject = useCallback(async (path: string) => {
     try {
@@ -160,10 +165,11 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
         setSelectedProject(null);
       }
       await loadProjects();
+      onProjectsChange?.();
     } catch {
       flash("Failed to remove project");
     }
-  }, [api, selectedProject, loadProjects, flash]);
+  }, [api, selectedProject, loadProjects, flash, onProjectsChange]);
 
   const handleSave = useCallback(async () => {
     if (!selectedProject) return;
@@ -181,12 +187,13 @@ export function ProjectsPanel({ api, connected, onOpenSession }: Props) {
         preferred_coding_agent: preferredCodingAgent?.name || null,
       });
       flash("Saved");
+      onProjectsChange?.();
     } catch {
       flash("Error saving");
     } finally {
       setSaving(false);
     }
-  }, [api, selectedProject, lintCommand, testCommand, instructionsPaths, previewPortMode, previewPort, previewCommand, preferredCodingAgent, flash]);
+  }, [api, selectedProject, lintCommand, testCommand, instructionsPaths, previewPortMode, previewPort, previewCommand, preferredCodingAgent, flash, onProjectsChange]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
