@@ -60,6 +60,7 @@ class ProjectConfig:
     preview_port: int | None = None
     preview_command: str | None = None
     preferred_coding_agent: str | None = None
+    autoconfigure_agent: str | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -83,6 +84,7 @@ class ProjectConfig:
             "preview_port": self.preview_port,
             "preview_command": self.preview_command,
             "preferred_coding_agent": self.preferred_coding_agent,
+            "autoconfigure_agent": self.autoconfigure_agent,
         }
 
     @classmethod
@@ -116,6 +118,7 @@ class ProjectConfig:
             preview_port=data.get("preview_port"),
             preview_command=data.get("preview_command"),
             preferred_coding_agent=data.get("preferred_coding_agent"),
+            autoconfigure_agent=data.get("autoconfigure_agent"),
         )
 
 
@@ -442,6 +445,7 @@ def save_project_settings(
     preview_port: int | None = ...,
     preview_command: str | None = ...,
     preferred_coding_agent: str | None = ...,
+    autoconfigure_agent: str | None = ...,
 ) -> ProjectConfig:
     """Persist verification commands and documentation paths for a project.
 
@@ -514,6 +518,9 @@ def save_project_settings(
 
     if preferred_coding_agent is not ...:
         config.preferred_coding_agent = preferred_coding_agent or None
+
+    if autoconfigure_agent is not ...:
+        config.autoconfigure_agent = autoconfigure_agent or None
 
     save_project_config(project_path, config)
     return config

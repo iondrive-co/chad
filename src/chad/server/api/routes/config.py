@@ -401,6 +401,7 @@ class ProjectSettingsResponse(BaseModel):
     preview_port: int | None = Field(default=None, description="Local port for preview (manual mode)")
     preview_command: str | None = Field(default=None, description="Command to start the app for preview")
     preferred_coding_agent: str | None = Field(default=None, description="Default coding agent for this project")
+    autoconfigure_agent: str | None = Field(default=None, description="Agent used for autoconfigure")
 
 
 class ProjectSettingsUpdate(BaseModel):
@@ -414,6 +415,7 @@ class ProjectSettingsUpdate(BaseModel):
     preview_port: int | None = Field(default=None, description="Local port for preview (manual mode)")
     preview_command: str | None = Field(default=None, description="Command to start the app for preview")
     preferred_coding_agent: str | None = Field(default=None, description="Default coding agent for this project")
+    autoconfigure_agent: str | None = Field(default=None, description="Agent used for autoconfigure")
 
 
 @router.get("/projects")
@@ -442,6 +444,7 @@ async def list_projects() -> list[ProjectSettingsResponse]:
                 preview_port=config.preview_port,
                 preview_command=config.preview_command,
                 preferred_coding_agent=config.preferred_coding_agent,
+                autoconfigure_agent=config.autoconfigure_agent,
             ))
         else:
             results.append(ProjectSettingsResponse(
@@ -453,6 +456,7 @@ async def list_projects() -> list[ProjectSettingsResponse]:
                 preview_port=None,
                 preview_command=None,
                 preferred_coding_agent=data.get("preferred_coding_agent"),
+                autoconfigure_agent=data.get("autoconfigure_agent"),
             ))
     return results
 
@@ -494,6 +498,7 @@ async def get_project_settings(
             preview_port=config.preview_port,
             preview_command=config.preview_command,
             preferred_coding_agent=config.preferred_coding_agent,
+            autoconfigure_agent=config.autoconfigure_agent,
         )
 
     # Return defaults for new project
@@ -515,19 +520,26 @@ async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSetting
     """Update project settings.
 
     Saves lint/test commands and documentation paths for a project.
+    Fields not included in the request body are left unchanged (using ellipsis sentinel).
     """
     from chad.util.project_setup import save_project_settings
 
     path = Path(request.project_path).expanduser().resolve()
+
+    # Use model_fields_set to determine which fields were actually sent in the request.
+    # Fields not sent should use ellipsis (...) to signal "leave unchanged".
+    fields_set = request.model_fields_set
+
     config = save_project_settings(
         path,
-        lint_command=request.lint_command,
-        test_command=request.test_command,
-        instructions_paths=request.instructions_paths,
-        preview_port_mode=request.preview_port_mode,
-        preview_port=request.preview_port,
-        preview_command=request.preview_command,
-        preferred_coding_agent=request.preferred_coding_agent,
+        lint_command=request.lint_command if "lint_command" in fields_set else ...,
+        test_command=request.test_command if "test_command" in fields_set else ...,
+        instructions_paths=request.instructions_paths if "instructions_paths" in fields_set else ...,
+        preview_port_mode=request.preview_port_mode if "preview_port_mode" in fields_set else ...,
+        preview_port=request.preview_port if "preview_port" in fields_set else ...,
+        preview_command=request.preview_command if "preview_command" in fields_set else ...,
+        preferred_coding_agent=request.preferred_coding_agent if "preferred_coding_agent" in fields_set else ...,
+        autoconfigure_agent=request.autoconfigure_agent if "autoconfigure_agent" in fields_set else ...,
     )
 
     return ProjectSettingsResponse(
@@ -540,6 +552,7 @@ async def set_project_settings(request: ProjectSettingsUpdate) -> ProjectSetting
         preview_port=config.preview_port,
         preview_command=config.preview_command,
         preferred_coding_agent=config.preferred_coding_agent,
+        autoconfigure_agent=config.autoconfigure_agent,
     )
 
 

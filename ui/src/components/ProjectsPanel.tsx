@@ -43,7 +43,6 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
 
   const flash = useCallback((msg: string) => {
     setStatus(msg);
-    setTimeout(() => setStatus(null), 3000);
   }, []);
 
   // Load projects and pre-fill default path on connect
@@ -89,6 +88,13 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
       } else {
         setPreferredCodingAgent(null);
       }
+      // Load autoconfigure agent
+      if (s.autoconfigure_agent) {
+        const account = accountsResult.accounts.find((a) => a.name === s.autoconfigure_agent);
+        setCodingAgent(account || null);
+      } else {
+        setCodingAgent(null);
+      }
       // Mark as initialized after loading
       preferredAgentInitialized.current = true;
     }).catch(() => {});
@@ -110,11 +116,12 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
     });
   }, [api, selectedProject, connected]);
 
-  // Auto-save when preferred coding agent changes (after initial load)
-  useEffect(() => {
-    if (!selectedProject || !connected || !preferredAgentInitialized.current) return;
+  const saveProjectSettings = useCallback(async (
+    overrides?: { preferredCodingAgent?: Account | null; codingAgent?: Account | null },
+  ) => {
+    if (!selectedProject) return null;
     const parsedPort = previewPort.trim() ? parseInt(previewPort, 10) : null;
-    api.setProjectSettings({
+    return api.setProjectSettings({
       project_path: selectedProject,
       lint_command: lintCommand || null,
       test_command: testCommand || null,
@@ -122,12 +129,53 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
       preview_port_mode: previewPortMode,
       preview_port: (parsedPort != null && !isNaN(parsedPort)) ? parsedPort : null,
       preview_command: previewCommand || null,
-      preferred_coding_agent: preferredCodingAgent?.name || null,
-    }).then(() => {
+      preferred_coding_agent: (overrides?.preferredCodingAgent ?? preferredCodingAgent)?.name || null,
+      autoconfigure_agent: (overrides?.codingAgent ?? codingAgent)?.name || null,
+    });
+  }, [
+    api,
+    selectedProject,
+    lintCommand,
+    testCommand,
+    instructionsPaths,
+    previewPortMode,
+    previewPort,
+    previewCommand,
+    preferredCodingAgent,
+    codingAgent,
+  ]);
+
+  const handlePreferredCodingAgentChange = useCallback(async (account: Account | null) => {
+    setPreferredCodingAgent(account);
+    if (!selectedProject || !connected || !preferredAgentInitialized.current) return;
+    try {
+      const updated = await saveProjectSettings({ preferredCodingAgent: account });
       flash("Saved");
       onProjectsChange?.();
-    }).catch(() => flash("Error saving"));
-  }, [preferredCodingAgent]); // eslint-disable-line react-hooks/exhaustive-deps
+      if (updated) {
+        if (updated.preferred_coding_agent) {
+          const accountsResult = await api.listAccounts();
+          const refreshed = accountsResult.accounts.find((a) => a.name === updated.preferred_coding_agent) || null;
+          setPreferredCodingAgent(refreshed);
+        } else {
+          setPreferredCodingAgent(null);
+        }
+      }
+    } catch {
+      flash("Error saving");
+    }
+  }, [api, connected, selectedProject, saveProjectSettings, flash, onProjectsChange]);
+
+  const handleAutoconfigureAgentChange = useCallback(async (account: Account | null) => {
+    setCodingAgent(account);
+    if (!selectedProject || !connected || !preferredAgentInitialized.current) return;
+    try {
+      await saveProjectSettings({ codingAgent: account });
+      flash("Saved");
+    } catch {
+      flash("Error saving");
+    }
+  }, [connected, selectedProject, saveProjectSettings, flash]);
 
   // Auto-scroll autoconfigure output
   useEffect(() => {
@@ -175,17 +223,7 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
     if (!selectedProject) return;
     setSaving(true);
     try {
-      const parsedPort = previewPort.trim() ? parseInt(previewPort, 10) : null;
-      await api.setProjectSettings({
-        project_path: selectedProject,
-        lint_command: lintCommand || null,
-        test_command: testCommand || null,
-        instructions_paths: instructionsPaths.filter(p => p.trim()),
-        preview_port_mode: previewPortMode,
-        preview_port: (parsedPort != null && !isNaN(parsedPort)) ? parsedPort : null,
-        preview_command: previewCommand || null,
-        preferred_coding_agent: preferredCodingAgent?.name || null,
-      });
+      await saveProjectSettings();
       flash("Saved");
       onProjectsChange?.();
     } catch {
@@ -193,7 +231,7 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
     } finally {
       setSaving(false);
     }
-  }, [api, selectedProject, lintCommand, testCommand, instructionsPaths, previewPortMode, previewPort, previewCommand, preferredCodingAgent, flash, onProjectsChange]);
+  }, [selectedProject, saveProjectSettings, flash, onProjectsChange]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -386,7 +424,12 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
                   <div className="autoconfigure-banner">
                     Project not yet configured.
                     <div className="autoconfigure-inline">
-                      <AccountPicker api={api} selected={codingAgent} onSelect={setCodingAgent} placeholder="Select agent" />
+                      <AccountPicker
+                        api={api}
+                        selected={codingAgent}
+                        onSelect={handleAutoconfigureAgentChange}
+                        placeholder="Autoconfigure agent"
+                      />
                       <button
                         className="autoconfigure-btn"
                         onClick={handleAutoconfigure}
@@ -468,11 +511,11 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
 
                 <div className="project-settings-row">
                   <label>
-                    Default Coding Agent
+                    Preferred Coding Agent
                     <AccountPicker
                       api={api}
                       selected={preferredCodingAgent}
-                      onSelect={setPreferredCodingAgent}
+                      onSelect={handlePreferredCodingAgentChange}
                       placeholder="Use global default"
                       allowNone
                     />
@@ -516,7 +559,13 @@ export function ProjectsPanel({ api, connected, onOpenSession, onProjectsChange 
                     {saving ? "Saving..." : "Save"}
                   </button>
                   <div className="autoconfigure-inline">
-                    <AccountPicker api={api} selected={codingAgent} onSelect={setCodingAgent} placeholder="Select agent" />
+                    <span>Autoconfigure Agent</span>
+                    <AccountPicker
+                      api={api}
+                      selected={codingAgent}
+                      onSelect={handleAutoconfigureAgentChange}
+                      placeholder="Autoconfigure agent"
+                    />
                     <button
                       className="autoconfigure-btn"
                       onClick={handleAutoconfigure}

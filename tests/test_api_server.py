@@ -748,6 +748,114 @@ class TestProjectSettingsEndpoints:
         assert data["lint_command"] == "npm run lint"
         assert data["test_command"] == "npm test"
 
+    def test_partial_update_preserves_preferred_coding_agent(self, client, tmp_path):
+        """Partial updates should NOT clear preferred_coding_agent.
+
+        Regression test: When the UI saves lint/test commands without
+        including preferred_coding_agent in the request, it should preserve
+        the existing preferred_coding_agent value.
+        """
+        project_dir = tmp_path / "test-project-partial"
+        project_dir.mkdir()
+        project_path = str(project_dir)
+
+        # First save with preferred_coding_agent
+        response1 = client.put(
+            "/api/v1/config/project",
+            json={
+                "project_path": project_path,
+                "lint_command": "flake8 .",
+                "test_command": "pytest",
+                "preferred_coding_agent": "my-claude-account",
+            },
+        )
+        assert response1.status_code == 200
+        assert response1.json()["preferred_coding_agent"] == "my-claude-account"
+
+        # Second save WITHOUT preferred_coding_agent in request
+        # This should preserve the existing value
+        response2 = client.put(
+            "/api/v1/config/project",
+            json={
+                "project_path": project_path,
+                "lint_command": "flake8 . --max-line-length=120",
+                "test_command": "pytest -v",
+            },
+        )
+        assert response2.status_code == 200
+        # Bug: This was getting cleared because Pydantic defaults to None
+        assert response2.json()["preferred_coding_agent"] == "my-claude-account"
+
+        # Verify via GET as well
+        response3 = client.get(f"/api/v1/config/project?project_path={project_path}")
+        assert response3.status_code == 200
+        assert response3.json()["preferred_coding_agent"] == "my-claude-account"
+
+    def test_explicit_clear_preferred_coding_agent(self, client, tmp_path):
+        """Explicitly passing null should clear preferred_coding_agent.
+
+        This tests the distinction between "field not sent" (preserve existing)
+        and "field explicitly set to null" (clear the value).
+        """
+        project_dir = tmp_path / "test-project-clear"
+        project_dir.mkdir()
+        project_path = str(project_dir)
+
+        # First save with preferred_coding_agent
+        response1 = client.put(
+            "/api/v1/config/project",
+            json={
+                "project_path": project_path,
+                "preferred_coding_agent": "my-codex-account",
+            },
+        )
+        assert response1.status_code == 200
+        assert response1.json()["preferred_coding_agent"] == "my-codex-account"
+
+        # Explicitly clear by passing null
+        response2 = client.put(
+            "/api/v1/config/project",
+            json={
+                "project_path": project_path,
+                "preferred_coding_agent": None,
+            },
+        )
+        assert response2.status_code == 200
+        assert response2.json()["preferred_coding_agent"] is None
+
+    def test_autoconfigure_agent_persists_across_saves(self, client, tmp_path):
+        """Autoconfigure agent should persist and not be cleared by other saves."""
+        project_dir = tmp_path / "test-project-autoconfig"
+        project_dir.mkdir()
+        project_path = str(project_dir)
+
+        # Save with autoconfigure_agent
+        response1 = client.put(
+            "/api/v1/config/project",
+            json={
+                "project_path": project_path,
+                "autoconfigure_agent": "my-codex-account",
+            },
+        )
+        assert response1.status_code == 200
+        assert response1.json()["autoconfigure_agent"] == "my-codex-account"
+
+        # Save lint command WITHOUT autoconfigure_agent — should preserve it
+        response2 = client.put(
+            "/api/v1/config/project",
+            json={
+                "project_path": project_path,
+                "lint_command": "flake8 .",
+            },
+        )
+        assert response2.status_code == 200
+        assert response2.json()["autoconfigure_agent"] == "my-codex-account"
+
+        # Verify via GET
+        response3 = client.get(f"/api/v1/config/project?project_path={project_path}")
+        assert response3.status_code == 200
+        assert response3.json()["autoconfigure_agent"] == "my-codex-account"
+
     def test_get_session_log_path(self, client):
         """Can get session log file path."""
         # Create a session
