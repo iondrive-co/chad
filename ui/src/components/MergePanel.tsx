@@ -25,42 +25,25 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
   const [currentBranch, setCurrentBranch] = useState("");
   const [targetBranch, setTargetBranch] = useState("");
   const [commitMessage, setCommitMessage] = useState("");
+  const [worktreeHasChanges, setWorktreeHasChanges] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // Load initial state
+  // Load available branches and initialize the comparison target.
   useEffect(() => {
     const load = async () => {
       try {
-        // Get diff summary
-        const summaryData = await api.getDiffSummary(sessionId);
-        setFilesChanged(summaryData.files_changed);
-        setInsertions(summaryData.insertions);
-        setDeletions(summaryData.deletions);
-
-        // No actual file changes — dismiss instead of showing empty merge panel.
-        // This happens when old commits exist on the branch from a previous task
-        // but the current task made no changes.
-        if (
-          summaryData.files_changed === 0 &&
-          summaryData.insertions === 0 &&
-          summaryData.deletions === 0
-        ) {
-          onDismiss();
-          return;
-        }
-
-        // Get branches
-        const branchData = await api.getBranches(sessionId);
+        const [branchData, worktreeStatus] = await Promise.all([
+          api.getBranches(sessionId),
+          api.getWorktreeStatus(sessionId),
+        ]);
         setBranches(branchData.branches);
         setDefaultBranch(branchData.default);
         setCurrentBranch(branchData.current);
-        // Default merge target to the primary repo branch (first in list), not the worktree branch
+        setWorktreeHasChanges(worktreeStatus.has_changes);
         const preferredTarget = branchData.branches[0] ?? branchData.default ?? "";
         setTargetBranch(preferredTarget);
-
-        setPhase("changes");
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to load changes");
         setPhase("error");
@@ -69,6 +52,43 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
     load();
   }, [api, sessionId]);
 
+  useEffect(() => {
+    if (!targetBranch) {
+      return;
+    }
+
+    const loadDiffSummary = async () => {
+      setLoading(true);
+      try {
+        const summaryData = await api.getDiffSummary(sessionId, targetBranch);
+        setFilesChanged(summaryData.files_changed);
+        setInsertions(summaryData.insertions);
+        setDeletions(summaryData.deletions);
+        setDiff(null);
+        setShowDiff(false);
+
+        if (
+          summaryData.files_changed === 0 &&
+          summaryData.insertions === 0 &&
+          summaryData.deletions === 0 &&
+          !worktreeHasChanges
+        ) {
+          onDismiss();
+          return;
+        }
+
+        setPhase("changes");
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to load changes");
+        setPhase("error");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    void loadDiffSummary();
+  }, [api, onDismiss, sessionId, targetBranch, worktreeHasChanges]);
+
   const handleViewChanges = useCallback(async () => {
     if (diff) {
       setShowDiff(!showDiff);
@@ -76,7 +96,7 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
     }
     setLoading(true);
     try {
-      const fullDiff = await api.getFullDiff(sessionId);
+      const fullDiff = await api.getFullDiff(sessionId, targetBranch || null);
       setDiff(fullDiff);
       setShowDiff(true);
     } catch (e) {
@@ -84,7 +104,7 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [api, sessionId, diff, showDiff]);
+  }, [api, sessionId, diff, showDiff, targetBranch]);
 
   const handleMerge = useCallback(async () => {
     setPhase("merging");
@@ -236,6 +256,14 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
         {insertions > 0 && <span className="insertions">+{insertions}</span>}
         {deletions > 0 && <span className="deletions">-{deletions}</span>}
       </div>
+
+      {filesChanged === 0 && insertions === 0 && deletions === 0 && worktreeHasChanges && (
+        <div className="error-text">
+          These session changes are already present on "{targetBranch}", so there is nothing to
+          merge into that branch. Choose a different target branch if you want to merge the same
+          changes elsewhere.
+        </div>
+      )}
 
       <button
         className="expand-btn"

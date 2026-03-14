@@ -355,6 +355,31 @@ class TestGitWorktreeManager:
 
         assert mgr.has_changes(task_id) is True
 
+    def test_get_worktree_base_commit_from_reflog(self, git_repo):
+        """The original worktree base commit should be recoverable from branch reflog."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-task-6b"
+
+        _, base_commit = mgr.create_worktree(task_id)
+
+        assert mgr.get_worktree_base_commit(task_id) == base_commit
+
+    def test_has_changes_ignores_preexisting_feature_branch_commits(self, git_repo):
+        """A fresh worktree on a feature branch should not report agent changes yet."""
+        subprocess.run(["git", "checkout", "-b", "feature"], cwd=git_repo, check=True, capture_output=True)
+        (git_repo / "feature.txt").write_text("feature branch baseline\n")
+        subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Feature baseline"], cwd=git_repo, check=True, capture_output=True)
+
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-task-6c"
+
+        worktree_path, base_commit = mgr.create_worktree(task_id)
+
+        assert worktree_path.exists()
+        assert mgr.get_worktree_base_commit(task_id) == base_commit
+        assert mgr.has_changes(task_id) is False
+
     def test_get_diff_summary(self, git_repo):
         """Test getting diff summary for uncommitted changes."""
         mgr = GitWorktreeManager(git_repo)
@@ -395,6 +420,36 @@ class TestGitWorktreeManager:
         names = [Path(f.new_path).name for f in diffs]
         assert "uncommitted.txt" in names
         assert "committed.txt" in names
+
+    def test_parsed_diff_can_compare_against_target_branch_tip(self, git_repo):
+        """Comparing against a target branch should only show worktree-side changes."""
+        mgr = GitWorktreeManager(git_repo)
+        task_id = "test-task-7d"
+
+        worktree_path, _ = mgr.create_worktree(task_id)
+
+        (git_repo / "main-only.txt").write_text("main branch change\n")
+        subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Main branch update"],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+        )
+
+        (worktree_path / "agent-only.txt").write_text("agent change\n")
+        subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Worktree update"],
+            cwd=worktree_path,
+            check=True,
+            capture_output=True,
+        )
+
+        diffs = mgr.get_parsed_diff(task_id, compare_branch="main")
+        names = sorted(Path(f.new_path).name for f in diffs)
+
+        assert names == ["agent-only.txt"]
 
     def test_commit_all_changes(self, git_repo):
         """Test committing all changes."""

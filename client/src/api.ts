@@ -277,12 +277,22 @@ export class ChadAPI {
     return this.get(`/api/v1/sessions/${sessionId}/worktree`);
   }
 
-  getDiffSummary(sessionId: string): Promise<DiffSummary> {
-    return this.get(`/api/v1/sessions/${sessionId}/worktree/diff`);
+  getDiffSummary(sessionId: string, compareBranch?: string | null): Promise<DiffSummary> {
+    const params = new URLSearchParams();
+    if (compareBranch) {
+      params.set("compare_branch", compareBranch);
+    }
+    const suffix = params.size > 0 ? `?${params.toString()}` : "";
+    return this.get(`/api/v1/sessions/${sessionId}/worktree/diff${suffix}`);
   }
 
-  getFullDiff(sessionId: string): Promise<DiffFull> {
-    return this.get(`/api/v1/sessions/${sessionId}/worktree/diff/full`);
+  getFullDiff(sessionId: string, compareBranch?: string | null): Promise<DiffFull> {
+    const params = new URLSearchParams();
+    if (compareBranch) {
+      params.set("compare_branch", compareBranch);
+    }
+    const suffix = params.size > 0 ? `?${params.toString()}` : "";
+    return this.get(`/api/v1/sessions/${sessionId}/worktree/diff/full${suffix}`);
   }
 
   mergeWorktree(

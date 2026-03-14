@@ -113,7 +113,7 @@ async def get_worktree_status(session_id: str) -> WorktreeStatus:
     if not exists:
         return WorktreeStatus(exists=False)
 
-    has_changes = wt_mgr.has_changes(session_id)
+    has_changes = wt_mgr.has_changes(session_id, session.worktree_base_commit)
     session.has_worktree_changes = has_changes
 
     return WorktreeStatus(
@@ -126,7 +126,10 @@ async def get_worktree_status(session_id: str) -> WorktreeStatus:
 
 
 @router.get("/{session_id}/worktree/diff", response_model=DiffSummary)
-async def get_diff_summary(session_id: str) -> DiffSummary:
+async def get_diff_summary(
+    session_id: str,
+    compare_branch: str | None = None,
+) -> DiffSummary:
     """Get a summary of changes in the worktree."""
     session = _get_session_or_404(session_id)
 
@@ -137,7 +140,14 @@ async def get_diff_summary(session_id: str) -> DiffSummary:
     if not wt_mgr.worktree_exists(session_id):
         raise HTTPException(status_code=400, detail="Worktree does not exist")
 
-    summary_text = wt_mgr.get_diff_summary(session_id, session.worktree_base_commit)
+    try:
+        summary_text = wt_mgr.get_diff_summary(
+            session_id,
+            session.worktree_base_commit,
+            compare_branch=compare_branch,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     files_changed, insertions, deletions = _parse_diff_stats(summary_text)
 
     return DiffSummary(
@@ -149,7 +159,10 @@ async def get_diff_summary(session_id: str) -> DiffSummary:
 
 
 @router.get("/{session_id}/worktree/diff/full", response_model=DiffFullResponse)
-async def get_full_diff(session_id: str) -> DiffFullResponse:
+async def get_full_diff(
+    session_id: str,
+    compare_branch: str | None = None,
+) -> DiffFullResponse:
     """Get the full diff with file-by-file details."""
     session = _get_session_or_404(session_id)
 
@@ -161,7 +174,14 @@ async def get_full_diff(session_id: str) -> DiffFullResponse:
         raise HTTPException(status_code=400, detail="Worktree does not exist")
 
     # Get summary
-    summary_text = wt_mgr.get_diff_summary(session_id, session.worktree_base_commit)
+    try:
+        summary_text = wt_mgr.get_diff_summary(
+            session_id,
+            session.worktree_base_commit,
+            compare_branch=compare_branch,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     files_changed, insertions, deletions = _parse_diff_stats(summary_text)
     summary = DiffSummary(
         summary=summary_text,
@@ -171,7 +191,11 @@ async def get_full_diff(session_id: str) -> DiffFullResponse:
     )
 
     # Get parsed diff
-    parsed_files = wt_mgr.get_parsed_diff(session_id, session.worktree_base_commit)
+    parsed_files = wt_mgr.get_parsed_diff(
+        session_id,
+        session.worktree_base_commit,
+        compare_branch=compare_branch,
+    )
 
     # Convert to schema types
     schema_files = []

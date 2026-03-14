@@ -383,7 +383,11 @@ class SessionManager:
                         if wt_path.exists():
                             session.worktree_path = wt_path
                             session.worktree_branch = branch
-                            session.has_worktree_changes = git_mgr.has_changes(session_id)
+                            session.worktree_base_commit = git_mgr.get_worktree_base_commit(session_id)
+                            session.has_worktree_changes = git_mgr.has_changes(
+                                session_id,
+                                session.worktree_base_commit,
+                            )
                     except Exception:
                         pass
 

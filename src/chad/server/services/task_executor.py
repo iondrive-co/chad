@@ -1534,7 +1534,10 @@ class TaskExecutor:
                 task.completed_at = datetime.now(timezone.utc)
                 session.active = False
                 session.status = "interrupted"
-                session.has_worktree_changes = git_mgr.has_changes(task.session_id)
+                session.has_worktree_changes = git_mgr.has_changes(
+                    task.session_id,
+                    session.worktree_base_commit,
+                )
                 if task.event_log:
                     task.event_log.log(SessionEndedEvent(success=False, reason="timeout"))
                 return
@@ -1545,7 +1548,10 @@ class TaskExecutor:
             if final_exit_code == 0:
                 task.state = TaskState.COMPLETED
                 task.result = "Task completed successfully"
-                session.has_worktree_changes = git_mgr.has_changes(task.session_id)
+                session.has_worktree_changes = git_mgr.has_changes(
+                    task.session_id,
+                    session.worktree_base_commit,
+                )
                 session.status = "completed"
                 emit(
                     "complete",
