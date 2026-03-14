@@ -899,6 +899,87 @@ def test_continuation_loop_waits_for_completion_json(tmp_path, monkeypatch):
     assert ended_events[-1].get("success") is True
 
 
+def test_continuation_loop_uses_full_resume_prompt(tmp_path, monkeypatch):
+    """Continuation retries should use event-log resume context, not only terminal tail."""
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"accounts": {"test": {"provider": "openai"}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHAD_CONFIG", str(config_path))
+    monkeypatch.setenv("CHAD_LOG_DIR", str(tmp_path / "logs"))
+
+    session_manager = SessionManager()
+    session = session_manager.create_session(project_path=str(repo_path), name="continuation-resume-test")
+
+    executor = TaskExecutor(
+        ConfigManager(),
+        session_manager,
+        inactivity_timeout=30.0,
+    )
+
+    import chad.server.services.task_executor as te
+
+    call_count = [0]
+    continuation_prompts: list[str | None] = []
+
+    def mock_command(
+        provider,
+        account_name,
+        project_path,
+        task_description=None,
+        screenshots=None,
+        phase="combined",
+        exploration_output=None,
+        **kwargs,
+    ):
+        call_count[0] += 1
+        if phase == "continuation":
+            continuation_prompts.append(kwargs.get("override_prompt"))
+
+        if call_count[0] == 1:
+            script = (
+                "echo '```json'; "
+                "echo '{\"type\": \"progress\", \"summary\": \"Found the issue\", "
+                "\\\"location\\\": \\\"src/main.py:42\\\", "
+                "\\\"next_step\\\": \\\"Implement the fix\\\"}'; "
+                "echo '```'"
+            )
+        else:
+            script = (
+                "echo '```json'; "
+                "echo '{\"change_summary\": \"Fixed the bug\", "
+                "\\\"files_changed\\\": [\\\"src/main.py\\\"], "
+                "\\\"completion_status\\\": \\\"success\\\"}'; "
+                "echo '```'"
+            )
+
+        return ["bash", "-c", script], {}, None
+
+    monkeypatch.setattr(te, "build_agent_command", mock_command)
+
+    task = executor.start_task(
+        session_id=session.id,
+        project_path=str(repo_path),
+        task_description="Fix the bug",
+        coding_account="test",
+    )
+
+    task._thread.join(timeout=10)
+
+    assert task.state == TaskState.COMPLETED, f"Task state was {task.state}, error: {task.error}"
+    assert continuation_prompts, "Expected at least one continuation prompt"
+    prompt = continuation_prompts[0]
+    assert prompt is not None
+    assert "<previous_session>" in prompt
+    assert "## Provider Handoff Context" in prompt
+    assert "Fix the bug" in prompt
+    assert "Most recent output from your previous attempt" not in prompt
+
+
 def test_combined_coding_phase_completes_with_json(tmp_path, monkeypatch):
     """Combined coding phase uses a single prompt and completes on completion JSON."""
     repo_path = tmp_path / "repo"

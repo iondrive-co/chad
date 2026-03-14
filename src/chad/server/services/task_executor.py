@@ -971,6 +971,15 @@ class TaskExecutor:
         Returns:
             Tuple of (exit_code, captured_output)
         """
+        if phase == "continuation" and override_prompt is None and task.event_log:
+            from chad.util.handoff import build_resume_prompt
+
+            override_prompt = build_resume_prompt(
+                task.event_log,
+                new_message=task_description,
+                target_provider=coding_provider,
+            )
+
         last_output_time = time.time()
         last_warning_time = 0.0
         last_log_flush = time.time()
