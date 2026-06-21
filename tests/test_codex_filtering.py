@@ -1,182 +1,153 @@
-"""Tests for Codex prompt echo filtering."""
+"""Tests for Codex output normalization into the agent-harness transcript.
 
-import re
+Codex prints its own rendered transcript (banner, echoed prompt, `codex`/`exec`
+blocks). CodexStreamParser turns that into the same shape the UI renders for every
+provider: clean prose plus structured Bash tool calls, with the banner, prompt
+echo, and raw command output dropped.
 
-
-def strip_ansi(text: str) -> str:
-    """Remove ANSI escape codes from text."""
-    ansi_pattern = re.compile(r'\x1b\[[0-9;]*m')
-    return ansi_pattern.sub('', text)
-
-
-# Simulated Codex output with ANSI codes
-CODEX_RAW_OUTPUT = """\
-\x1b[2m2026-02-05T21:42:38.165352Z\x1b[0m \x1b[31mERROR\x1b[0m some error message
-OpenAI Codex v0.92.0 (research preview)
---------
-\x1b[1mworkdir:\x1b[0m /tmp/tmpjwlejti6
-\x1b[1mmodel:\x1b[0m gpt-5.2-codex
-\x1b[1mprovider:\x1b[0m openai
-\x1b[1mapproval:\x1b[0m never
-\x1b[1msandbox:\x1b[0m danger-full-access
-\x1b[1msession id:\x1b[0m 019c2fc1-d7a7-7d13-ac6a-0229bdab82ec
---------
-\x1b[36muser\x1b[0m
-
-## Verification
-
-This is the prompt that should be filtered out.
-It contains the user's task description.
-
-\x1b[36mmcp startup:\x1b[0m no servers
-\x1b[1mthinking\x1b[0m
-**Agent is now working on the task**
-This content should be shown to the user.
+The fixture below is modeled on real `codex exec` output (v0.141.0).
 """
 
+from chad.server.services.codex_parser import CodexStreamParser, parse_exec_command
 
-def filter_codex_output(raw_output: str) -> str:
-    """Filter Codex prompt echo from output.
+# Real-shaped Codex exec output, with ANSI on the markers/banner as Codex emits.
+CODEX_RAW = (
+    "\x1b[2m2026-06-21T10:00:00Z\x1b[0m \x1b[31mERROR\x1b[0m transient startup warning\n"
+    "OpenAI Codex v0.141.0\n"
+    "--------\n"
+    "\x1b[1mworkdir:\x1b[0m /home/miles/chad/.chad-worktrees/00f848b9\n"
+    "\x1b[1mmodel:\x1b[0m gpt-5.5\n"
+    "\x1b[1mprovider:\x1b[0m openai\n"
+    "\x1b[1msandbox:\x1b[0m danger-full-access\n"
+    "\x1b[1msession id:\x1b[0m 019ee898-d6d4-7fb0-b043-813354bbb862\n"
+    "--------\n"
+    "\x1b[36muser\x1b[0m\n"
+    "# Project Documentation\n"
+    "Read the following project files from disk before making changes:\n"
+    "## Verification\n"
+    "# Task\n"
+    "Summarise this repo\n"
+    "Do not run `git commit` or `git add`.\n"
+    "\x1b[36mcodex\x1b[0m\n"
+    "EXPLORATION_RESULT: The requested project docs are fully read; no code change "
+    "is implied by “Summarise this repo,” so I’m gathering structure.\n"
+    "\x1b[36mexec\x1b[0m\n"
+    "/bin/bash -lc \"find . -maxdepth 2 -type f | sort | sed -n '1,220p'\" "
+    "in /home/miles/chad/.chad-worktrees/00f848b9\n"
+    " succeeded in 0ms:\n"
+    "./.claude/Claude.md\n"
+    "./AGENTS.md\n"
+    "./pyproject.toml\n"
+    "\x1b[36mcodex\x1b[0m\n"
+    "EXPLORATION_RESULT: Lint passed with no flake8 output; starting the test suite.\n"
+    "\x1b[36mexec\x1b[0m\n"
+    "/bin/bash -lc '/home/miles/chad/.venv/bin/python -m flake8 .' in /home/miles/chad\n"
+    " succeeded in 793ms:\n"
+    "\x1b[36mexec\x1b[0m\n"
+    "/bin/bash -lc '/home/miles/chad/.venv/bin/python -m pytest tests/ -v' in /home/miles/chad\n"
+    "\x1b[36mcodex\x1b[0m\n"
+    "EXPLORATION_RESULT: Pytest collected 1203 tests; no failures so far.\n"
+    "tokens used\n"
+    "3,988\n"
+)
 
-    Returns the content that should be shown to the user.
-    """
-    normalized = raw_output.replace("\r\n", "\n").replace("\r", "\n")
 
-    # Strip ANSI codes for pattern matching
-    ansi_pattern = re.compile(r'\x1b\[[0-9;]*m')
-    stripped = ansi_pattern.sub('', normalized)
-
-    # Find the "user" marker (after second --------)
-    user_line_match = re.search(r'\n--------\nuser\n', stripped)
-
-    if not user_line_match:
-        # No prompt echo detected, return as-is
-        return raw_output
-
-    # Find the position in original string
-    user_pattern = re.compile(r'\n--------\n(?:\x1b\[[0-9;]*m)*user(?:\x1b\[[0-9;]*m)*\n')
-    match = user_pattern.search(normalized)
-
-    if not match:
-        return raw_output
-
-    # Content before the "user" line (banner + header)
-    pre_echo = normalized[:match.start()]
-
-    # Content after the "user" line (need to find mcp startup)
-    post_user = normalized[match.end():]
-    stripped_post = ansi_pattern.sub('', post_user)
-
-    if "mcp startup:" not in stripped_post.lower():
-        # No end marker yet, can't filter
-        return raw_output
-
-    # Find mcp startup marker
-    mcp_pattern = re.compile(r'(?:\x1b\[[0-9;]*m)*mcp startup:(?:\x1b\[[0-9;]*m)*[^\n]*\n', re.IGNORECASE)
-    mcp_match = mcp_pattern.search(post_user)
-
-    if mcp_match:
-        agent_output = post_user[mcp_match.end():]
+def _run(parser: CodexStreamParser, raw: str, chunk_size: int | None = None):
+    """Feed raw text (optionally split into chunks) and return (prose, tool_items)."""
+    data = raw.encode()
+    items = []
+    if chunk_size is None:
+        items.extend(parser.feed(data))
     else:
-        # Fallback
-        marker_pos = stripped_post.lower().find("mcp startup:")
-        newline_after = stripped_post.find("\n", marker_pos)
-        if newline_after != -1:
-            agent_output = post_user[newline_after + 1:]
-        else:
-            agent_output = ""
-
-    # Return pre-echo (header) + agent output
-    return pre_echo + "\n" + agent_output
+        for i in range(0, len(data), chunk_size):
+            items.extend(parser.feed(data[i:i + chunk_size]))
+    items.extend(parser.flush())
+    prose = "".join(text for kind, text in items if kind == "text")
+    tools = [payload for kind, payload in items if kind == "tool"]
+    return prose, tools
 
 
-class TestCodexFiltering:
-    """Tests for Codex output filtering."""
+class TestCodexStreamParser:
+    def test_drops_banner_and_header(self):
+        prose, _ = _run(CodexStreamParser(), CODEX_RAW)
+        assert "OpenAI Codex" not in prose
+        assert "workdir:" not in prose
+        assert "session id:" not in prose
+        assert "danger-full-access" not in prose
 
-    def test_filter_removes_prompt_echo(self):
-        """Filter should remove the echoed prompt."""
-        result = filter_codex_output(CODEX_RAW_OUTPUT)
+    def test_drops_prompt_echo(self):
+        prose, _ = _run(CodexStreamParser(), CODEX_RAW)
+        assert "# Project Documentation" not in prose
+        assert "## Verification" not in prose
+        assert "Read the following project files" not in prose
+        assert "git commit" not in prose
 
-        # Should NOT contain the prompt text
-        assert "This is the prompt that should be filtered out" not in result
-        assert "It contains the user's task description" not in result
-        assert "## Verification" not in result
+    def test_keeps_agent_prose(self):
+        prose, _ = _run(CodexStreamParser(), CODEX_RAW)
+        assert "The requested project docs are fully read" in prose
+        assert "starting the test suite" in prose
+        assert "Pytest collected 1203 tests" in prose
 
-    def test_filter_keeps_banner_and_header(self):
-        """Filter should keep the Codex banner and session info."""
-        result = filter_codex_output(CODEX_RAW_OUTPUT)
+    def test_exec_becomes_bash_tool_calls(self):
+        _, tools = _run(CodexStreamParser(), CODEX_RAW)
+        commands = [t["command"] for t in tools]
+        assert all(t["tool"] == "Bash" for t in tools)
+        assert any("find . -maxdepth 2" in c for c in commands)
+        assert any("flake8 ." in c for c in commands)
+        assert any("pytest tests/ -v" in c for c in commands)
+        # The bash -lc wrapper and the trailing `in <dir>` are stripped from the command.
+        assert all("bash -lc" not in c for c in commands)
+        assert all(" in /home/miles" not in c for c in commands)
 
-        # Should contain banner
-        assert "OpenAI Codex v0.92.0" in result
+    def test_drops_command_output(self):
+        prose, _ = _run(CodexStreamParser(), CODEX_RAW)
+        assert "./.claude/Claude.md" not in prose
+        assert "./AGENTS.md" not in prose
+        assert "succeeded in" not in prose
 
-        # Should contain header info
-        stripped = strip_ansi(result)
-        assert "workdir:" in stripped
-        assert "model:" in stripped
-        assert "session id:" in stripped
+    def test_drops_tokens_used_footer(self):
+        prose, _ = _run(CodexStreamParser(), CODEX_RAW)
+        assert "tokens used" not in prose
+        assert "3,988" not in prose
 
-    def test_filter_keeps_agent_output(self):
-        """Filter should keep the agent's actual work output."""
-        result = filter_codex_output(CODEX_RAW_OUTPUT)
+    def test_strips_ansi_from_prose(self):
+        prose, _ = _run(CodexStreamParser(), CODEX_RAW)
+        assert "\x1b[" not in prose
 
-        # Should contain agent work
-        assert "Agent is now working on the task" in result
-        assert "This content should be shown to the user" in result
+    def test_streaming_matches_whole_feed(self):
+        """Splitting input across arbitrary chunk boundaries yields the same result."""
+        whole_prose, whole_tools = _run(CodexStreamParser(), CODEX_RAW)
+        for size in (1, 3, 7, 50):
+            prose, tools = _run(CodexStreamParser(), CODEX_RAW, chunk_size=size)
+            assert prose == whole_prose, f"prose differs at chunk_size={size}"
+            assert [t["command"] for t in tools] == [t["command"] for t in whole_tools], (
+                f"tools differ at chunk_size={size}"
+            )
 
-    def test_filter_handles_no_prompt_echo(self):
-        """Filter should pass through output without prompt echo."""
-        simple_output = "Just some output\nNo markers here\n"
-        result = filter_codex_output(simple_output)
-        assert result == simple_output
-
-    def test_filter_handles_ansi_codes_in_markers(self):
-        """Filter should handle ANSI codes in the user/mcp markers."""
-        # The actual output has ANSI codes like [36muser[0m
-        result = filter_codex_output(CODEX_RAW_OUTPUT)
-
-        # Verify we got to the agent output
-        assert "thinking" in strip_ansi(result) or "Agent is now working" in result
-
-
-class TestCodexBufferFlush:
-    """Tests for Codex output buffer flush behavior."""
-
-    def test_unflushed_buffer_loses_content(self):
-        """Demonstrate that buffered content without mcp marker needs explicit flush."""
-        # Simulate incremental Codex output that hasn't reached mcp startup marker
-        buffer = ""
-        captured = []
-
-        # First chunk: header starts
-        buffer += "OpenAI Codex v0.92.0\n--------\nworkdir: /tmp\n"
-        # Buffer hasn't seen markers yet, nothing emitted
-
-        # Stream ends unexpectedly - buffer has content
-        assert buffer.strip()
-        assert len(captured) == 0
-
-        # Without flush, this content would be lost
-        # With flush: captured_output.append(codex_output_buffer)
-        captured.append(buffer)
-        assert "OpenAI Codex" in "\n".join(captured)
-
-    def test_full_output_not_truncated_by_terminal(self):
-        """Accumulated text captures full output regardless of terminal screen size."""
-        accumulated_text = []
-
-        # Simulate 200 lines of agent output being accumulated
-        for i in range(200):
-            chunk = f"Agent output line {i}\n"
-            accumulated_text.append(chunk)
-
-        full_output = "\n".join(accumulated_text)
-
-        # All lines should be present (unlike terminal.get_text() which only has last ~50)
-        assert "Agent output line 0" in full_output
-        assert "Agent output line 100" in full_output
-        assert "Agent output line 199" in full_output
+    def test_handles_output_with_no_markers(self):
+        """Output before any marker (e.g. a bare banner) is dropped, not leaked."""
+        prose, tools = _run(CodexStreamParser(), "just some banner text\nno markers\n")
+        assert prose == ""
+        assert tools == []
 
 
-if __name__ == "__main__":
-    import pytest
-    pytest.main([__file__, "-v"])
+class TestParseExecCommand:
+    def test_bash_lc_double_quotes(self):
+        cmd, cwd = parse_exec_command('/bin/bash -lc "find . -type f" in /home/x')
+        assert cmd == "find . -type f"
+        assert cwd == "/home/x"
+
+    def test_bash_lc_single_quotes(self):
+        cmd, cwd = parse_exec_command("/bin/bash -lc 'pytest -q' in /home/x/proj")
+        assert cmd == "pytest -q"
+        assert cwd == "/home/x/proj"
+
+    def test_non_bash_command(self):
+        cmd, cwd = parse_exec_command("npm run build in /srv/app")
+        assert cmd == "npm run build"
+        assert cwd == "/srv/app"
+
+    def test_no_workdir(self):
+        cmd, cwd = parse_exec_command('/bin/bash -lc "echo hi"')
+        assert cmd == "echo hi"
+        assert cwd is None

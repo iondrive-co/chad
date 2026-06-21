@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import signal
 import sys
 import warnings
 from pathlib import Path
@@ -21,27 +23,56 @@ sys.path = [SRC_STR, TESTS_STR] + [
     p for p in sys.path if p not in (SRC_STR, TESTS_STR)
 ]
 
+# Imported at module load (not lazily inside the SIGTERM handler) so a SIGTERM
+# arriving mid-import can't deadlock on the import lock while the handler runs.
+from test_helpers import reap_child_processes  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Process-leak safety net
 #
 # Many tests spawn real subprocesses and clean them up in a per-test ``finally``
-# block (e.g. the preview-tunnel ``serve.py`` autodetect test). When a test is
-# skipped, errors, or the whole run is aborted with Ctrl-C, that teardown may not
-# run and the child is reparented to init and survives forever. At the end of the
-# session — which still runs on normal completion, test failures, and
-# KeyboardInterrupt — reap any child the suite left behind so a run never leaks
-# processes regardless of whether an individual test cleaned up after itself.
-#
-# We deliberately do NOT install a SIGTERM handler: SIGTERM is exercised by the
-# app and by individual tests as a normal mechanism, so a global handler that
-# reaped on every SIGTERM would tear down a still-running test's own children.
+# block (e.g. the preview-tunnel ``serve.py`` autodetect test). That teardown is
+# skipped when a run is interrupted, leaving the child reparented to init and
+# running forever. We reap any leftover child of the pytest process on two
+# triggers:
+#   - pytest_sessionfinish: normal completion, test failures, and Ctrl-C
+#     (KeyboardInterrupt) all still run it.
+#   - a SIGTERM handler: a ``timeout``-wrapped run (how agents and CI run the
+#     suite) is killed with SIGTERM, which by default skips finally/atexit; this
+#     is the case that originally orphaned ``serve.py``. The handler is dormant
+#     during a normal run — nothing sends SIGTERM to the pytest process itself —
+#     and only fires when the run is being torn down from outside.
 # ---------------------------------------------------------------------------
+
+_PREVIOUS_SIGTERM_HANDLER = None
+
+
+def _sigterm_reap_handler(signum, frame):
+    """Reap leaked children before a SIGTERM-interrupted run is torn down, then
+    chain to the previous handler so the run still terminates."""
+    reap_child_processes(timeout=2.0)
+    signal.signal(signal.SIGTERM, _PREVIOUS_SIGTERM_HANDLER or signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def pytest_configure(config):
+    global _PREVIOUS_SIGTERM_HANDLER
+    if os.name == "nt":
+        return
+    _PREVIOUS_SIGTERM_HANDLER = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, _sigterm_reap_handler)
+
+
+def pytest_unconfigure(config):
+    global _PREVIOUS_SIGTERM_HANDLER
+    if os.name == "nt" or _PREVIOUS_SIGTERM_HANDLER is None:
+        return
+    signal.signal(signal.SIGTERM, _PREVIOUS_SIGTERM_HANDLER)
+    _PREVIOUS_SIGTERM_HANDLER = None
 
 
 def pytest_sessionfinish(session, exitstatus):
-    from test_helpers import reap_child_processes
-
     leaked = reap_child_processes()
     if leaked:
         warnings.warn(

@@ -58,6 +58,9 @@ def _write_synthetic_log(session_id: str, log_dir: Path) -> Path:
         )
     )
     log.log(ToolCallStartedEvent(tool_call_id="t1", tool="Read", path="src/bug.py"))
+    # An EXPLORATION_RESULT progress line (emitted by every provider). The panel
+    # should show the summary but strip the machine "EXPLORATION_RESULT:" prefix.
+    log.log(TerminalOutputEvent(data="EXPLORATION_RESULT: tracing the validate() ordering\n"))
     log.log(TerminalOutputEvent(data=f"{PROSE_MARKER}: the null check runs after validation.\n"))
     log.log(ToolCallStartedEvent(tool_call_id="t2", tool="Grep", args={"pattern": "validate"}))
     log.log(ToolCallStartedEvent(tool_call_id="t3", tool="Edit", path="src/bug.py"))
@@ -147,6 +150,10 @@ def test_live_view_renders_harness_transcript(tmp_path):
     assert LEAKED_JSON_MARKER not in text, f"leaked completion JSON; got:\n{text}"
     assert COLLAPSED_SUMMARY_MARKER not in text, f"leaked collapsed summary; got:\n{text}"
     assert "```" not in text, f"leaked code fence; got:\n{text}"
+
+    # The EXPLORATION_RESULT: progress prefix is stripped, but its summary is kept.
+    assert "EXPLORATION_RESULT:" not in text, f"leaked progress marker; got:\n{text}"
+    assert "tracing the validate() ordering" in text, f"dropped progress summary; got:\n{text}"
 
     # Behaves like a terminal: scrollable and bottom-anchored on load.
     assert metrics["sh"] >= metrics["ch"], f"transcript not laid out: {metrics}"

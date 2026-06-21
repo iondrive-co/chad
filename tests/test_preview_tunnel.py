@@ -686,10 +686,19 @@ class TestPortAutodetection:
 
         mock_registry_fn.return_value = MagicMock()
 
-        # Write a tiny server script that prints a URL and listens
+        # Write a tiny server script that prints a URL and listens. It self-
+        # terminates if orphaned (parent reparented to init) so a hard-killed
+        # test run — SIGTERM from a `timeout` wrapper, where pytest teardown
+        # never runs — can't leave it serving forever.
         script = tmp_path / "serve.py"
         script.write_text(
-            "import http.server, sys\n"
+            "import http.server, os, sys, threading, time\n"
+            "def _exit_if_orphaned():\n"
+            "    while True:\n"
+            "        time.sleep(1)\n"
+            "        if os.getppid() == 1:\n"
+            "            os._exit(0)\n"
+            "threading.Thread(target=_exit_if_orphaned, daemon=True).start()\n"
             "s = http.server.HTTPServer(('127.0.0.1', 0), http.server.SimpleHTTPRequestHandler)\n"
             "print(f'http://localhost:{s.server_address[1]}/')\n"
             "sys.stdout.flush()\n"

@@ -30,6 +30,7 @@ from chad.util.prompts import (
     get_continuation_prompt,
 )
 from chad.util.installer import AIToolInstaller
+from chad.server.services.codex_parser import CodexStreamParser
 from chad.server.services.pty_stream import get_pty_stream_service, PTYEvent
 from chad.ui.terminal_emulator import TERMINAL_COLS, TERMINAL_ROWS, TerminalEmulator
 
@@ -990,16 +991,7 @@ class TaskExecutor:
             self._activity_times[task.id] = last_output_time
         terminal_buffer = bytearray()
         terminal_lock = threading.Lock()
-        first_stream_chunk_seen = False
         captured_output: list[str] = []
-
-        # For Codex, track prompt echo filtering state
-        # Codex echoes the stdin prompt in format: "-------- user" + prompt + "mcp startup:"
-        # We keep content BEFORE "-------- user", filter BETWEEN that and "mcp startup:",
-        # and show content AFTER "mcp startup:"
-        codex_in_prompt_echo = False  # True when we're in the echoed prompt section
-        codex_past_prompt_echo = False  # True when we've seen "mcp startup:" and are done
-        codex_output_buffer = ""  # Buffer to detect markers
 
         # Terminal emulator for extracting meaningful text from PTY output
         log_emulator = TerminalEmulator(cols=cols, rows=rows)
@@ -1057,6 +1049,9 @@ class TaskExecutor:
 
         # Create JSON parser for providers that use stream-json output
         json_parser = ClaudeStreamJsonParser() if coding_provider in ("anthropic", "qwen", "gemini", "kimi") else None
+        # Codex prints its own rendered transcript; normalize it into clean prose
+        # plus structured tool calls so the UI renders it like every other provider.
+        codex_parser = CodexStreamParser() if coding_provider == "openai" else None
 
         # Get event loop for feeding output
         session_event_loop = getattr(task, '_session_event_loop', None)
@@ -1069,10 +1064,6 @@ class TaskExecutor:
 
         def log_pty_event(event: PTYEvent):
             nonlocal last_output_time
-            nonlocal first_stream_chunk_seen
-            nonlocal codex_in_prompt_echo
-            nonlocal codex_past_prompt_echo
-            nonlocal codex_output_buffer
             if event.type == "output":
                 last_output_time = time.time()
                 with self._lock:
@@ -1082,13 +1073,6 @@ class TaskExecutor:
                     chunk_bytes = base64.b64decode(event.data)
                 except Exception:
                     chunk_bytes = b""
-
-                # Suppress the provider launch banner
-                if not first_stream_chunk_seen:
-                    first_stream_chunk_seen = True
-                    decoded = chunk_bytes.decode(errors="ignore")
-                    if "OpenAI Codex" in decoded or ("model:" in decoded and "directory:" in decoded):
-                        return
 
                 # For anthropic/qwen, parse stream-json and convert to readable text
                 if json_parser:
@@ -1117,94 +1101,39 @@ class TaskExecutor:
                         event.data = ""
                         event.has_ansi = False
                         event.text = True
+                elif codex_parser:
+                    # Codex prints a rendered transcript (banner, echoed prompt,
+                    # `codex`/`exec` blocks). Normalize it into clean prose plus
+                    # structured Bash tool calls so the UI renders it uniformly.
+                    prose_parts: list[str] = []
+                    for kind, payload in codex_parser.feed(chunk_bytes):
+                        if kind == "tool" and task.event_log:
+                            task.event_log.log(ToolCallStartedEvent(
+                                tool=payload["tool"],
+                                command=payload.get("command"),
+                                cwd=payload.get("cwd"),
+                            ))
+                        elif kind == "text":
+                            prose_parts.append(payload)
+                    readable_text = _strip_binary_garbage("".join(prose_parts))
+                    if readable_text.strip():
+                        # Replace PTY payload with clean prose for subscribers.
+                        event.data = readable_text
+                        event.has_ansi = False
+                        event.text = True
+                        emit("stream", chunk=base64.b64encode(readable_text.encode()).decode())
+                        with terminal_lock:
+                            terminal_buffer.extend(readable_text.encode())
+                        _feed_captured(readable_text)
+                    else:
+                        # Suppress banner / prompt echo / command output from subscribers.
+                        event.data = ""
+                        event.has_ansi = False
+                        event.text = True
                 else:
-                    # Non-anthropic (Codex): filter out prompt echo
-                    # Codex output structure:
-                    #   [banner]
-                    #   --------
-                    #   [header info]
-                    #   --------
-                    #   user  (or [36muser[0m with ANSI)
-                    #   [prompt - FILTER THIS]
-                    #   mcp startup: ...
-                    #   [agent work - KEEP THIS]
+                    # Other text providers (e.g. Mistral): pass through after
+                    # stripping binary garbage.
                     decoded = chunk_bytes.decode(errors="replace")
-
-                    if coding_provider == "openai" and not codex_past_prompt_echo:
-                        # Buffer output to detect markers
-                        codex_output_buffer += decoded
-
-                        # Normalize line endings for matching
-                        normalized = codex_output_buffer.replace("\r\n", "\n").replace("\r", "\n")
-
-                        # Strip ANSI codes for pattern matching
-                        ansi_pattern = re.compile(r'\x1b\[[0-9;]*m')
-                        stripped = ansi_pattern.sub('', normalized)
-
-                        # Look for "user" on its own line (after second --------)
-                        user_line_match = re.search(r'\n--------\nuser\n', stripped)
-
-                        # Check if we're entering the prompt echo section
-                        if not codex_in_prompt_echo and user_line_match:
-                            # Found start of prompt echo - emit content before it
-                            user_pattern = re.compile(r'\n--------\n(?:\x1b\[[0-9;]*m)*user(?:\x1b\[[0-9;]*m)*\n')
-                            match = user_pattern.search(normalized)
-                            if match:
-                                pre_echo = normalized[:match.start()]
-                                if pre_echo.strip():
-                                    encoded = base64.b64encode(pre_echo.encode()).decode()
-                                    emit("stream", chunk=encoded)
-                                    with terminal_lock:
-                                        terminal_buffer.extend(pre_echo.encode())
-                                    _feed_captured(pre_echo)
-                                # Now in prompt echo section - update buffer
-                                codex_in_prompt_echo = True
-                                codex_output_buffer = normalized[match.end():]
-                                normalized = codex_output_buffer
-                                stripped = ansi_pattern.sub('', normalized)
-
-                        # Check if we've passed the prompt echo section
-                        if codex_in_prompt_echo and "mcp startup:" in stripped.lower():
-                            # Found end of prompt echo - extract agent output after marker
-                            mcp_pattern = re.compile(r'(?:\x1b\[[0-9;]*m)*mcp startup:(?:\x1b\[[0-9;]*m)*[^\n]*\n', re.IGNORECASE)
-                            match = mcp_pattern.search(normalized)
-                            if match:
-                                agent_output = normalized[match.end():]
-                            else:
-                                # Fallback
-                                marker_pos = stripped.lower().find("mcp startup:")
-                                newline_after = stripped.find("\n", marker_pos)
-                                if newline_after != -1:
-                                    agent_output = normalized[newline_after + 1:]
-                                else:
-                                    agent_output = ""
-                            codex_past_prompt_echo = True
-                            codex_output_buffer = ""
-                            agent_output = _strip_binary_garbage(agent_output)
-                            if agent_output.strip():
-                                encoded = base64.b64encode(agent_output.encode()).decode()
-                                emit("stream", chunk=encoded)
-                                with terminal_lock:
-                                    terminal_buffer.extend(agent_output.encode())
-                                _feed_captured(agent_output)
-                            return
-
-                        # If not in prompt echo yet, emit normally (content before markers)
-                        if not codex_in_prompt_echo:
-                            # Keep buffering to catch the marker
-                            if len(codex_output_buffer) > 2000:
-                                # No marker found - emit what we have and keep looking
-                                to_emit = _strip_binary_garbage(codex_output_buffer[:-500])
-                                codex_output_buffer = codex_output_buffer[-500:]
-                                if to_emit.strip():
-                                    encoded = base64.b64encode(to_emit.encode()).decode()
-                                    emit("stream", chunk=encoded)
-                                    with terminal_lock:
-                                        terminal_buffer.extend(to_emit.encode())
-                                    _feed_captured(to_emit)
-                        return
-
-                    # Past prompt echo - emit after stripping binary garbage
                     cleaned = _strip_binary_garbage(decoded)
                     if cleaned.strip():
                         cleaned_bytes = cleaned.encode()
@@ -1290,9 +1219,25 @@ class TaskExecutor:
                 time.sleep(0.1)
             exit_code = pty_session.exit_code if pty_session.exit_code is not None else 0
 
-        # Flush any remaining Codex output buffer that wasn't emitted
-        if codex_output_buffer:
-            captured_output.append(codex_output_buffer)
+        # Flush any trailing Codex output (last line may lack a newline)
+        if codex_parser:
+            prose_parts: list[str] = []
+            for kind, payload in codex_parser.flush():
+                if kind == "tool" and task.event_log:
+                    task.event_log.log(ToolCallStartedEvent(
+                        tool=payload["tool"],
+                        command=payload.get("command"),
+                        cwd=payload.get("cwd"),
+                    ))
+                elif kind == "text":
+                    prose_parts.append(payload)
+            readable_text = _strip_binary_garbage("".join(prose_parts))
+            if readable_text.strip():
+                emit("stream", chunk=base64.b64encode(readable_text.encode()).decode())
+                with terminal_lock:
+                    terminal_buffer.extend(readable_text.encode())
+                _feed_captured(readable_text)
+                captured_output.append(readable_text)
 
         # Flush any remaining data in the JSON parser (last event may lack trailing newline)
         if json_parser:

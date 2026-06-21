@@ -18,6 +18,8 @@ import subprocess
 import sys
 import time
 
+import pytest
+
 from test_helpers import reap_child_processes
 
 
@@ -89,3 +91,16 @@ def test_reaper_no_children_is_noop():
     # Drain any child this test process may already have (none expected here).
     killed = reap_child_processes(timeout=1.0)
     assert isinstance(killed, list)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="SIGTERM handler only installed on Unix")
+def test_sigterm_handler_installed_for_session():
+    """conftest installs a SIGTERM handler so a timeout-killed run still reaps.
+
+    A ``timeout``-wrapped run (how agents and CI invoke the suite) is torn down
+    with SIGTERM, which skips ``pytest_sessionfinish``; the handler is what reaps
+    leaked children in that case.
+    """
+    handler = signal.getsignal(signal.SIGTERM)
+    assert callable(handler), "No SIGTERM handler installed for the test session"
+    assert getattr(handler, "__name__", "") == "_sigterm_reap_handler"
