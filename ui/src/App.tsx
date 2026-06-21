@@ -1,4 +1,5 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef, Fragment } from "react";
+import type { Session } from "chad-client";
 import { ChadAPI } from "chad-client";
 import type { ProjectSettings } from "chad-client";
 import { ChatView } from "./components/ChatView.tsx";
@@ -86,6 +87,42 @@ function loadActiveTab(): Tab {
     // ignore
   }
   return "projects";
+}
+
+// Get the short display name for a project path (just the folder name)
+function getProjectDisplayName(path: string | null): string {
+  if (!path) return "No Project";
+  const parts = path.replace(/\\/g, "/").split("/");
+  return parts[parts.length - 1] || path;
+}
+
+// Group sessions by project_path, maintaining order (most recent first within each group)
+function groupSessionsByProject(
+  sessions: Session[],
+  openedIds: Set<string>,
+): Array<{ project: string | null; displayName: string; sessions: Session[] }> {
+  const opened = sessions.filter((s) => openedIds.has(s.id));
+  // Reverse to show most recent first
+  const reversed = [...opened].reverse();
+
+  // Group by project_path, preserving first-seen order
+  const groupOrder: (string | null)[] = [];
+  const groupMap = new Map<string | null, Session[]>();
+
+  for (const s of reversed) {
+    const key = s.project_path;
+    if (!groupMap.has(key)) {
+      groupOrder.push(key);
+      groupMap.set(key, []);
+    }
+    groupMap.get(key)!.push(s);
+  }
+
+  return groupOrder.map((project) => ({
+    project,
+    displayName: getProjectDisplayName(project),
+    sessions: groupMap.get(project)!,
+  }));
 }
 
 export function App() {
@@ -285,30 +322,40 @@ export function App() {
           {connected && sessions.some(s => openedSessionIds.has(s.id)) && (
             <>
               <span className="tab-separator" />
-              {[...sessions].filter(s => openedSessionIds.has(s.id)).reverse().map((s) => (
-                <button
-                  key={s.id}
-                  className={`session-tab ${s.id === selectedSession && tab === "chat" ? "active" : ""}`}
-                  onClick={() => handleSelectSession(s.id)}
-                  title={s.name}
-                >
-                  <span className="session-tab-name">{s.name}</span>
-                  {s.active && !s.paused && <span className="badge running-badge">R</span>}
-                  {s.paused && <span className="badge paused-badge">P</span>}
-                  {s.has_changes && !s.active && <span className="badge changes-badge">C</span>}
-                  {s.resumable && !s.active && !s.has_changes && (
-                    <span className="badge" title={`${s.status} - resumable`}>
-                      {s.status === "completed" ? "\u2713" : "\u25CB"}
+              {groupSessionsByProject(sessions, openedSessionIds).map((group, groupIdx) => (
+                <Fragment key={group.project ?? "__no_project__"}>
+                  {groupIdx > 0 && <span className="tab-group-separator" />}
+                  <div className="session-group">
+                    <span className="session-group-header" title={group.project ?? "No project"}>
+                      {group.displayName}
                     </span>
-                  )}
-                  <span
-                    className="session-tab-close"
-                    onClick={(e) => handleDeleteSession(e, s.id)}
-                    title="Delete session"
-                  >
-                    x
-                  </span>
-                </button>
+                    {group.sessions.map((s) => (
+                      <button
+                        key={s.id}
+                        className={`session-tab ${s.id === selectedSession && tab === "chat" ? "active" : ""}`}
+                        onClick={() => handleSelectSession(s.id)}
+                        title={s.name}
+                      >
+                        <span className="session-tab-name">{s.name}</span>
+                        {s.active && !s.paused && <span className="badge running-badge">R</span>}
+                        {s.paused && <span className="badge paused-badge">P</span>}
+                        {s.has_changes && !s.active && <span className="badge changes-badge">C</span>}
+                        {s.resumable && !s.active && !s.has_changes && (
+                          <span className="badge" title={`${s.status} - resumable`}>
+                            {s.status === "completed" ? "\u2713" : "\u25CB"}
+                          </span>
+                        )}
+                        <span
+                          className="session-tab-close"
+                          onClick={(e) => handleDeleteSession(e, s.id)}
+                          title="Delete session"
+                        >
+                          x
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </Fragment>
               ))}
             </>
           )}

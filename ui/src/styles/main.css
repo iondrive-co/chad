@@ -324,6 +324,50 @@ label {
   flex-shrink: 0;
 }
 
+/* Chrome-like inline tab groups */
+.session-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  padding: 2px 4px 2px 2px;
+  flex-shrink: 0;
+}
+
+.session-group-header {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
+  padding: 4px 8px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.tab-group-separator {
+  width: 6px;
+  flex-shrink: 0;
+}
+
+/* Tabs within a group have connected look */
+.session-group .session-tab {
+  border-radius: 4px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.session-group .session-tab:hover {
+  background: var(--bg-secondary);
+}
+
+.session-group .session-tab.active {
+  background: var(--bg);
+  border-color: var(--accent);
+}
+
 .session-tab {
   display: flex;
   align-items: center;
