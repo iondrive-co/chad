@@ -8,13 +8,22 @@ authenticated. Used by both the CLI (`chad.ui.cli.app`) and the web API
 
 import json
 import os
+import shlex
+import shutil
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 from chad.util.installer import AIToolInstaller
 from chad.util.providers import is_mistral_configured
 
 _INSTALLER = AIToolInstaller()
+
+# Providers whose login launches an interactive terminal UI (Ink/raw-mode) and
+# therefore needs a real TTY. From a detached server thread these must open in a
+# new terminal window; the CLI front-end runs them in its own terminal instead.
+TTY_LOGIN_PROVIDERS = frozenset({"anthropic", "gemini", "qwen", "kimi"})
 
 # Provider type -> installer tool key
 PROVIDER_TOOL_KEYS: dict[str, str] = {
@@ -156,12 +165,18 @@ def is_logged_in(provider: str, account_name: str) -> bool:
 
 # ── Login ──
 
-def run_login(provider: str, account_name: str, api_key: str = "") -> tuple[bool, str]:  # noqa: C901
+def run_login(
+    provider: str, account_name: str, api_key: str = "", new_terminal: bool = False
+) -> tuple[bool, str]:
     """Install the CLI if needed and run the provider's login flow.
 
-    For OAuth providers this launches the CLI's interactive login, which opens a
-    browser on the machine running this process. For API-key providers the key is
-    written to the provider's credential file. Returns (success, message).
+    - Codex (openai) logs in via a browser and needs no terminal.
+    - Claude/Gemini/Qwen/Kimi use interactive terminal UIs: pass
+      ``new_terminal=True`` (the web server) to open them in a new terminal
+      window; leave it False (the CLI) to run them in the current terminal.
+    - API-key providers write the supplied key to disk.
+
+    Returns (success, message).
     """
     cli_ok, cli_detail = ensure_cli(provider)
     if not cli_ok:
@@ -191,47 +206,49 @@ def run_login(provider: str, account_name: str, api_key: str = "") -> tuple[bool
             return True, "Login successful"
         return False, "Login failed or was cancelled"
 
+    if provider in TTY_LOGIN_PROVIDERS:
+        cmd, extra_env = _tty_login_command(provider, account_name, cli_path)
+        return _run_tty_login(provider, account_name, cmd, extra_env, new_terminal)
+
+    return False, f"Unsupported provider: {provider}"
+
+
+def _tty_login_command(provider: str, account_name: str, cli_path: str) -> tuple[list[str], dict]:
+    """Build the command + isolated env for a terminal-interactive login."""
     if provider == "anthropic":
         config_dir = claude_config_dir(account_name)
         config_dir.mkdir(parents=True, exist_ok=True)
-        env = os.environ.copy()
-        env["CLAUDE_CONFIG_DIR"] = str(config_dir)
-        try:
-            subprocess.run([cli_path], env=env, timeout=_LOGIN_TIMEOUT_SECS)
-        except FileNotFoundError:
-            return False, "Claude CLI not found after install"
-        except subprocess.TimeoutExpired:
-            return False, "Login timed out"
-        if is_logged_in(provider, account_name):
-            return True, "Login successful"
-        return False, "Login failed or was cancelled"
-
-    if provider in ("gemini", "qwen"):
-        try:
-            subprocess.run([cli_path, "-y"], timeout=_LOGIN_TIMEOUT_SECS)
-        except FileNotFoundError:
-            return False, f"{provider} CLI not found after install"
-        except subprocess.TimeoutExpired:
-            return False, "Login timed out"
-        if is_logged_in(provider, account_name):
-            return True, "Login successful"
-        return False, "Login failed or was cancelled"
-
+        return [cli_path], {"CLAUDE_CONFIG_DIR": str(config_dir)}
     if provider == "kimi":
         home = kimi_home(account_name)
         home.mkdir(parents=True, exist_ok=True)
-        env = _isolated_env(str(home))
-        try:
-            subprocess.run([cli_path, "login"], env=env, timeout=_LOGIN_TIMEOUT_SECS)
-        except FileNotFoundError:
-            return False, "Kimi CLI not found after install"
-        except subprocess.TimeoutExpired:
-            return False, "Login timed out"
-        if is_logged_in(provider, account_name):
-            return True, "Login successful"
-        return False, "Kimi login did not complete"
+        return [cli_path, "login"], {"HOME": str(home)}
+    # gemini / qwen authenticate against their global home in YOLO mode.
+    return [cli_path, "-y"], {}
 
-    return False, f"Unsupported provider: {provider}"
+
+def _run_tty_login(
+    provider: str, account_name: str, cmd: list[str], extra_env: dict, new_terminal: bool
+) -> tuple[bool, str]:
+    if new_terminal:
+        if _spawn_terminal(cmd, extra_env):
+            return True, "Login started — finish signing in in the terminal window that opened."
+        return False, (
+            "Could not open a terminal window for login. Open a terminal and run: "
+            + " ".join(shlex.quote(c) for c in cmd)
+        )
+
+    env = os.environ.copy()
+    env.update(extra_env)
+    try:
+        subprocess.run(cmd, env=env, timeout=_LOGIN_TIMEOUT_SECS)
+    except FileNotFoundError:
+        return False, f"{provider} CLI not found after install"
+    except subprocess.TimeoutExpired:
+        return False, "Login timed out"
+    if is_logged_in(provider, account_name):
+        return True, "Login successful"
+    return False, "Login failed or was cancelled"
 
 
 def _login_api_key(provider: str, api_key: str) -> tuple[bool, str]:
@@ -267,3 +284,60 @@ def _isolated_env(home: str) -> dict:
     if os.name == "nt":
         env["USERPROFILE"] = home
     return env
+
+
+# Terminal emulators tried in order on Linux, with the flag that precedes the command.
+_LINUX_TERMINALS: list[tuple[str, list[str]]] = [
+    ("x-terminal-emulator", ["-e"]),
+    ("gnome-terminal", ["--"]),
+    ("konsole", ["-e"]),
+    ("xfce4-terminal", ["-e"]),
+    ("xterm", ["-e"]),
+]
+
+
+def _write_login_script(cmd: list[str], extra_env: dict) -> str:
+    """Write a temp shell script that sets env, runs cmd, and waits for a keypress."""
+    lines = ["#!/usr/bin/env bash", ""]
+    for key, value in extra_env.items():
+        lines.append(f"export {key}={shlex.quote(value)}")
+    lines.append(" ".join(shlex.quote(c) for c in cmd))
+    lines.append("echo")
+    lines.append('read -n 1 -s -r -p "Login finished — press any key to close this window."')
+    fd, path = tempfile.mkstemp(prefix="chad-login-", suffix=".sh")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    os.chmod(path, 0o755)
+    return path
+
+
+def _spawn_terminal(cmd: list[str], extra_env: dict) -> bool:
+    """Launch cmd in a new visible terminal window. Returns True if one was opened."""
+    if os.name == "nt":
+        env = os.environ.copy()
+        env.update(extra_env)
+        CREATE_NEW_CONSOLE = 0x00000010
+        try:
+            subprocess.Popen(cmd, env=env, creationflags=CREATE_NEW_CONSOLE)
+            return True
+        except OSError:
+            return False
+
+    script = _write_login_script(cmd, extra_env)
+    if sys.platform == "darwin":
+        try:
+            subprocess.Popen(["open", "-a", "Terminal", script])
+            return True
+        except OSError:
+            return False
+
+    for name, flag in _LINUX_TERMINALS:
+        exe = shutil.which(name)
+        if not exe:
+            continue
+        try:
+            subprocess.Popen([exe, *flag, "bash", script])
+            return True
+        except OSError:
+            continue
+    return False

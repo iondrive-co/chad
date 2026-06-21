@@ -87,6 +87,64 @@ class TestProviderLoginUtil:
         assert ok is True
         assert seen == ["codex"]
 
+    def test_run_login_claude_new_terminal_spawns_window(self, tmp_path, monkeypatch):
+        """Claude (TTY UI) login opens a terminal window when new_terminal is set."""
+        from chad.util import provider_login
+        from chad.util.installer import AIToolInstaller
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            AIToolInstaller, "ensure_tool", lambda self, key: (True, f"/fake/{key}")
+        )
+        spawned = []
+        monkeypatch.setattr(
+            provider_login, "_spawn_terminal",
+            lambda cmd, env: spawned.append((cmd, env)) or True,
+        )
+        ok, msg = provider_login.run_login("anthropic", "acct", new_terminal=True)
+        assert ok is True
+        assert "terminal" in msg.lower()
+        cmd, extra_env = spawned[0]
+        assert cmd[0] == "/fake/claude"
+        assert "CLAUDE_CONFIG_DIR" in extra_env
+
+    def test_run_login_claude_new_terminal_unavailable(self, tmp_path, monkeypatch):
+        """When no terminal can be opened, login fails with a manual-run hint."""
+        from chad.util import provider_login
+        from chad.util.installer import AIToolInstaller
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            AIToolInstaller, "ensure_tool", lambda self, key: (True, f"/fake/{key}")
+        )
+        monkeypatch.setattr(provider_login, "_spawn_terminal", lambda cmd, env: False)
+        ok, msg = provider_login.run_login("anthropic", "acct", new_terminal=True)
+        assert ok is False
+        assert "terminal" in msg.lower()
+
+    def test_run_login_claude_cli_runs_in_current_terminal(self, tmp_path, monkeypatch):
+        """Without new_terminal (the CLI path) login runs the CLI inheriting stdio."""
+        from chad.util import provider_login
+        from chad.util.installer import AIToolInstaller
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            AIToolInstaller, "ensure_tool", lambda self, key: (True, f"/fake/{key}")
+        )
+        calls = []
+
+        class _Result:
+            returncode = 0
+
+        def fake_run(cmd, env=None, timeout=None, **kwargs):
+            calls.append(cmd)
+            return _Result()
+
+        monkeypatch.setattr("chad.util.provider_login.subprocess.run", fake_run)
+        # Not authenticated and no terminal spawned -> runs the CLI directly.
+        provider_login.run_login("anthropic", "acct", new_terminal=False)
+        assert calls and calls[0][0] == "/fake/claude"
+
 
 class TestCreateProvider:
     """Test cases for provider factory."""

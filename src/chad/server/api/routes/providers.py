@@ -179,11 +179,14 @@ async def login_account(name: str, request: AccountLoginRequest) -> AccountLogin
     threading.Thread(
         target=provider_login.run_login,
         args=(provider, name, request.api_key),
+        kwargs={"new_terminal": True},
         daemon=True,
     ).start()
 
     if provider in provider_login.API_KEY_PROVIDERS:
         message = "Authorizing…"
+    elif provider in provider_login.TTY_LOGIN_PROVIDERS:
+        message = "Login started — finish signing in in the terminal window that opened."
     else:
         message = "Login started — complete authentication in the browser window that opened."
     return AccountLoginResponse(

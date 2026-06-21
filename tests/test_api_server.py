@@ -333,6 +333,21 @@ class TestProviderLogin:
         # Now reported ready.
         assert client.get("/api/v1/accounts/my-oc").json()["ready"] is True
 
+    def test_login_tty_provider_message_mentions_terminal(self, client, monkeypatch, tmp_path):
+        """Claude/Gemini/Qwen/Kimi login tells the user to use the terminal window."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_account(client, monkeypatch, "my-claude", "anthropic")
+
+        from chad.server.api.routes import providers as providers_route
+        monkeypatch.setattr(providers_route.threading, "Thread", _InlineThread)
+        monkeypatch.setattr(
+            providers_route.provider_login, "run_login", lambda *a, **k: (True, "ok")
+        )
+
+        resp = client.post("/api/v1/accounts/my-claude/login", json={})
+        assert resp.status_code == 200, resp.text
+        assert "terminal" in resp.json()["message"].lower()
+
     def test_login_api_key_provider_requires_key(self, client, monkeypatch, tmp_path):
         """API-key providers reject login when no key is supplied."""
         monkeypatch.setenv("HOME", str(tmp_path))
