@@ -86,6 +86,7 @@ python_functions = ["test_*"]
 addopts = "-v"
 markers = [
     "api: marks tests as API endpoint tests",
+    "visual: marks tests that drive the UI with Playwright (require a browser)",
 ]
 filterwarnings = [
     "ignore:datetime.datetime.utcfromtimestamp:DeprecationWarning",

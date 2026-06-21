@@ -98,3 +98,4 @@ dist/install-chad.sh
 /ui/dist-portable/
 /release/
 /.claude/settings.local.json
+/.nop/
