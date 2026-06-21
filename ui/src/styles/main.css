@@ -2428,6 +2428,7 @@ label {
   display: flex;
   align-items: center;
   gap: 12px;
+  flex-wrap: wrap;
 }
 
 .project-selector-bar label {
@@ -2439,7 +2440,13 @@ label {
   flex: 1;
 }
 
-.project-selector-bar select {
+.project-selector-label {
+  font-size: 1rem;
+  color: var(--text-muted);
+}
+
+.project-selector-bar select,
+.project-selector-new input {
   flex: 1;
   padding: 6px 10px;
   background: var(--bg);
@@ -2450,18 +2457,63 @@ label {
   font-size: 1rem;
 }
 
-.project-selector-bar select:focus {
+.project-selector-bar select:focus,
+.project-selector-new input:focus {
   outline: none;
   border-color: var(--accent);
 }
 
-.no-projects-hint {
+.project-selector-new {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 360px;
+  min-width: 0;
+}
+
+.project-selector-new input {
+  min-width: 180px;
+}
+
+.project-selector-new button {
+  padding: 6px 14px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+.project-selector-new button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.project-selector-error {
   font-size: 1rem;
-  color: var(--text-muted);
-  font-style: italic;
+  color: var(--error);
 }
 
 @media (max-width: 640px) {
+  .project-selector-bar {
+    align-items: stretch;
+  }
+
+  .project-selector-bar label,
+  .project-selector-new {
+    flex-basis: 100%;
+  }
+
+  .project-selector-new {
+    flex-wrap: wrap;
+  }
+
+  .project-selector-error {
+    flex-basis: 100%;
+  }
+
   .projects-layout {
     flex-direction: column;
   }

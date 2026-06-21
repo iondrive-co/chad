@@ -387,6 +387,7 @@ export function App() {
                 api={api}
                 sessionId={selectedSession}
                 onSessionChange={refreshSessions}
+                onProjectsChange={loadProjects}
                 defaultProjectPath={sessionProjectPath}
                 apiBaseUrl={apiBaseUrl}
                 token={token}

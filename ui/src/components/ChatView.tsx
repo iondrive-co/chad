@@ -18,6 +18,7 @@ interface Props {
   api: ChadAPI;
   sessionId: string;
   onSessionChange: () => void;
+  onProjectsChange?: () => Promise<void> | void;
   defaultProjectPath?: string;
   apiBaseUrl?: string;
   token?: string;
@@ -26,6 +27,8 @@ interface Props {
   /** Available projects for the project dropdown. */
   projects?: ProjectSettings[];
 }
+
+const NEW_PROJECT_VALUE = "__new_project__";
 
 function normalizeLineEndings(text: string): string {
   return text.replace(/\r\n?/g, "\n");
@@ -44,6 +47,7 @@ export function ChatView({
   api,
   sessionId,
   onSessionChange,
+  onProjectsChange,
   defaultProjectPath = "",
   apiBaseUrl,
   token,
@@ -87,11 +91,18 @@ export function ChatView({
 
   // Track current project path for settings
   const [currentProjectPath, setCurrentProjectPath] = useState(defaultProjectPath);
+  const [creatingProject, setCreatingProject] = useState(false);
+  const [newProjectPath, setNewProjectPath] = useState("");
+  const [savingProject, setSavingProject] = useState(false);
+  const [projectCreateError, setProjectCreateError] = useState<string | null>(null);
   const [worktreeRefresh, setWorktreeRefresh] = useState(0);
 
   // Sync when parent changes defaultProjectPath (e.g. selecting a session tab)
   useEffect(() => {
-    if (defaultProjectPath) setCurrentProjectPath(defaultProjectPath);
+    if (defaultProjectPath) {
+      setCurrentProjectPath(defaultProjectPath);
+      setCreatingProject(false);
+    }
   }, [defaultProjectPath]);
 
   // Preview
@@ -580,6 +591,40 @@ export function ChatView({
     setDragOver(false);
   }, []);
 
+  const handleProjectSelect = useCallback((value: string) => {
+    setProjectCreateError(null);
+    if (value === NEW_PROJECT_VALUE) {
+      setCreatingProject(true);
+      setCurrentProjectPath("");
+      return;
+    }
+    setCreatingProject(false);
+    setNewProjectPath("");
+    setCurrentProjectPath(value);
+  }, []);
+
+  const handleAddProjectFromChat = useCallback(async () => {
+    const path = newProjectPath.trim();
+    if (!path) {
+      setProjectCreateError("Enter a project path");
+      return;
+    }
+
+    setSavingProject(true);
+    setProjectCreateError(null);
+    try {
+      const settings = await api.setProjectSettings({ project_path: path });
+      await onProjectsChange?.();
+      setCurrentProjectPath(settings.project_path);
+      setCreatingProject(false);
+      setNewProjectPath("");
+    } catch {
+      setProjectCreateError("Failed to add project");
+    } finally {
+      setSavingProject(false);
+    }
+  }, [api, newProjectPath, onProjectsChange]);
+
   const removeScreenshot = useCallback((index: number) => {
     setScreenshots((prev) => {
       const removed = prev[index];
@@ -776,6 +821,9 @@ export function ChatView({
     }).catch(() => {});
   }, [api, currentProjectPath]);
 
+  const projectSelectorValue = creatingProject ? NEW_PROJECT_VALUE : currentProjectPath;
+  const showNewProjectForm = creatingProject || projects.length === 0;
+
   return (
     <div className="chat-view">
       {/* Worktree and session info bar */}
@@ -812,27 +860,48 @@ export function ChatView({
       )}
 
       {/* Project selector - shown when no task has been run yet */}
-      {!hasRunTask && projects.length > 0 && (
+      {!hasRunTask && (
         <div className="project-selector-bar">
-          <label>
-            Project
-            <select
-              value={currentProjectPath}
-              onChange={(e) => setCurrentProjectPath(e.target.value)}
+          {projects.length > 0 ? (
+            <label>
+              Project
+              <select
+                value={projectSelectorValue}
+                onChange={(e) => handleProjectSelect(e.target.value)}
+              >
+                <option value="">-- Select a project --</option>
+                {projects.map((p) => (
+                  <option key={p.project_path} value={p.project_path}>
+                    {p.project_path}{p.project_type && p.project_type !== "unknown" ? ` (${p.project_type})` : ""}
+                  </option>
+                ))}
+                <option value={NEW_PROJECT_VALUE}>New project</option>
+              </select>
+            </label>
+          ) : (
+            <span className="project-selector-label">Project</span>
+          )}
+          {showNewProjectForm && (
+            <form
+              className="project-selector-new"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleAddProjectFromChat();
+              }}
             >
-              <option value="">-- Select a project --</option>
-              {projects.map((p) => (
-                <option key={p.project_path} value={p.project_path}>
-                  {p.project_path}{p.project_type && p.project_type !== "unknown" ? ` (${p.project_type})` : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-      )}
-      {!hasRunTask && projects.length === 0 && (
-        <div className="project-selector-bar">
-          <span className="no-projects-hint">No projects configured. Go to the Projects tab to add one.</span>
+              <input
+                value={newProjectPath}
+                onChange={(e) => setNewProjectPath(e.target.value)}
+                placeholder="/path/to/project"
+                aria-label="New project path"
+                disabled={savingProject}
+              />
+              <button type="submit" disabled={savingProject || !newProjectPath.trim()}>
+                {savingProject ? "Adding..." : "Add"}
+              </button>
+              {projectCreateError && <span className="project-selector-error">{projectCreateError}</span>}
+            </form>
+          )}
         </div>
       )}
 
