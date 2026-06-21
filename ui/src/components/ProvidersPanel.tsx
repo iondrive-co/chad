@@ -12,11 +12,15 @@ export function ProvidersPanel({ api, connected }: Props) {
   const [usageData, setUsageData] = useState<Record<string, AccountUsage>>({});
   const [newName, setNewName] = useState("");
   const [newType, setNewType] = useState("anthropic");
-  const [newApiKey, setNewApiKey] = useState("");
   const [adding, setAdding] = useState(false);
+  const [loggingIn, setLoggingIn] = useState<string | null>(null);
+  const [loginKeys, setLoginKeys] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<string | null>(null);
   const [editingModel, setEditingModel] = useState<string | null>(null);
   const [modelChoices, setModelChoices] = useState<string[]>([]);
+
+  const isApiKeyProvider = (provider: string) =>
+    provider === "mistral" || provider === "opencode";
 
   const flash = useCallback((msg: string) => {
     setStatus(msg);
@@ -54,24 +58,67 @@ export function ProvidersPanel({ api, connected }: Props) {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const needsApiKey = newType === "opencode" || newType === "mistral";
+  const pollReady = useCallback(async (name: string) => {
+    // Install + browser OAuth complete out-of-band; poll until ready.
+    for (let i = 0; i < 180; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const acc = await api.getAccount(name);
+        if (acc.ready) {
+          flash(`${name} logged in`);
+          await refresh();
+          return;
+        }
+      } catch { /* keep polling */ }
+    }
+    flash("Login not completed — try again");
+    await refresh();
+  }, [api, refresh, flash]);
+
+  const handleLogin = useCallback(async (name: string) => {
+    setLoggingIn(name);
+    setStatus(null);
+    try {
+      const res = await api.loginAccount(name, loginKeys[name] ?? "");
+      if (res.ready) {
+        flash(`${name} logged in`);
+        await refresh();
+      } else if (res.success) {
+        flash(res.message);
+        await pollReady(name);
+      } else {
+        flash(res.message);
+      }
+    } catch (e) {
+      flash(e instanceof Error ? e.message : "Login failed");
+    } finally {
+      setLoggingIn(null);
+    }
+  }, [api, loginKeys, refresh, flash, pollReady]);
 
   const handleAdd = useCallback(async () => {
     if (!newName.trim()) return;
+    const name = newName.trim();
+    const provider = newType;
     setAdding(true);
     setStatus(null);
     try {
-      await api.createAccount({ name: newName.trim(), provider: newType as Account["provider"] });
+      await api.createAccount({ name, provider: provider as Account["provider"] });
       setNewName("");
-      setNewApiKey("");
-      flash(`Added ${newName.trim()}`);
+      flash(`Added ${name}`);
       await refresh();
     } catch (e) {
       flash(e instanceof Error ? e.message : "Failed to add provider");
-    } finally {
       setAdding(false);
+      return;
     }
-  }, [api, newName, newType, refresh, flash]);
+    setAdding(false);
+    // Browser-OAuth providers can log in straight away; API-key providers need
+    // the user to paste a key first, so leave them with the Log in button.
+    if (!isApiKeyProvider(provider)) {
+      await handleLogin(name);
+    }
+  }, [api, newName, newType, refresh, flash, handleLogin]);
 
   const handleDelete = useCallback(async (name: string) => {
     try {
@@ -160,6 +207,30 @@ export function ProvidersPanel({ api, connected }: Props) {
                 <button className="delete-rule-btn" onClick={() => handleDelete(a.name)} disabled={dis}>x</button>
               </div>
 
+              {!a.ready && (
+                <div className="account-login">
+                  <span className="login-hint">Log in to authorize this account.</span>
+                  {isApiKeyProvider(a.provider) && (
+                    <input
+                      type="password"
+                      placeholder="API Key"
+                      value={loginKeys[a.name] ?? ""}
+                      onChange={(e) =>
+                        setLoginKeys((prev) => ({ ...prev, [a.name]: e.target.value }))
+                      }
+                      disabled={dis || loggingIn === a.name}
+                    />
+                  )}
+                  <button
+                    className="login-btn"
+                    onClick={() => handleLogin(a.name)}
+                    disabled={dis || loggingIn === a.name}
+                  >
+                    {loggingIn === a.name ? "Logging in…" : "Log in"}
+                  </button>
+                </div>
+              )}
+
               <div className="account-details">
                 <div className="account-field">
                   <span className="field-label">Model:</span>
@@ -247,15 +318,6 @@ export function ProvidersPanel({ api, connected }: Props) {
               <option key={p.type} value={p.type}>{p.name}</option>
             ))}
           </select>
-          {needsApiKey && (
-            <input
-              type="password"
-              value={newApiKey}
-              onChange={(e) => setNewApiKey(e.target.value)}
-              placeholder="API Key"
-              disabled={dis}
-            />
-          )}
           <button onClick={handleAdd} disabled={adding || !newName.trim() || dis}>
             {adding ? "Adding..." : "+ Add"}
           </button>

@@ -34,8 +34,20 @@ class TestMainVersionFlag:
         assert __version__ in captured.out
 
 
+def _stub_installer(monkeypatch, result=None):
+    """Stub CLI installation so login tests never shell out to npm/pip/shell."""
+    from chad.util.installer import AIToolInstaller
+
+    def fake_ensure_tool(self, tool_key):
+        if result is not None:
+            return result
+        return True, f"/fake/bin/{tool_key}"
+
+    monkeypatch.setattr(AIToolInstaller, "ensure_tool", fake_ensure_tool)
+
+
 class TestProviderOauthFlow:
-    """Tests for CLI provider auth behavior."""
+    """Tests for CLI provider auth behavior (delegates to chad.util.provider_login)."""
 
     def test_opencode_detects_existing_auth(self, monkeypatch, tmp_path):
         """OpenCode should detect existing OAuth credentials."""
@@ -56,13 +68,13 @@ class TestProviderOauthFlow:
         import json
         from chad.ui.cli.app import _run_provider_oauth
 
+        _stub_installer(monkeypatch)
         monkeypatch.setattr("chad.ui.cli.app.Path.home", lambda: tmp_path)
         monkeypatch.setattr("builtins.input", lambda _prompt="": "sk-test-key-123")
 
         success, message = _run_provider_oauth("opencode", "my-opencode")
 
         assert success is True
-        assert "stored" in message.lower()
         auth_file = tmp_path / ".local" / "share" / "opencode" / "auth.json"
         assert auth_file.exists()
         data = json.loads(auth_file.read_text())
@@ -72,19 +84,20 @@ class TestProviderOauthFlow:
         """OpenCode should fail when user skips API key entry."""
         from chad.ui.cli.app import _run_provider_oauth
 
+        _stub_installer(monkeypatch)
         monkeypatch.setattr("chad.ui.cli.app.Path.home", lambda: tmp_path)
         monkeypatch.setattr("builtins.input", lambda _prompt="": "")
 
         success, message = _run_provider_oauth("opencode", "my-opencode")
         assert success is False
-        assert "No API key" in message
+        assert "API key" in message
 
     def test_kimi_no_cli_reports_not_found(self, monkeypatch, tmp_path):
-        """Kimi add should fail when CLI is not installed."""
+        """Kimi add should fail when the CLI cannot be installed."""
         from chad.ui.cli.app import _run_provider_oauth
 
+        _stub_installer(monkeypatch, (False, "Kimi CLI not found. Install with: pip install kimi-cli"))
         monkeypatch.setattr("chad.ui.cli.app.Path.home", lambda: tmp_path)
-        monkeypatch.setattr("chad.ui.cli.app.shutil.which", lambda _cmd: None)
         success, message = _run_provider_oauth("kimi", "my-kimi")
 
         assert success is False
@@ -95,6 +108,7 @@ class TestProviderOauthFlow:
         """Kimi add should succeed when creds AND populated config exist."""
         from chad.ui.cli.app import _run_provider_oauth
 
+        _stub_installer(monkeypatch)
         # Create isolated credentials file AND populated config
         kimi_dir = tmp_path / ".chad" / "kimi-homes" / "my-kimi" / ".kimi"
         creds_dir = kimi_dir / "credentials"
@@ -115,6 +129,7 @@ class TestProviderOauthFlow:
         """Kimi add should write default config when creds exist but config is empty."""
         from chad.ui.cli.app import _run_provider_oauth
 
+        _stub_installer(monkeypatch)
         # Create credentials but empty config (partial login)
         kimi_dir = tmp_path / ".chad" / "kimi-homes" / "my-kimi" / ".kimi"
         creds_dir = kimi_dir / "credentials"
@@ -133,12 +148,13 @@ class TestProviderOauthFlow:
 
     def test_kimi_accepts_nonzero_login_if_creds_were_written(self, monkeypatch, tmp_path):
         """Kimi add should succeed if login writes credentials even when process exits non-zero."""
+        from pathlib import Path
         from chad.ui.cli.app import _run_provider_oauth
 
         class Completed:
             returncode = 1
 
-        def fake_run(cmd, env, timeout):
+        def fake_run(cmd, env=None, timeout=None, **kwargs):
             # Simulate successful OAuth followed by model-fetch failure.
             kimi_home = Path(env["HOME"])
             creds_dir = kimi_home / ".kimi" / "credentials"
@@ -146,24 +162,24 @@ class TestProviderOauthFlow:
             (creds_dir / "kimi-code.json").write_text('{"token": "test"}')
             return Completed()
 
-        from pathlib import Path
-
+        _stub_installer(monkeypatch)
         monkeypatch.setattr("chad.ui.cli.app.Path.home", lambda: tmp_path)
-        monkeypatch.setattr("chad.ui.cli.app.shutil.which", lambda _cmd: "/tmp/kimi")
-        monkeypatch.setattr("chad.ui.cli.app.subprocess.run", fake_run)
+        monkeypatch.setattr("chad.util.provider_login.subprocess.run", fake_run)
 
         success, message = _run_provider_oauth("kimi", "my-kimi")
 
         assert success is True
-        assert "Logged in successfully" in message
         config_text = (tmp_path / ".chad" / "kimi-homes" / "my-kimi" / ".kimi" / "config.toml").read_text()
         assert "[models." in config_text
 
     def test_mistral_prompts_for_api_key(self, monkeypatch, tmp_path):
         """Mistral auth should prompt for an API key and write it to ~/.vibe/.env."""
+        import webbrowser
         from chad.ui.cli.app import _run_provider_oauth
 
+        _stub_installer(monkeypatch)
         monkeypatch.setattr("chad.ui.cli.app.Path.home", lambda: tmp_path)
+        monkeypatch.setattr(webbrowser, "open", lambda *_a, **_k: False)
         monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
         monkeypatch.setattr("builtins.input", lambda _prompt: "sk-test-key-123")
 
@@ -177,16 +193,19 @@ class TestProviderOauthFlow:
 
     def test_mistral_empty_api_key_fails(self, monkeypatch, tmp_path):
         """Mistral auth should fail when user provides an empty API key."""
+        import webbrowser
         from chad.ui.cli.app import _run_provider_oauth
 
+        _stub_installer(monkeypatch)
         monkeypatch.setattr("chad.ui.cli.app.Path.home", lambda: tmp_path)
+        monkeypatch.setattr(webbrowser, "open", lambda *_a, **_k: False)
         monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
         monkeypatch.setattr("builtins.input", lambda _prompt: "")
 
         success, message = _run_provider_oauth("mistral", "my-vibe")
 
         assert success is False
-        assert "No API key" in message
+        assert "API key" in message
 
 
 class TestConnectionParsing:

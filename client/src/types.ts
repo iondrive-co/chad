@@ -128,6 +128,17 @@ export interface AccountCreate {
   provider: ProviderType;
 }
 
+export interface AccountLoginRequest {
+  api_key?: string;
+}
+
+export interface AccountLoginResponse {
+  account_name: string;
+  success: boolean;
+  ready: boolean;
+  message: string;
+}
+
 export interface AccountModels {
   account_name: string;
   provider: ProviderType;

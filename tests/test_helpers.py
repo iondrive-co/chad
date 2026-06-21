@@ -13,6 +13,51 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import psutil
+
+
+# ---------------------------------------------------------------------------
+# Tool 0: reap_child_processes (test-session cleanup safety net)
+# ---------------------------------------------------------------------------
+
+def reap_child_processes(timeout: float = 5.0) -> list[int]:
+    """Terminate every child process still alive under this (pytest) process.
+
+    Tests across the suite spawn real subprocesses — preview-tunnel dev servers
+    (``serve.py``), PTY children, idle-stall sleepers — and rely on a per-test
+    ``finally`` block (or the function under test) to terminate them. None of
+    that runs when a run is interrupted: a ``timeout``-wrapped invocation gets
+    SIGTERM, Ctrl-C aborts mid-test, or a crash skips teardown. The orphaned
+    child is then reparented to init and survives indefinitely.
+
+    The conftest session reaper calls this at session end and on SIGTERM so no
+    run leaks processes, independent of whether an individual test cleaned up
+    after itself. The whole child tree is taken down (``recursive=True``) so
+    grandchildren orphaned mid-teardown are caught too.
+
+    Returns the PIDs that were terminated.
+    """
+    try:
+        children = psutil.Process().children(recursive=True)
+    except psutil.Error:
+        return []
+    if not children:
+        return []
+
+    killed = [child.pid for child in children]
+    for child in children:
+        try:
+            child.terminate()
+        except psutil.Error:
+            pass
+    _, alive = psutil.wait_procs(children, timeout=timeout)
+    for child in alive:
+        try:
+            child.kill()
+        except psutil.Error:
+            pass
+    return killed
+
 
 # ---------------------------------------------------------------------------
 # Tool 1: collect_stream_events

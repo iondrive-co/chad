@@ -25,7 +25,7 @@ export function useStream(
   token?: string,
 ) {
   const wsRef = useRef<ChadWebSocket | null>(null);
-  const [terminalOutput, setTerminalOutput] = useState("");
+  const [terminalChunks, setTerminalChunks] = useState<TerminalChunk[]>([]);
   const [events, setEvents] = useState<StreamEvent[]>([]);
   const [completed, setCompleted] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -52,7 +52,7 @@ export function useStream(
   }, []);
 
   const reset = useCallback(() => {
-    setTerminalOutput("");
+    setTerminalChunks([]);
     setEvents([]);
     setCompleted(false);
     setError(null);
@@ -75,7 +75,7 @@ export function useStream(
         const isText = Boolean(msg.data.text);
         if (!raw) return;
         const decoded = decodeTerminal(raw, isText);
-        setTerminalOutput((prev) => prev + decoded);
+        setTerminalChunks((prev) => [...prev, { text: decoded, seq }]);
       } else if (msg.type === "event") {
         const event: StreamEvent = { event_type: "event", data: msg.data, seq };
         setEvents((prev) => [...prev, event]);
@@ -114,5 +114,5 @@ export function useStream(
     };
   }, [sessionId, apiBaseUrl, token, reset, decodeTerminal]);
 
-  return { terminalOutput, events, completed, error, reset };
+  return { terminalChunks, events, completed, error, reset };
 }

@@ -220,6 +220,28 @@ class TestProviderCommandGeneration:
         assert "HOME" in env
         assert "my-codex" in env["HOME"]
 
+    def test_openai_command_resolves_managed_binary(self, tmp_path, monkeypatch):
+        """A managed codex install resolves to an absolute path, never bare 'codex'.
+
+        Regression: a bare 'codex' argv[0] crashes the spawn with
+        [Errno 2] No such file or directory: 'codex' when the binary isn't on
+        the server's PATH.
+        """
+        from chad.server.services import task_executor
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "codex"
+        fake.write_text("#!/bin/sh\n")
+        fake.chmod(0o755)
+        monkeypatch.setattr(task_executor._CLI_INSTALLER, "bin_dir", bin_dir)
+        monkeypatch.setattr(task_executor._CLI_INSTALLER, "tools_dir", tmp_path)
+
+        cmd, _, _ = task_executor.build_agent_command("openai", "my-codex", tmp_path)
+
+        assert cmd[0] == str(fake)
+        assert cmd[0] != "codex"
+
     def test_gemini_command_has_yolo(self):
         """Gemini command includes YOLO flag."""
         from chad.server.services.task_executor import build_agent_command

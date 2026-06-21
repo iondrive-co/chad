@@ -1,6 +1,8 @@
-import { useState, useCallback, useRef, useEffect, DragEvent } from "react";
-import type { ChadAPI, ConversationItem, Account, VerificationSettings, ProjectSettings } from "chad-client";
+import { useState, useCallback, useRef, useEffect, DragEvent, UIEvent } from "react";
+import type { ChadAPI, ConversationItem, Account, VerificationSettings, ProjectSettings, StreamEvent } from "chad-client";
 import { useStream } from "../hooks/useStream.ts";
+import type { TerminalChunk } from "../hooks/useStream.ts";
+import { buildTranscript } from "../lib/transcript.ts";
 import { MergePanel } from "./MergePanel.tsx";
 import { WorktreeInfo } from "./WorktreeInfo.tsx";
 import { SessionLog } from "./SessionLog.tsx";
@@ -23,11 +25,6 @@ interface Props {
   sessionActive?: boolean;
   /** Available projects for the project dropdown. */
   projects?: ProjectSettings[];
-}
-
-/** Strip ANSI escape codes for plain-text display. */
-function stripAnsi(text: string): string {
-  return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
 }
 
 function normalizeLineEndings(text: string): string {
@@ -66,7 +63,10 @@ export function ChatView({
   // Track how the session ended: null (still running or no task), "completed", "cancelled", "timeout", "failed", etc.
   const [endReason, setEndReason] = useState<string | null>(null);
   const [expandedMilestones, setExpandedMilestones] = useState<Set<number>>(new Set());
-  const outputRef = useRef<HTMLPreElement>(null);
+  const outputRef = useRef<HTMLDivElement>(null);
+  // True once the user scrolls up off the bottom; suppresses terminal autoscroll
+  // until they return to the bottom, just like a real terminal.
+  const userScrolledUpRef = useRef(false);
   const convoRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -75,8 +75,10 @@ export function ChatView({
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
 
-  // Historical output/events loaded from persisted log for finished sessions
-  const [historicalOutput, setHistoricalOutput] = useState("");
+  // Historical transcript loaded from persisted log for finished sessions.
+  // Mirrors the live stream: prose chunks (with seq) plus tool_call_started events.
+  const [historicalChunks, setHistoricalChunks] = useState<TerminalChunk[]>([]);
+  const [historicalEvents, setHistoricalEvents] = useState<StreamEvent[]>([]);
 
   // Current task description, verification agent, and screenshots (extracted from session_started events)
   const [taskDescription, setTaskDescription] = useState<string | null>(null);
@@ -108,15 +110,23 @@ export function ChatView({
   // stream skips old milestones/events from previous tasks in the same session.
   const streamSinceSeqRef = useRef<number | undefined>(undefined);
 
-  const { terminalOutput, events, completed, error, reset } = useStream(
+  const { terminalChunks, events, completed, error, reset } = useStream(
     taskActive ? sessionId : null,
     streamSinceSeqRef.current,
     apiBaseUrl,
     token,
   );
 
-  // Combined output: live streaming output or historical output for finished sessions
-  const displayOutput = normalizeLineEndings(terminalOutput || historicalOutput);
+  // Live stream (during a task) or historical log (finished session). The right
+  // panel renders a Claude-Code-style transcript from these — tool calls plus
+  // prose — rather than the raw terminal text.
+  const usingLive = taskActive || terminalChunks.length > 0 || events.length > 0;
+  const transcript = buildTranscript(
+    usingLive ? terminalChunks : historicalChunks,
+    usingLive ? events : historicalEvents,
+  );
+  const hasOutput = transcript.length > 0;
+  const hasHistorical = historicalChunks.length > 0 || historicalEvents.length > 0;
 
   const mapEventToConversationItem = useCallback(
     (data: any, seq: number | null): ConversationItem | null => {
@@ -163,25 +173,31 @@ export function ChatView({
     [],
   );
 
-  // Load historical output when session is selected and not active
+  // Load historical transcript when session is selected and not active
   useEffect(() => {
     let cancelled = false;
-    setHistoricalOutput("");
+    setHistoricalChunks([]);
+    setHistoricalEvents([]);
     setTaskDescription(null);
     setVerificationAgent(null);
 
     if (!sessionActive && !taskActive) {
       (async () => {
         try {
-          const data = await api.getEvents(sessionId, 0, "terminal_output,session_started,session_ended");
+          const data = await api.getEvents(sessionId, 0, "terminal_output,tool_call_started,session_started,session_ended");
           if (cancelled) return;
 
-          const terminalEvents = (data.events as { type: string; data?: string }[])
-            .filter((e) => e.type === "terminal_output" && e.data);
-          if (terminalEvents.length > 0) {
-            const output = terminalEvents.map((e) => e.data || "").join("");
-            setHistoricalOutput(normalizeLineEndings(output));
-          }
+          const allEvents = data.events as { type: string; seq?: number; data?: string }[];
+
+          const chunks: TerminalChunk[] = allEvents
+            .filter((e) => e.type === "terminal_output" && e.data)
+            .map((e) => ({ text: normalizeLineEndings(e.data || ""), seq: e.seq ?? null }));
+          setHistoricalChunks(chunks);
+
+          const toolEvents: StreamEvent[] = allEvents
+            .filter((e) => e.type === "tool_call_started")
+            .map((e) => ({ event_type: "event", data: e, seq: e.seq ?? null }));
+          setHistoricalEvents(toolEvents);
 
           const starts = (data.events as { type: string; task_description?: string; verification_account?: string }[])
             .filter((e) => e.type === "session_started" && e.task_description);
@@ -381,12 +397,27 @@ export function ChatView({
     });
   }, [events, mapEventToConversationItem]);
 
-  // Auto-scroll terminal output (live or historical)
+  // Track whether the user has scrolled up off the bottom of the transcript.
+  // While scrolled up, new output does not yank them back down.
+  const handleTerminalScroll = useCallback((e: UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    userScrolledUpRef.current = distanceFromBottom > 24;
+  }, []);
+
+  // Auto-scroll terminal transcript to the bottom as it grows, unless the user
+  // has scrolled up to read back — matching real terminal behaviour.
   useEffect(() => {
-    if (outputRef.current) {
-      outputRef.current.scrollTop = outputRef.current.scrollHeight;
+    const el = outputRef.current;
+    if (el && !userScrolledUpRef.current) {
+      el.scrollTop = el.scrollHeight;
     }
-  }, [terminalOutput, historicalOutput]);
+  }, [terminalChunks, events, historicalChunks, historicalEvents]);
+
+  // Reset scroll-follow state when switching sessions.
+  useEffect(() => {
+    userScrolledUpRef.current = false;
+  }, [sessionId]);
 
   // Auto-scroll conversation to bottom when new messages arrive
   useEffect(() => {
@@ -437,8 +468,9 @@ export function ChatView({
       streamSinceSeqRef.current = undefined;
     }
     reset();
-    // Clear historical output when starting a new task
-    setHistoricalOutput("");
+    // Clear historical transcript when starting a new task
+    setHistoricalChunks([]);
+    setHistoricalEvents([]);
     setTaskActive(true);
     setShowMerge(false);
     setEndReason(null);
@@ -757,7 +789,7 @@ export function ChatView({
       </div>
 
       {/* Task description - shown when a task is running or has output */}
-      {taskDescription && (taskActive || displayOutput) && (
+      {taskDescription && (taskActive || hasOutput) && (
         <div className="task-description-bar">
           <span className="task-description-label">Task:</span>
           <span className="task-description-text">{taskDescription}</span>
@@ -942,7 +974,7 @@ export function ChatView({
                 </button>
               </>
             )}
-            {(completed || (historicalOutput && !taskActive)) && (
+            {(completed || (hasHistorical && !taskActive)) && (
               <span className={endReason === "completed" || !endReason ? "done-indicator" : endReason === "cancelled" ? "cancelled-indicator" : "failed-indicator"}>
                 {endReason === "cancelled" ? "Cancelled" : endReason === "timeout" ? "Timed out" : endReason && endReason !== "completed" ? `Failed (${endReason})` : "Completed"}
               </span>
@@ -960,9 +992,23 @@ export function ChatView({
             )}
           </div>
 
-          <pre ref={outputRef} className="terminal-output">
-            {stripAnsi(displayOutput)}
-          </pre>
+          <div
+            ref={outputRef}
+            className="terminal-output"
+            onScroll={handleTerminalScroll}
+          >
+            {transcript.map((line, i) =>
+              line.kind === "tool" ? (
+                <div key={i} className="tline tool">
+                  <span className="tool-glyph">●</span> {line.text}
+                </div>
+              ) : (
+                <div key={i} className="tline prose">
+                  {line.text}
+                </div>
+              ),
+            )}
+          </div>
         </div>
       </div>
 

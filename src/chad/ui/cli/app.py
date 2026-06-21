@@ -1,10 +1,8 @@
 """Simple CLI for Chad - minimal terminal UI using API streaming."""
 
-import json
 import os
 import shutil
 import signal
-import subprocess
 import sys
 import threading
 from datetime import datetime, timezone
@@ -17,254 +15,46 @@ from chad.ui.cli.terminal_io import (
 )
 from chad.ui.client import APIClient
 from chad.ui.client.stream_client import SyncStreamClient, decode_terminal_data
-from chad.util.providers import is_mistral_configured
+from chad.util import provider_login
 
 
-def _get_codex_home(account_name: str) -> Path:
-    """Get the isolated HOME directory for a Codex account."""
-    return Path.home() / ".chad" / "codex-homes" / account_name
-
-
-def _get_claude_config_dir(account_name: str) -> Path:
-    """Get the isolated CLAUDE_CONFIG_DIR for a Claude account."""
-    return Path.home() / ".chad" / "claude-configs" / account_name
-
-
-def _write_kimi_default_config(config_file: Path) -> None:
-    """Write default Kimi config when creds exist but config wasn't populated."""
-    config_file.parent.mkdir(parents=True, exist_ok=True)
-    config_file.write_text(
-        'default_model = "kimi-code/kimi-k2.5"\n\n'
-        '[models."kimi-code/kimi-k2.5"]\n'
-        'provider = "managed:kimi-code"\n'
-        'model = "kimi-k2.5"\n'
-        'max_context_size = 131072\n\n'
-        '[providers."managed:kimi-code"]\n'
-        'type = "kimi"\n'
-        'base_url = "https://api.kimi.com/coding/v1"\n'
-        'api_key = ""\n\n'
-        '[providers."managed:kimi-code".oauth]\n'
-        'storage = "file"\n'
-        'key = "kimi-code"\n',
-        encoding="utf-8",
-    )
+_PROVIDER_LOGIN_LABELS = {
+    "openai": "Codex",
+    "anthropic": "Claude",
+    "gemini": "Gemini",
+    "qwen": "Qwen",
+    "kimi": "Kimi",
+}
 
 
 def _run_provider_oauth(provider: str, account_name: str) -> tuple[bool, str]:
-    """Run the OAuth flow for a provider.
+    """Install the provider CLI if needed and run its login flow (CLI front-end).
 
-    Args:
-        provider: Provider type (anthropic, openai, gemini, qwen, mistral, opencode, kimi)
-        account_name: Name for the new account
-
-    Returns:
-        Tuple of (success, message)
+    Delegates the actual work to chad.util.provider_login so the CLI and web UI
+    share one implementation; this wrapper only handles interactive prompting.
     """
-    if provider == "openai":
-        # Codex uses isolated HOME directory
-        codex_home = _get_codex_home(account_name)
-        codex_home.mkdir(parents=True, exist_ok=True)
-        auth_file = codex_home / ".codex" / "auth.json"
-
-        env = os.environ.copy()
-        env["HOME"] = str(codex_home)
-
-        print("Starting Codex login... (browser will open)")
-        print()
-        try:
-            result = subprocess.run(
-                ["codex", "login"],
-                env=env,
-                timeout=120,
-            )
-            if result.returncode == 0 and auth_file.exists():
-                try:
-                    with open(auth_file, encoding="utf-8") as f:
-                        auth_data = json.load(f)
-                    if auth_data.get("tokens", {}).get("access_token"):
-                        return True, "Login successful"
-                except (json.JSONDecodeError, OSError):
-                    pass
-            return False, "Login failed or was cancelled"
-        except FileNotFoundError:
-            shutil.rmtree(codex_home, ignore_errors=True)
-            return False, "Codex CLI not found. Install with: npm install -g @openai/codex"
-        except subprocess.TimeoutExpired:
-            shutil.rmtree(codex_home, ignore_errors=True)
-            return False, "Login timed out"
-        except Exception as e:
-            shutil.rmtree(codex_home, ignore_errors=True)
-            return False, f"Login error: {e}"
-
-    elif provider == "anthropic":
-        # Claude uses isolated config directory
-        config_dir = _get_claude_config_dir(account_name)
-        config_dir.mkdir(parents=True, exist_ok=True)
-        creds_file = config_dir / ".credentials.json"
-
-        env = os.environ.copy()
-        env["CLAUDE_CONFIG_DIR"] = str(config_dir)
-
-        print("Starting Claude login... (browser will open)")
-        print()
-        try:
-            # Run claude which will handle the OAuth flow
-            result = subprocess.run(
-                ["claude"],
-                env=env,
-                timeout=120,
-            )
-            # Check for credentials file
-            if creds_file.exists():
-                try:
-                    with open(creds_file, encoding="utf-8") as f:
-                        creds_data = json.load(f)
-                    if creds_data.get("claudeAiOauth", {}).get("accessToken"):
-                        return True, "Login successful"
-                except (json.JSONDecodeError, OSError):
-                    pass
-            return False, "Login failed or was cancelled"
-        except FileNotFoundError:
-            shutil.rmtree(config_dir, ignore_errors=True)
-            return False, "Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code"
-        except subprocess.TimeoutExpired:
-            shutil.rmtree(config_dir, ignore_errors=True)
-            return False, "Login timed out"
-        except Exception as e:
-            shutil.rmtree(config_dir, ignore_errors=True)
-            return False, f"Login error: {e}"
-
-    elif provider == "gemini":
-        creds_file = Path.home() / ".gemini" / "oauth_creds.json"
-
-        print("Starting Gemini login... (browser will open)")
-        print()
-        try:
-            result = subprocess.run(
-                ["gemini", "-y"],
-                timeout=120,
-            )
-            if result.returncode == 0 and creds_file.exists():
-                return True, "Login successful"
-            return False, "Login failed or was cancelled"
-        except FileNotFoundError:
-            return False, "Gemini CLI not found"
-        except subprocess.TimeoutExpired:
-            return False, "Login timed out"
-        except Exception as e:
-            return False, f"Login error: {e}"
-
-    elif provider == "qwen":
-        print("Starting Qwen login... (browser will open)")
-        print()
-        try:
-            result = subprocess.run(
-                ["qwen", "-y"],
-                timeout=120,
-            )
-            if result.returncode == 0:
-                return True, "Login successful"
-            return False, "Login failed or was cancelled"
-        except FileNotFoundError:
-            return False, "Qwen CLI not found"
-        except subprocess.TimeoutExpired:
-            return False, "Login timed out"
-        except Exception as e:
-            return False, f"Login error: {e}"
-
-    elif provider == "mistral":
-        vibe_dir = Path.home() / ".vibe"
-        if is_mistral_configured(vibe_dir):
+    if provider in provider_login.API_KEY_PROVIDERS:
+        if provider_login.is_logged_in(provider, account_name):
             return True, "Already logged in"
-
-        import webbrowser
-        print("Mistral requires an API key.")
-        print("Opening https://console.mistral.ai/codestral/cli ...")
-        webbrowser.open("https://console.mistral.ai/codestral/cli")
-        print()
-        api_key = input("Paste your MISTRAL_API_KEY: ").strip()
-        if not api_key:
-            return False, "No API key provided"
-
-        vibe_dir.mkdir(parents=True, exist_ok=True)
-        env_file = vibe_dir / ".env"
-        env_file.write_text(f"MISTRAL_API_KEY='{api_key}'\n", encoding="utf-8")
-        return True, "Login successful"
-
-    elif provider == "opencode":
-        # OpenCode stores credentials at ~/.local/share/opencode/auth.json
-        auth_file = Path.home() / ".local" / "share" / "opencode" / "auth.json"
-        if auth_file.exists():
-            try:
-                data = json.loads(auth_file.read_text(encoding="utf-8"))
-                if data:
-                    return True, "Already logged in"
-            except (json.JSONDecodeError, OSError):
-                pass
-
-        print("OpenCode requires an API key.")
-        print("Get one at https://opencode.ai/auth")
+        if provider == "mistral":
+            import webbrowser
+            print("Mistral requires an API key.")
+            print("Opening https://console.mistral.ai/codestral/cli ...")
+            webbrowser.open("https://console.mistral.ai/codestral/cli")
+        else:
+            print("OpenCode requires an API key.")
+            print("Get one at https://opencode.ai/auth")
         print()
         try:
-            api_key = input("Paste your API key (or press Enter to skip): ").strip()
+            api_key = input("Paste your API key: ").strip()
         except (EOFError, KeyboardInterrupt):
             api_key = ""
-        if api_key:
-            auth_file.parent.mkdir(parents=True, exist_ok=True)
-            auth_data = {"opencode": {"type": "api", "key": api_key}}
-            auth_file.write_text(json.dumps(auth_data), encoding="utf-8")
-            return True, "API key stored"
-        return False, "No API key provided"
+        return provider_login.run_login(provider, account_name, api_key)
 
-    elif provider == "kimi":
-        # Check isolated credentials for this account
-        kimi_home = Path.home() / ".chad" / "kimi-homes" / account_name
-        creds_file = kimi_home / ".kimi" / "credentials" / "kimi-code.json"
-        global_creds = Path.home() / ".kimi" / "credentials" / "kimi-code.json"
-        config_file = kimi_home / ".kimi" / "config.toml"
-        # Only consider fully logged in if creds exist AND config has models populated.
-        # A partial login leaves creds but empty config, causing "LLM not set".
-        if creds_file.exists() or global_creds.exists():
-            if config_file.exists() and "[models." in config_file.read_text(encoding="utf-8"):
-                return True, "Already logged in"
-            # Creds exist but config wasn't populated — write config directly
-            # rather than re-doing OAuth (which fails with "already approved").
-            _write_kimi_default_config(config_file)
-            return True, "Already logged in"
-
-        # Run interactive kimi login in the terminal
-        kimi_cli = shutil.which("kimi")
-        if not kimi_cli:
-            return False, "Kimi CLI not found. Install with: pip install kimi-cli"
-
-        kimi_home.mkdir(parents=True, exist_ok=True)
-        env = os.environ.copy()
-        env["HOME"] = str(kimi_home)
-
-        print("Starting Kimi login...")
-        print()
-        try:
-            result = subprocess.run(
-                [kimi_cli, "login"],
-                env=env,
-                timeout=120,
-            )
-            if result.returncode == 0 and creds_file.exists():
-                return True, "Logged in successfully"
-            # Kimi may persist credentials before a non-fatal model listing error.
-            # Accept this as logged in and repair config if needed.
-            if creds_file.exists() or global_creds.exists():
-                if not (config_file.exists() and "[models." in config_file.read_text(encoding="utf-8")):
-                    _write_kimi_default_config(config_file)
-                return True, "Logged in successfully"
-            return False, "Kimi login did not complete"
-        except subprocess.TimeoutExpired:
-            return False, "Login timed out"
-        except Exception as e:
-            return False, f"Login error: {e}"
-
-    else:
-        return False, f"Unsupported provider: {provider}"
+    label = _PROVIDER_LOGIN_LABELS.get(provider, provider.title())
+    print(f"Starting {label} login... (browser will open)")
+    print()
+    return provider_login.run_login(provider, account_name)
 
 
 def get_terminal_size() -> tuple[int, int]:

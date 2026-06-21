@@ -2,6 +2,7 @@ import type {
   Account,
   AccountCreate,
   AccountList,
+  AccountLoginResponse,
   AccountModels,
   AccountUsage,
   AutoconfigureResult,
@@ -220,6 +221,13 @@ export class ChadAPI {
 
   createAccount(params: AccountCreate): Promise<Account> {
     return this.post("/api/v1/accounts", params);
+  }
+
+  loginAccount(name: string, apiKey = ""): Promise<AccountLoginResponse> {
+    return this.post(
+      `/api/v1/accounts/${encodeURIComponent(name)}/login`,
+      { api_key: apiKey },
+    );
   }
 
   getAccount(name: string): Promise<Account> {

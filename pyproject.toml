@@ -40,6 +40,8 @@ dependencies = [
     "pyte>=0.8.0",
     # QR code generation
     "segno>=1.6.0",
+    # Process inspection: preview-tunnel port detection + test-session reaper
+    "psutil>=5.9.0",
 ]
 
 [project.optional-dependencies]
@@ -86,6 +88,7 @@ python_functions = ["test_*"]
 addopts = "-v"
 markers = [
     "api: marks tests as API endpoint tests",
+    "visual: marks tests that drive the UI with Playwright (require a browser)",
 ]
 filterwarnings = [
     "ignore:datetime.datetime.utcfromtimestamp:DeprecationWarning",
