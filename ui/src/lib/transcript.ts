@@ -1,0 +1,161 @@
+import type { StreamEvent } from "chad-client";
+import type { TerminalChunk } from "../hooks/useStream.ts";
+
+/**
+ * Builds a Claude-Code-style transcript for the live view panel.
+ *
+ * The panel is an append-only, terminal-like log of what the agent is doing:
+ * individual tool calls (rendered like `● Read(src/foo.py)`) interleaved with
+ * the agent's prose, ordered by sequence number.
+ *
+ * Two things are deliberately filtered out so the panel reads like a real agent
+ * harness and never gets clobbered by the agent's final output:
+ *  - The completion/progress JSON the prompt asks the agent to emit
+ *    (e.g. ```json {"change_summary": ...}```). It is machine plumbing, not
+ *    something a terminal user should see.
+ *  - The parser's collapsed `• 3 files read` summary lines, since we render the
+ *    individual tool calls from structured events instead.
+ */
+
+export type TranscriptLineKind = "prose" | "tool";
+
+export interface TranscriptLine {
+  kind: TranscriptLineKind;
+  text: string;
+}
+
+interface Segment {
+  seq: number;
+  /** Tie-break within the same seq: prose (0) sorts before its tool calls (1). */
+  rank: number;
+  kind: "text" | "tool";
+  text: string;
+}
+
+function stripAnsi(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+}
+
+function truncate(value: string, max: number): string {
+  const v = value.trim();
+  return v.length > max ? `${v.slice(0, max - 1)}…` : v;
+}
+
+/** Format a tool_call_started event as a Claude-Code-style call line. */
+function formatToolLine(data: Record<string, unknown>): string {
+  const tool = String(data.tool || "tool");
+  const args = (data.args as Record<string, unknown>) || {};
+  const path = data.path as string | undefined;
+  const command = data.command as string | undefined;
+
+  switch (tool) {
+    case "Read":
+    case "Write":
+    case "Edit":
+      return `${tool}(${path ?? (args.file_path as string) ?? ""})`;
+    case "Bash":
+      return `Bash(${truncate(String(command ?? args.command ?? ""), 80)})`;
+    case "Glob":
+      return `Glob(${(args.pattern as string) ?? path ?? ""})`;
+    case "Grep":
+      return `Grep(${(args.pattern as string) ?? ""})`;
+    case "Task":
+      return `Task(${truncate(String(args.description ?? ""), 60)})`;
+    case "WebSearch":
+      return `WebSearch(${truncate(String(args.query ?? ""), 60)})`;
+    case "WebFetch":
+      return `WebFetch(${truncate(String(args.url ?? ""), 60)})`;
+    default: {
+      const keys = Object.keys(args);
+      const detail = keys.length ? truncate(JSON.stringify(args), 60) : "";
+      return detail ? `${tool}(${detail})` : tool;
+    }
+  }
+}
+
+/**
+ * Remove agent-emitted JSON plumbing and parser summary lines from a run of
+ * prose. Operates on the assembled prose (not per-chunk) so a JSON block split
+ * across streaming chunks is still stripped as a whole.
+ */
+function cleanProse(text: string): string {
+  let t = stripAnsi(text);
+  // The EXPLORATION_RESULT: progress-protocol prefix (every provider's prompt asks
+  // for it) — keep the agent's summary text, drop the machine marker.
+  t = t.replace(/^[ \t]*EXPLORATION_RESULT:[ \t]*/gm, "");
+  // Fenced JSON blocks: ```json { ... } ``` or ``` { ... } ```
+  t = t.replace(/```(?:json)?\s*\{[^`]*?\}\s*```/gi, "");
+  // Bare completion JSON: {"change_summary": ...} / completion_status / files_changed
+  t = t.replace(/\{[^{}]*"(?:change_summary|completion_status|files_changed)"[^{}]*\}/g, "");
+  // Bare progress JSON: {"type": "progress", ...}
+  t = t.replace(/\{[^{}]*"type"\s*:\s*"progress"[^{}]*\}/g, "");
+  return t;
+}
+
+export function buildTranscript(
+  chunks: TerminalChunk[],
+  events: StreamEvent[],
+): TranscriptLine[] {
+  const segments: Segment[] = [];
+
+  for (const chunk of chunks) {
+    if (chunk.text) {
+      segments.push({ seq: chunk.seq ?? 0, rank: 0, kind: "text", text: chunk.text });
+    }
+  }
+
+  for (const event of events) {
+    const data = (event.data as Record<string, unknown>) || {};
+    if (data.type === "tool_call_started") {
+      const seq = typeof data.seq === "number" ? data.seq : event.seq ?? 0;
+      segments.push({ seq, rank: 1, kind: "tool", text: formatToolLine(data) });
+    }
+  }
+
+  segments.sort((a, b) => a.seq - b.seq || a.rank - b.rank);
+
+  const lines: TranscriptLine[] = [];
+  let buffer = "";
+
+  const flush = () => {
+    if (!buffer) return;
+    const cleaned = cleanProse(buffer);
+    buffer = "";
+    let blankRun = 0;
+    for (const line of cleaned.split("\n")) {
+      if (/^\s*•/.test(line)) continue; // drop collapsed tool summaries
+      if (line.trim() === "") {
+        blankRun += 1;
+        if (blankRun > 1) continue; // collapse blank runs
+      } else {
+        blankRun = 0;
+      }
+      lines.push({ kind: "prose", text: line });
+    }
+  };
+
+  for (const segment of segments) {
+    if (segment.kind === "text") {
+      buffer += segment.text;
+    } else {
+      flush();
+      lines.push({ kind: "tool", text: segment.text });
+    }
+  }
+  flush();
+
+  // Trim leading/trailing blank prose so the panel doesn't open or end on gaps.
+  while (lines.length && lines[0].kind === "prose" && lines[0].text.trim() === "") {
+    lines.shift();
+  }
+  while (
+    lines.length &&
+    lines[lines.length - 1].kind === "prose" &&
+    lines[lines.length - 1].text.trim() === ""
+  ) {
+    lines.pop();
+  }
+
+  return lines;
+}

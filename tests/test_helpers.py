@@ -13,10 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-try:
-    import psutil
-except ImportError:  # psutil is an optional dependency
-    psutil = None
+import psutil
 
 
 # ---------------------------------------------------------------------------
@@ -40,8 +37,6 @@ def reap_child_processes(timeout: float = 5.0) -> list[int]:
 
     Returns the PIDs that were terminated.
     """
-    if psutil is None:
-        return []
     try:
         children = psutil.Process().children(recursive=True)
     except psutil.Error:

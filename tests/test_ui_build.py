@@ -1,9 +1,49 @@
 """Tests for the UI autobuild helper."""
 
+import subprocess
 from pathlib import Path
 from unittest.mock import call, patch
 
 from chad.util.ui_build import ensure_ui_built
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_no_ui_source_file_is_gitignored():
+    """Every UI/client source file must be trackable by git.
+
+    A bare ``lib/`` rule in .gitignore (meant for Python build artifacts) once
+    also matched ``ui/src/lib/``, so ``transcript.ts`` was silently never
+    committed. CI then failed the React build (``Cannot find module
+    '../lib/transcript.ts'``) and ``/`` returned 404. Guard against any UI or
+    client source file being excluded by gitignore.
+    """
+    source_files = []
+    for base in ("ui/src", "client/src"):
+        root = _REPO_ROOT / base
+        if not root.is_dir():
+            continue
+        for pattern in ("*.ts", "*.tsx", "*.css"):
+            source_files.extend(root.rglob(pattern))
+
+    assert source_files, "No UI source files found — test is looking in the wrong place"
+
+    rel_paths = [str(p.relative_to(_REPO_ROOT)) for p in source_files]
+    # --no-index evaluates the gitignore rules directly, independent of whether a
+    # file happens to be staged/tracked locally — that is what CI's fresh
+    # checkout sees, and what silently dropped transcript.ts.
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", "--stdin"],
+        input="\n".join(rel_paths),
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    ignored = [line for line in result.stdout.splitlines() if line.strip()]
+    assert not ignored, (
+        "These UI source files are gitignored and won't be committed, "
+        f"breaking the CI build: {ignored}"
+    )
 
 
 def _touch(path: Path, content: str = "") -> None:
