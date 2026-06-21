@@ -1314,6 +1314,27 @@ label {
   margin: 16px 0;
 }
 
+.branch-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.branch-refresh-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 2px 8px;
+  font-size: 14px;
+  border-radius: 4px;
+}
+
+.branch-refresh-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .merge-actions {
   display: flex;
   gap: 8px;

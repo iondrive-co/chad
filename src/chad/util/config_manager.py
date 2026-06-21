@@ -638,7 +638,14 @@ class ConfigManager:
             self.save_config(config)
 
     def delete_account(self, account_name: str) -> None:
-        """Delete an account and any role assignments using it.
+        """Delete an account and all settings referencing it.
+
+        This cleans up:
+        - The account entry itself
+        - Role assignments referencing the account
+        - Mock settings (remaining_usage, run_duration, session_reset_time)
+        - verification_agent if it points to this account
+        - action_settings entries with target_account pointing to this account
 
         Args:
             account_name: Account name to delete
@@ -654,6 +661,25 @@ class ConfigManager:
             roles_to_clear = [role for role, acct in config["role_assignments"].items() if acct == account_name]
             for role in roles_to_clear:
                 del config["role_assignments"][role]
+
+        # Remove mock settings for this account
+        if "mock_remaining_usage" in config:
+            config["mock_remaining_usage"].pop(account_name, None)
+        if "mock_run_duration_seconds" in config:
+            config["mock_run_duration_seconds"].pop(account_name, None)
+        if "mock_session_reset_time" in config:
+            config["mock_session_reset_time"].pop(account_name, None)
+
+        # Clear verification_agent if it points to the deleted account
+        if config.get("verification_agent") == account_name:
+            del config["verification_agent"]
+
+        # Remove action_settings entries that reference this account as target_account
+        if "action_settings" in config:
+            config["action_settings"] = [
+                s for s in config["action_settings"]
+                if s.get("target_account") != account_name
+            ]
 
         self.save_config(config)
 

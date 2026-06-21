@@ -13,6 +13,10 @@ interface Props {
 
 type Phase = "loading" | "changes" | "merging" | "conflict" | "success" | "error";
 
+// How often to re-poll the branch list so branches created while the panel is
+// open appear in the target dropdown without reopening the panel.
+const BRANCH_REFRESH_INTERVAL_MS = 5000;
+
 export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
   const [phase, setPhase] = useState<Phase>("loading");
   const [filesChanged, setFilesChanged] = useState(0);
@@ -29,18 +33,44 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
   const [showDiff, setShowDiff] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [refreshingBranches, setRefreshingBranches] = useState(false);
 
-  // Load available branches and initialize the comparison target.
+  // Fetch the list of branches available as merge targets. Does NOT touch the
+  // selected target branch, so a periodic or manual refresh never clobbers the
+  // user's current selection. Only updates `branches` when it actually changed
+  // to avoid needless re-renders on the background poll.
+  const refreshBranches = useCallback(async () => {
+    const branchData = await api.getBranches(sessionId);
+    setBranches((prev) =>
+      prev.length === branchData.branches.length && prev.every((b, i) => b === branchData.branches[i])
+        ? prev
+        : branchData.branches,
+    );
+    setDefaultBranch(branchData.default);
+    setCurrentBranch(branchData.current);
+    return branchData;
+  }, [api, sessionId]);
+
+  // Manual refresh shows a transient "Refreshing…" label; the background poll does not.
+  const handleManualRefresh = useCallback(async () => {
+    setRefreshingBranches(true);
+    try {
+      await refreshBranches();
+    } catch {
+      // Ignore transient failures; the list stays as-is.
+    } finally {
+      setRefreshingBranches(false);
+    }
+  }, [refreshBranches]);
+
+  // Initial load: branches + worktree status, and pick the default target branch.
   useEffect(() => {
     const load = async () => {
       try {
         const [branchData, worktreeStatus] = await Promise.all([
-          api.getBranches(sessionId),
+          refreshBranches(),
           api.getWorktreeStatus(sessionId),
         ]);
-        setBranches(branchData.branches);
-        setDefaultBranch(branchData.default);
-        setCurrentBranch(branchData.current);
         setWorktreeHasChanges(worktreeStatus.has_changes);
         const preferredTarget = branchData.branches[0] ?? branchData.default ?? "";
         setTargetBranch(preferredTarget);
@@ -49,8 +79,19 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
         setPhase("error");
       }
     };
-    load();
-  }, [api, sessionId]);
+    void load();
+  }, [api, sessionId, refreshBranches]);
+
+  // Keep the branch list fresh: branches created after the panel opened (e.g. a
+  // new branch made in another tool) show up without reopening the panel.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      void refreshBranches().catch(() => {
+        // Ignore transient refresh failures; the list simply stays as-is.
+      });
+    }, BRANCH_REFRESH_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [refreshBranches]);
 
   useEffect(() => {
     if (!targetBranch) {
@@ -287,7 +328,18 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
         </label>
 
         <label>
-          Target Branch
+          <span className="branch-label-row">
+            Target Branch
+            <button
+              type="button"
+              className="branch-refresh-btn"
+              onClick={() => { void handleManualRefresh(); }}
+              disabled={refreshingBranches}
+              title="Refresh branch list"
+            >
+              {refreshingBranches ? "Refreshing…" : "↻ Refresh"}
+            </button>
+          </span>
           <select
             value={targetBranch}
             onChange={(e) => setTargetBranch(e.target.value)}
