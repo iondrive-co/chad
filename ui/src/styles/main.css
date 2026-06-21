@@ -1450,14 +1450,9 @@ label {
   color: var(--text-muted);
 }
 
-/* ── Diff Viewer ── */
+/* ── Diff Viewer (nop-diff web component renders into .nop-diff-host) ── */
 
-.diff-viewer {
-  font-family: var(--font-mono);
-  font-size: 16px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow: hidden;
+.nop-diff-host {
   margin: 12px 0;
 }
 
@@ -1466,116 +1461,6 @@ label {
   color: var(--text-muted);
   font-size: 15px;
   padding: 12px;
-}
-
-.diff-file {
-  border-bottom: 1px solid var(--border);
-}
-
-.diff-file:last-child {
-  border-bottom: none;
-}
-
-.diff-file-header {
-  background: var(--bg-tertiary);
-  padding: 8px 12px;
-  font-size: 15px;
-  color: var(--accent);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.diff-file-header .badge {
-  font-size: 15px;
-  padding: 2px 6px;
-}
-
-.diff-file-header .badge.new-file {
-  background: var(--success);
-}
-
-.diff-file-header .badge.deleted-file {
-  background: var(--error);
-}
-
-.diff-file-header .badge.binary-file {
-  background: var(--text-muted);
-}
-
-.diff-binary {
-  padding: 8px 12px;
-  color: var(--text-muted);
-  font-style: italic;
-}
-
-.diff-hunk {
-  border-bottom: 1px solid var(--border);
-}
-
-.diff-hunk:last-child {
-  border-bottom: none;
-}
-
-.diff-comparison {
-  display: flex;
-}
-
-.diff-side {
-  flex: 1;
-  min-width: 0;
-  overflow-x: auto;
-}
-
-.diff-side-left {
-  border-right: 1px solid var(--border);
-}
-
-.diff-side-header {
-  background: var(--bg-tertiary);
-  padding: 4px 8px;
-  font-size: 15px;
-  color: var(--text-muted);
-  font-weight: 600;
-}
-
-.diff-line {
-  display: flex;
-  line-height: 1.4;
-}
-
-.diff-line.context {
-  background: var(--bg-secondary);
-}
-
-.diff-line.delete {
-  background: var(--diff-delete-bg);
-}
-
-.diff-line.add {
-  background: var(--diff-add-bg);
-}
-
-.diff-line.empty {
-  background: var(--bg);
-  min-height: 1.4em;
-}
-
-.diff-line-no {
-  width: 40px;
-  padding: 0 8px;
-  text-align: right;
-  color: var(--text-muted);
-  user-select: none;
-  flex-shrink: 0;
-  border-right: 1px solid var(--border);
-}
-
-.diff-line-content {
-  flex: 1;
-  padding: 0 8px;
-  white-space: pre-wrap;
-  word-break: break-all;
 }
 
 /* ── Conflict Viewer ── */

@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import type { ChadAPI, DiffFull, MergeConflict } from "chad-client";
 import { ChadAPIError } from "chad-client";
-import { DiffViewer } from "./DiffViewer.tsx";
+import { NopDiffView } from "./NopDiffView.tsx";
 import { ConflictViewer } from "./ConflictViewer.tsx";
 
 interface Props {
@@ -314,7 +314,7 @@ export function MergePanel({ api, sessionId, onMerged, onDismiss }: Props) {
         {showDiff ? "Hide Changes" : "View Changes"}
       </button>
 
-      {showDiff && diff && <DiffViewer files={diff.files} />}
+      {showDiff && diff && <NopDiffView files={diff.files} />}
 
       <div className="merge-form">
         <label>
