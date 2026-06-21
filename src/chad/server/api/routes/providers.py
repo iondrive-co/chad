@@ -1,5 +1,7 @@
 """Provider and account management endpoints."""
 
+import threading
+
 from fastapi import APIRouter, HTTPException
 
 from chad.server.api.schemas import (
@@ -14,9 +16,12 @@ from chad.server.api.schemas import (
     AccountRoleUpdate,
     AccountModelsResponse,
     AccountDeleteResponse,
+    AccountLoginRequest,
+    AccountLoginResponse,
     RoleType,
 )
 from chad.server.state import get_config_manager, get_model_catalog
+from chad.util import provider_login
 
 router = APIRouter()
 
@@ -46,7 +51,7 @@ def _account_to_response(
         model=model if model != "default" else None,
         reasoning=reasoning if reasoning != "default" else None,
         role=role,
-        ready=True,  # Accounts in config are ready
+        ready=provider_login.is_logged_in(provider, name),
     )
 
 
@@ -119,10 +124,12 @@ async def list_accounts() -> AccountListResponse:
 
 @router.post("/accounts", response_model=AccountResponse, status_code=201)
 async def create_account(request: AccountCreate) -> AccountResponse:
-    """Register a new account after OAuth authentication.
+    """Register a new account.
 
-    The UI handles the OAuth flow; this endpoint stores the account
-    configuration after authentication succeeds.
+    This only records the account so the request returns instantly; the
+    provider CLI is installed and authorized later via POST /accounts/{name}/login
+    (which runs in the background). Installing here would block the request on a
+    potentially long npm/pip download.
     """
     config_mgr = get_config_manager()
 
@@ -132,7 +139,7 @@ async def create_account(request: AccountCreate) -> AccountResponse:
             detail=f"Account '{request.name}' already exists"
         )
 
-    # Store account with empty API key (OAuth handles auth)
+    # Store account with empty API key (login handles auth)
     config_mgr.store_account(
         account_name=request.name,
         provider=request.provider,
@@ -141,6 +148,47 @@ async def create_account(request: AccountCreate) -> AccountResponse:
     )
 
     return _account_to_response(request.name, request.provider, config_mgr)
+
+
+@router.post("/accounts/{name}/login", response_model=AccountLoginResponse)
+async def login_account(name: str, request: AccountLoginRequest) -> AccountLoginResponse:
+    """Install the provider CLI and authorize an account.
+
+    Returns immediately and does the work (install + browser OAuth / API-key
+    write) on a background thread so a slow npm/pip install never blocks the
+    request. The client polls GET /accounts/{name} until ``ready`` becomes true.
+    """
+    config_mgr = get_config_manager()
+
+    if not config_mgr.has_account(name):
+        raise HTTPException(status_code=404, detail=f"Account '{name}' not found")
+
+    provider = config_mgr.list_accounts().get(name)
+
+    if provider_login.is_logged_in(provider, name):
+        return AccountLoginResponse(
+            account_name=name, success=True, ready=True, message="Already logged in"
+        )
+
+    if provider in provider_login.API_KEY_PROVIDERS and not request.api_key:
+        return AccountLoginResponse(
+            account_name=name, success=False, ready=False,
+            message=f"{provider} requires an API key",
+        )
+
+    threading.Thread(
+        target=provider_login.run_login,
+        args=(provider, name, request.api_key),
+        daemon=True,
+    ).start()
+
+    if provider in provider_login.API_KEY_PROVIDERS:
+        message = "Authorizing…"
+    else:
+        message = "Login started — complete authentication in the browser window that opened."
+    return AccountLoginResponse(
+        account_name=name, success=True, ready=False, message=message,
+    )
 
 
 @router.get("/accounts/{name}", response_model=AccountResponse)

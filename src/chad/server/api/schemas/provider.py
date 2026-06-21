@@ -102,3 +102,22 @@ class AccountDeleteResponse(BaseModel):
     account_name: str
     deleted: bool = True
     message: str = "Account deleted successfully"
+
+
+class AccountLoginRequest(BaseModel):
+    """Request model for logging in / authorizing an account.
+
+    For OAuth providers the api_key is ignored (a browser flow is launched).
+    For API-key providers (mistral, opencode) the key is required.
+    """
+
+    api_key: str = Field(default="", description="API key for providers that require one")
+
+
+class AccountLoginResponse(BaseModel):
+    """Response model for an account login attempt."""
+
+    account_name: str
+    success: bool = Field(description="Whether the login was started/completed successfully")
+    ready: bool = Field(description="Whether the account is now authenticated")
+    message: str = Field(description="Human-readable status message")

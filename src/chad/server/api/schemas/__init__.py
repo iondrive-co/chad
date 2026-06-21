@@ -28,6 +28,8 @@ from .provider import (
     AccountRoleUpdate,
     AccountModelsResponse,
     AccountDeleteResponse,
+    AccountLoginRequest,
+    AccountLoginResponse,
 )
 from .worktree import (
     WorktreeStatus,
@@ -96,6 +98,8 @@ __all__ = [
     "AccountRoleUpdate",
     "AccountModelsResponse",
     "AccountDeleteResponse",
+    "AccountLoginRequest",
+    "AccountLoginResponse",
     # Worktree
     "WorktreeStatus",
     "DiffLine",

@@ -37,6 +37,29 @@ def client(tmp_path, monkeypatch):
     reset_state()
 
 
+def _mock_installer(monkeypatch):
+    """Stub out CLI installation so account creation doesn't shell out to npm/pip."""
+    installed = []
+
+    def fake_ensure_tool(self, tool_key):
+        installed.append(tool_key)
+        return True, f"/fake/bin/{tool_key}"
+
+    from chad.util.installer import AIToolInstaller
+    monkeypatch.setattr(AIToolInstaller, "ensure_tool", fake_ensure_tool)
+    return installed
+
+
+def _seed_account(client, monkeypatch, name, provider):
+    """Create an account through the API with installation stubbed out."""
+    get_config_manager().save_config(
+        {"password_hash": "", "encryption_salt": "dGVzdHNhbHQ=", "accounts": {}}
+    )
+    resp = client.post("/api/v1/accounts", json={"name": name, "provider": provider})
+    assert resp.status_code == 201, resp.text
+    return resp
+
+
 class TestStatusEndpoint:
     """Tests for status endpoint."""
 
@@ -225,6 +248,105 @@ class TestProviderEndpoints:
         data = response.json()
         assert data["total"] == 0
         assert data["accounts"] == []
+
+
+class _InlineThread:
+    """Drop-in for threading.Thread that runs the target synchronously on start()."""
+
+    def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self):
+        if self._target:
+            self._target(*self._args, **self._kwargs)
+
+
+class TestProviderLogin:
+    """Authorizing a provider installs its CLI and tracks real login state."""
+
+    def test_create_account_does_not_install(self, client, monkeypatch):
+        """Creating an account is instant — install is deferred to login.
+
+        Regression: a synchronous npm/pip install in create_account blocked the
+        request long enough that the UI reported failure.
+        """
+        installed = _mock_installer(monkeypatch)
+        _seed_account(client, monkeypatch, "my-codex", "openai")
+        assert installed == []
+
+    def test_account_ready_reflects_login_state(self, client, monkeypatch, tmp_path):
+        """`ready` is False with no credentials and flips True once auth.json exists."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_account(client, monkeypatch, "my-codex", "openai")
+
+        before = client.get("/api/v1/accounts/my-codex").json()
+        assert before["ready"] is False
+
+        auth_file = tmp_path / ".chad" / "codex-homes" / "my-codex" / ".codex" / "auth.json"
+        auth_file.parent.mkdir(parents=True, exist_ok=True)
+        auth_file.write_text(json.dumps({"tokens": {"access_token": "tok"}}), encoding="utf-8")
+
+        after = client.get("/api/v1/accounts/my-codex").json()
+        assert after["ready"] is True
+
+    def test_login_installs_and_authorizes_in_background(self, client, monkeypatch, tmp_path):
+        """OAuth login returns immediately and runs install + browser flow off-thread.
+
+        Regression: this is where the CLI gets installed into ~/.chad/tools so the
+        task spawn no longer fails with [Errno 2] No such file or directory.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_account(client, monkeypatch, "my-codex", "openai")
+
+        calls = []
+        from chad.server.api.routes import providers as providers_route
+        monkeypatch.setattr(providers_route.threading, "Thread", _InlineThread)
+        monkeypatch.setattr(
+            providers_route.provider_login, "run_login",
+            lambda *a, **k: calls.append(a) or (True, "ok"),
+        )
+
+        resp = client.post("/api/v1/accounts/my-codex/login", json={})
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["success"] is True
+        assert data["ready"] is False
+        assert "browser" in data["message"].lower()
+        assert calls == [("openai", "my-codex", "")]
+
+    def test_login_api_key_provider_writes_credentials(self, client, monkeypatch, tmp_path):
+        """API-key providers authorize from the supplied key (install stubbed)."""
+        _mock_installer(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_account(client, monkeypatch, "my-oc", "opencode")
+
+        from chad.server.api.routes import providers as providers_route
+        monkeypatch.setattr(providers_route.threading, "Thread", _InlineThread)
+
+        resp = client.post("/api/v1/accounts/my-oc/login", json={"api_key": "sk-test"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["success"] is True
+        auth_file = tmp_path / ".local" / "share" / "opencode" / "auth.json"
+        assert auth_file.exists()
+        # Now reported ready.
+        assert client.get("/api/v1/accounts/my-oc").json()["ready"] is True
+
+    def test_login_api_key_provider_requires_key(self, client, monkeypatch, tmp_path):
+        """API-key providers reject login when no key is supplied."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_account(client, monkeypatch, "my-oc", "opencode")
+
+        resp = client.post("/api/v1/accounts/my-oc/login", json={})
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["success"] is False
+        assert "api key" in data["message"].lower()
+
+    def test_login_unknown_account_returns_404(self, client):
+        resp = client.post("/api/v1/accounts/nope/login", json={})
+        assert resp.status_code == 404
 
 
 class TestConfigEndpoints:

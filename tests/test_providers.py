@@ -26,6 +26,68 @@ from chad.util.providers import (
 )
 
 
+class TestProviderLoginUtil:
+    """Tests for the shared chad.util.provider_login helpers."""
+
+    def test_is_logged_in_codex_reflects_auth_file(self, tmp_path, monkeypatch):
+        from chad.util import provider_login
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert provider_login.is_logged_in("openai", "acct") is False
+
+        auth = tmp_path / ".chad" / "codex-homes" / "acct" / ".codex" / "auth.json"
+        auth.parent.mkdir(parents=True, exist_ok=True)
+        auth.write_text(json.dumps({"tokens": {"access_token": "tok"}}), encoding="utf-8")
+        assert provider_login.is_logged_in("openai", "acct") is True
+
+    def test_is_logged_in_codex_requires_token(self, tmp_path, monkeypatch):
+        from chad.util import provider_login
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        auth = tmp_path / ".chad" / "codex-homes" / "acct" / ".codex" / "auth.json"
+        auth.parent.mkdir(parents=True, exist_ok=True)
+        auth.write_text(json.dumps({"tokens": {}}), encoding="utf-8")
+        assert provider_login.is_logged_in("openai", "acct") is False
+
+    def test_run_login_opencode_writes_api_key(self, tmp_path, monkeypatch):
+        from chad.util import provider_login
+        from chad.util.installer import AIToolInstaller
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            AIToolInstaller, "ensure_tool", lambda self, key: (True, f"/fake/{key}")
+        )
+        ok, _ = provider_login.run_login("opencode", "acct", "sk-test")
+        assert ok is True
+        auth = tmp_path / ".local" / "share" / "opencode" / "auth.json"
+        assert json.loads(auth.read_text())["opencode"]["key"] == "sk-test"
+
+    def test_run_login_opencode_requires_key(self, tmp_path, monkeypatch):
+        from chad.util import provider_login
+        from chad.util.installer import AIToolInstaller
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            AIToolInstaller, "ensure_tool", lambda self, key: (True, f"/fake/{key}")
+        )
+        ok, msg = provider_login.run_login("opencode", "acct", "")
+        assert ok is False
+        assert "API key" in msg
+
+    def test_ensure_cli_delegates_to_installer(self, monkeypatch):
+        from chad.util import provider_login
+        from chad.util.installer import AIToolInstaller
+
+        seen = []
+        monkeypatch.setattr(
+            AIToolInstaller, "ensure_tool",
+            lambda self, key: seen.append(key) or (True, f"/fake/{key}"),
+        )
+        ok, path = provider_login.ensure_cli("openai")
+        assert ok is True
+        assert seen == ["codex"]
+
+
 class TestCreateProvider:
     """Test cases for provider factory."""
 
