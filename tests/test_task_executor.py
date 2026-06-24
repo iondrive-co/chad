@@ -1056,6 +1056,28 @@ class TestModelPassThrough:
         assert "model_reasoning_effort" in cmd[idx_c + 1]
         assert "high" in cmd[idx_c + 1]
 
+    def test_anthropic_reasoning_thinking_tokens(self, tmp_path):
+        """Anthropic maps reasoning levels onto the MAX_THINKING_TOKENS budget."""
+        budgets = {}
+        for level in ("low", "medium", "high"):
+            _, env, _ = build_agent_command(
+                "anthropic", "test", tmp_path, "fix bug", reasoning_effort=level
+            )
+            assert "MAX_THINKING_TOKENS" in env, f"missing thinking budget for {level}"
+            budgets[level] = int(env["MAX_THINKING_TOKENS"])
+            assert budgets[level] > 0
+        # Higher reasoning levels request larger thinking budgets.
+        assert budgets["low"] < budgets["medium"] < budgets["high"]
+
+    def test_anthropic_no_reasoning_no_thinking_budget(self, tmp_path):
+        """Anthropic omits MAX_THINKING_TOKENS when no reasoning level is set."""
+        _, env, _ = build_agent_command("anthropic", "test", tmp_path, "fix bug")
+        assert "MAX_THINKING_TOKENS" not in env
+        _, env_default, _ = build_agent_command(
+            "anthropic", "test", tmp_path, "fix bug", reasoning_effort="default"
+        )
+        assert "MAX_THINKING_TOKENS" not in env_default
+
     def test_gemini_model_flag(self, tmp_path):
         """Gemini provider passes -m flag."""
         cmd, env, _ = build_agent_command(

@@ -220,6 +220,11 @@ class TestProviderEndpoints:
         assert "opencode" in provider_types
         assert "kimi" in provider_types
 
+        # Anthropic (Claude Code) and OpenAI (Codex) support a reasoning level.
+        by_type = {p["type"]: p for p in providers}
+        assert by_type["anthropic"]["supports_reasoning"] is True
+        assert by_type["openai"]["supports_reasoning"] is True
+
     @pytest.mark.parametrize("provider", ["opencode", "kimi"])
     def test_create_account_accepts_new_provider_types(self, client, provider):
         """Account create API should accept all provider types exposed in the setup UI."""

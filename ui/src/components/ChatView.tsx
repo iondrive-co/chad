@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect, DragEvent, UIEvent } from "react";
-import type { ChadAPI, ConversationItem, Account, VerificationSettings, ProjectSettings, StreamEvent } from "chad-client";
+import type { ChadAPI, ConversationItem, Account, ProviderInfo, VerificationSettings, ProjectSettings, StreamEvent } from "chad-client";
 import { useStream } from "../hooks/useStream.ts";
 import type { TerminalChunk } from "../hooks/useStream.ts";
 import { buildTranscript } from "../lib/transcript.ts";
@@ -30,6 +30,8 @@ interface Props {
 
 const NEW_PROJECT_VALUE = "__new_project__";
 
+const REASONING_OPTIONS = ["", "low", "medium", "high"];
+
 function normalizeLineEndings(text: string): string {
   return text.replace(/\r\n?/g, "\n");
 }
@@ -58,6 +60,10 @@ export function ChatView({
   const [sending, setSending] = useState(false);
   const [showMerge, setShowMerge] = useState(false);
   const [codingAccount, setCodingAccount] = useState<Account | null>(null);
+  // Provider metadata (used to decide whether the coding agent supports a
+  // reasoning level) and the reasoning level chosen for the next answer.
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [codingReasoning, setCodingReasoning] = useState("");
   const [conversation, setConversation] = useState<ConversationItem[]>([]);
   const [conversationError, setConversationError] = useState<string | null>(null);
   const conversationSeqRef = useRef(0);
@@ -297,6 +303,15 @@ export function ChatView({
     });
     return () => { cancelled = true; };
   }, [api, currentProjectPath, projects]);
+
+  // Load provider metadata so we know which coding agents support a reasoning level.
+  useEffect(() => {
+    let cancelled = false;
+    api.listProviders()
+      .then((r) => { if (!cancelled) setProviders(r.providers); })
+      .catch(() => { if (!cancelled) setProviders([]); });
+    return () => { cancelled = true; };
+  }, [api]);
 
   // Load verification settings and default verification agent
   useEffect(() => {
@@ -662,6 +677,7 @@ export function ChatView({
       project_path: projectPath,
       task_description: message,
       coding_agent: codingAccount.name,
+      coding_reasoning: codingReasoning || undefined,
       verification_agent: verificationAllowed ? verificationAccount.name : undefined,
       is_followup: isFollowup,
       screenshots: attachedScreenshots.length > 0 ? attachedScreenshots.map((s) => s.path) : undefined,
@@ -672,6 +688,7 @@ export function ChatView({
     api,
     sessionId,
     codingAccount,
+    codingReasoning,
     verificationAccount,
     verificationSettings,
     currentProjectPath,
@@ -823,6 +840,11 @@ export function ChatView({
 
   const projectSelectorValue = creatingProject ? NEW_PROJECT_VALUE : currentProjectPath;
   const showNewProjectForm = creatingProject || projects.length === 0;
+
+  // The reasoning-level dropdown only makes sense for coding agents whose
+  // provider supports it (e.g. Codex). Other providers ignore the level.
+  const codingSupportsReasoning =
+    providers.find((p) => p.type === codingAccount?.provider)?.supports_reasoning ?? false;
 
   return (
     <div className="chat-view">
@@ -1009,6 +1031,22 @@ export function ChatView({
                 <div className="composer-right">
                   {uploading && <span className="running-indicator">Uploading…</span>}
                   {taskActive && <span className="running-indicator">Running…</span>}
+                  {codingSupportsReasoning && (
+                    <select
+                      className="reasoning-select"
+                      value={codingReasoning}
+                      onChange={(e) => setCodingReasoning(e.target.value)}
+                      disabled={sending}
+                      aria-label="Reasoning level"
+                      title="Reasoning level to use for the answer"
+                    >
+                      {REASONING_OPTIONS.map((r) => (
+                        <option key={r} value={r}>
+                          {r ? `Reasoning: ${r}` : "Reasoning: default"}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                   {!taskActive && (
                     <button
                       type="button"

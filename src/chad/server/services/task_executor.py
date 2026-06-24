@@ -456,6 +456,12 @@ def _strip_binary_garbage(text: str) -> str:
     return _BINARY_GARBAGE_RE.sub('', text)
 
 
+# Claude Code's extended-thinking budgets, mirroring its own "think" (4k),
+# "megathink" (10k), and "ultrathink" (~32k) keyword tiers. Set via the
+# MAX_THINKING_TOKENS env var the CLI reads.
+_CLAUDE_THINKING_BUDGETS = {"low": 4000, "medium": 10000, "high": 31999}
+
+
 def build_agent_command(
     provider: str,
     account_name: str,
@@ -538,6 +544,12 @@ def build_agent_command(
         if model and model != "default":
             cmd.extend(["--model", model])
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+        # Claude Code reads MAX_THINKING_TOKENS to enable extended thinking with a
+        # token budget. Map the shared low/medium/high reasoning levels onto the
+        # CLI's own "think"/"megathink"/"ultrathink" budgets.
+        thinking_budget = _CLAUDE_THINKING_BUDGETS.get(reasoning_effort or "")
+        if thinking_budget:
+            env["MAX_THINKING_TOKENS"] = str(thinking_budget)
         # Provide prompt as positional argument (required with -p when stdin is a TTY)
         if full_prompt:
             cmd.append(full_prompt)

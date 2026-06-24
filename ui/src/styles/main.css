@@ -800,6 +800,27 @@ label {
   margin-bottom: 8px;
 }
 
+.reasoning-select {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 6px 10px;
+  font-size: 15px;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: border-color 0.2s, color 0.2s;
+}
+
+.reasoning-select:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.reasoning-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .attach-btn {
   background: transparent;
   border: 1px solid var(--border);

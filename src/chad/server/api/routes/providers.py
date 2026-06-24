@@ -63,7 +63,7 @@ async def list_providers() -> ProviderListResponse:
             type="anthropic",
             name="Anthropic (Claude Code)",
             description="Claude AI models via Claude Code CLI",
-            supports_reasoning=False,
+            supports_reasoning=True,
         ),
         ProviderInfo(
             type="openai",
