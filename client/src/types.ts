@@ -152,6 +152,7 @@ export interface AccountUsage {
   weekly_usage_pct: number | null;
   session_reset_eta: string | null;
   weekly_reset_eta: string | null;
+  usage_as_of: string | null;
 }
 
 // ── Config types ──

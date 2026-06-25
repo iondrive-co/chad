@@ -1250,6 +1250,12 @@ label {
   color: var(--text);
 }
 
+.usage-as-of {
+  font-size: 14px;
+  color: var(--text-muted, #999);
+  font-style: italic;
+}
+
 .link-btn {
   background: transparent;
   color: var(--accent);

@@ -255,6 +255,31 @@ class TestProviderEndpoints:
         assert data["accounts"] == []
 
 
+class TestAccountUsageEndpoint:
+    """The usage endpoint surfaces the snapshot's age for staleness display."""
+
+    def test_usage_response_includes_as_of(self, client, monkeypatch):
+        """The response carries the snapshot timestamp so the UI can show how
+        stale a Codex usage reading is."""
+        _mock_installer(monkeypatch)
+        _seed_account(client, monkeypatch, "my-codex", "openai")
+
+        monkeypatch.setattr(
+            "chad.util.providers.OpenAICodexProvider.get_weekly_usage_percentage",
+            lambda self: 100.0,
+        )
+        monkeypatch.setattr(
+            "chad.util.providers.OpenAICodexProvider.get_usage_as_of",
+            lambda self: "2026-06-25T09:30:00+00:00",
+        )
+
+        resp = client.get("/api/v1/accounts/my-codex/usage")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["usage_as_of"] == "2026-06-25T09:30:00+00:00"
+        assert data["weekly_usage_pct"] == 100.0
+
+
 class _InlineThread:
     """Drop-in for threading.Thread that runs the target synchronously on start()."""
 

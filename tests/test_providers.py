@@ -3439,6 +3439,205 @@ class TestUsagePercentageCalculation:
             assert result == pytest.approx(0.05, abs=0.01)
 
 
+class TestCodexUsageFreshness:
+    """Codex usage is read from session-file rate_limits snapshots, which are
+    point-in-time. These tests pin down the freshness handling: stale (already
+    reset) windows must not be reported as current, the freshest snapshot across
+    files must win, and a live refresh must update the reading.
+    """
+
+    def _home_dir(self, tmp_path, account):
+        """Codex HOME dir for an account (account='' means the real ~/.codex home)."""
+        if account:
+            return tmp_path / ".chad" / "codex-homes" / account
+        return tmp_path
+
+    def _write_auth(self, tmp_path, account, account_id):
+        """Write an auth.json whose id_token JWT encodes the given account id."""
+        import json
+        import base64
+
+        payload = base64.urlsafe_b64encode(
+            json.dumps({"https://api.openai.com/auth": {"chatgpt_account_id": account_id}}).encode()
+        ).decode().rstrip("=")
+        token = f"hdr.{payload}.sig"
+        auth = self._home_dir(tmp_path, account) / ".codex" / "auth.json"
+        auth.parent.mkdir(parents=True, exist_ok=True)
+        auth.write_text(json.dumps({"tokens": {"id_token": token}}))
+
+    def _write_session(self, tmp_path, account, *, name, rate_limits, mtime=None):
+        """Write a Codex session JSONL containing one token_count rate_limits event."""
+        import json
+        import os
+
+        sessions_dir = self._home_dir(tmp_path, account) / ".codex" / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        path = sessions_dir / name
+        event = {
+            "type": "event_msg",
+            "payload": {"type": "token_count", "rate_limits": rate_limits},
+        }
+        path.write_text(json.dumps(event) + "\n")
+        if mtime is not None:
+            os.utime(path, (mtime, mtime))
+        return path
+
+    def test_expired_window_reports_zero_not_stale_percent(self, tmp_path):
+        """A window whose resets_at has already passed has rolled over since the
+        snapshot, so current usage is 0 — not the stale used_percent."""
+        from chad.util.providers import (
+            _get_codex_usage_percentage,
+            _get_codex_weekly_usage_percentage,
+        )
+
+        now = time.time()
+        self._write_session(
+            tmp_path, "acct", name="s.jsonl",
+            rate_limits={
+                # 5-hour window already reset 1 hour ago -> stale 16% must read 0
+                "primary": {"used_percent": 16.0, "resets_at": now - 3600},
+                # weekly window resets in the future -> 54% is still valid
+                "secondary": {"used_percent": 54.0, "resets_at": now + 3600},
+            },
+        )
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            assert _get_codex_usage_percentage("acct") == pytest.approx(0.0)
+            assert _get_codex_weekly_usage_percentage("acct") == pytest.approx(54.0)
+
+    def test_freshest_snapshot_across_files_wins(self, tmp_path):
+        """The newest session file may not yet contain a token_count event; the
+        reader must fall back to the freshest file that has rate_limits rather
+        than reporting 0."""
+        from chad.util.providers import _get_codex_weekly_usage_percentage
+
+        now = time.time()
+        # Older file has the real snapshot...
+        self._write_session(
+            tmp_path, "acct", name="old.jsonl",
+            rate_limits={"secondary": {"used_percent": 88.0, "resets_at": now + 3600}},
+            mtime=now - 600,
+        )
+        # ...newer file exists but carries no rate_limits yet.
+        import os
+        newer = (
+            tmp_path / ".chad" / "codex-homes" / "acct" / ".codex" / "sessions" / "new.jsonl"
+        )
+        newer.write_text('{"type": "session_meta", "payload": {}}\n')
+        os.utime(newer, (now, now))
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            assert _get_codex_weekly_usage_percentage("acct") == pytest.approx(88.0)
+
+    def test_usage_as_of_reports_snapshot_time(self, tmp_path):
+        """The snapshot's age is surfaced so a stale reading isn't shown as current."""
+        from chad.util.providers import OpenAICodexProvider, ModelConfig
+
+        now = time.time()
+        self._write_session(
+            tmp_path, "acct", name="s.jsonl",
+            rate_limits={"secondary": {"used_percent": 54.0, "resets_at": now + 3600}},
+            mtime=now - 1000,
+        )
+        provider = OpenAICodexProvider(
+            ModelConfig(provider="openai", model_name="default", account_name="acct")
+        )
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            as_of = provider.get_usage_as_of()
+        assert as_of is not None  # ISO8601 timestamp string
+
+    def test_weekly_reset_eta_from_snapshot(self, tmp_path):
+        """Codex now exposes a reset ETA derived from the snapshot's resets_at."""
+        from chad.util.providers import OpenAICodexProvider, ModelConfig
+
+        now = time.time()
+        self._write_session(
+            tmp_path, "acct", name="s.jsonl",
+            rate_limits={"secondary": {"used_percent": 54.0, "resets_at": now + 7200}},
+        )
+        provider = OpenAICodexProvider(
+            ModelConfig(provider="openai", model_name="default", account_name="acct")
+        )
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            eta = provider.get_weekly_reset_eta()
+        assert eta is not None and "h" in eta  # e.g. "2h 0m"
+
+    def test_cross_home_same_account_freshest_wins(self, tmp_path):
+        """Codex limits are per-account on the server, so a fresher snapshot from
+        the standalone CLI's ~/.codex (same account) must win over a stale one in
+        Chad's isolated home. This is the reported discrepancy: the CLI shows the
+        account maxed out while Chad's own home holds an old low reading."""
+        from chad.util.providers import _get_codex_weekly_usage_percentage
+
+        now = time.time()
+        # Both homes belong to the same OpenAI account.
+        self._write_auth(tmp_path, "acct", "acct-123")   # Chad's isolated home
+        self._write_auth(tmp_path, "", "acct-123")        # the real ~/.codex
+
+        # Isolated home: stale 54% weekly (e.g. from days ago).
+        self._write_session(
+            tmp_path, "acct", name="stale.jsonl",
+            rate_limits={"secondary": {"used_percent": 54.0, "resets_at": now + 3600}},
+            mtime=now - 100000,
+        )
+        # ~/.codex: today's CLI run shows the account actually maxed at 100%.
+        self._write_session(
+            tmp_path, "", name="cli-today.jsonl",
+            rate_limits={"secondary": {"used_percent": 100.0, "resets_at": now + 3600}},
+            mtime=now - 60,
+        )
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            assert _get_codex_weekly_usage_percentage("acct") == pytest.approx(100.0)
+
+    def test_cross_home_ignores_different_account(self, tmp_path):
+        """A home belonging to a *different* OpenAI account must never contribute
+        its usage, even if its snapshot is newer."""
+        from chad.util.providers import _get_codex_weekly_usage_percentage
+
+        now = time.time()
+        self._write_auth(tmp_path, "acct", "acct-123")
+        self._write_auth(tmp_path, "other", "acct-999")  # different account
+
+        self._write_session(
+            tmp_path, "acct", name="ours.jsonl",
+            rate_limits={"secondary": {"used_percent": 30.0, "resets_at": now + 3600}},
+            mtime=now - 1000,
+        )
+        # Newer, but belongs to a different account → must be ignored.
+        self._write_session(
+            tmp_path, "other", name="theirs.jsonl",
+            rate_limits={"secondary": {"used_percent": 100.0, "resets_at": now + 3600}},
+            mtime=now - 10,
+        )
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            assert _get_codex_weekly_usage_percentage("acct") == pytest.approx(30.0)
+
+    def test_null_window_snapshot_is_skipped(self, tmp_path):
+        """A newer snapshot whose windows are null (a different limit bucket that
+        doesn't report the 5h/weekly pools) must not clobber a real reading."""
+        from chad.util.providers import _get_codex_weekly_usage_percentage
+
+        now = time.time()
+        self._write_auth(tmp_path, "acct", "acct-123")
+
+        self._write_session(
+            tmp_path, "acct", name="real.jsonl",
+            rate_limits={"secondary": {"used_percent": 72.0, "resets_at": now + 3600}},
+            mtime=now - 1000,
+        )
+        # Newer but carries no window data — must be skipped.
+        self._write_session(
+            tmp_path, "acct", name="nulls.jsonl",
+            rate_limits={"limit_id": "premium", "primary": None, "secondary": None},
+            mtime=now - 10,
+        )
+
+        with patch("chad.util.providers.safe_home", return_value=tmp_path):
+            assert _get_codex_weekly_usage_percentage("acct") == pytest.approx(72.0)
+
+
 class TestMockProviderQuotaSimulation:
     """Tests for MockProvider quota exhaustion simulation.
 

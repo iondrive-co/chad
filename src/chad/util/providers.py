@@ -1,5 +1,6 @@
 """Generic AI provider interface for supporting multiple models."""
 
+import base64
 import glob
 import os
 import re
@@ -899,137 +900,225 @@ def _get_claude_reset_eta(account_name: str, period_key: str) -> str | None:
     return _parse_reset_eta(resets_at)
 
 
-def _get_codex_weekly_usage_percentage(account_name: str) -> float | None:
-    """Get Codex weekly usage percentage from session files.
+def _codex_home_dir(account_name: str) -> Path:
+    """Isolated Codex HOME directory for an account (or the real HOME if unset).
 
-    Args:
-        account_name: The account name to check usage for
-
-    Returns:
-        Usage percentage (0-100), or None if unavailable
+    ``safe_home()`` returns a flavor-safe Path, so we avoid wrapping in ``Path()``
+    (which would force a WindowsPath on non-Windows test runs under ``os.name``
+    patching).
     """
     base_home = safe_home()
     if account_name:
-        codex_home = Path(base_home) / ".chad" / "codex-homes" / account_name
-    else:
-        codex_home = Path(base_home)
+        return base_home / ".chad" / "codex-homes" / account_name
+    return base_home
 
-    if account_name and not codex_home.exists():
+
+def _codex_account_id(home: Path) -> str | None:
+    """OpenAI account id from a Codex home's ``auth.json`` (``<home>/.codex/auth.json``).
+
+    Decodes the id_token JWT payload to read ``chatgpt_account_id``. Returns None
+    if the home isn't logged in or the token can't be read.
+    """
+    auth = home / ".codex" / "auth.json"
+    if not auth.exists():
+        return None
+    try:
+        data = json.loads(auth.read_text(encoding="utf-8"))
+        token = (data.get("tokens") or {}).get("id_token")
+        if not token:
+            return None
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        return (claims.get("https://api.openai.com/auth") or {}).get("chatgpt_account_id")
+    except Exception:
         return None
 
-    sessions_dir = codex_home / ".codex" / "sessions"
-    if not sessions_dir.exists():
-        return 0.0
 
-    # Find the most recent session file
-    session_files: list[tuple[float, Path]] = []
-    for root, _, files in os.walk(sessions_dir):
-        for filename in files:
-            if filename.endswith(".jsonl"):
-                path = platform_path(root) / filename
-                try:
-                    session_files.append((path.stat().st_mtime, path))
-                except OSError:
-                    pass
+def _codex_candidate_homes(account_name: str) -> list[Path]:
+    """Codex HOME dirs holding usage for the same OpenAI account as ``account_name``.
 
-    if not session_files:
-        return 0.0
+    Codex rate limits are enforced per-account on the server, so a snapshot
+    written by *any* client on the same account — the standalone ``codex`` CLI's
+    ``~/.codex``, or another Chad account home — is an equally valid and often
+    fresher reading than this account's isolated home alone. (This is exactly the
+    common case: the user runs the same account in both Chad and the CLI, and the
+    CLI's usage is invisible to Chad's isolated home.) We match candidates by the
+    account id in each home's ``auth.json``.
+    """
+    target = _codex_home_dir(account_name)
+    homes = [target]
 
-    session_files.sort(reverse=True)
-    latest_session = session_files[0][1]
+    target_id = _codex_account_id(target)
+    if not target_id:
+        # Not logged in / unknown identity — only trust our own home, since we
+        # can't prove another home belongs to the same account.
+        return homes
 
+    base = safe_home()
+    candidates = [base]  # the real ~/.codex (auth/sessions under base/.codex)
+    codex_homes_root = base / ".chad" / "codex-homes"
+    if codex_homes_root.exists():
+        try:
+            candidates.extend(child for child in codex_homes_root.iterdir() if child.is_dir())
+        except OSError:
+            pass
+
+    for cand in candidates:
+        if cand == target:
+            continue
+        if _codex_account_id(cand) == target_id:
+            homes.append(cand)
+    return homes
+
+
+def _latest_populated_rate_limits(path: Path) -> dict | None:
+    """Last token_count ``rate_limits`` in a session file that carries window data.
+
+    A trivial turn can return a snapshot whose ``primary``/``secondary`` windows
+    are null (a different limit bucket that doesn't report the 5h/weekly pools);
+    such snapshots are skipped so they never clobber a real reading.
+    """
+    found = None
     try:
-        rate_limits = None
-        with open(latest_session, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 if "rate_limits" in line:
                     data = json.loads(line.strip())
                     if data.get("type") == "event_msg":
                         payload = data.get("payload", {})
                         if payload.get("type") == "token_count":
-                            rate_limits = payload.get("rate_limits")
+                            rate_limits = payload.get("rate_limits") or {}
+                            if rate_limits.get("primary") or rate_limits.get("secondary"):
+                                found = rate_limits
+    except Exception:
+        return None
+    return found
 
-        if rate_limits:
-            secondary = rate_limits.get("secondary", {})
-            if secondary:
-                util = secondary.get("used_percent")
-                if util is not None:
+
+def _read_codex_rate_limits(account_name: str) -> tuple[dict | None, float | None]:
+    """Read the freshest populated Codex ``rate_limits`` snapshot for an account.
+
+    Scans session files across every home belonging to the same account (see
+    ``_codex_candidate_homes``) and returns the most recently written snapshot
+    that actually carries window data, plus that file's modification time (used
+    to surface staleness).
+
+    Returns ``(rate_limits, snapshot_mtime)`` or ``(None, None)``.
+    """
+    session_files: list[tuple[float, Path]] = []
+    for home in _codex_candidate_homes(account_name):
+        sessions_dir = home / ".codex" / "sessions"
+        if not sessions_dir.exists():
+            continue
+        for root, _, files in os.walk(sessions_dir):
+            for filename in files:
+                if filename.endswith(".jsonl"):
+                    path = platform_path(root) / filename
                     try:
-                        return float(util)
-                    except (ValueError, TypeError):
+                        session_files.append((path.stat().st_mtime, path))
+                    except OSError:
                         pass
 
-    except Exception:
-        pass
+    session_files.sort(reverse=True)
 
-    return 0.0
+    for mtime, path in session_files:
+        rate_limits = _latest_populated_rate_limits(path)
+        if rate_limits:
+            return rate_limits, mtime
+
+    return None, None
+
+
+def _codex_window_used_percent(window: dict | None) -> float | None:
+    """Current used-percent for a Codex rate-limit window, honoring its reset.
+
+    ``used_percent`` is a point-in-time snapshot. If the window's ``resets_at``
+    (unix seconds) has already passed, the window has rolled over since the
+    snapshot was taken, so current usage in the new window is 0 — reporting the
+    stale percentage would wrongly show a maxed-out window as still maxed.
+    """
+    if not window:
+        return None
+    used = window.get("used_percent")
+    if used is None:
+        return None
+    resets_at = window.get("resets_at")
+    if resets_at is not None:
+        try:
+            if time.time() >= float(resets_at):
+                return 0.0
+        except (ValueError, TypeError):
+            pass
+    try:
+        return float(used)
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_unix_reset_eta(resets_at: object) -> str | None:
+    """Human-readable ETA (e.g. ``"2h 15m"``) from a unix-seconds reset time."""
+    if resets_at is None:
+        return None
+    try:
+        total_seconds = max(0, int(float(resets_at) - time.time()))
+    except (ValueError, TypeError):
+        return None
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def _get_codex_reset_eta(account_name: str, window_key: str) -> str | None:
+    """Reset ETA for a Codex window (``"primary"`` 5h or ``"secondary"`` weekly)."""
+    rate_limits, _ = _read_codex_rate_limits(account_name)
+    if not rate_limits:
+        return None
+    window = rate_limits.get(window_key) or {}
+    return _parse_unix_reset_eta(window.get("resets_at"))
+
+
+def _get_codex_usage_as_of(account_name: str) -> str | None:
+    """ISO-8601 timestamp of the most recent Codex usage snapshot, or None.
+
+    Lets the UI label a reading as possibly stale (the snapshot only reflects
+    usage from the last turn Chad itself ran, not usage from the standalone CLI
+    or web on the same account).
+    """
+    _, mtime = _read_codex_rate_limits(account_name)
+    if mtime is None:
+        return None
+    return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+
+
+def _get_codex_weekly_usage_percentage(account_name: str) -> float | None:
+    """Get Codex weekly (secondary window) usage percentage from session files.
+
+    Returns the percentage (0-100), or None if the account home is missing.
+    """
+    if account_name and not _codex_home_dir(account_name).exists():
+        return None
+    rate_limits, _ = _read_codex_rate_limits(account_name)
+    if not rate_limits:
+        return 0.0
+    pct = _codex_window_used_percent(rate_limits.get("secondary"))
+    return pct if pct is not None else 0.0
 
 
 def _get_codex_usage_percentage(account_name: str) -> float | None:
-    """Get Codex usage percentage from session files.
+    """Get Codex 5-hour (primary window) usage percentage from session files.
 
-    Args:
-        account_name: The account name to check usage for
-
-    Returns:
-        Usage percentage (0-100), or None if unavailable
+    Returns the percentage (0-100), or None if the account home is missing.
     """
-    # Get the isolated home directory for this account
-    base_home = safe_home()
-    if account_name:
-        codex_home = Path(base_home) / ".chad" / "codex-homes" / account_name
-    else:
-        codex_home = Path(base_home)
-
-    if account_name and not codex_home.exists():
+    if account_name and not _codex_home_dir(account_name).exists():
         return None
-
-    sessions_dir = codex_home / ".codex" / "sessions"
-    if not sessions_dir.exists():
+    rate_limits, _ = _read_codex_rate_limits(account_name)
+    if not rate_limits:
         return 0.0
-
-    # Find the most recent session file
-    session_files: list[tuple[float, Path]] = []
-    for root, _, files in os.walk(sessions_dir):
-        for filename in files:
-            if filename.endswith(".jsonl"):
-                path = platform_path(root) / filename
-                try:
-                    session_files.append((path.stat().st_mtime, path))
-                except OSError:
-                    pass
-
-    if not session_files:
-        return 0.0
-
-    session_files.sort(reverse=True)
-    latest_session = session_files[0][1]
-
-    try:
-        rate_limits = None
-        with open(latest_session, encoding="utf-8") as f:
-            for line in f:
-                if "rate_limits" in line:
-                    data = json.loads(line.strip())
-                    if data.get("type") == "event_msg":
-                        payload = data.get("payload", {})
-                        if payload.get("type") == "token_count":
-                            rate_limits = payload.get("rate_limits")
-
-        if rate_limits:
-            primary = rate_limits.get("primary", {})
-            if primary:
-                util = primary.get("used_percent")
-                if util is not None:
-                    try:
-                        return float(util)
-                    except (ValueError, TypeError):
-                        pass
-
-    except Exception:
-        pass
-
-    return 0.0
+    pct = _codex_window_used_percent(rate_limits.get("primary"))
+    return pct if pct is not None else 0.0
 
 
 def _gemini_usage_path() -> Path:
@@ -1864,11 +1953,12 @@ class OpenAICodexProvider(AIProvider):
         self.last_event_info: dict | None = None
 
     def _get_isolated_home(self) -> str:
-        """Get the isolated HOME directory for this account."""
-        base_home = safe_home()
-        if self.config.account_name:
-            return str(base_home / ".chad" / "codex-homes" / self.config.account_name)
-        return str(base_home)
+        """Get the isolated HOME directory for this account.
+
+        Shares ``_codex_home_dir`` with the usage readers so the directory Codex
+        writes its session snapshots into is exactly the one the readers scan.
+        """
+        return str(_codex_home_dir(self.config.account_name))
 
     def _get_env(self) -> dict:
         """Get environment with isolated HOME for this account."""
@@ -2437,6 +2527,18 @@ class OpenAICodexProvider(AIProvider):
     def get_weekly_usage_percentage(self) -> float | None:
         """Get Codex weekly usage percentage from session files."""
         return _get_codex_weekly_usage_percentage(self.config.account_name)
+
+    def get_session_reset_eta(self) -> str | None:
+        """Time until the Codex 5-hour window resets, from the latest snapshot."""
+        return _get_codex_reset_eta(self.config.account_name, "primary")
+
+    def get_weekly_reset_eta(self) -> str | None:
+        """Time until the Codex weekly window resets, from the latest snapshot."""
+        return _get_codex_reset_eta(self.config.account_name, "secondary")
+
+    def get_usage_as_of(self) -> str | None:
+        """ISO-8601 time of the snapshot the usage reading is derived from."""
+        return _get_codex_usage_as_of(self.config.account_name)
 
     def is_quota_exhausted(self, output_tail: str) -> str | None:
         """Check if Codex output indicates quota exhaustion."""

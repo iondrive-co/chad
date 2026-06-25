@@ -302,6 +302,7 @@ async def get_account_usage(name: str) -> AccountUsage:
     weekly_pct = provider.get_weekly_usage_percentage()
     session_eta = provider.get_session_reset_eta() if hasattr(provider, "get_session_reset_eta") else None
     weekly_eta = provider.get_weekly_reset_eta() if hasattr(provider, "get_weekly_reset_eta") else None
+    usage_as_of = provider.get_usage_as_of() if hasattr(provider, "get_usage_as_of") else None
 
     return AccountUsage(
         account_name=name,
@@ -310,6 +311,7 @@ async def get_account_usage(name: str) -> AccountUsage:
         weekly_usage_pct=weekly_pct,
         session_reset_eta=session_eta,
         weekly_reset_eta=weekly_eta,
+        usage_as_of=usage_as_of,
     )
 
 

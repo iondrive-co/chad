@@ -68,6 +68,10 @@ class AccountUsage(BaseModel):
     weekly_reset_eta: str | None = Field(
         default=None, description="Human-readable time until weekly reset"
     )
+    usage_as_of: str | None = Field(
+        default=None,
+        description="ISO-8601 time the usage reading was sampled, for staleness display",
+    )
 
 
 class AccountModelUpdate(BaseModel):

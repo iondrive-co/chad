@@ -18,6 +18,7 @@ export function ProvidersPanel({ api, connected }: Props) {
   const [status, setStatus] = useState<string | null>(null);
   const [editingModel, setEditingModel] = useState<string | null>(null);
   const [modelChoices, setModelChoices] = useState<string[]>([]);
+  const [refreshingUsage, setRefreshingUsage] = useState<string | null>(null);
 
   const isApiKeyProvider = (provider: string) =>
     provider === "mistral" || provider === "opencode";
@@ -45,6 +46,20 @@ export function ProvidersPanel({ api, connected }: Props) {
     }
     setUsageData(prev => ({...prev, ...newUsageData}));
   }, [api]);
+
+  // Re-read usage for one account (picks up snapshots written since load — e.g.
+  // after a run in the standalone CLI on the same account).
+  const refreshUsageLive = useCallback(async (name: string) => {
+    setRefreshingUsage(name);
+    try {
+      const usage = await api.getAccountUsage(name);
+      setUsageData(prev => ({ ...prev, [name]: usage }));
+    } catch {
+      flash("Could not refresh usage");
+    } finally {
+      setRefreshingUsage(null);
+    }
+  }, [api, flash]);
 
   const refresh = useCallback(async () => {
     try {
@@ -179,6 +194,20 @@ export function ProvidersPanel({ api, connected }: Props) {
     return text;
   };
 
+  // Relative age of a usage snapshot, e.g. "3 days ago". Returns null if unknown.
+  const formatAsOf = (asOf: string | null | undefined): string | null => {
+    if (!asOf) return null;
+    const ms = Date.now() - new Date(asOf).getTime();
+    if (!Number.isFinite(ms) || ms < 0) return "just now";
+    const mins = Math.floor(ms / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
+  };
+
   const dis = !connected;
 
   return (
@@ -294,6 +323,18 @@ export function ProvidersPanel({ api, connected }: Props) {
                         <span className="usage-bar">{formatUsage(usage.weekly_usage_pct, usage.weekly_reset_eta)}</span>
                       </div>
                     )}
+                    <div className="usage-row">
+                      {formatAsOf(usage.usage_as_of) && (
+                        <span className="usage-as-of">as of {formatAsOf(usage.usage_as_of)}</span>
+                      )}
+                      <button
+                        className="link-btn"
+                        onClick={() => refreshUsageLive(a.name)}
+                        disabled={dis || refreshingUsage === a.name}
+                      >
+                        {refreshingUsage === a.name ? "Refreshing…" : "Refresh"}
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
